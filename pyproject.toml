@@ -1,0 +1,25 @@
+# Root configuration for the monorepo. Not a distribution — the three wheels are
+# built from packages/{hfmodem,hfhost,creance}.
+#
+# testpaths is load-bearing: without it a bare `pytest` at the root walks
+# working/, which holds third-party clones with their own suites, and collects
+# them.
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+norecursedirs = ["working", "perf", ".venv", "*.egg-info", "build"]
+markers = [
+    "realtime: depends on the machine keeping up -- a rendezvous between spawned processes, a wall-clock deadline, an elapsed time asserted on; deselect with -m 'not realtime' on a busy machine",
+    "slow: end-to-end tests that run the threaded modem in real time, and the\n     publication gate that runs the whole suite again inside the distribution;\n     exclude with -m 'not slow', which works where --deselect silently does not",
+    "corpus: needs the off-air recording corpus (HFMODEM_CORPUS)",
+    "ardopcf: needs a built ardopcf to cross-decode against (ARDOPCF)",
+    "hardware: needs the radio or the sound card (HFMODEM_RIG, HFMODEM_AUDIO)",
+    "wheel: builds a real wheel and inspects its contents",
+]
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["working"]
+
+[tool.ruff.lint]
+select = ["F"]

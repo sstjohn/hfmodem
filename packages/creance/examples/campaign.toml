@@ -1,0 +1,73 @@
+# An unattended initiator matrix: every protocol, small to large, repeated
+# enough to see spread. Sessions run in order, failures do not stop the run,
+# and the aggregate lands in results/<site>/<date>/campaign-<ts>.txt.
+#
+#   creance campaign -c site-home.toml --plan campaign.toml --deadline 3600
+
+[[run]]
+modem = "kestrel"
+dst = "K7CRE"
+scenario = "connect"
+repeat = 3
+interval_s = 10
+label = "matrix"
+
+[[run]]
+modem = "kestrel"
+dst = "K7CRE"
+scenario = "unidir"
+params = { size = "10k", payload = "prbs9" }
+repeat = 3
+interval_s = 30
+retries = 1
+label = "matrix"
+
+[[run]]
+modem = "kestrel"
+dst = "K7CRE"
+scenario = "echo"
+params = { size = "10k" }
+interval_s = 30
+label = "matrix"
+
+[[run]]
+modem = "sabir-A"
+dst = "K7CRE"
+scenario = "unidir"
+params = { size = "10k", payload = "prbs9" }
+repeat = 3
+interval_s = 30
+retries = 1
+label = "matrix"
+
+[[run]]
+modem = "sabir-A"
+dst = "K7CRE"
+scenario = "reverse"
+params = { size = "10k" }
+interval_s = 30
+label = "matrix"
+
+[[run]]
+modem = "sabir-A"
+dst = "K7CRE"
+scenario = "bidir"
+params = { size = "10k" }
+interval_s = 30
+label = "matrix"
+
+# shrike cannot join the campaign yet: it has no TCP host interface — Winlink
+# reaches PACTOR over the SCS PTC serial dialect, so shrike emulates a
+# PTC-IIIusb over a pty, a dialect creance cannot drive. Uncomment once creance
+# grows a PTC hostmode client and `creance conform --modem shrike` passes. Its
+# cycle-locked timing wants a generous [responder] hello_timeout_s at the far
+# end.
+#
+# [[run]]
+# modem = "shrike"
+# dst = "K7CRE"
+# scenario = "unidir"
+# params = { size = "1k" }
+# repeat = 3
+# interval_s = 60
+# label = "matrix"

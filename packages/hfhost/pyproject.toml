@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hfhost"
+version = "0.1.0"
+description = "Host clients for HF modems, including VARA-style TCP and Sabir framed CBOR"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Ham Radio",
+]
+# Inline rather than a file path: this package directory carries no README.md, and
+# `readme = "README.md"` builds a wheel whose long description is empty -- a blank
+# PyPI page, which is what hfmodem's own comment records going wrong.
+readme = { content-type = "text/markdown", text = """
+Host clients and session bookkeeping for HF modems, including the VARA-style
+two-socket TCP interface and Sabir's native framed-CBOR interface.
+
+**Standard library only, deliberately.** It is the piece a client links against,
+so it stays free of anything that would drag numerical or audio dependencies into
+a process that only needs to talk to a modem over a socket.
+
+Part of [hfmodem](https://github.com/sstjohn/hfmodem), where it is used by the
+station process and by the conformance bench. Pre-alpha.
+""" }
+
+[project.urls]
+Homepage = "https://hfmodem.ssj.lol"
+Source = "https://github.com/sstjohn/hfmodem"
+Issues = "https://github.com/sstjohn/hfmodem/issues"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["hfhost*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "realtime: depends on the machine keeping up -- a rendezvous between spawned processes, a wall-clock deadline, an elapsed time asserted on; deselect with -m 'not realtime' on a busy machine",
+]

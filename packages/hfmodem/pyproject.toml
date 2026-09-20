@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hfmodem"
+version = "0.1.0"
+description = "Four HF softmodems — PACTOR-1/2/3, VARA, ARDOP and sabir — and one station process that owns the radio."
+# Inline, not a file path: this package directory carries no README.md, and
+# `readme = "README.md"` quietly built wheels whose long description was empty
+# -- a blank PyPI page. The text lives here so the metadata cannot dangle.
+readme = { content-type = "text/markdown", text = """
+Four HF softmodems — **shrike** (PACTOR-1/2/3, the waveform published as
+ITU-R M.1798), **kestrel** (VARA), **besra** (ARDOP) and **sabir** (a
+clean-sheet protocol) — and one station process that owns the radio: the
+PTT-keyed transceiver, the sound card, and the host ports mail clients speak.
+
+Everything runs from recordings with no radio attached, and `transmit = false`
+in the station file is a hard interlock.
+
+Outbound mail delivery is confirmed over PACTOR-3, VARA and ARDOP.
+PACTOR-1 has received gateway mail. All four modems remain pre-alpha;
+the project README records the tested paths and remaining limits.
+""" }
+requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+# NOTICE is a licence file, not a courtesy: besra reproduces parts of ardopcf,
+# whose MIT terms require the copyright and permission notice to travel with every
+# copy, and NOTICE is the only place that text exists.
+license-files = ["LICENSE", "NOTICE"]
+keywords = ["ham radio", "winlink", "hf", "modem", "arq", "pactor", "vara", "ardop"]
+# No `License ::` classifier: PyPI rejects metadata carrying both that and the
+# License-Expression the SPDX string above produces.
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Ham Radio",
+]
+
+# hfhost supplies the config primitives and the client the station probes itself
+# through. The dependency runs one way only and tests/gates/test_import_direction.py
+# enforces it: hfhost must stay able to drive a modem it knows nothing about.
+dependencies = ["hfhost>=0.0.1", "numpy>=1.24", "scipy>=1.10"]
+
+[project.urls]
+Homepage = "https://hfmodem.ssj.lol"
+Source = "https://github.com/sstjohn/hfmodem"
+Issues = "https://github.com/sstjohn/hfmodem/issues"
+
+[project.optional-dependencies]
+# The sound card. Everything else runs on recordings.
+radio = ["sounddevice>=0.4"]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.scripts]
+hfmodem = "hfmodem.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hfmodem*"]
+# Left explicit: the default walks every directory without an __init__.py, and
+# this tree has large sibling directories that would cost minutes to discover.
+namespaces = false
+
+[tool.setuptools.package-data]
+# One entry, and it is the whole of what this project ships as data. Every table
+# shrike and kestrel's receivers use is computed at the point of use by
+# `shrike/tablegen.py` and `kestrel/rx/tablegen.py`; the two that no formula
+# reaches are integers written out as literals in the latter. What is left is the
+# BW500 synthesis pulse, which is a deconvolution of recorded audio -- a
+# measurement, not a derivation, so there is nothing to compute it from.
+"hfmodem.kestrel.tx" = ["assets/*.npz"]
+
+[tool.pytest.ini_options]
+testpaths = ["hfmodem/tests"]
+# `build` matters as much here as in the root config: a setuptools staging copy
+# holds a second `hfmodem/tests` under the same module names, and pytest picks
+# whichever config is nearest the arguments it was given. Without it the suite
+# collects or refuses to collect depending on how it was invoked.
+norecursedirs = [".venv", "*.egg-info", "build"]
+markers = [
+    "realtime: depends on the machine keeping up -- a rendezvous between spawned processes, a wall-clock deadline, an elapsed time asserted on; deselect with -m 'not realtime' on a busy machine",
+    "slow: end-to-end tests that run the threaded modem in real time",
+    "corpus: needs the off-air recording corpus (HFMODEM_CORPUS)",
+    "ardopcf: needs a built ardopcf to cross-decode against (ARDOPCF)",
+    "hardware: needs the radio or the sound card (HFMODEM_RIG, HFMODEM_AUDIO)",
+    "wheel: builds a real wheel and inspects its contents",
+]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# The pyflakes rules — undefined names (F821), unused imports and vars. This is
+# the class of regression that a path no test executes hides until it runs, and
+# tests/gates/test_lint.py enforces it.
+select = ["F"]

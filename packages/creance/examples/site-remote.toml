@@ -1,0 +1,55 @@
+# Remote responder site: the daemon runs unattended under systemd/launchd and
+# nobody is there to nurse it. Timeouts are generous (a slow protocol must not
+# be cut off mid-transfer), retention is capped (the disk must not fill), and
+# every modem recycles itself if it goes deaf.
+
+[site]
+name = "remote-ridge"
+mycall = "K7CRE"
+results_dir = "/var/lib/creance/results"
+
+[responder]
+pending_timeout_s = 60
+hello_timeout_s = 60        # PACTOR-3's cycle-locked timing needs room
+max_session_s = 1800
+on_plain_peer = "sink"      # a stray Winlink caller is data, not an error
+retention_max_age_s = 2592000   # 30 days of sessions, then they go
+retention_max_bytes = 2147483648
+retention_interval_s = 300      # how often the daemon sweeps, between sessions
+
+[initiator]
+connect_timeout_s = 120
+max_session_s = 1800       # a stalling peer must not hold the night open
+on_plain_peer = "disconnect"
+
+[[modem]]
+name = "kestrel"
+cmd_port = 8300
+data_port = 8301
+spawn = ["/opt/hfmodem/.venv/bin/python", "-m", "hfmodem.kestrel.host.run_server",
+         "--cmd-port", "8300", "--data-port", "8301", "--quiet"]
+bandwidth = "2300"
+compression = "OFF"
+rev = "kestrel-2026.07"
+
+[modem.quirks]
+preconnect_queue = true     # LoopbackModem buffers pre-CONNECTED writes, flushes on CONNECT (spec §7.4)
+max_idle_recycle_s = 21600  # nothing heard in 6 h: the modem is deaf, restart it
+
+[[modem]]
+name = "sabir"
+dialect = "hostapi"
+cmd_port = 8310
+data_port = 0
+spawn = ["/opt/hfmodem/.venv/bin/python", "-m", "hfmodem.sabir.host.run_server",
+         "--ports", "8310", "8312", "--quiet"]
+sim_time = true
+rev = "simulated-pair"
+
+[modem.quirks]
+max_idle_recycle_s = 21600
+
+# M3: creance owns the radio, modems stay PTT-less.
+# [rig]
+# host = "127.0.0.1"
+# port = 4532

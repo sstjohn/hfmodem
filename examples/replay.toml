@@ -1,0 +1,32 @@
+# A station that cannot transmit, running on a recording.
+#
+# This is the configuration to develop against: no CAT port is opened, no keying
+# line is held, and no sound card is touched. `transmit = false` is a hard
+# interlock rather than a preference, so nothing downstream has to remember.
+schema = 1
+
+[station]
+mycall     = "N0CALL"
+control    = "local"
+regulatory = "unregulated"
+because    = "replaying a recording; no antenna and no transmitting authority involved"
+transmit   = false
+
+[rig]
+model     = "ft891"
+centre_hz = 7101500
+
+[audio]
+# `replay:FILE` is not a device name: the station reads the file and opens no
+# card. This one is besra's off-air ARDOP fixture, the only recording that ships
+# — six seconds of a Winlink gateway, resampled to the card rate on the way in.
+# Any WAV does, and the path is relative to where the station is started.
+input      = "replay:packages/hfmodem/hfmodem/tests/besra/fixtures/offair_ke8lva_greeting.wav"
+output     = "replay"   # never opened; a station on a recording plays nothing back
+input_gain = 0.040
+
+[protocols.vara]
+enabled   = true
+host      = "vara"
+cmd_port  = 8300
+data_port = 8301

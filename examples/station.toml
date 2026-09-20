@@ -1,0 +1,119 @@
+# hfmodem station configuration. One file, the whole station.
+#
+# Unknown keys are an error. That is deliberate: a typo'd key is a setting that
+# silently did not apply, and on a transmitter that is the difference between a
+# hot input and a working one.
+schema = 1
+
+[station]
+mycall     = "N0CALL"          # yours. Nothing arms and nothing keys without it.
+grid       = "AA00"
+
+# Who is answerable at the moment a transmission is made. Required, no default.
+#   local      an operator is at the control point (local or remote control)
+#   automatic  the station answers on its own — which is what listen = true means
+control    = "local"
+
+# Which rules this station operates under. Required, no default.
+#   part97        47 CFR Part 97, the US amateur service. Needs `licence` below.
+#   unregulated   no constraint modelled; you are answerable for every emission.
+#                 The honest choice under any regime hfmodem does not encode —
+#                 maritime, land mobile, experimental, outside the US, or a
+#                 bench. Needs `because = "..."`, which is recorded and shown in
+#                 status: a station running unchecked should not look like one
+#                 that made a considered choice.
+regulatory = "part97"
+licence    = "technician"       # part97 only: technician | general | advanced | extra
+                                # No default. Guessing upward is the failure that matters.
+
+# A hard interlock, not a preference. False and nothing can key, whatever else
+# is configured. This is what to set while working on the code.
+transmit   = false
+
+id_interval_s = 540             # configured identification interval
+id_mode       = "cw"            # cw | none
+
+# What this station announces itself as to a Winlink gateway — the name and
+# version half of the B2F SID, which goes on the air as [HFM-0.1-B2FHM$]. The
+# capability letters are NOT in here: they state what this code can actually do
+# and are appended for you.
+#
+# This is your declaration about your own station, so it is yours to make.
+# Winlink's production servers refuse a client type they do not know — the CMS
+# behind KX8U answered ours with "Unknown client types are not allowed on
+# production servers", before the login challenge and before any mail could
+# move. hfmodem ships its own honest name and will never ship anyone else's.
+client_sid = "HFM-0.1"
+
+[rig]
+model     = "ft891"
+cat       = "rigctld"           # rigctld owns the CAT port, exclusively
+host      = "127.0.0.1"
+port      = 4532
+mode      = "PKTUSB"
+# The CHANNEL CENTRE, as a gateway list publishes it. The dial is derived as
+# centre − 1500 Hz. `dial_hz` is a rejected key and the error explains why.
+centre_hz = 7101500
+max_key_s = 30.0                # watchdog ceiling; per-burst deadlines are shorter
+# PEP the transmitter is set to. Optional except on a band that carries its own
+# limit — 30 m is 200 W for everyone — where an emission that does not state its
+# power is refused rather than sent into a capped band as an unknown quantity.
+# power_w = 100.0
+
+[rig.ptt]
+backend  = "rts"                # rts | rigctld. rts keeps one owner per serial port.
+settle_s = 0.04
+# `port` IS DELIBERATELY ABSENT, and nothing here will guess it. A device name is
+# per-machine, so a template that carried one shipped a station that looked
+# configured and could not key: every field edited but that one, and the
+# placeholder it kept exists on no machine. Add the key yourself —
+#
+#     port = "<the PTT interface>"
+#
+# — taking the name from `ls /dev/cu.*` (or `ls /dev/serial/by-id/*`). It is the
+# PTT interface, NOT the CAT one: a two-port adapter shares one serial number
+# between them and they differ only in the trailing index.
+#
+# Left out, this file loads and this station receives. `hfmodem config` shows the
+# line as (unset), and both `hfmodem rig` and `transmit = true` refuse by naming
+# [rig.ptt] port rather than keying nothing and calling it a session.
+
+[audio]
+input      = "USB Audio CODEC"
+output     = "USB Audio CODEC"  # unset with a protocol enabled is an error, not a default
+rate       = 48000
+blocksize  = 128
+latency    = "low"
+input_gain = 0.040              # measured; wrong at 0.51, 0.50, 0.18 and 0.118
+# The peak EVERY keyed burst leaves at, on every protocol — the audio level is
+# the RF power on a data interface. Export HFMODEM_STATION=<this file> and the
+# on-air tools read it too; without that they fall back to core.levels.TX_DRIVE
+# and only the station process is governed by this line.
+tx_drive   = 0.6
+capture_dir = "~/radio/captures"
+
+[protocols.pactor]
+enabled = true
+host    = "ptc"                 # a pty emulating an SCS PTC-IIIusb
+pty     = "~/radio/ptc"
+listen  = true
+
+[protocols.vara]
+enabled   = true
+host      = "vara"
+cmd_port  = 8300
+data_port = 8301
+bandwidth = "2300"
+listen    = true
+
+[protocols.ardop]
+enabled   = false
+host      = "ardop"
+cmd_port  = 8515
+data_port = 8516
+
+[protocols.sabir]
+enabled = true
+host    = "hostapi"
+port    = 8320
+listen  = true

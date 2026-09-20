@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "creance"
+version = "0.1.0"
+description = "Conformance and performance harness for the radio flock (kestrel, shrike, sabir)"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Ham Radio",
+]
+# Inline, for the same reason hfhost's is: no README.md sits beside this file, and a
+# dangling path builds a wheel with an empty long description.
+readme = { content-type = "text/markdown", text = """
+The conformance and performance bench for the modems in
+[hfmodem](https://github.com/sstjohn/hfmodem) -- **kestrel** (VARA), **shrike**
+(PACTOR) and **sabir**.
+
+It runs a transfer between two modem instances over a simulated channel and sums
+both ends to prove the same bytes arrived, so a claim about a protocol is
+something you can re-run rather than something you read. Pre-alpha.
+""" }
+dependencies = ["hfhost>=0.0.1"]
+
+[project.urls]
+Homepage = "https://hfmodem.ssj.lol"
+Source = "https://github.com/sstjohn/hfmodem"
+Issues = "https://github.com/sstjohn/hfmodem/issues"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+creance = "creance.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["creance*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "realtime: depends on the machine keeping up -- a rendezvous between spawned processes, a wall-clock deadline, an elapsed time asserted on; deselect with -m 'not realtime' on a busy machine",
+]

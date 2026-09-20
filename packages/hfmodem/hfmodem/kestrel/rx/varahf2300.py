@@ -1,0 +1,844 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+
+"""BW2300 wideband OFDM DATA receiver — base + high-throughput speed levels.
+
+Built from the spec's BW2300 sections (spec/01 §2300, spec/03 §3.5.3-3.5.4,
+spec/06 §6.1c-6.1d) and the BW2300 constant data tables (spec/tables/bw2300 +
+the shared 64-entry constellation LUT). It mirrors the structure of the validated
+BW500 receiver ``kestrel/rx/varahf500.py``.
+
+Two value-law families (spec/06 §6.1c):
+
+  * **INDEX / POSITION levels (records 0 to 3):** single-layer index modulation.
+    Each OFDM symbol carries one column: a single lit bin in ``first_bin ..
+    first_bin+span-1`` whose position is the coded value (Gray-mapped), stepped
+    by ``stride``. No CP, no twiddle (spec/01 §2300 2026-07-20, audio-validated).
+    Coding chain: frame → CRC-16/GENIBUS → whiten (XOR BW2300 PN) → turbo (13,15)
+    at the record's rate, 1/2 at records 2 and 3 and 1/3 at records 1 and 0, with
+    the record's il2 column → channel interleave (its il1 column) → one-hot
+    columns.
+
+    Record 3 is the base DATA level, host ``BITRATE (4)``: 512-sample symbols,
+    16 bins, 395 columns, 4.36 s. Below it the comb doubles and then doubles
+    again while the column count falls: record 2 (host ``BITRATE (3)``) reads 32
+    bins at stride 2 on 1024-sample symbols, 228 columns, four bits a column;
+    record 1 (``BITRATE (2)``) the same comb at three bits; record 0
+    (``BITRATE (1)``) 64 bins at stride 2 on 2048-sample symbols, 124 columns,
+    three bits. This is the whole free ladder, and none of it could be read here
+    until each record's bin table was reversed off tape (see
+    ``tablegen.base_bins_col2`` and its two neighbours).
+
+    BW2750's base level is the third index record, and it is record 3's law on a
+    wider comb: 20 bins at 6..25 rather than 16 at 9..24, everything else the
+    same, its allocation table the same LCG stream quantised to 20. It is not a
+    rung of the BW2300 ladder, so it is keyed out of ``LEVELS`` and named in
+    ``BASE_LEVELS``; the four bins a 20-wide column holds beyond its 16 values
+    carry nothing and are masked out of the soft demodulator.
+
+  * **High-throughput levels (records 9-16):** a dense complex constellation
+    (spec/06 §6.1d) — QPSK / 8-PSK / multi-ring 8-APSK selected by the LUT column
+    ``pos = b01-1`` — on a 1024-IFFT + 128-sample cyclic-prefix OFDM symbol
+    (``dw50 = 1152``), ``span`` carriers/symbol. Coding chain: frame →
+    CRC-16/GENIBUS → whiten → turbo (13,15) at the record's rate (1/2 or punctured
+    2/3, 4/5, 5/6) → channel interleave → Gray → constellation LUT.
+
+Round-trip note: kestrel TX ⇄ kestrel RX is byte-exact for every TX-supported level.
+BW2750 records100–103 have independently measured native receive tables;
+record100 is host level1. Lower TX selection needs separate ARQ qualification. VARA
+bit-exact on-air interop for the high levels additionally needs the exact
+per-cell carrier raster (VARA's alloc/map, spec/06 §6.1d) and the ``pos≥3`` bpc,
+both flagged PENDING in the spec — see module SPEC GAPS in the package STATUS.
+
+NO RECORDING THIS PROJECT HOLDS CARRIES A CONST-LAW BURST, and that is a
+measurement rather than an absence of looking. The four off-air BW2300 gateway
+sessions on disk — 2026-08-23 KE8LVA and KB3AC-10, 2026-08-26 KE8LVA twice, 750 s,
+two gateways — were segmented on absolute in-band level and every gateway
+transmission in them classified by how much of a 2048-sample block's in-band
+energy sits in its strongest bin. Two populations, no third: 0.54-0.57 for the
+MFSK control frames (one tone a symbol) and 0.13-0.16 for the index-law DATA overs
+(one lit bin of sixteen a column). Band noise reads 0.06-0.09, and every burst
+the 2026-08-26 monitor log recorded as `undecoded (DATA/high-SL)` is either a
+32-symbol MFSK session frame or a stretch of that noise the energy gate held open
+after our own transmission ended — the twelve "high-SL overs" of the 12:59z
+session are one `session-turn-release-responder`, one `session-responder-over-answer` and
+ten stretches of band floor, peaking 1.8-6 dB BELOW every real gateway burst in
+the same recording.
+
+So `decode_overs` offering the audio only to the index family costs nothing that
+has ever been on the air here, and the const levels are left out of it
+deliberately: each is a turbo decode of thousands of bits, on every bracket, for a
+waveform no capture holds. What would change that is a recording that holds one —
+a licensed VARA pair driven above BITRATE (4) on the bench, both cables recorded
+separately, which also supplies the per-cell carrier raster and the pos>=3 bpc
+that `const_points` still stands in for. Until then the synchronisation question
+below it (whether the cp=128 repetition can be used the ordinary way on received
+audio) has nothing to be asked of.
+
+Constants (record ladder, first_bin/span/stride, Gray rows) are spec-provided
+facts (spec/06 §6.1c-6.1d). The BW2300 tables are regenerated by
+:mod:`hfmodem.kestrel.rx.tablegen`. The turbo
+codec is ``hfmodem.kestrel.coding.turbo``.
+"""
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import dataclass
+from functools import cache
+
+import numpy as np
+
+from . import tablegen
+from .bw2750_allocations import ALLOC_REC0, ALLOC_REC1, ALLOC_REC2
+from ..coding import turbo as _turbo
+from ..coding.crc import crc16_genibus
+
+FS = 48000
+
+#: BW2750's ``BITRATE (4)`` record. It is record 3's index law on a wider comb, so
+#: it is record 3 of a *different* ladder — the numbering is per bandwidth and the
+#: two cannot share a key. Numbered 100 above its own record index, kept out of
+#: ``LEVELS``, and reached through :data:`BASE_LEVELS`.
+_REC0_2750, _REC1_2750, _REC2_2750, _REC3_2750 = 100, 101, 102, 103
+
+
+def _load():
+    # spec/tables/bw2300 constant data facts, regenerated (see tablegen): the
+    # whitener and interleavers from the VB6 Rnd stream, record 3's bin-placement
+    # tables and the shared constellation LUT in closed form / reconstructed, and
+    # record 2's bin table measured off recorded VARA audio.
+    pn = (tablegen.whitener() & 1).astype(int)
+    il1 = tablegen.interleaver("bw2300", 1)
+    il2 = tablegen.interleaver("bw2300", 2)
+    lut = tablegen.constellation_lut()
+    ai = np.arange(395) * 2                    # record 3 ships its tables 2x-strided
+    base = {3: (tablegen.alloc_col3()[ai], tablegen.map1_col3()[ai],
+                tablegen.map2_col3()[ai]),
+            _REC3_2750: (tablegen.alloc_col3(span=20, first_bin=6)[ai],
+                         tablegen.map1_col3()[ai], tablegen.map2_col3()[ai]),
+            _REC0_2750: (np.array(ALLOC_REC0, dtype=int), tablegen.map1_col0(),
+                         np.zeros(124, int)),
+            _REC1_2750: (np.array(ALLOC_REC1, dtype=int), tablegen.map1_col2(),
+                         np.zeros(228, int)),
+            _REC2_2750: (np.array(ALLOC_REC2, dtype=int), tablegen.map1_col2(),
+                         np.zeros(228, int)),
+            2: (tablegen.base_bins_col2(), tablegen.map1_col2(),
+                np.zeros(228, int)),
+            # record 1 emits on record 2's columns and its reference layout, so
+            # `map1_col2` gates both.
+            1: (tablegen.base_bins_col1(), tablegen.map1_col2(),
+                np.zeros(228, int)),
+            0: (tablegen.base_bins_col0(), tablegen.map1_col0(),
+                np.zeros(124, int))}
+    cls = tablegen.clsparm_gray()
+    return pn, il1, il2, lut, base, cls
+
+
+_PN, _IL1, _IL2, _LUT, _BASE_TABLES, _CLS = _load()
+
+# Gray class-parameter rows (spec/06 §6.1d clsparm_gray): raw bpc-bit group -> symbol
+# index. Sourced from the promoted table (rows bpc=2/3/4 at offset (bpc-2)*16).
+_CLSPARM = {bpc: list(_CLS[(bpc - 2) * 16:(bpc - 2) * 16 + 2 ** bpc]) for bpc in (2, 3, 4)}
+
+
+@cache
+def _clsinv(bpc: int) -> np.ndarray:
+    """Gray symbol -> raw bpc-bit value, the inverse of the clsparm row."""
+    inv = np.zeros(2 ** bpc, int)
+    for v, g in enumerate(_CLSPARM[bpc]):
+        inv[g] = v
+    return inv
+
+# Base index-mod (rec3): 395 emission columns = 371 data + 24 reference (spec/01 §2300
+# "PROMOTED base-level bin-placement law"). map1!=0 marks a reference column (no
+# payload bits).
+_BASE_NCOLS = 395
+_GUARD_TRIES = 6          # turbo decodes spent on the best-ranked alignments
+_ONSET_STEP = 4           # sample-grid search granularity within a 512-column
+
+# The base over opens with 2 silent PTT lead-in blocks and the 12-symbol training
+# preamble (spec/01 §2300 "gDC REFERENCE PREAMBLE"); data column 1 is block 14. The
+# preamble carries no payload, so the RX only has to step over it.
+_BASE_LEADIN = 2
+_BASE_PREAMBLE = 12
+_BASE_LEAD = _BASE_LEADIN + _BASE_PREAMBLE
+
+
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Record:
+    """One BW2300 speed-level physical/coding descriptor (spec/06 §6.1c-6.1d)."""
+    level: int          # speed-level / record index (spec/06 §6.1c)
+    name: str
+    law: str            # 'index' (base one-hot) | 'const' (dense constellation)
+    n_info: int         # turbo info bits
+    coded: int          # turbo coded bits
+    frame_bytes: int    # bytes fed to the coder; payload + 2-byte CRC
+    bpc: int            # bits per cell
+    pos: int            # LUT column (const law); ignored for index law
+    dw50: int           # OFDM symbol length in samples
+    cp: int             # cyclic-prefix samples
+    span: int           # carriers/symbol
+    first_bin: int      # base index-mod: low bin of the one-hot band
+    stride: int
+    ncols: int = 0      # index law: emission columns (data + reference)
+    lead: int = 0       # index law: blocks kestrel renders ahead of column 1
+    il: int | None = None  # explicit column zero is valid for BW2750 record100
+
+    @property
+    def il_col(self) -> int:
+        return self.level if self.il is None else self.il
+
+
+# The BW2300 speed-level ladder (spec/06 §6.1c table + §6.1d coding fields).
+# Base = record 3 (BITRATE-4). High-throughput = records 9-16.
+# Records are indexed as VARA indexes them: host `BITRATE (N)` is record N-1, so
+# the base level a gateway calls BITRATE (4) is record 3 and the robust level it
+# drops to below it, BITRATE (3), is record 2 -- one gear down, not one up.
+#
+# Record 2 is the same index law as the base one octave slower: 1024-sample
+# one-hot symbols over the same audio band read at twice the resolution, 32 bins
+# instead of 16, four bits a column at stride 2. Reversed off recorded VARA audio
+# 2026-08-25 -- 228 columns, band 17..48 of a 1024-FFT and the 24 reference
+# columns all read off the tape, three overs bin-for-bin.
+# Records 1 and 0 are the two below it and the bottom of the free ladder: record 1
+# on record 2's comb and columns at three bits a column, record 0 on 2048-sample
+# symbols reading 64 bins at 33..96, 124 columns, also three bits. Both take the
+# rate-1/3 turbo branch, and both were reversed off the 2026-09-04 gear-down
+# tapes -- eleven overs of differing payloads at each record for the reference
+# layout, then nine record-1 and ten record-0 frames giving the same table column
+# for column.
+# Their training symbol counts came off the same tapes: the preamble is 2/4/6/12
+# symbols at records 0/1/2/3, which is 4096 samples at the two low records and
+# 6144 at the two high ones, not one constant.
+# Records 4-8 are absent: no recording of this project holds one, and their bin
+# tables are not derivable from the ones that are (see `tablegen.base_bins_col2`).
+# frame_bytes = payload capacity + 2-byte CRC-16/GENIBUS (no marker: the ARQ layer
+# carries its own control byte inside the payload, uniformly across all levels).
+#
+# BW2750's base level is here too, as `_REC3_2750`. It is record 3's index law on
+# a wider comb -- 20 bins at 6..25 instead of 16 at 9..24 -- with the same 512-
+# sample no-CP symbol, the same 395 columns, the same 24 reference columns, the
+# same coding chain (hence `il=3`) and the same 92-byte frame. Its allocation
+# table is the same LCG stream quantised to 20 bins (`tablegen.alloc_col3`), so
+# nothing about it is measured. Established 2026-09-02 on the 2026-07-21 loopback
+# link-setup over, whose frame is known in advance, and confirmed on seven off-air
+# overs from NS0A, KC9GHZ and KO2F that VARA itself logged as `CONNECTED ... 2750`.
+# The high-SL BW2750 waveform is NOT here: the dw50=1152 / cp=128 geometry below
+# is BW2300's, and an off-air high-SL BW2750 burst measures a CP repetition of
+# ~1280 samples, ~11% longer (spec/01 §2750). BW2750 records 1/2 ARE measured:
+# stock recoveries on 2026-09-16 use the same coding and 1024-sample symbols as
+# BW2300's lower records, but distinct allocations on a 40-bin comb at 12..51.
+# These records are receive-only; their presence does not extend the TX ladder.
+RECORDS = {
+    0:  Record(0, "rec0-floor",  "index",  96,  300,   12,   3, 0, 2048, 0,   64, 33, 2, 124, _BASE_LEADIN + 2),
+    1:  Record(1, "rec1-robust", "index", 200,  612,   25,   3, 0, 1024, 0,   32, 17, 2, 228, _BASE_LEADIN + 4),
+    2:  Record(2, "rec2-robust", "index", 402,  816,   50,   4, 0, 1024, 0,   32, 17, 2, 228, _BASE_LEADIN + 6),
+    3:  Record(3,  "rec3-base", "index", 736,   1484,  92,   4, 0, 512,  0,   16, 9, 1, 395, _BASE_LEAD),
+    _REC3_2750: Record(_REC3_2750, "rec3-base-2750", "index", 736, 1484, 92, 4, 0,
+                       512, 0, 20, 6, 1, 395, _BASE_LEAD, il=3),
+    _REC0_2750: Record(_REC0_2750, "rec0-floor-2750", "index", 96, 300, 12, 3, 0,
+                       2048, 0, 80, 24, 2, 124, _BASE_LEADIN + 2, il=0),
+    _REC1_2750: Record(_REC1_2750, "rec1-robust-2750", "index", 200, 612, 25, 3, 0,
+                       1024, 0, 40, 12, 2, 228, _BASE_LEADIN + 4, il=1),
+    _REC2_2750: Record(_REC2_2750, "rec2-robust-2750", "index", 402, 816, 50, 4, 0,
+                       1024, 0, 40, 12, 2, 228, _BASE_LEADIN + 6, il=2),
+    9:  Record(9,  "QPSK-1/2",  "const", 7197,  14406, 899,  2, 1, 1152, 128, 32, 9, 1),
+    10: Record(10, "QPSK-2/3",  "const", 9596,  14406, 1199, 2, 1, 1152, 128, 32, 9, 1),
+    11: Record(11, "QPSK-4/5",  "const", 11512, 14406, 1439, 2, 1, 1152, 128, 32, 9, 1),
+    12: Record(12, "8PSK-2/3",  "const", 14398, 21609, 1799, 3, 2, 1152, 128, 32, 9, 1),
+    13: Record(13, "8PSK-4/5",  "const", 17276, 21609, 2159, 3, 2, 1152, 128, 32, 9, 1),
+    14: Record(14, "16APSK-5/6", "const", 21710, 26068, 2713, 4, 3, 1152, 128, 32, 9, 1),
+    15: Record(15, "32APSK-4/5", "const", 26056, 32585, 3257, 5, 4, 1152, 128, 32, 9, 1),
+    16: Record(16, "32APSK-4/5", "const", 1704,  2145,  213,  5, 4, 1152, 128, 32, 9, 1),
+}
+
+LEVELS = sorted(lv for lv in RECORDS if lv < 100)   # BW2300 only
+BASE_LEVEL = 3
+
+#: The record each bandwidth's ``BITRATE (4)`` rides. BW2750's is not a rung of the
+#: BW2300 ladder, which is why it is not in :data:`LEVELS` and is named only here.
+BASE_LEVELS = {"2300": BASE_LEVEL, "2750": _REC3_2750}
+
+#: Speed levels whose over is a one-hot column raster a reference-column score can
+#: recognise without decoding, ascending by record index.
+INDEX_LEVELS = tuple(lv for lv in LEVELS if RECORDS[lv].law == "index")
+
+#: The receive family for each bandwidth; BW2750's measured lower records are
+#: separate keys so its 40-bin comb never substitutes for BW2300's 32-bin one.
+INDEX_LEVELS_BW = {"2300": INDEX_LEVELS,
+                   "2750": (_REC0_2750, _REC1_2750, _REC2_2750, _REC3_2750)}
+
+
+#: Levels kestrel keys, ascending — the index records whose training preamble is
+#: reversed, plus the const family. Nothing shifts gear into record 2 yet: the ARQ
+#: layer keys the base level and this says only that the waveform is renderable.
+KEYABLE_LEVELS = tuple(lv for lv in LEVELS
+                       if RECORDS[lv].law != "index" or RECORDS[lv].lead)
+
+
+def _column_roles(level: int):
+    """Split an index-law record's emission columns into data and reference columns.
+
+    A data column's lit bin depends on the payload; a reference column's is fixed
+    by its class (map2) alone, so the 24 reference bins are known before anything
+    is demodulated. That is what makes frame alignment testable without decoding.
+    """
+    r = RECORDS[level]
+    alloc, map1, map2 = _BASE_TABLES[level]
+    ref = map1 != 0
+    binpos = ((alloc + r.stride * map2 - r.first_bin) % r.span) + r.first_bin
+    return (np.flatnonzero(ref), binpos[ref],
+            np.flatnonzero(~ref), (alloc[~ref] - r.first_bin) % r.span)
+
+
+_ROLES = {lv: _column_roles(lv) for lv in _BASE_TABLES}
+_REF_COL, _REF_BIN, _DATA_COL, _DATA_ALLOC = _ROLES[BASE_LEVEL]
+
+
+def payload_bytes(level: int) -> int:
+    """User payload bytes carried per frame at ``level`` (frame minus 2-byte CRC)."""
+    return RECORDS[level].frame_bytes - 2
+
+
+def turbo_perm(level: int) -> np.ndarray:
+    """Internal turbo interleaver = BW2300 il2 column ``level`` (spec/03 §3.5.3).
+
+    The promoted full-height table gives an exact 0..N-1 bijection for every level."""
+    r = RECORDS[level]
+    N = r.n_info
+    c = _IL2[r.il_col::17][:N]
+    assert len(c) == N and c.min() == 0 and c.max() == N - 1 and len(np.unique(c)) == N
+    return c
+
+
+def chan_perm(level: int) -> np.ndarray:
+    """Channel (block) interleaver = BW2300 il1 column ``level`` (spec/03 §3.5.3).
+
+    The promoted full-height table gives an exact 0..coded-1 bijection for every level."""
+    r = RECORDS[level]
+    coded = r.coded
+    c = _IL1[r.il_col::17][:coded]
+    assert len(c) == coded and c.min() == 0 and c.max() == coded - 1 and len(np.unique(c)) == coded
+    return c
+
+
+def _gray_row(bpc: int) -> list:
+    """Bit-group -> symbol-index Gray map. bpc 2/3/4 = the promoted clsparm rows;
+    bpc 5 (32-ary rec15/16) has no promoted row, so a standard reflected-binary Gray
+    is used for the self-consistent (on-air-validatable-only) high level."""
+    if bpc in _CLSPARM:
+        return _CLSPARM[bpc]
+    return [v ^ (v >> 1) for v in range(2 ** bpc)]
+
+
+def const_points(level: int) -> np.ndarray:
+    """The 2**bpc complex constellation points for a 'const'-law record.
+
+    rec9-13 (QPSK/8-PSK, bpc 2/3): VARA's real alphabet ``LUT[pos+6*clsparm[v]]``
+    (spec/06 §6.1d). rec14/15/16 (16-/32-ary APSK, bpc 4/5): the LUT ``pos`` column
+    holds only ~10-11 filled points — too few for 2**bpc — and the exact VARA
+    sub-alphabet + forced/reference-cell loading is on-air-validatable-only
+    (spec/06 §6.1e). So these use a self-consistent synthetic multi-ring APSK; TX/RX
+    agree, round-trip is byte-exact, VARA bit-exactness pends a licensed-peer capture.
+    """
+    r = RECORDS[level]
+    npts = 2 ** r.bpc
+    if r.pos + 6 * (npts - 1) < len(_LUT):
+        row = _gray_row(r.bpc)
+        return np.array([_LUT[r.pos + 6 * row[v]] for v in range(npts)])
+    return _synth_apsk(npts)
+
+
+def _synth_apsk(npts: int) -> np.ndarray:
+    """Deterministic distinct multi-ring APSK of ``npts`` points (self-consistent
+    alphabet for the dense on-air-validatable-only levels)."""
+    nring = 4 if npts > 16 else 2
+    per = npts // nring
+    radii = np.linspace(0.4, 1.6, nring)
+    pts = []
+    for ri, rad in enumerate(radii):
+        for k in range(per):
+            ang = 2 * np.pi * k / per + (np.pi / per) * ri      # stagger rings
+            pts.append(rad * np.exp(1j * ang))
+    return np.array(pts[:npts])
+
+
+# --------------------------------------------------------------------------- #
+# on-air bits <-> coded bits (channel de-interleave + turbo decode + de-whiten)
+#: The most any one channel bit may claim, hard or soft.
+_LLR_CAP = 8.0
+
+
+def onair_to_frame(onair: np.ndarray, level: int, iters: int = 8) -> bytes:
+    """Recovered on-air coded-bit stream -> decoded frame bytes (post de-whiten).
+
+    ``onair`` is either hard bits or per-bit log-likelihood ratios, positive for
+    zero, and both are capped at ``_LLR_CAP``. A soft read takes its noise scale
+    from the column's own median, so a column holding no signal at all produces an
+    unbounded ratio, and a handful of bits claiming hundreds is more certainty than
+    the code can outvote.
+    """
+    r = RECORDS[level]
+    pi = chan_perm(level)
+    onair = np.asarray(onair)
+    Lc = np.zeros(r.coded)
+    Lc[pi] = (np.clip(onair[:r.coded], -_LLR_CAP, _LLR_CAP) if onair.dtype.kind == "f"
+              else np.where(onair[:r.coded] == 0, _LLR_CAP, -_LLR_CAP))
+    perm = turbo_perm(level)
+
+    def _crc_ok(bits) -> bool:
+        """Convergence test handed down to the decoder [see varahf500].
+
+        Worth twice as much here as at BW500: the receiver scans speculatively
+        across levels, so stopping early makes the *correct* hypothesis the
+        cheap one, while a wrong level still pays the full schedule and is
+        rejected on its CRC exactly as before.
+        """
+        cand = np.packbits((bits ^ _PN[:r.n_info]).astype(np.uint8)).tobytes()
+        return check_frame(cand[:r.frame_bytes], level).crc_ok
+
+    if r.coded == 2 * r.n_info + 12:
+        dec = _turbo.decode_from_coded_llr(Lc, r.n_info, perm=perm, iters=iters,
+                                           check=_crc_ok)
+    elif r.coded == 3 * r.n_info + 12:
+        dec = _turbo.decode_r13(Lc, r.n_info, perm, iters=iters, check=_crc_ok)
+    else:
+        dec = _turbo.decode_punctured(Lc, r.n_info, perm, r.coded, iters=iters,
+                                      check=_crc_ok)
+    frame_bits = (dec ^ _PN[:r.n_info]).astype(np.uint8)
+    by = np.packbits(frame_bits).tobytes()
+    return by[:r.frame_bytes]
+
+
+@dataclass
+class Frame2300:
+    level: int
+    crc_ok: bool
+    frame_bytes: bytes
+
+    @property
+    def payload(self) -> bytes:
+        return self.frame_bytes[:payload_bytes(self.level)]
+
+
+def check_frame(by: bytes, level: int) -> Frame2300:
+    if len(by) < 2:
+        return Frame2300(level=level, crc_ok=False, frame_bytes=by)
+    crc = crc16_genibus(by[:-2])               # CRC over payload
+    crc_ok = by[-2:] == bytes(((crc >> 8) & 0xFF, crc & 0xFF))
+    return Frame2300(level=level, crc_ok=crc_ok, frame_bytes=by)
+
+
+# --------------------------------------------------------------------------- #
+# physical demod
+#: Per-bin level below which there is nothing to equalise. A clean synthesised burst
+#: reads exactly zero in every unlit bin, so an unfloored division by that level is a
+#: division by numerical dust and the argmax follows the dust.
+_BIN_FLOOR = 1e-3
+
+
+def _band_mag(audio: np.ndarray, level: int, ncol: int) -> np.ndarray:
+    """``ncol × span`` matrix of one-hot-band readings, one row per 512-column.
+
+    Equalised per bin. One column lights one bin of ``span``, so the median down a
+    bin is what that bin reads while unlit — its share of the channel's frequency
+    response plus whatever else is sitting on it — and dividing it out puts every
+    bin's lit and unlit readings on one scale before anything takes an argmax.
+
+    Without it the argmax follows the channel rather than the payload. On the
+    2026-08-19 KC9GHZ over the four bins around 1.3 kHz read 2-4x the rest of the
+    band across the whole 4.2 s frame; all six of the reference columns that missed
+    missed *into* those four bins, the frame scored 18 of 24 and would not decode,
+    and equalised it scores 20 and decodes to a clean CRC.
+    """
+    r = RECORDS[level]
+    blocks = np.asarray(audio[:ncol * r.dw50], float).reshape(ncol, r.dw50)
+    mag = np.abs(np.fft.rfft(blocks, axis=1)[:, r.first_bin:r.first_bin + r.span])
+    return mag / np.maximum(np.median(mag, axis=0), _BIN_FLOOR * mag.max() + 1e-12)
+
+
+def _onair_from_bins(bins: np.ndarray, level: int, ncol: int | None = None) -> np.ndarray:
+    """Per-column lit bins -> on-air bits: bpc bits per data column via alloc + Gray.
+    Columns past ``ncol`` are absent from the audio and contribute no bits."""
+    r = RECORDS[level]
+    data_col, data_alloc = _ROLES[level][2:]
+    cols = data_col[data_col < (r.ncols if ncol is None else ncol)]
+    gray = (bins[cols] - r.first_bin - data_alloc[:len(cols)]) % r.span
+    # A 20-bin comb carries 16 values, so an argmax can land on a bin that means
+    # nothing; the soft path drops those, and a hard read has to pick something.
+    inv = _clsinv(r.bpc)
+    v = inv[np.minimum(gray // r.stride, len(inv) - 1)]
+    bits = ((v[:, None] >> np.arange(r.bpc - 1, -1, -1)) & 1).ravel()
+    onair = np.zeros(r.coded, int)
+    onair[:min(len(bits), r.coded)] = bits[:r.coded]
+    return onair
+
+
+_BIT_LABELS: dict[int, tuple] = {}
+
+
+def _bit_labels(level: int) -> tuple:
+    """``(labels, lit)``: the bits each bin of each data column means, and whether
+    it means anything at all.
+
+    ``labels`` is ``data columns × span × bpc`` — the map :func:`_onair_from_bins`
+    applies to one argmax, held for every bin at once so a demodulator can weigh
+    them against each other. ``lit`` is the same shape broadcast over one bit and
+    marks the bins that carry a value: BW2750 spans 20 bins for 16 values, so four
+    bins of every column carry none and must not be weighed against the sixteen
+    that do.
+    """
+    if level not in _BIT_LABELS:
+        r = RECORDS[level]
+        data_alloc = _ROLES[level][3]
+        gray = (np.arange(r.span)[None, :] - data_alloc[:, None]) % r.span
+        lit = gray // r.stride < 2 ** r.bpc
+        v = _clsinv(r.bpc)[np.where(lit, gray // r.stride, 0)]
+        _BIT_LABELS[level] = ((v[:, :, None] >> np.arange(r.bpc - 1, -1, -1)) & 1,
+                              lit[:, :, None])
+    return _BIT_LABELS[level]
+
+
+def _onair_llr(mag: np.ndarray, level: int) -> np.ndarray:
+    """Per-column bin magnitudes -> on-air bit log-likelihood ratios, positive for
+    zero.
+
+    One column lights one bin of ``span``, so its bpc bits are a joint decision
+    over the whole band reading and not bpc independent ones: the LLR of a bit is
+    the log-ratio of the energy in the bins that carry it as zero to the energy in
+    the bins that carry it as one, at a noise scale the column supplies itself
+    (the median down its own band, which is what it reads unlit).
+
+    What this replaces is an argmax, and the argmax is why the KB3AC-10 greeting
+    stopped at its first over on 2026-08-31. Its second over had 71 of 395 columns
+    won by the wrong bin — but the true bin was the runner-up in 23 of those and
+    lost by under 3 dB in 45, so a hard read hands the turbo decoder 284 confident
+    wrong bits and it fails, while the same audio read this way decodes to a clean
+    CRC at every alignment tried and to the bytes a stock modem returns off the
+    same recording.
+    """
+    r = RECORDS[level]
+    data_col = _ROLES[level][2]
+    cols = data_col[data_col < len(mag)]
+    p = mag[cols] ** 2
+    ll = p / (np.median(p, axis=1, keepdims=True) + 1e-18)
+    lab, lit = _bit_labels(level)
+    lab = lab[:len(cols)]
+    lik = np.exp(ll - ll.max(axis=1, keepdims=True))[:, :, None] * lit[:len(cols)]
+    bits = (np.log((lik * (lab == 0)).sum(1) + 1e-300)
+            - np.log((lik * (lab == 1)).sum(1) + 1e-300))
+    onair = np.zeros(r.coded)
+    onair[:min(bits.size, r.coded)] = bits.ravel()[:r.coded]
+    return onair
+
+
+def _demod_index(audio: np.ndarray, level: int, start: int = 0) -> np.ndarray:
+    """Index-mod (spec/01 §2300 promoted law): read the record's emission columns
+    from block ``start``; per-block argmax over bins ``first_bin..+span``; skip
+    reference columns (map1!=0); recover bpc on-air bits/data-column via alloc + Gray.
+    """
+    r = RECORDS[level]
+    ncol = min(r.ncols, max(0, len(audio) // r.dw50 - start))
+    mag = _band_mag(audio[start * r.dw50:], level, ncol)
+    bins = np.zeros(r.ncols, int)
+    bins[:ncol] = mag.argmax(1) + r.first_bin
+    return _onair_from_bins(bins, level, ncol)
+
+
+def _demod_const(audio: np.ndarray, level: int) -> np.ndarray:
+    """High-throughput: strip CP, 1024-FFT, nearest-point demap -> on-air bits."""
+    r = RECORDS[level]
+    pts = const_points(level)
+    blk = r.dw50
+    ncell = (r.coded + r.bpc - 1) // r.bpc
+    nsym = (ncell + r.span - 1) // r.span
+    onair = np.zeros(ncell * r.bpc, int)
+    ci = 0
+    for s in range(nsym):
+        seg = audio[s * blk:(s + 1) * blk]
+        if len(seg) < blk:
+            break
+        sp = np.fft.fft(seg[r.cp:r.cp + (blk - r.cp)]) * 2.0    # undo real-folding /2
+        band = sp[r.first_bin:r.first_bin + r.span]
+        for k in range(r.span):
+            if ci >= ncell:
+                break
+            v = int(np.argmin(np.abs(band[k] - pts)))
+            for j in range(r.bpc):
+                onair[ci * r.bpc + j] = (v >> (r.bpc - 1 - j)) & 1
+            ci += 1
+    return onair[:r.coded]
+
+
+def burst_length(level: int) -> int:
+    """Expected TX audio length (samples) for one frame at ``level``."""
+    r = RECORDS[level]
+    if r.law == "index":
+        return (r.lead + r.ncols) * r.dw50             # preamble + emission columns
+    ncell = (r.coded + r.bpc - 1) // r.bpc
+    nsym = (ncell + r.span - 1) // r.span
+    return nsym * r.dw50
+
+
+def candidate_levels(audio: np.ndarray, tol: int = 2048) -> list:
+    """Levels whose expected burst length matches ``audio`` (length is not unique
+    to a level — VARA embeds the level in the waveform — so several may match)."""
+    n = len(audio)
+    return [lv for lv in LEVELS if abs(burst_length(lv) - n) <= tol]
+
+
+def _decode_at(audio: np.ndarray, level: int) -> Frame2300:
+    r = RECORDS[level]
+    if r.law == "index":
+        # the data columns end the burst, so the lead (with or without preamble)
+        # follows from the length
+        lead = max(0, len(audio) // r.dw50 - r.ncols)
+        onair = _demod_index(audio, level, start=lead)
+    else:
+        onair = _demod_const(audio, level)
+    by = onair_to_frame(onair, level)
+    return check_frame(by, level)
+
+
+def decode_burst(audio: np.ndarray, level: int | None = None) -> Frame2300:
+    """Decode one kestrel BW2300 burst.
+
+    ``level`` given -> decode at that level. ``level=None`` -> CRC-confirmed trial
+    decode over the length-compatible candidate levels (needed on the ARQ path,
+    where the speed level is not separately signaled); returns the CRC-clean result,
+    else the last attempt.
+    """
+    audio = np.asarray(audio, float)
+    if level is not None:
+        return _decode_at(audio, level)
+    last = Frame2300(level=BASE_LEVEL, crc_ok=False, frame_bytes=b"")
+    for lv in candidate_levels(audio):
+        last = _decode_at(audio, lv)
+        if last.crc_ok:
+            return last
+    return last
+
+
+# --------------------------------------------------------------------------- #
+# Real-VARA-capture decoder: segment a recorded BW2300 session into DATA overs
+# and decode each at the base level (spec/01 §2300 promoted law). This is the
+# open-loop interop path — it decodes real captured VARA BW2300 DATA audio.
+def detect_overs(audio: np.ndarray, min_len: int = 190000) -> list:
+    """Envelope-segment the ~4.4 s wideband OFDM overs (DATA + link-setup) in a
+    recorded BW2300 session. Returns (start, end) sample ranges."""
+    from scipy.signal import fftconvolve, firwin
+    h = firwin(401, [750 / (FS / 2), 2350 / (FS / 2)], pass_zero=False)
+    env = np.abs(fftconvolve(audio, h, "same"))
+    sm = fftconvolve(env, np.ones(4096) / 4096, "same")
+    on = sm > 0.12 * sm.max()
+    # Edge-index the gate rather than walking it: a Python loop here is one
+    # iteration per SAMPLE (millions on a session recording), and the monitor now
+    # calls this per burst.
+    d = np.diff(on.astype(np.int8))
+    starts = list(np.flatnonzero(d == 1) + 1)
+    ends = list(np.flatnonzero(d == -1) + 1)
+    if on[0]:
+        starts = [0] + starts
+    if on[-1]:
+        ends = ends + [len(on)]
+    return [(s, e) for s, e in zip(starts, ends) if e - s > min_len]
+
+
+def _guard_scores(mag: np.ndarray, level: int = BASE_LEVEL) -> tuple:
+    """Rank every candidate frame start in a column-magnitude matrix, no decoding.
+
+    The 24 reference columns light bins fixed by their class, so at the true start
+    their argmax bins all match the known pattern; anywhere else the match count
+    falls to chance (~1.5 of 24). Measured off air a real frame scores 20-24 while
+    nothing else in the same recording exceeds 9. Returns (hits, share, bins);
+    ``share`` is the reference bins' energy fraction, a tie-break that survives
+    fades deep enough to move an argmax."""
+    r = RECORDS[level]
+    ref_col, ref_bin = _ROLES[level][:2]
+    bins = mag.argmax(1) + r.first_bin
+    ng = len(mag) - r.ncols + 1
+    if ng <= 0:
+        return np.zeros(0), np.zeros(0), bins
+    frac = mag / (mag.sum(1, keepdims=True) + 1e-12)
+    hits = np.zeros(ng)
+    share = np.zeros(ng)
+    for c, b in zip(ref_col, ref_bin):
+        hits += bins[c:c + ng] == b
+        share += frac[c:c + ng, b - r.first_bin]
+    return hits, share, bins
+
+
+def _alignments(seg: np.ndarray, tries: int, level: int = BASE_LEVEL) -> Iterator[tuple]:
+    """The ``tries`` most frame-like alignments of ``seg``, best first.
+
+    Sample grid and frame start are searched together: both are payload-blind and
+    both are scored by the same reference-column metric, and locking the grid on
+    its own beforehand loses frames — an off-air burst whose energy concentration
+    peaks at the wrong onset scored 9 there and a clean 24 at the right one.
+    Yields (onset, start-column, band magnitudes); adjacent onsets that describe
+    the same frame are collapsed so every entry costs a distinct turbo decode."""
+    r = RECORDS[level]
+    ranked, magmap = [], {}
+    for onset in range(0, r.dw50, _ONSET_STEP):
+        ncol = (len(seg) - onset) // r.dw50
+        if ncol < r.ncols:
+            continue
+        mag = _band_mag(seg[onset:], level, ncol)
+        hits, share, _ = _guard_scores(mag, level)
+        magmap[onset] = mag
+        for g in np.lexsort((-share, -hits))[:tries]:
+            ranked.append((-hits[g], -share[g], onset, int(g)))
+    ranked.sort()
+    out = []
+    for _, _, onset, g in ranked:
+        at = onset + g * r.dw50
+        if any(abs(at - prev) < r.dw50 for prev in out):
+            continue
+        out.append(at)
+        yield onset, g, magmap[onset]
+        if len(out) >= tries:
+            return
+
+
+def decode_over(audio: np.ndarray, s: int, e: int, tries: int = _GUARD_TRIES,
+                level: int = BASE_LEVEL) -> Frame2300:
+    """Find where an index-law frame starts inside one segment and decode it.
+    Returns the CRC-clean frame if found.
+
+    The frame can begin anywhere in the segment — off-air bursts arrive with far
+    more lead-in than loopback captures do, and a fade can leave the segmenter
+    holding several overs' worth of audio. Turbo-decoding every alignment to find
+    out costs a minute or more per burst, so :func:`_alignments` ranks them first
+    and only the best ``tries`` are decoded.
+
+    It can also begin *before* the segment, and that is why the record's own
+    training columns are stood in as silence ahead of it. A window that opens at
+    our own un-mute holds a burst already in progress — the station is deaf for
+    0.17-0.19 s after every keying — and the search reaches no further back than
+    the first sample it was given, so the frame's column 0 is outside it and the
+    24 reference columns fall to chance: the 2026-09-11 KC9GHZ greetings, whole
+    and CRC-clean off the tape, score 5 and 6 of 24 and read as band noise from
+    128 ms and 85 ms in. The reach is the record's own ``lead``: column 0 may sit
+    that far ahead of the window's first sample, which gives back the training
+    columns for nothing and the data columns behind them as erasures the turbo
+    pass carries — 24 of 24 reference columns and a clean CRC on both of those
+    greetings from 213 ms and 181 ms in. Standing silence in cannot flatter the
+    score, because no record carries a reference column inside its own lead.
+    """
+    r = RECORDS[level]
+    seg = np.concatenate([np.zeros(r.lead * r.dw50),
+                          np.asarray(audio[s:e], float)])
+    last = Frame2300(level=level, crc_ok=False, frame_bytes=b"")
+    for _, g, mag in _alignments(seg, tries, level):
+        fr = check_frame(onair_to_frame(_onair_llr(mag[g:], level), level), level)
+        if fr.crc_ok:
+            return fr
+        last = fr
+    return last
+
+
+def decode_overs(audio: np.ndarray) -> list:
+    """Decode every DATA over in a recorded BW2300 session -> list of Frame2300
+    (CRC-clean where the over is an index-law DATA frame).
+
+    Base level first, then the rest of the index family in the order a peer walks
+    down it — a session where the peer dropped a gear holds overs at more than one
+    record, and the level is not signalled anywhere but in the waveform. Only a
+    segment the base level fails on pays for the second try, and it pays for the
+    gear below before the floor."""
+    audio = np.asarray(audio, float)
+    out = []
+    below = tuple(lv for lv in reversed(INDEX_LEVELS) if lv != BASE_LEVEL)
+    for s, e in detect_overs(audio):
+        fr = decode_over(audio, s, e)
+        for lv in below:
+            if fr.crc_ok:
+                break
+            fr = decode_over(audio, s, e, level=lv)
+        out.append(fr)
+    return out
+
+
+def decode_wav(path: str) -> list:
+    """Load a 48 kHz WAV (float32/int) and decode its BW2300 DATA overs."""
+    from scipy.io import wavfile
+    _, a = wavfile.read(path)
+    a = np.asarray(a, float)
+    if a.ndim > 1:
+        a = a[:, 0]
+    peak = np.abs(a).max()
+    return decode_overs(a / peak if peak else a)
+
+
+# --------------------------------------------------------------------------- #
+# Which level is on the air: the payload-blind score, across the index-law family.
+
+#: Reference columns a partial window must still reach for its score to mean
+#: anything. 16 of 24 is where `vara_arq._OVER_GUARD_MIN` draws the same line.
+_PARTIAL_REFS = 16
+
+
+def _partial_scores(x: np.ndarray, level: int) -> tuple:
+    """Best (hits, of, sample-offset) for ``level`` in a window that may be shorter
+    than one whole over — every alignment scored on the reference columns it
+    reaches, rather than only on the alignments that hold all 24.
+
+    A record-2 over is 4.86 s of columns and the ARQ layer's receive buffer holds
+    4.21 s, so requiring all 24 would score that level never. The 20 references
+    inside the first 197 columns still separate a frame from noise by a factor of
+    thirty — chance on 20 columns of 32 bins is 0.6 hits."""
+    r = RECORDS[level]
+    ref_col, ref_bin = _ROLES[level][:2]
+    best = (0, 0, 0)
+    for onset in range(0, r.dw50, _ONSET_STEP * 4):
+        ncol = (len(x) - onset) // r.dw50
+        if ncol < _PARTIAL_REFS:
+            continue
+        bins = _band_mag(x[onset:], level, ncol).argmax(1) + r.first_bin
+        for g in range(ncol):
+            use = ref_col[ref_col < ncol - g]
+            if len(use) < _PARTIAL_REFS:
+                break
+            hits = int((bins[use + g] == ref_bin[:len(use)]).sum())
+            if (hits, -len(use)) > (best[0], -best[1]):
+                best = (hits, len(use), onset + g * r.dw50)
+    return best
+
+
+def index_guard(audio: np.ndarray, levels=INDEX_LEVELS) -> list:
+    """``(level, hits, of, sample-offset)`` per index-law record, best score first.
+
+    The payload-blind half of :func:`decode_over`, run across the whole index-law
+    family instead of one level. What it is for is telling "no over here" apart
+    from "an over this build cannot read": a gateway that drops a gear keys a
+    waveform whose reference columns still line up, at a record the base-level
+    score reads as noise. Measured on the 2026-08-14 two-sided bench session, the
+    record-2 over scores 24 of 24 at its own level and 5 at the base one, against
+    a 7 of 24 ceiling for gaussian noise — which is why scoring only the base
+    level reported that over as silence."""
+    x = np.asarray(audio, float)
+    return sorted(((lv, *_partial_scores(x, lv)) for lv in levels),
+                  key=lambda t: (-t[1] / t[2] if t[2] else 0.0))
+
+
+def unread_over(audio: np.ndarray, floor: int, base_hits: int) -> str | None:
+    """One line about receive audio that carries an index-law over the base-level
+    guard just declined — or None, which is almost always.
+
+    ``base_hits`` of 24 is what the caller measured before declining and ``floor``
+    the bar it declined against. The answer is a sentence only when some other
+    record in the family clears that bar on the same audio: a peer that drops a
+    speed level goes on keying overs whose reference columns line up, and a
+    receiver that scores one record reports the drop as a silent band.
+
+    The caller has already scored the base level, so this scores the rest — 26 ms
+    of a 500 ms receive block for the one record below the base one."""
+    others = tuple(lv for lv in INDEX_LEVELS if lv != BASE_LEVEL)
+    for lv, hits, of, at in index_guard(audio, others):
+        if not of or hits * len(_REF_COL) < floor * of:
+            continue
+        return (f"unread over at {at / FS:.2f}s: {hits}/{of} reference columns "
+                f"at record {lv} ({RECORDS[lv].name}), {base_hits}/24 at the base "
+                f"level this buffer is scored on")
+    return None

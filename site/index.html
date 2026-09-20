@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hfmodem · HF data modem</title>
+<meta name="description" content="An HF data modem with PACTOR, VARA, ARDOP and experimental sabir modes. Protocol diagrams, implementation evidence and station setup.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="wrap masthead">
+<a class="brand" href="./" aria-label="hfmodem home">hf<span>modem</span></a>
+<nav aria-label="Main navigation"><a href="#modes">Modes</a><a href="#results">Results</a><a href="#run">Run</a></nav>
+</header>
+<main id="main">
+<section class="wrap hero">
+<p class="eyebrow">W9SSJ / hfmodem</p>
+<h1>HF data modem</h1>
+<div class="intro"><p>hfmodem supports PACTOR, VARA, ARDOP and experimental sabir modes with shared audio, rig control and host connections.</p><a class="action" href="#run">Run a recording</a></div>
+<div class="spec-strip"><span>Pre-alpha</span><span>AGPL-3.0-only</span></div>
+<figure class="cycle"><div class="figure-heading"><span>01 / PACTOR-1 timing</span><span>PACTOR-1 · 1.25 s per cycle</span></div><div class="spectrum-scroll"><svg viewBox="66 14 800 186" role="img" aria-labelledby="cyc-t">
+        <title id="cyc-t">One PACTOR-1 cycle drawn to scale: a 0.96 second data packet from this station, then a 0.12 second control signal back from the gateway, in a 1.25 second raster.</title>
+
+        <rect class="sp-band sp-grow" x="70" y="28" width="303" height="34"></rect>
+        <rect class="sp-band sp-grow" x="465" y="28" width="303" height="34" style="animation-delay:.18s"></rect>
+        <text class="sp-name" x="78" y="50">W9SSJ &mdash; data packet, 0.96 s</text>
+
+        <rect class="sp-band alt" x="398" y="86" width="38" height="34"></rect>
+        <rect class="sp-band alt" x="793" y="86" width="38" height="34"></rect>
+        <text class="sp-name" x="444" y="108">gateway &mdash; control signal, 0.12 s</text>
+
+        <g class="sp-lead">
+          <line x1="373" y1="62" x2="373" y2="134"></line>
+          <line x1="398" y1="120" x2="398" y2="134"></line>
+        </g>
+        <line class="sp-brace" x1="373" y1="134" x2="398" y2="134"></line>
+        <text class="sp-num" x="366" y="138" text-anchor="end">turnaround measured at 78.6 ms &rarr;</text>
+
+        <line class="sp-axis" x1="70" y1="160" x2="860" y2="160"></line>
+        <g class="sp-tick">
+          <line x1="70" y1="160" x2="70" y2="167"></line>
+          <line x1="228" y1="160" x2="228" y2="165"></line>
+          <line x1="386" y1="160" x2="386" y2="165"></line>
+          <line x1="465" y1="160" x2="465" y2="167"></line>
+          <line x1="623" y1="160" x2="623" y2="165"></line>
+          <line x1="781" y1="160" x2="781" y2="165"></line>
+          <line x1="860" y1="160" x2="860" y2="167"></line>
+        </g>
+        <text class="sp-num" x="70" y="182">0</text>
+        <text class="sp-num" x="221" y="182">0.5</text>
+        <text class="sp-num" x="379" y="182">1.0</text>
+        <text class="sp-num" x="453" y="182">1.25 s</text>
+        <text class="sp-num" x="616" y="182">1.75</text>
+        <text class="sp-num" x="774" y="182">2.25</text>
+      </svg></div><figcaption>A PACTOR-1 exchange with KB5LZK on 40 m: 0.96 s data packets, 0.12 s control signals and a measured 78.6 ms turnaround. Each cycle includes time for switching and propagation.</figcaption></figure>
+</section>
+<section id="modes" class="wrap section">
+<div class="section-head"><p class="eyebrow">Modes</p><h2>Protocol guides</h2><p>Interactive diagrams describe carrier placement, frame structure, coding and link control.</p></div>
+<a class="guide-feature" href="compared/"><div><h3>Mode comparison</h3><p>Carrier placement, timing and mode parameters</p></div></a>
+<div class="guides"><a href="pactor/"><span class="eyebrow">01 / shrike</span><h3>PACTOR</h3><p>PACTOR-1, PACTOR-2 and PACTOR-3 link entry, waveforms and control signals</p></a><a href="vara/"><span class="eyebrow">02 / kestrel</span><h3>VARA</h3><p>Connection frames, modulation and bandwidth selection</p></a><a href="ardop/"><span class="eyebrow">03 / besra</span><h3>ARDOP</h3><p>Frame types, error correction and acknowledged transfers</p></a><a href="sabir/"><span class="eyebrow">04 / sabir</span><h3>sabir</h3><p>An experimental mode using OFDM and adaptive coding; its protocol and wire format are subject to change.</p></a></div>
+</section>
+<section id="results" class="wrap section">
+<div class="section-head"><p class="eyebrow">Results</p><h2>Observed results</h2><p>Evidence records document radio transfers, remote reception and codec checks.</p></div>
+<div class="modem-list">
+<article class="modem"><div><span class="index">01</span><h3>PACTOR</h3><span class="protocol">shrike</span></div><div><p class="status">Mail sent over PACTOR-3 and received over PACTOR-1</p><p>Confirmed outbound delivery through WS8EOC over PACTOR-3. Four messages received through KB5LZK over PACTOR-1, with a normal session close.</p></div><a href="status/#pactor" aria-label="Read PACTOR evidence">Evidence</a></article>
+<article class="modem"><div><span class="index">02</span><h3>VARA</h3><span class="protocol">kestrel</span></div><div><p class="status">Mail received and delivered</p><p>Mail reception through K0SI at BW2300 and confirmed outbound delivery through KB8AY. Multiple deliveries confirmed by the operator. The KB8AY delivery used a registered third-party client SID.</p></div><a href="status/#vara" aria-label="Read VARA evidence">Evidence</a></article>
+<article class="modem"><div><span class="index">03</span><h3>ARDOP</h3><span class="protocol">besra</span></div><div><p class="status">Mail sent and received</p><p>hfmodem received messages through WW2MI and W6IDS. An outbound message through WW2MI reached its destination. Codec checks against ardopcf cover all 59 frame types in both directions.</p></div><a href="status/#ardop" aria-label="Read ARDOP evidence">Evidence</a></article>
+<article class="modem"><div><span class="index">04</span><h3>sabir</h3><span class="protocol">experimental</span></div><div><p class="status">Beacon decoded at remote receivers</p><p>The hfmodem decoder recovered 40 m beacons from recordings at public receivers 103 and 302 miles away. Two transmitted gears decoded at both receivers.</p></div><a href="status/#sabir" aria-label="Read sabir evidence">Evidence</a></article>
+</div>
+</section>
+<section id="run" class="wrap section">
+<div class="section-head"><p class="eyebrow">Run</p><h2>Replay a recording</h2><p>Install with Python 3.11 or later. The replay example runs a station from an audio file with transmission disabled.</p></div>
+<div class="workbench"><div><div class="code-head"><span>Terminal / from the repository root</span><button id="copy" type="button" hidden>Copy</button><span id="copy-status" role="status"></span></div><pre><code id="commands">git clone https://github.com/sstjohn/hfmodem
+cd hfmodem
+python -m venv .venv
+./.venv/bin/pip install -e packages/hfhost -e "packages/hfmodem[dev]" -e packages/creance
+./.venv/bin/python -m pytest -rs
+./.venv/bin/hfmodem station examples/replay.toml</code></pre><p class="margin-note">Some tests require a local corpus or an ardopcf binary; <code>-rs</code> lists skipped tests. This example checks station startup: it feeds an ARDOP recording to a VARA lane.</p></div><aside><h3>Documentation</h3><a href="docs/">Documentation index ↗</a><a href="https://github.com/sstjohn/hfmodem/blob/main/docs/STATION.md">Station setup ↗</a><a href="https://github.com/sstjohn/hfmodem/blob/main/docs/CONFIG.md">Configuration ↗</a><a href="https://github.com/sstjohn/hfmodem/blob/main/ARCHITECTURE.md">Architecture ↗</a><p>Sound-card operation requires the <code>radio</code> extra. The station guide covers audio devices, rig control and the <code>transmit = false</code> interlock.</p></aside></div>
+</section>
+</main>
+<footer class="wrap"><!--colophon--></footer>
+<script>
+const copy=document.getElementById('copy');
+if(navigator.clipboard){copy.hidden=false;copy.addEventListener('click',async()=>{try{await navigator.clipboard.writeText(document.getElementById('commands').textContent);document.getElementById('copy-status').textContent='Copied'}catch(e){document.getElementById('copy-status').textContent='Select the commands to copy'}})}
+</script>
+</body>
+</html>

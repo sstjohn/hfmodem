@@ -1,0 +1,26 @@
+[
+  {
+    "file": "20260918T154839Z-W9SSJ-tap.wav",
+    "source_capture": "working/vara-level-air-0915/arms/vara-current-kb8ay-40m-7101500-2750-sense-20260918T154839Z/tap.wav",
+    "shows": "The whole W9SSJ-to-KB8AY VARA session of 2026-09-18 on one clock, taken off the rig's speaker with the transmit monitor on: KB8AY's frames at receive level, and this station's own transmissions, louder, filling the overs through which incoming RF is muted.",
+    "station": "W9SSJ",
+    "peer": "KB8AY",
+    "peer_grid": "EN82CI",
+    "band_m": 40,
+    "centre_hz": 7101500,
+    "dial_hz": 7100000,
+    "rig_mode": "PKTUSB 3000",
+    "session_bandwidth_hz": 2300,
+    "gateway_listing": "VARA 2750",
+    "recorded_from": "CUBILUX HLMS-C4 Line IN, fed from the rig's speaker audio",
+    "started_utc": "2026-09-18T15:48:46Z",
+    "arm_started_utc": "2026-09-18T15:48:40.434880+00:00",
+    "arm_ended_utc": "2026-09-18T15:51:43.329444+00:00",
+    "samplerate": 48000,
+    "channels": 1,
+    "samples": 8231424,
+    "duration_s": 171.488,
+    "bytes": 16462892,
+    "sha256": "c35119771eff9a5a5d2041750063a55dc00dbec7108ea754f130a38bf4645bcd"
+  }
+]

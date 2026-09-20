@@ -1,0 +1,942 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PACTOR · hfmodem</title>
+
+<style>
+/* ============================================================= TOKENS === */
+:root{
+  --sans: system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
+
+  /* cool blue-black instrument ground; a cold cyan signal accent (VARA's sibling
+     runs amber — this one runs the waterfall-cyan of an SDR display) */
+  --bg:      #20221f;
+  --bg-2:    #292c27;
+  --bg-3:    #252822;
+  --panel:   #292c27;
+  --ink:     #f0f0e7;
+  --ink-dim: #b3b6aa;
+  --ink-faint:#a3a89a;
+  --line:    #4e5348;
+  --line-2:  #3c4137;
+
+  --sig:    #33c6e6;   /* hero accent */
+  --sig-hi: #82e2f6;
+  --gold:   #f0b23a;   /* warm secondary — the family tie to the VARA page */
+  --gold-hi:#ffcf7a;
+  --violet: #8a7be8;
+  --magenta:#e8608f;
+
+  --good:   #c3b589;   /* published standard        */
+  --mid:    #ecb84b;
+  --pend:   #ec6a8c;   /* open / gated              */
+
+  --maxw: 1160px;
+  --measure: 44rem;
+  --r: 0px;
+  --shadow:none;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f5f4ef; --bg-2:#f5f4ef; --bg-3:#eeede7; --panel:#f5f4ef;
+    --ink:#242522; --ink-dim:#62635d; --ink-faint:#62635d;
+    --line:#cdcec5; --line-2:#ddded5;
+    --sig:#0f83a4; --sig-hi:#1597bd; --gold:#a86a0c; --gold-hi:#c47f14;
+    --violet:#5b4bc4; --magenta:#c23a6d;
+    --good:#756035; --mid:#a4740c; --pend:#c73763;
+    --shadow:none;
+  }
+}
+
+
+
+*{box-sizing:border-box}
+html{scroll-padding-top:70px}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  line-height:1.62;font-size:17px;-webkit-font-smoothing:antialiased;overflow-x:hidden;}
+h1,h2,h3,h4{line-height:1.12;text-wrap:balance;font-weight:500;letter-spacing:-.02em;margin:0}
+p{margin:0 0 1em}
+a{color:var(--sig);text-decoration-color:var(--line)}
+code,.mono{font-family:var(--mono)}
+:focus-visible{outline:2px solid var(--sig);outline-offset:2px;border-radius:0}
+
+/* ============================================================= LAYOUT === */
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 clamp(18px,4vw,40px)}
+.prose{max-width:var(--measure)}
+.eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.24em;text-transform:uppercase;
+  color:var(--sig);font-weight:600}
+.dim{color:var(--ink-dim)}
+.faint{color:var(--ink-faint)}
+section{padding:clamp(56px,9vh,120px) 0;border-top:1px solid var(--line-2)}
+section:first-of-type{border-top:none}
+
+
+
+.btn{font-family:var(--mono);font-size:.74rem;letter-spacing:.04em;color:var(--ink-dim);
+  background:var(--bg-2);border:1px solid var(--line);padding:6px 11px;border-radius:0;cursor:pointer;
+  transition:.18s}
+.btn:hover{border-color:var(--sig);color:var(--ink)}
+
+/* ============================================================== HERO ==== */
+.hero{position:relative;padding-top:clamp(30px,6vh,70px)}
+.hero h1{font-size:clamp(2.5rem,6.4vw,5rem);letter-spacing:-.035em;margin:.12em 0 .28em}
+.hero h1 .g{font-family:Georgia,serif;font-style:italic;font-weight:400;color:var(--ink)}
+.hero .lede{font-size:clamp(1.05rem,2vw,1.35rem);color:var(--ink-dim);max-width:41rem}
+.hero .kicker{display:inline-flex;gap:10px;align-items:center;font-family:var(--mono);
+  font-size:.74rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:0;padding:6px 14px}
+.hero .kicker b{color:var(--gold)}
+.metastrip{display:flex;flex-wrap:wrap;gap:10px 26px;margin-top:26px;font-family:var(--mono);
+  font-size:.8rem;color:var(--ink-dim)}
+.metastrip b{color:var(--ink);font-weight:600}
+
+.stage{position:relative;margin-top:38px;border:1px solid var(--line);border-radius:0;
+  overflow:hidden;background:linear-gradient(180deg,#05070c,#0a0f18);box-shadow:var(--shadow)}
+:root[data-theme="light"] .stage{background:linear-gradient(180deg,#0a0f18,#0d1420)}
+.stage canvas{display:block;width:100%;height:clamp(340px,52vh,560px)}
+.stage .ovl{position:absolute;inset:0;pointer-events:none}
+.stage .badge{position:absolute;top:14px;left:16px;font-family:var(--mono);font-size:.7rem;
+  letter-spacing:.12em;text-transform:uppercase;color:#cfe0f0;
+  background:rgba(6,10,18,.5);border:1px solid rgba(150,175,205,.2);border-radius:0;padding:5px 9px}
+.stage .axis-f{position:absolute;left:16px;bottom:12px;font-family:var(--mono);font-size:.68rem;color:#9fb4cc}
+.stage .axis-t{position:absolute;right:16px;bottom:12px;font-family:var(--mono);font-size:.68rem;color:#9fb4cc}
+.stage .ctl{position:absolute;top:12px;right:12px;display:flex;gap:6px;pointer-events:auto}
+.stage .ctl .btn{background:rgba(6,10,18,.55);color:#cfe0f0;border-color:rgba(150,175,205,.22)}
+.stage .ctl .btn:hover{border-color:var(--sig);color:#fff}
+.wf-legend{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:16px;font-family:var(--mono);font-size:.72rem}
+.wf-legend span{display:inline-flex;align-items:center;gap:7px;color:var(--ink-dim)}
+.wf-legend i{width:11px;height:11px;border-radius:0;display:inline-block}
+
+
+.sechead{display:flex;flex-direction:column;gap:12px;margin-bottom:34px}
+.sechead h2{font-size:clamp(1.7rem,3.6vw,2.7rem)}
+.sechead .n{font-family:var(--mono);color:var(--sig);font-size:.8rem;letter-spacing:.2em}
+.sechead p{color:var(--ink-dim);max-width:var(--measure)}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:20px}
+.grid{display:grid;gap:18px}.grid>*{min-width:0}
+@media(min-width:820px){.cols2{grid-template-columns:1fr 1fr}.cols5-7{grid-template-columns:5fr 7fr}.cols7-5{grid-template-columns:7fr 5fr}}
+
+/* pipeline flow */
+.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;font-family:var(--mono);font-size:.74rem}
+.flow .stg{background:var(--bg-2);border:1px solid var(--line);border-radius:0;padding:8px 11px;
+  display:flex;flex-direction:column;gap:3px;min-width:0;transition:.2s}
+.flow .stg .t{color:var(--ink);font-weight:600}
+.flow .stg .s{color:var(--ink-faint);font-size:.68rem}
+.flow .stg.hot{border-color:var(--sig);box-shadow:none}
+.flow .arr{align-self:center;color:var(--ink-faint)}
+
+/* segmented packet timeline */
+.pkt{display:flex;gap:3px;font-family:var(--mono);font-size:.66rem;align-items:stretch}
+.pkt .seg{border-radius:0;padding:9px 8px;display:flex;flex-direction:column;gap:2px;justify-content:center;
+  border:1px solid var(--line);background:var(--bg-2);min-width:0;overflow:hidden}
+.pkt .seg .t{color:var(--ink);font-weight:600;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.pkt .seg .s{color:var(--ink-faint);font-size:.6rem}
+.pkt .seg.hi{border-color:var(--sig);color:var(--sig)}
+
+/* interactive controls */
+.hs-controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:8px}
+.hs-controls label{font-family:var(--mono);font-size:.72rem;color:var(--ink-dim);letter-spacing:.06em;text-transform:uppercase}
+input.call{font-family:var(--mono);font-size:1rem;letter-spacing:.12em;text-transform:uppercase;
+  background:var(--bg-2);border:1px solid var(--line);color:var(--ink);border-radius:0;padding:9px 12px;width:9.5em}
+input.call:focus{border-color:var(--sig);outline:none}
+.seg-ctl{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:0;overflow:hidden}
+.seg-ctl button{font-family:var(--mono);font-size:.72rem;background:var(--bg-2);color:var(--ink-dim);
+  border:none;padding:8px 12px;cursor:pointer;border-right:1px solid var(--line)}
+.seg-ctl button:last-child{border-right:none}
+.seg-ctl button.on{background:var(--sig);color:#06121a;font-weight:700}
+:root[data-theme="light"] .seg-ctl button.on{color:#fff}
+.readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:0;overflow:hidden;margin-top:6px}
+.readout div{background:var(--panel);padding:10px 12px}
+.readout .k{font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint)}
+.readout .v{font-family:var(--mono);font-size:1rem;color:var(--sig-hi);font-weight:600;overflow-wrap:anywhere}
+.binline{font-family:var(--mono);font-size:.72rem;color:var(--ink-dim);word-spacing:.1em;line-height:1.8;
+  overflow-x:auto;white-space:nowrap;padding-bottom:4px}
+.binline b{color:var(--sig-hi)}
+
+canvas.c2d{display:block;width:100%;border-radius:0;background:var(--bg-3);border:1px solid var(--line)}
+
+/* tables */
+.tbl-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r)}
+table{border-collapse:collapse;width:100%;font-size:.86rem;min-width:520px}
+th,td{text-align:left;padding:9px 13px;border-bottom:1px solid var(--line-2);vertical-align:top}
+th{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);
+  font-weight:600;background:var(--bg-2)}
+td.mono,td .m{font-family:var(--mono)}
+td.num{font-variant-numeric:tabular-nums;font-family:var(--mono)}
+tr:last-child td{border-bottom:none}
+.val{color:var(--sig-hi);font-family:var(--mono)}
+
+details.spec{border:1px solid var(--line);border-radius:var(--r);margin-bottom:14px;background:var(--panel);overflow:hidden}
+details.spec>summary{cursor:pointer;padding:15px 18px;font-weight:650;list-style:none;display:flex;
+  align-items:center;gap:12px;font-size:1.02rem}
+details.spec>summary::-webkit-details-marker{display:none}
+details.spec>summary .mk{font-family:var(--mono);color:var(--sig);transition:.2s;font-size:.9rem}
+details.spec[open]>summary .mk{transform:rotate(90deg)}
+details.spec>summary .sub{font-family:var(--mono);font-size:.68rem;color:var(--ink-faint);font-weight:400;margin-left:auto}
+.spec-body{padding:0 18px 18px}
+
+.callout{border-left:3px solid var(--pend);background:color-mix(in srgb,var(--pend) 9%,var(--panel));
+  border-radius:0 var(--r) var(--r) 0;padding:16px 18px}
+.callout.info{border-left-color:var(--sig);background:color-mix(in srgb,var(--sig) 8%,var(--panel))}
+.callout.warm{border-left-color:var(--gold);background:color-mix(in srgb,var(--gold) 8%,var(--panel))}
+.callout h4{font-size:1rem;margin-bottom:6px;display:flex;gap:10px;align-items:center}
+.callout p{margin:0;color:var(--ink-dim);font-size:.92rem}
+
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:15px 16px}
+.tile .big{font-family:var(--mono);font-size:1.6rem;font-weight:700;color:var(--sig-hi);
+  font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.tile .lab{font-family:var(--mono);font-size:.64rem;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);margin-top:2px}
+
+.states{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-family:var(--mono);font-size:.74rem}
+.states .st{border:1px solid var(--line);border-radius:0;padding:9px 13px;background:var(--bg-2);transition:.25s}
+.states .st.on{border-color:var(--sig);color:var(--sig-hi);box-shadow:none}
+.states .a{color:var(--ink-faint)}
+
+/* control-signal perfect-code grid */
+.csbits{display:grid;gap:4px}
+.csrow{display:flex;gap:6px;align-items:center}
+.csrow .lab{font-family:var(--mono);font-size:.68rem;color:var(--ink-dim);width:3.6em;flex:none}
+.csrow .word{display:flex;gap:2px}
+.csrow .b{width:11px;height:16px;border-radius:0;background:var(--bg-2);border:1px solid var(--line-2)}
+.csrow .b.one{background:var(--sig)}
+.dmat{border-collapse:collapse;font-family:var(--mono);font-size:.72rem}
+.dmat td,.dmat th{border:1px solid var(--line-2);padding:5px 8px;text-align:center;min-width:2.1em}
+.dmat td.d{color:var(--good);font-weight:600}
+.dmat td.diag{color:var(--ink-faint);background:var(--bg-2)}
+
+footer{padding:60px 0 90px;border-top:1px solid var(--line-2);color:var(--ink-faint);font-size:.85rem}
+footer .wrap{display:flex;flex-direction:column;gap:14px}
+
+.hl-sig{color:var(--sig-hi)} .hl-gold{color:var(--gold-hi)} .hl-violet{color:var(--violet)} .hl-mag{color:var(--magenta)}
+
+@media (prefers-reduced-motion: reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important}}
+
+/* Reading controls stay visible without colour or animation. */
+.btn{min-height:44px}a{text-underline-offset:.2em}.hero .kicker{border:0;border-bottom:1px solid var(--line);padding:6px 0}.topbar .brand{text-decoration:none;color:var(--ink)}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+/* Inline so each explainer also works as a standalone file. */
+.site-header{position:sticky;top:0;z-index:60;background:var(--bg);color:var(--ink);border-bottom:1px solid var(--line)}
+.site-header-inner{width:min(1100px,calc(100% - 36px));margin:auto;padding:10px 0}
+.site-heading{display:flex;align-items:center;gap:16px;font:12px/1.5 var(--mono)}
+.site-home{font-weight:700;text-decoration:underline;text-underline-offset:4px;color:var(--ink)}
+.site-title{margin-right:auto;color:var(--ink)}
+.site-theme{font:12px var(--mono);min-height:44px;padding:8px 12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);cursor:pointer}
+.site-nav{display:flex;flex-wrap:wrap;gap:2px 20px;padding-top:6px;font:12px/1.5 var(--mono)}
+.site-nav a{display:inline-flex;align-items:center;min-height:38px;color:var(--ink);text-decoration:none;border-bottom:2px solid transparent}
+.site-nav a[aria-current=page]{border-bottom-color:currentColor;font-weight:bold}
+.page-contents{margin:0;padding:0;border:0;font:12px/1.5 var(--mono)}
+.page-contents summary{margin:0;min-height:38px;padding:10px 0;cursor:pointer;font:inherit}
+.page-contents .rail{position:static;transform:none;display:flex;flex-wrap:wrap;gap:4px 20px;padding:0 0 10px}
+.page-contents .rail a{display:inline-flex;min-height:38px;align-items:center;color:var(--ink);font:12px/1.5 var(--mono);text-decoration:underline;text-underline-offset:4px}
+html{scroll-padding-top:170px}
+@media(max-width:600px){.site-nav{gap:2px 16px}.site-heading{gap:12px}.site-title{font-size:11px}html{scroll-padding-top:200px}}
+@media print{.site-header{display:none}}
+</style>
+<link rel="stylesheet" href="guide.css">
+
+<header class="site-header"><div class="site-header-inner"><div class="site-heading"><a class="site-home" href="../README.md">Documentation</a><span class="site-title">hfmodem / PACTOR</span></div><nav class="site-nav" aria-label="Modes"><a href="flock-compared.html" data-route="compared">Comparison</a><a href="pactor-explained.html" data-route="pactor" aria-current="page">PACTOR</a><a href="vara-explained.html" data-route="vara">VARA</a><a href="ardop-explained.html" data-route="ardop">ARDOP</a><a href="sabir-explained.html" data-route="sabir">sabir</a></nav><details class="page-contents"><summary>On this page</summary><nav class="rail" aria-label="sections"><a href="#tones">Channel occupancy</a><a href="#connect">Link entry</a><a href="#generations">Generations</a><a href="#packet">Frame structure and coding</a><a href="#arq">ARQ and host interface</a><a href="#numbers">Rate selection and values</a><a href="#results">Observed results</a></nav></details></div></header>
+
+
+
+<!-- ================================================================ HERO -->
+<header class="hero wrap" id="air">
+  <span class="kicker">Functional specification &nbsp;·&nbsp; <b>waveform, coding, ARQ</b></span>
+  <h1>PACTOR</h1>
+  <p class="lede">The PACTOR mode in hfmodem uses shrike for PACTOR-1, PACTOR-2 and PACTOR-3.
+    Links begin with FSK and can select multicarrier waveforms. Data and replies share a fixed cycle.</p>
+  <div class="tbl-scroll"><table><thead><tr><th>Generation</th><th>Waveform</th><th>Link structure</th></tr></thead><tbody>
+    <tr><td>PACTOR-1</td><td>100 / 200 Bd FSK</td><td>Link entry, data packets and control signals</td></tr>
+    <tr><td>PACTOR-2</td><td>Two differential PSK carriers</td><td>Coded data and negotiated speed levels</td></tr>
+    <tr><td>PACTOR-3</td><td>2–18 differential PSK carriers</td><td>Six speed levels on a 120 Hz grid</td></tr>
+  </tbody></table></div>
+
+  <div class="metastrip">
+    <span><b>18 tones</b> · 120 Hz grid · 480–2520 Hz</span>
+    <span><b>100 Bd</b> DBPSK → DQPSK</span>
+    <span>conv <b>K=7/9</b> · CRC-16/X25</span>
+    <span>cycle-locked <b>1.25 s</b> ARQ</span>
+  </div>
+
+  <div class="stage" id="wfStage">
+    <canvas id="wf" aria-label="Scrolling waterfall of a PACTOR-3 session"></canvas>
+    <div class="ovl">
+      <div class="badge">Schematic exchange · frequency × time</div>
+      <div class="axis-f">frequency 0.3 – 2.7 kHz →</div>
+      <div class="axis-t">time ↓</div>
+    </div>
+    <div class="ctl">
+      <button class="btn" id="wfPlay">❚❚</button>
+    </div>
+  </div>
+  <div class="wf-legend" id="wfLegend"></div>
+  <p class="dim" style="margin-top:14px;font-size:.9rem;max-width:var(--measure)">
+    Schematic PACTOR-1 link entry followed by PACTOR-3 data cycles. PACTOR-3 channels 5 and 12,
+    at 1080 and 1920 Hz, carry headers and control signals at every speed level.</p>
+
+</header>
+
+<!-- ============================================================== TONES -->
+<section id="tones"><div class="wrap">
+  <div class="sechead">
+    <span class="n">THE CARRIER SET</span>
+    <h2>PACTOR-3 channel occupancy</h2>
+    <p>PACTOR-3 uses up to eighteen independently pulse-shaped 100 Bd carriers on a 120 Hz grid from 480 to 2520 Hz. Each speed level selects a symmetric carrier set, modulation and code rate.</p>
+  </div>
+
+  <div class="grid cols7-5">
+    <div class="card">
+      <div class="hs-controls" style="margin-bottom:14px">
+        <label>Speed level</label>
+        <span class="seg-ctl" id="slSeg">
+          <button data-sl="1">SL1</button>
+          <button data-sl="2" class="on">SL2</button>
+          <button data-sl="3">SL3</button>
+          <button data-sl="4">SL4</button>
+          <button data-sl="5">SL5</button>
+          <button data-sl="6">SL6</button>
+        </span>
+      </div>
+      <canvas class="c2d" id="toneCanvas" height="260"></canvas>
+      <p class="dim" style="font-size:.8rem;margin:12px 0 0">DBPSK has two differential phase states; DQPSK has four. Channels 5 and 12 carry the variable header and control signals.</p>
+    </div>
+    <div class="grid" style="align-content:start;gap:14px">
+      <div class="card">
+        <div class="eyebrow" style="margin-bottom:10px">This speed level</div>
+        <div class="readout" id="slReadout"></div>
+      </div>
+      <div class="callout info">
+        <h4>Symmetric about 1500 Hz</h4>
+        <p>Every tone map is mirror-symmetric around the 1500&nbsp;Hz centre, and every one contains
+        channels 5 &amp; 12. SL1 uses those two carriers; SL6 uses all eighteen. The net user rate
+        climbs from <b>77&nbsp;bit/s</b> to <b>2722&nbsp;bit/s</b> across the six levels.</p>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+<!-- ============================================================ CONNECT -->
+<section id="connect"><div class="wrap">
+  <div class="sechead">
+    <span class="n">LINK SETUP</span>
+    <h2>Link entry</h2>
+    <p>A PACTOR-1 connect burst carries the called callsign in a dual-rate FSK frame.
+      The link can remain in PACTOR-1 or negotiate a higher generation after entry.
+      The encoder below shows the address frame for the selected callsign.</p>
+  </div>
+
+  <div class="grid cols7-5">
+    <div class="card">
+      <div class="hs-controls">
+        <label>Called callsign</label>
+        <input class="call" id="callIn" value="DL6MAA" maxlength="8" spellcheck="false" autocomplete="off">
+      </div>
+      <canvas class="c2d" id="fskCanvas" height="150"></canvas>
+      <div class="binline" id="fskBins" style="margin-top:10px"></div>
+      <div class="kat ok" id="fskKat"></div>
+    </div>
+
+    <div class="grid" style="align-content:start;gap:14px">
+      <div class="card">
+        <div class="eyebrow" style="margin-bottom:10px">The frame, byte by byte</div>
+        <div class="readout" id="fskReadout"></div>
+      </div>
+      <div class="card">
+        <div class="eyebrow" style="margin-bottom:10px">Closed form (per callsign)</div>
+<pre class="mono" style="margin:0;font-size:.72rem;line-height:1.7;color:var(--ink-dim);overflow-x:auto">T = [0x55] + ascii(call) + 0x0F&#8230; to 9 bytes
+<span class="faint"># address section, 100 Bd (9 bytes)</span>
+raw = T
+<span class="faint"># redundancy section, 200 Bd (6 bytes)</span>
+red = T[1:7]
+<span class="hl-sig">MARK(bit 1)=1400 Hz · SPACE(bit 0)=1600 Hz</span>
+LSB-first · continuous phase · no CRC</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid cols2" style="margin-top:18px">
+    <div class="callout info">
+      <h4>Dual-rate frame</h4>
+      <p>The connect frame contains nine bytes at 100 Bd followed by six redundancy bytes at 200 Bd, with continuous phase across the rate change. The receiver demodulates the two sections at their respective rates.</p>
+    </div>
+    <div class="callout">
+      <h4>Callsign bytes</h4>
+      <p>The address sends uppercase ASCII after the sync byte, padded with <code>0x0F</code>.
+      The redundancy section repeats address bytes 1 through 6 at 200 Bd.</p>
+    </div>
+  </div>
+</div></section>
+
+<section id="generations"><div class="wrap"><div class="sechead"><h2>PACTOR-1 and PACTOR-2 data</h2><p>PACTOR-1 carries data with 100 or 200 Bd FSK. A packet contains a header, payload, status and CRC; the receiver replies with a control signal in the fixed cycle.</p><p>PACTOR-2 uses two 100 Bd differential PSK carriers at 1400 and 1600 Hz. Its four speed levels select DBPSK or DQPSK and convolutional code rates. The K=9 code is punctured to 2/3 at SL3 and 7/8 at SL4. The payload is interleaved and protected by CRC-16/X25.</p></div><div class="tbl-scroll"><table><thead><tr><th>Generation</th><th>Frame arrangement</th><th>Rate selection</th></tr></thead><tbody><tr><td>PACTOR-1</td><td>Header → data → status → CRC</td><td>100 / 200 Bd</td></tr><tr><td>PACTOR-2</td><td>Frame marker → coded data</td><td>SL1–4</td></tr><tr><td>PACTOR-3</td><td>Phase reference → headers → coded data</td><td>SL1–6</td></tr></tbody></table></div><p class="dim" style="margin-top:18px">PACTOR-2 transmit payloads have independent monitor evidence at SL1–3. Its control-signal keying remains an implementation hypothesis. PACTOR-3 parameters and figures follow below.</p></div></section>
+<!-- ============================================================= PACKET -->
+<section id="packet"><div class="wrap">
+  <div class="sechead">
+    <span class="n">THE DATA PACKET</span>
+    <h2>PACTOR-3 frame structure</h2>
+    <p>The short cycle lasts 1.25 s. A data packet contains a phase reference, headers and coded data.</p>
+  </div>
+
+  <div class="card">
+    <div class="pkt" id="pktBar"></div>
+    <p class="dim" style="font-size:.86rem;margin:16px 0 0">
+      A phase-reference symbol precedes the header block. The variable header carries speed level and cycle on channels 5 and 12; other active carriers send constant headers. The data field carries payload, status and CRC-16/X25. Link acquisition uses a separate burst.</p>
+  </div>
+
+  <div class="grid cols2" style="margin-top:18px">
+    <div class="card">
+      <div class="eyebrow" style="margin-bottom:4px">The coding chain</div>
+      <p class="dim" style="font-size:.84rem;margin:0 0 12px">Payload bytes are whitened, convolutionally coded, punctured and permuted onto the active carriers. The receiver uses soft-decision Viterbi decoding and CRC-16/X25. Each speed level selects its interleaving stride.</p>
+      <div class="flow" id="codeFlow"></div>
+    </div>
+    <div class="card">
+      <div class="eyebrow" style="margin-bottom:4px">Phase-reference symbol — Schroeder's quadratic</div>
+      <p class="dim" style="font-size:.84rem;margin:0 0 10px">A phase-reference symbol precedes the data. Carrier <i>k</i> starts at <code>−πk(k+1)/18</code>, a quadratic phase assignment that reduces crest factor. Subsequent symbols encode differential phase changes.</p>
+      <canvas class="c2d" id="refCanvas" height="240"></canvas>
+    </div>
+  </div>
+
+  <div class="grid cols7-5" style="margin-top:18px;align-items:start">
+    <div class="card">
+      <div class="eyebrow" style="margin-bottom:4px">PACTOR-3 control signals</div>
+      <p class="dim" style="font-size:.84rem;margin:0 0 12px">Six 20-bit control words are transmitted with DBPSK on channels 5 and 12. Every pair differs in 12 bits.</p>
+      <div class="grid cols2" style="gap:18px">
+        <div class="csbits" id="csBits"></div>
+        <div>
+          <div class="faint mono" style="font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px">pairwise distance (bits)</div>
+          <div style="overflow-x:auto"><table class="dmat" id="csMat"></table></div>
+        </div>
+      </div>
+    </div>
+    <div class="grid" style="align-content:start;gap:14px">
+      <div class="callout">
+        <h4>Header detection</h4>
+        <p>The receiver correlates the variable-header channels against known codewords to identify speed level and cycle.</p>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+<!-- ================================================================ ARQ -->
+<section id="arq"><div class="wrap"><figure class="link-exchange"><div class="exchange" role="img" aria-label="Schematic exchange: sender on left transmits data to receiver on right, then receiver replies to sender"><div class="station">Sender</div><div class="station">Receiver</div><div class="transmit">Data frame →</div><div class="reply">← Control signal · ACK / repeat</div></div><figcaption>Schematic · data left to right; reply right to left</figcaption></figure>
+  <div class="sechead">
+    <span class="n">THE ARQ CYCLE</span>
+    <h2>ARQ timing and the host interface</h2>
+    <p>PACTOR uses cycle-locked stop-and-wait ARQ with control signals for acknowledgements, repeats and rate changes. Shrike exposes an SCS PTC serial host interface.</p>
+  </div>
+
+  <div class="grid cols7-5">
+    <div class="card">
+      <div class="eyebrow" style="margin-bottom:14px">Connect → transfer → disconnect</div>
+      <div class="states" id="stateRow"></div>
+      <canvas class="c2d" id="ladderCanvas" height="380" style="margin-top:16px"></canvas>
+    </div>
+    <div class="grid" style="align-content:start;gap:14px">
+      <div class="card">
+        <div class="eyebrow" style="margin-bottom:10px">Control signals → ARQ events</div>
+        <table style="min-width:0"><tbody>
+          <tr><td class="mono val">CS1 / CS2</td><td class="dim">ACK · request next</td></tr>
+          <tr><td class="mono val">CS3</td><td class="dim">break-in</td></tr>
+          <tr><td class="mono val">CS4</td><td class="dim">speed up one level</td></tr>
+          <tr><td class="mono val">CS5</td><td class="dim">NAK · speed down</td></tr>
+          <tr><td class="mono val">CS6</td><td class="dim">toggle cycle length</td></tr>
+        </tbody></table>
+        <p class="faint" style="font-size:.74rem;margin:10px 0 0">The mapping from codeword to event is not
+          fixed by the published description.</p>
+      </div>
+      <div class="tiles">
+        <div class="tile"><div class="big">1.25<span style="font-size:1rem">s</span></div><div class="lab">short cycle</div></div>
+        <div class="tile"><div class="big">1</div><div class="lab">window (stop &amp; wait)</div></div>
+        <div class="tile"><div class="big">mem</div><div class="lab">-ARQ soft combine</div></div>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+<!-- ============================================================ NUMBERS -->
+<section id="numbers"><div class="wrap">
+  <div class="sechead">
+    <span class="n">THE NUMBERS</span>
+    <h2>Protocol constants</h2>
+    <p>PACTOR-3 physical-layer and timing values follow ITU-R M.1798. Coding tables below describe the shrike implementation.</p>
+  </div>
+
+  <details class="spec" open>
+    <summary><span class="mk">▸</span> Physical layer <span class="sub">ITU-R M.1798</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>Carriers</td><td class="mono"><span data-fig="physical.n_channels"></span> independent pulse-shaped DPSK · <span class="val">not OFDM</span></td></tr>
+      <tr><td>Symbol rate</td><td class="num"><span class="val" data-fig="physical.baud"></span> Bd</td></tr>
+      <tr><td>Tone spacing · channel 0</td><td class="num"><span class="val" data-fig="physical.spacing_hz"></span> Hz · <span data-fig="physical.chan0_hz"></span> Hz</td></tr>
+      <tr><td>Occupied band · centre</td><td class="num"><span data-fig="physical.chan0_hz"></span> – <span data-fig="physical.hi_hz"></span> Hz · <span class="val" data-fig="physical.centre_hz"></span> Hz</td></tr>
+      <tr><td>Header / control channels</td><td class="mono val">5 &amp; 12 (1080 / 1920 Hz)</td></tr>
+      <tr><td>Emission designator</td><td class="mono val" data-fig="physical.emission"></td></tr>
+    </tbody></table></div></div>
+  </details>
+
+  <details class="spec">
+    <summary><span class="mk">▸</span> Speed levels <span class="sub">ITU-R M.1798</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table id="slTable"><tbody></tbody></table></div></div>
+  </details>
+
+  <details class="spec">
+    <summary><span class="mk">▸</span> PACTOR-1 connect <span class="sub">§2</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>Waveform</td><td class="mono">single dual-rate FSK frame · continuous phase</td></tr>
+      <tr><td>Rates</td><td class="mono">9 B @ <span class="val">100 Bd</span> (address) + 6 B @ <span class="val">200 Bd</span> (redundancy)</td></tr>
+      <tr><td>Tones</td><td class="mono">MARK/bit1 = <span class="val">1400 Hz</span> · SPACE/bit0 = <span class="val">1600 Hz</span> · LSB-first</td></tr>
+      <tr><td>Address image</td><td class="mono">T = [0x55] + ASCII(call) + 0x0F fill → 9 B</td></tr>
+      <tr><td>On-air bytes</td><td class="mono">Address T, followed by T[1:7] at 200 Bd</td></tr>
+      <tr><td>Frame CRC</td><td class="dim">none — the receiver validates the recovered characters instead</td></tr>
+      <tr><td>Address field</td><td class="mono">any callsign; the frame carries no capability field, so a connect does not negotiate a generation</td></tr>
+    </tbody></table></div></div>
+  </details>
+
+  <details class="spec">
+    <summary><span class="mk">▸</span> Coding chain <span class="sub">§3</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>Whitening</td><td class="mono"><span class="val">word[i] ^= crc16_table[i]</span> on info bytes · not in the spec</td></tr>
+      <tr><td>Data conv code · SL1</td><td class="mono">K=9 · <span class="val" data-fig="levels.0.generators"></span> · rate 1/2</td></tr>
+      <tr><td>Data conv code · SL2–6</td><td class="mono">K=7 · <span class="val" data-fig="levels.1.generators"></span></td></tr>
+      <tr><td>Transmit G0/G1 order</td><td class="mono"><span class="val" data-fig="coding.tx_generators"></span>, bits packed LSB-first over the transmit form, terminated, over the whitened field</td></tr>
+      <tr><td>Puncture · SL5 (3/4)</td><td class="mono">G1=<span data-fig="coding.puncture_3_4.0"></span> G2=<span data-fig="coding.puncture_3_4.1"></span></td></tr>
+      <tr><td>Puncture · SL6 (8/9)</td><td class="mono" style="font-size:.72rem">G1=<span data-fig="coding.puncture_8_9.0"></span> G2=<span data-fig="coding.puncture_8_9.1"></span></td></tr>
+      <tr><td>Interleaver</td><td class="mono">Stride by speed level: <span class="val" id="strideList"></span>. At SL1, channel order matches code order. Full-frame interleaver geometry remains unresolved.</td></tr>
+      <tr><td>Decoder</td><td class="mono">soft-decision Viterbi</td></tr>
+      <tr><td>CRC</td><td class="mono">CRC-16/X25 (0x1021, init/xor 0xFFFF, reflected, residue 0xF0B8)</td></tr>
+    </tbody></table></div></div>
+  </details>
+
+  <details class="spec">
+    <summary><span class="mk">▸</span> Packet structure &amp; control signals <span class="sub">§3</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>Acquisition preamble</td><td class="mono">±800 low-PAPR multitone burst used for link acquisition</td></tr>
+      <tr><td>Phase-reference symbol</td><td class="mono">1 symbol, no data · channel <i>k</i> keyed at <span class="val">−πk(k+1)/18</span> (Schroeder)</td></tr>
+      <tr><td>Header block</td><td class="mono">DQPSK · <span class="val" data-fig="packet.header_symbols"></span> symbols on every lit tone · <span data-fig="packet.constant_headers"></span> constant headers + <span data-fig="packet.variable_headers"></span> variable, on 5 &amp; 12. No FEC field: the codewords are published and the decoder matched-filters them</td></tr>
+      <tr><td>Data-field modulation</td><td class="mono"><b>differential</b> · dibit → phase step <span class="val" id="dibitMap"></span></td></tr>
+      <tr><td>Grid rows / carrier</td><td class="num"><span class="val" data-fig="packet.rows_short"></span> (short cycle) · <span class="val" data-fig="packet.rows_long"></span> (long)</td></tr>
+      <tr><td>Control signals CS1–6</td><td class="mono" style="font-size:.72rem">52D56 · AABA2 · AD45A · 95AC5 · 74339 · 4B4AD (20-bit, d=12)</td></tr>
+      <tr><td>SL header — detection mechanism</td><td class="dim">matched-filter correlation over the known codewords, thresholded per SL hypothesis</td></tr>
+      <tr><td>Packet on an established link</td><td class="dim">One phase-reference symbol, the header block and <span data-fig="packet.rows_short"></span> data rows. A trailing run-out symbol carries no data.</td></tr>
+    </tbody></table></div></div>
+  </details>
+
+  <details class="spec">
+    <summary><span class="mk">▸</span> ARQ &amp; cycle timing <span class="sub">ITU-R M.1798</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>Scheme</td><td class="mono">cycle-locked stop-and-wait · window 1 · memory-ARQ</td></tr>
+      <tr><td>Cycle length</td><td class="num">short <span class="val" data-fig="cycle.short_s"></span> s · long <span class="val" data-fig="cycle.long_s"></span> s (longpath <span data-fig="cycle.short_longpath_s"></span> / <span data-fig="cycle.long_longpath_s"></span> s)</td></tr>
+      <tr><td>Phase-reference pulse</td><td class="num">one symbol before each packet and control signal</td></tr>
+      <tr><td>Control-signal window</td><td class="num"><span class="val" data-fig="cycle.cs_window_s"></span> s</td></tr>
+      <tr><td>Carrier swap</td><td class="mono">tones swapped per cycle (involution, fixes 5↔12) — frequency diversity</td></tr>
+      <tr><td>Speed adaptation</td><td class="mono">climb on ACK, drop on NAK (CS4 / CS5)</td></tr>
+      <tr><td>Link-layer FSM</td><td class="mono">stop-and-wait + gear-shift + graceful disconnect</td></tr>
+      <tr><td>Host interface</td><td class="mono">SCS PTC serial hostmode</td></tr>
+    </tbody></table></div></div>
+  </details>
+
+</div></section>
+
+<section id="results"><div class="wrap"><div class="sechead"><h2>Observed results</h2>
+<p>Confirmed outbound mail delivery through WS8EOC over PACTOR-3
+(message <code>9WQNVWBDLVOY</code>). Four messages received through KB5LZK over PACTOR-1, with a normal session close.</p>
+<p>PACTOR-2 codec behavior has bench evidence. PACTOR-3 mail delivery is demonstrated
+through one gateway; speed-level coverage and reliability across gateways remain open.</p>
+<p><a href="../STATUS.md">Implementation evidence</a> records the conditions and coverage.</p>
+</div></div></section>
+<footer><div class="wrap"><p>PACTOR-3 physical-layer values and cycle timing: ITU-R M.1798.
+Interactive figures use the shrike implementation tables.</p></div></footer>
+
+<script>
+"use strict";
+/* ---- generated by docs/viz/build.py; do not edit by hand ---- */
+const FIG = {"coding": {"crc_poly": "0x1021", "interleave": "per-path stride (unknowns.U3_INTERLEAVER: OPEN)", "puncture_3_4": [[1, 1, 0], [0, 1, 1]], "puncture_8_9": [[0, 1, 0, 1, 1, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 1]], "tx_generators": ["0o171", "0o133"]}, "control": {"bits": 20, "names": ["ACK", "REQ", "BREAK-IN", "SPEED-UP", "NAK", "CYCLE-TOG"], "words": ["52D56", "AABA2", "AD45A", "95AC5", "74339", "4B4AD"]}, "cycle": {"cs_window_s": 0.29, "long_longpath_s": 4.2, "long_s": 3.75, "pulse_slot_s": 0.01, "short_longpath_s": 1.4, "short_s": 1.25}, "levels": [{"bits_per_symbol": 1, "channels": [5, 12], "crest_db": 1.9, "generators": ["0o753", "0o561"], "k": 9, "n_buf": 144, "ndr": 76.8, "payload_long": 36, "payload_short": 5, "pdr": 200, "puncture": [[1], [1]], "rate": "1/2", "sl": 1, "stride": 0}, {"bits_per_symbol": 1, "channels": [3, 5, 7, 10, 12, 14], "crest_db": 2.6, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 432, "ndr": 247.5, "payload_long": 116, "payload_short": 23, "pdr": 600, "puncture": [[1], [1]], "rate": "1/2", "sl": 2, "stride": 35}, {"bits_per_symbol": 1, "channels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "crest_db": 3.1, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 1008, "ndr": 588.8, "payload_long": 276, "payload_short": 59, "pdr": 1400, "puncture": [[1], [1]], "rate": "1/2", "sl": 3, "stride": 69}, {"bits_per_symbol": 2, "channels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "crest_db": 3.8, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2016, "ndr": 1186.1, "payload_long": 556, "payload_short": 122, "pdr": 2800, "puncture": [[1], [1]], "rate": "1/2", "sl": 4, "stride": 250}, {"bits_per_symbol": 2, "channels": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "crest_db": 5.2, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2304, "ndr": 2039.5, "payload_long": 956, "payload_short": 212, "pdr": 3200, "puncture": [[1, 1, 0], [0, 1, 1]], "rate": "3/4", "sl": 5, "stride": 563}, {"bits_per_symbol": 2, "channels": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17], "crest_db": 5.7, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2592, "ndr": 2722.1, "payload_long": 1276, "payload_short": 284, "pdr": 3600, "puncture": [[0, 1, 0, 1, 1, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 1]], "rate": "8/9", "sl": 6, "stride": 909}], "packet": {"constant_headers": 16, "data_offset": 9, "header_symbols": 8, "packet_s": 0.81, "rows_long": 320, "rows_short": 72, "variable_headers": 16}, "phase": {"bit_deg": [315.0, 135.0], "dibit_deg": [135.0, 45.0, -135.0, -45.0], "pattern_a_deg": [0.0, 180.0, 0.0, 90.0, 180.0, 180.0, 180.0, 90.0], "start_deg": [0.0, 340.0, 300.0, 240.0, 160.0, 60.0, 300.0, 160.0, 0.0, 180.0, 340.0, 120.0, 240.0, 340.0, 60.0, 120.0, 160.0, 180.0]}, "physical": {"baud": 100.0, "centre_hz": 1500.0, "chan0_hz": 480.0, "emission": "2K20J2D", "hi_hz": 2520.0, "n_channels": 18, "spacing_hz": 120.0, "vh": [5, 12]}};
+/* ---- end generated ---- */
+/* ===================================================================== */
+/*  PACTOR-III facts — every one of them out of the generated block above */
+/* ===================================================================== */
+const CHAN0_HZ=FIG.physical.chan0_hz, CHAN_SP=FIG.physical.spacing_hz;
+const NCHAN=FIG.physical.n_channels, VH=FIG.physical.vh;
+const chanHz=c=>CHAN0_HZ+CHAN_SP*c;
+const SLS=Object.fromEntries(FIG.levels.map(l=>[l.sl,l]));
+const CONTROL_SIGNALS=FIG.control.words.map(w=>parseInt(w,16));
+
+/* ===================================================================== */
+/*  Shared helpers                                                       */
+/* ===================================================================== */
+const prefersReduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
+function cssv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function fitCanvas(cv,h){
+  const dpr=Math.min(2,devicePixelRatio||1),w=cv.clientWidth;
+  const bw=Math.round(w*dpr),bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){cv.width=bw;cv.height=bh;cv.style.height=h+'px';}
+  const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
+  return{ctx,w,h};
+}
+function registerLoop(el,step){
+  if(prefersReduce){step(0);return;}
+  const o={vis:true};
+  const pump=()=>{if(o._on)return;o._on=true;const tick=t=>{if(!o.vis){o._on=false;return;}step(t);requestAnimationFrame(tick);};requestAnimationFrame(tick);};
+  new IntersectionObserver(es=>{o.vis=es[0].isIntersecting;if(o.vis)pump();},{threshold:.05}).observe(el);
+  pump();
+}
+// Phosphor-cyan waterfall ramp: dark ground → teal → cyan → white-hot.
+const CM=[[0,[6,10,16]],[0.15,[10,40,64]],[0.34,[16,86,120]],[0.55,[30,150,180]],[0.74,[90,210,225]],[0.9,[190,240,245]],[1,[240,252,255]]];
+function colormap(t){t=Math.max(0,Math.min(1,t));for(let i=1;i<CM.length;i++){if(t<=CM[i][0]){const a=CM[i-1],b=CM[i],f=(t-a[0])/(b[0]-a[0]);return[a[1][0]+(b[1][0]-a[1][0])*f,a[1][1]+(b[1][1]-a[1][1])*f,a[1][2]+(b[1][2]-a[1][2])*f];}}return CM[CM.length-1][1];}
+
+/* ===================================================================== */
+/*  Scene 0 — hero session waterfall (scrolling 2D)                      */
+/* ===================================================================== */
+const F_LO=300, F_HI=2700, NF=256;
+const hz2col=hz=>Math.round((hz-F_LO)/(F_HI-F_LO)*(NF-1));
+// Build a tall energy grid for one full session, then scroll a window over it.
+function buildSession(){
+  const rows=[];                       // each row: Float32Array(NF)
+  const rnd=(()=>{let x=0x2545;return()=>{x=(x*1103515245+12345)&0x7fffffff;return x/0x7fffffff;};})();
+  const blank=()=>new Float32Array(NF);
+  const put=(r,col,v,w)=>{for(let d=-w;d<=w;d++){const c=col+d;if(c<0||c>=NF)continue;const e=v*Math.exp(-(d*d)/(w*0.7+0.3));if(e>r[c])r[c]=e;}};
+  const gap=n=>{for(let i=0;i<n;i++)rows.push(blank());};
+  // PACTOR-1 dual-rate FSK connect: alternating 1400/1600 Hz
+  const c1400=hz2col(1400),c1600=hz2col(1600);
+  for(let i=0;i<26;i++){const r=blank();put(r,(i%2?c1400:c1600),0.9,2);put(r,hz2col(1500),0.15,1);rows.push(r);}
+  gap(3);
+  // The ±800 burst opens the link and appears once; no cycle carries one.
+  for(let i=0;i<3;i++){const r=blank();for(let c=0;c<NCHAN;c++)put(r,hz2col(chanHz(c)),0.32+0.18*rnd(),1);rows.push(r);}
+  gap(2);
+  // then several ARQ cycles, speed climbing 2 -> 5
+  const climb=[2,2,3,3,4,4,5,5];
+  for(const sl of climb){
+    // data packet: the SL's active tones, 5&12 brightest
+    const chs=SLS[sl].channels;
+    for(let i=0;i<16;i++){const r=blank();for(const c of chs){const hi=(c===5||c===12);put(r,hz2col(chanHz(c)),hi?0.95:0.6+0.15*rnd(),hi?2:1);}rows.push(r);}
+    gap(2);
+    // control-signal return: DBPSK on 5 & 12 only
+    for(let i=0;i<5;i++){const r=blank();put(r,hz2col(chanHz(5)),0.85,2);put(r,hz2col(chanHz(12)),0.85,2);rows.push(r);}
+    gap(4);
+  }
+  gap(6);
+  return rows;
+}
+const SESSION=buildSession();
+(function(){const L=document.getElementById('wfLegend');
+  const items=[["PACTOR-1 FSK connect","#33c6e6"],["acquisition preamble","#8a7be8"],["data packet (18 tones)","#82e2f6"],["header / control · ch 5+12","#f0b23a"]];
+  L.innerHTML=items.map(([t,c])=>`<span><i style="background:${c}"></i>${t}</span>`).join('');
+})();
+// Pre-render the whole session to an offscreen strip once; scroll by blitting.
+let wfStrip=null;
+function renderStrip(){
+  const off=document.createElement('canvas');off.width=NF;off.height=SESSION.length;
+  const ctx=off.getContext('2d');const img=ctx.createImageData(NF,SESSION.length);
+  for(let y=0;y<SESSION.length;y++){const row=SESSION[y];for(let x=0;x<NF;x++){
+    const [r,g,b]=colormap(Math.pow(row[x],0.85));const i=(y*NF+x)*4;
+    img.data[i]=r;img.data[i+1]=g;img.data[i+2]=b;img.data[i+3]=255;}}
+  ctx.putImageData(img,0,0);wfStrip=off;
+}
+renderStrip();
+const wfCanvas=document.getElementById('wf');
+let wfPaused=false, wfOff=0, wfLast=0;
+function drawWaterfall(t){
+  const dpr=Math.min(2,devicePixelRatio||1);
+  const w=wfCanvas.clientWidth,h=wfCanvas.clientHeight;
+  if(wfCanvas.width!==w*dpr||wfCanvas.height!==h*dpr){wfCanvas.width=w*dpr;wfCanvas.height=h*dpr;}
+  const ctx=wfCanvas.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.imageSmoothingEnabled=true;
+  if(!wfPaused){const dt=(t-wfLast)||16;wfOff=(wfOff+dt*0.020)%SESSION.length;}wfLast=t;
+  const rowsVis=Math.min(SESSION.length, Math.round(h/2.4));   // vertical scale
+  const rh=h/rowsVis;
+  ctx.fillStyle="#05070d";ctx.fillRect(0,0,w,h);
+  // blit one strip-row per visible row, wrapping the source for a seamless loop
+  for(let y=0;y<rowsVis;y++){
+    const sy=(((Math.floor(wfOff)+y)%SESSION.length)+SESSION.length)%SESSION.length;
+    ctx.drawImage(wfStrip,0,sy,NF,1,0,y*rh,w,rh+0.6);
+  }
+  // header-carrier guide rails at 1080 / 1920 Hz
+  ctx.fillStyle="rgba(240,178,58,0.12)";
+  for(const hz of [1080,1920]){const x=hz2col(hz)/(NF-1)*w;ctx.fillRect(x-1,0,2,h);}
+}
+registerLoop(document.getElementById('wfStage'),drawWaterfall);
+document.getElementById('wfPlay').onclick=function(){wfPaused=!wfPaused;this.textContent=wfPaused?'▶':'❚❚';};
+
+/* ===================================================================== */
+/*  Scene 1 — speed-level tone map                                       */
+/* ===================================================================== */
+const toneCanvas=document.getElementById('toneCanvas');
+let curSL=2, tonePh=0;
+function drawTones(){
+  const {ctx,w,h}=fitCanvas(toneCanvas,260);
+  const sl=SLS[curSL], active=new Set(sl.channels);
+  const padL=32,padR=32,padB=42,padT=22;
+  const gw=w-padL-padR, gh=h-padB-padT;
+  const fx=hz=>padL+gw*hz/3000;
+  ctx.font="10px "+cssv('--mono');ctx.textAlign="center";
+  ctx.strokeStyle=cssv('--line-2');ctx.fillStyle=cssv('--ink-faint');ctx.lineWidth=1;
+  for(let f=0;f<=3000;f+=500){const x=fx(f);ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,h-padB);ctx.stroke();ctx.fillText(String(f),x,h-8);}
+  const baseY=h-padB;
+  for(let c=0;c<NCHAN;c++){
+    const x=fx(chanHz(c)), on=active.has(c), vh=(c===5||c===12);
+    if(!on){ctx.strokeStyle=cssv('--line');ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,baseY);ctx.lineTo(x,baseY-8);ctx.stroke();
+      if(vh){ctx.fillStyle=cssv('--gold');ctx.fillText("ch "+c,x,baseY+16);}continue;}
+    const amp=0.85;
+    const barH=(gh-24)*amp;
+    ctx.fillStyle=vh?cssv('--gold'):cssv('--sig');ctx.globalAlpha=vh?0.9:0.75;
+    ctx.fillRect(x-3,baseY-barH,6,barH);ctx.globalAlpha=1;
+    // differential phasor head: 2 states (DBPSK) or 4 (DQPSK)
+    const cy=baseY-barH-12, R=8;
+    ctx.strokeStyle=cssv('--line');ctx.beginPath();ctx.arc(x,cy,R,0,7);ctx.stroke();
+    const states=sl.bits_per_symbol===1?2:4;
+    const st=Math.floor(tonePh*0.03+c)%states;
+    const ang=st*(2*Math.PI/states);
+    ctx.strokeStyle=vh?cssv('--gold-hi'):cssv('--sig-hi');ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(x,cy);ctx.lineTo(x+Math.cos(ang)*R,cy-Math.sin(ang)*R);ctx.stroke();ctx.lineWidth=1;
+    if(vh){ctx.strokeStyle=cssv('--gold-hi');ctx.beginPath();ctx.arc(x,cy,R+4,0,7);ctx.stroke();}
+    ctx.fillStyle=vh?cssv('--gold-hi'):cssv('--ink-dim');ctx.fillText(c,x,baseY+16);
+  }
+  ctx.textAlign="left";ctx.fillStyle=cssv('--ink-faint');ctx.fillText("Audio frequency (Hz) · carrier positions",padL,padT-6);
+}
+function updateSL(){
+  const sl=SLS[curSL];
+  document.getElementById('slReadout').innerHTML=[
+    ["tones",sl.channels.length],
+    ["modulation",sl.bits_per_symbol===1?"DBPSK":"DQPSK"],
+    ["conv code","K="+sl.k+" · "+sl.rate],
+    ["raw rate",sl.pdr+" bit/s"],
+    ["net rate",sl.ndr+" bit/s"],
+    ["crest factor",sl.crest_db+" dB"],
+  ].map(([k,v])=>`<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+  drawTones();
+}
+document.getElementById('slSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
+  [...e.currentTarget.children].forEach(c=>c.classList.remove('on'));b.classList.add('on');curSL=+b.dataset.sl;updateSL();});
+updateSL();
+registerLoop(toneCanvas,()=>{tonePh++;drawTones();});
+
+/* ===================================================================== */
+/*  Scene 2 — PACTOR-1 connect encoder (exact, from pactor1.py)          */
+/* ===================================================================== */
+function connectFrame(call){
+  call=(call||"").toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,8);
+  const T=[0x55];for(const ch of call)T.push(ch.charCodeAt(0)&0xFF);
+  while(T.length<9)T.push(0x0F);
+  const raw=T.slice();
+  const red=T.slice(1,7);
+  return {call,T,raw,red};
+}
+function hex(a){return a.map(b=>b.toString(16).padStart(2,'0')).join(' ');}
+const fskCanvas=document.getElementById('fskCanvas');
+let curCall="DL6MAA", frame=connectFrame(curCall), fskReveal=0;
+function bitsOf(bytes){const o=[];for(const b of bytes)for(let i=0;i<8;i++)o.push((b>>i)&1);return o;} // LSB-first
+function drawFsk(){
+  const {ctx,w,h}=fitCanvas(fskCanvas,150);
+  const addrBits=bitsOf(frame.raw), redBits=bitsOf(frame.red);
+  const total=addrBits.length+redBits.length;
+  const padL=6,padR=6,padT=22,padB=20;
+  const gw=w-padL-padR, gh=h-padT-padB;
+  const yMark=padT+gh*0.25, ySpace=padT+gh*0.75;
+  // address section is 2x wider per bit than the 200-Bd redundancy section
+  const unit=gw/(addrBits.length*2 + redBits.length*1);
+  ctx.font="10px "+cssv('--mono');
+  ctx.fillStyle=cssv('--ink-faint');ctx.textAlign="left";
+  ctx.fillText("1400 Hz",padL,yMark-6);ctx.fillText("1600 Hz",padL,ySpace+14);
+  const nRev=prefersReduce?total:Math.min(total,Math.floor(fskReveal));
+  let x=padL;
+  ctx.lineWidth=2;ctx.strokeStyle=cssv('--sig');ctx.beginPath();let started=false;
+  const step=(bit,wU,i)=>{
+    const y=bit?yMark:ySpace, x2=x+wU*unit;
+    if(i>=nRev){x=x2;return;}
+    if(!started){ctx.moveTo(x,y);started=true;}else ctx.lineTo(x,y);
+    ctx.lineTo(x2,y);x=x2;
+  };
+  addrBits.forEach((b,i)=>step(b,2,i));
+  const splitX=x;
+  redBits.forEach((b,i)=>step(b,1,addrBits.length+i));
+  ctx.stroke();ctx.lineWidth=1;
+  // section divider + labels
+  ctx.strokeStyle=cssv('--line');ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(splitX,padT-4);ctx.lineTo(splitX,h-6);ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle=cssv('--ink-dim');ctx.textAlign="center";
+  ctx.fillText("address · 100 Bd",(padL+splitX)/2,h-6);
+  ctx.fillText("redundancy · 200 Bd",(splitX+w-padR)/2,h-6);
+}
+function updateConnect(){
+  frame=connectFrame(curCall);fskReveal=0;
+  document.getElementById('fskReadout').innerHTML=[
+    ["callsign",frame.call||"—"],
+    ["T image","55 "+hex(frame.T.slice(1))],
+    ["address raw (9)",hex(frame.raw)],
+    ["redundancy raw (6)",hex(frame.red)],
+  ].map(([k,v])=>`<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+  document.getElementById('fskBins').innerHTML=
+    "<span class='faint'>on-air bytes</span> <b>"+hex(frame.raw)+"</b> <span class='faint'>|</span> "+hex(frame.red);
+  document.getElementById('fskKat').innerHTML="Address: "+(frame.call||"—")+" · 0.960 s";
+  drawFsk();
+}
+document.getElementById('callIn').addEventListener('input',e=>{curCall=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'');e.target.value=curCall;updateConnect();});
+updateConnect();
+registerLoop(fskCanvas,()=>{if(fskReveal<200)fskReveal+=0.8;drawFsk();});
+
+/* ===================================================================== */
+/*  Scene 3 — packet anatomy bar                                         */
+/* ===================================================================== */
+(function(){
+  const P=FIG.packet;
+  const segs=[
+    ["phase reference","1 symbol","--gold",1],
+    ["header block",`${P.header_symbols} symbols`,"--gold",P.header_symbols],
+    ["data field",`${P.rows_short} rows · payload + status + CRC-16/X25`,"--sig",P.rows_short],
+  ];
+  const bar=document.getElementById('pktBar');
+  segs.forEach(([t,s,c,fl])=>{const d=document.createElement('div');d.className='seg';
+    d.style.flex=fl;d.style.borderColor=`color-mix(in srgb, var(${c}) 55%, var(--line))`;
+    d.innerHTML=`<span class="t" style="color:var(${c})">${t}</span><span class="s">${s}</span>`;bar.appendChild(d);});
+})();
+
+/* Scene 3 — coding chain flow */
+const CODE_STAGES=[
+  ["payload","info bytes"],["CRC-16/X25","append 2 B"],["whiten","word^=crc_tbl"],
+  ["conv K=7",`(${FIG.coding.tx_generators.join(',')})`],["puncture","rate 1/2→8/9"],
+  ["interleave","per-path stride"],["place","tone × symbol"],
+];
+(function(){const f=document.getElementById('codeFlow');
+  CODE_STAGES.forEach((s,i)=>{const d=document.createElement('div');d.className='stg';
+    d.innerHTML=`<span class="t">${s[0]}</span><span class="s">${s[1]}</span>`;f.appendChild(d);
+    if(i<CODE_STAGES.length-1){const a=document.createElement('span');a.className='arr';a.textContent='→';f.appendChild(a);}});
+  let hot=0,acc=0;
+  registerLoop(f,()=>{acc++;if(acc<48)return;acc=0;const st=f.querySelectorAll('.stg');
+    st.forEach(s=>s.classList.remove('hot'));st[hot].classList.add('hot');hot=(hot+1)%st.length;});
+})();
+
+/* Scene 3 — the phase-reference symbol's per-channel start angle */
+const refCanvas=document.getElementById('refCanvas');
+const N_CH=FIG.phase.start_deg.length;
+const refPts=FIG.phase.start_deg.map(d=>{const ph=d*Math.PI/180;return[Math.cos(ph),Math.sin(ph)];});
+let refPh=0;
+function drawRef(){
+  const {ctx,w,h}=fitCanvas(refCanvas,240);
+  const cx=w/2,cy=h/2,R=Math.min(w,h)*0.36;
+  ctx.strokeStyle=cssv('--line-2');ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(cx-R*1.25,cy);ctx.lineTo(cx+R*1.25,cy);ctx.moveTo(cx,cy-R*1.25);ctx.lineTo(cx,cy+R*1.25);ctx.stroke();
+  ctx.beginPath();ctx.arc(cx,cy,R,0,7);ctx.stroke();
+  const lead=Math.floor(refPh*0.05)%N_CH;
+  // connect the sequence order to show the quadratic phase ramp
+  ctx.strokeStyle=cssv('--sig');ctx.globalAlpha=0.4;ctx.beginPath();
+  refPts.forEach(([re,im],k)=>{const x=cx+re*R,y=cy-im*R;k?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();ctx.globalAlpha=1;
+  refPts.forEach(([re,im],k)=>{const x=cx+re*R,y=cy-im*R;const on=k===lead;
+    ctx.fillStyle=on?cssv('--gold-hi'):cssv('--sig');ctx.globalAlpha=on?1:0.8;
+    ctx.beginPath();ctx.arc(x,y,on?5:3,0,7);ctx.fill();});
+  ctx.globalAlpha=1;ctx.fillStyle=cssv('--ink-dim');ctx.font="11px "+cssv('--mono');ctx.textAlign="center";
+  ctx.fillText(N_CH+" channels, one start angle each",cx,h-8);
+}
+registerLoop(refCanvas,()=>{refPh++;drawRef();});
+
+/* Scene 3 — control-signal perfect code */
+(function(){
+  const bitsEl=document.getElementById('csBits');
+  CONTROL_SIGNALS.forEach((cs,i)=>{
+    const row=document.createElement('div');row.className='csrow';
+    let word='';for(let b=19;b>=0;b--)word+=`<span class="b ${(cs>>b)&1?'one':''}"></span>`;
+    row.innerHTML=`<span class="lab">CS${i+1}</span><span class="word">${word}</span>`;bitsEl.appendChild(row);
+  });
+  const pop=x=>{let n=0;while(x){n+=x&1;x>>=1;}return n;};
+  const mat=document.getElementById('csMat');
+  let html='<tr><th></th>'+CONTROL_SIGNALS.map((_,j)=>`<th>${j+1}</th>`).join('')+'</tr>';
+  CONTROL_SIGNALS.forEach((a,i)=>{
+    html+=`<tr><th>${i+1}</th>`;
+    CONTROL_SIGNALS.forEach((b,j)=>{
+      if(i===j)html+='<td class="diag">·</td>';
+      else html+=`<td class="d">${pop(a^b)}</td>`;
+    });
+    html+='</tr>';
+  });
+  mat.innerHTML=html;
+})();
+
+/* ===================================================================== */
+/*  Scene 4 — ARQ ladder                                                 */
+/* ===================================================================== */
+const STATES=["DISCONNECTED","CONNECTING","CONNECTED","SPEED-ADAPT","DISCONNECTING"];
+(function(){const r=document.getElementById('stateRow');
+  STATES.forEach((s,i)=>{const d=document.createElement('span');d.className='st';d.dataset.i=i;d.textContent=s;r.appendChild(d);
+    if(i<STATES.length-1){const a=document.createElement('span');a.className='a';a.textContent='→';r.appendChild(a);}});
+})();
+const LADDER=[
+  {from:"A",label:"PACTOR-1 connect (DL6MAA)",st:1,c:"--sig"},
+  {from:"B",label:"CS1 · acknowledge",st:2,c:"--good"},
+  {from:"A",label:"DATA packet · SL2",st:2,c:"--sig-hi"},
+  {from:"B",label:"CS1 · ACK",st:2,c:"--good"},
+  {from:"A",label:"DATA packet · SL2",st:2,c:"--sig-hi"},
+  {from:"B",label:"CS4 · ACK + speed up",st:3,c:"--gold"},
+  {from:"A",label:"DATA packet · SL3",st:3,c:"--sig-hi"},
+  {from:"B",label:"CS5 · NAK + speed down",st:3,c:"--magenta"},
+  {from:"A",label:"DATA packet · SL2 (retry)",st:3,c:"--sig-hi"},
+  {from:"B",label:"CS1 · ACK",st:2,c:"--good"},
+  {from:"A",label:"QRT · disconnect",st:4,c:"--ink-dim"},
+];
+const ladderCanvas=document.getElementById('ladderCanvas');let ladProg=0;
+function drawLadder(){
+  const {ctx,w,h}=fitCanvas(ladderCanvas,380);
+  const laneA=w*0.17,laneB=w*0.83,padT=26;const rowH=(h-padT-14)/LADDER.length;
+  ctx.font="11px "+cssv('--mono');ctx.textAlign="center";
+  ctx.fillStyle=cssv('--sig-hi');ctx.fillText("initiator  A",laneA,16);
+  ctx.fillStyle=cssv('--gold-hi');ctx.fillText("responder  B",laneB,16);
+  ctx.strokeStyle=cssv('--line-2');ctx.lineWidth=1;
+  [laneA,laneB].forEach(x=>{ctx.beginPath();ctx.moveTo(x,padT-6);ctx.lineTo(x,h-8);ctx.stroke();});
+  const shown=prefersReduce?LADDER.length:Math.min(LADDER.length,Math.floor(ladProg));
+  let curState=0;
+  for(let i=0;i<shown;i++){const e=LADDER[i];const y=padT+i*rowH+rowH/2;
+    const x0=e.from==="A"?laneA:laneB, x1=e.from==="A"?laneB:laneA;
+    ctx.strokeStyle=cssv(e.from==='A'?'--signal':'--secondary');ctx.lineWidth=2;ctx.globalAlpha=(i===shown-1&&shown<LADDER.length)?0.6:1;
+    ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x1,y);ctx.stroke();
+    const dir=x1>x0?1:-1;ctx.beginPath();ctx.moveTo(x1,y);ctx.lineTo(x1-dir*8,y-4);ctx.lineTo(x1-dir*8,y+4);ctx.closePath();ctx.fillStyle=cssv(e.from==='A'?'--signal':'--secondary');ctx.fill();
+    ctx.globalAlpha=1;ctx.fillStyle=cssv('--ink-dim');ctx.font="10px "+cssv('--mono');
+    ctx.fillText(e.label,(x0+x1)/2,y-6);
+    curState=e.st;
+  }
+  document.querySelectorAll('#stateRow .st').forEach(el=>el.classList.toggle('on',+el.dataset.i===curState));
+}
+registerLoop(ladderCanvas,()=>{ladProg+=0.028;if(ladProg>LADDER.length+9)ladProg=0;drawLadder();});
+
+/* ===================================================================== */
+/*  Numbers — every value cell reaches back into the generated block      */
+/* ===================================================================== */
+(function(){
+  const at=path=>path.split('.').reduce((o,k)=>o[k],FIG);
+  const show=v=>Array.isArray(v)?`(${v.join(', ')})`:String(v);
+  document.querySelectorAll('[data-fig]').forEach(el=>{el.textContent=show(at(el.dataset.fig));});
+  document.getElementById('strideList').textContent=
+    FIG.levels.map(l=>`SL${l.sl} ${l.stride}`).join(' · ');
+  document.getElementById('dibitMap').textContent=
+    FIG.phase.dibit_deg.map((d,i)=>`${i}→${d}°`).join(' · ');
+})();
+
+(function(){
+  const t=document.querySelector('#slTable tbody');
+  let html='<tr><th>SL</th><th>Tones</th><th>Mod</th><th>Code</th><th>Raw b/s</th><th>Net b/s</th><th>CF dB</th><th>Payload B</th></tr>';
+  for(let s=1;s<=6;s++){const sl=SLS[s];
+    html+=`<tr><td class="num val">${s}</td><td class="num">${sl.channels.length}</td><td class="mono">${sl.bits_per_symbol===1?'DBPSK':'DQPSK'}</td>`+
+          `<td class="mono">K=${sl.k} · ${sl.rate}</td><td class="num">${sl.pdr}</td><td class="num">${sl.ndr}</td>`+
+          `<td class="num">${sl.crest_db}</td><td class="num">${sl.payload_short}</td></tr>`;
+  }
+  t.innerHTML=html;
+})();
+
+/* ===================================================================== */
+/*  Theme toggle + rail scroll-spy                                       */
+/* ===================================================================== */
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>location.reload());
+const railLinks=[...document.querySelectorAll('.rail a')];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
+  railLinks.forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+e.target.id));}});},{rootMargin:"-40% 0px -55% 0px"});
+["air","tones","connect","packet","arq","numbers"].forEach(id=>{const s=document.getElementById(id);if(s)io.observe(s);});
+</script>
+
+
+<script>document.querySelectorAll('.page-contents a').forEach(a=>a.addEventListener('click',()=>{a.closest('details').open=false;}));</script>
+
+</html>

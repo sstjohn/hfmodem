@@ -1,0 +1,995 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VARA · hfmodem</title>
+
+<style>
+/* ============================================================= TOKENS === */
+:root{
+  --sans: system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono: ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
+
+  /* cool blue-black instrument ground with a radio-dial amber signal accent */
+  --bg:      #20221f;
+  --bg-2:    #292c27;
+  --bg-3:    #252822;
+  --panel:   #292c27;
+  --ink:     #f0f0e7;
+  --ink-dim: #b3b6aa;
+  --ink-faint:#a3a89a;
+  --line:    #4e5348;
+  --line-2:  #3c4137;
+
+  --amber:   #f2a63b;   /* hero accent */
+  --amber-hi:#ffc879;
+  --cyan:    #52cfe8;
+  --violet:  #8a7be8;
+  --magenta: #e8608f;
+
+  --good:    #c3b589;
+  --mid:     #ecb84b;
+  --pend:    #ec6a8c;
+
+  --maxw: 1160px;
+  --measure: 44rem;
+  --r: 0px;
+  --shadow:none;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f5f4ef; --bg-2:#f5f4ef; --bg-3:#eeede7; --panel:#f5f4ef;
+    --ink:#242522; --ink-dim:#62635d; --ink-faint:#62635d;
+    --line:#cdcec5; --line-2:#ddded5;
+    --amber:#b56d10; --amber-hi:#d98a1f; --cyan:#1785a3; --violet:#5b4bc4; --magenta:#c23a6d;
+    --good:#756035; --mid:#a4740c; --pend:#c73763;
+    --shadow:none;
+  }
+}
+
+
+
+*{box-sizing:border-box}
+html{scroll-padding-top:70px}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  line-height:1.62;font-size:17px;-webkit-font-smoothing:antialiased;overflow-x:hidden;}
+h1,h2,h3,h4{line-height:1.12;text-wrap:balance;font-weight:500;letter-spacing:-.02em;margin:0}
+p{margin:0 0 1em}
+a{color:var(--amber);text-decoration-color:var(--line)}
+code,.mono{font-family:var(--mono)}
+:focus-visible{outline:2px solid var(--amber);outline-offset:2px;border-radius:0}
+
+/* ============================================================= LAYOUT === */
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 clamp(18px,4vw,40px)}
+.prose{max-width:var(--measure)}
+.eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.24em;text-transform:uppercase;
+  color:var(--amber);font-weight:600}
+.dim{color:var(--ink-dim)}
+.faint{color:var(--ink-faint)}
+section{padding:clamp(56px,9vh,120px) 0;border-top:1px solid var(--line-2)}
+section:first-of-type{border-top:none}
+
+/* progress rail */
+
+
+/* top bar */
+.btn{font-family:var(--mono);font-size:.74rem;letter-spacing:.04em;color:var(--ink-dim);
+  background:var(--bg-2);border:1px solid var(--line);padding:6px 11px;border-radius:0;cursor:pointer;
+  transition:.18s}
+.btn:hover{border-color:var(--amber);color:var(--ink)}
+
+/* ============================================================== HERO ==== */
+.hero{position:relative;padding-top:clamp(30px,6vh,70px)}
+.hero h1{font-size:clamp(2.5rem,6.4vw,5rem);letter-spacing:-.035em;margin:.12em 0 .28em}
+.hero h1 .g{font-family:Georgia,serif;font-style:italic;font-weight:400;color:var(--ink)}
+.hero .lede{font-size:clamp(1.05rem,2vw,1.35rem);color:var(--ink-dim);max-width:40rem}
+.hero .kicker{display:inline-flex;gap:10px;align-items:center;font-family:var(--mono);
+  font-size:.74rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim);
+  border:1px solid var(--line);border-radius:0;padding:6px 14px}
+.hero .kicker b{color:var(--good)}
+.metastrip{display:flex;flex-wrap:wrap;gap:10px 26px;margin-top:26px;font-family:var(--mono);
+  font-size:.8rem;color:var(--ink-dim)}
+.metastrip b{color:var(--ink);font-weight:600}
+
+/* waterfall stage */
+.stage{position:relative;margin-top:38px;border:1px solid var(--line);border-radius:0;
+  overflow:hidden;background:linear-gradient(180deg,#05070c,#0a0f18);box-shadow:var(--shadow)}
+:root[data-theme="light"] .stage{background:linear-gradient(180deg,#0a0f18,#0d1420)}
+.stage canvas{display:block;width:100%;height:clamp(340px,52vh,560px);touch-action:none}
+.stage .ovl{position:absolute;inset:0;pointer-events:none}
+.stage .badge{position:absolute;top:14px;left:16px;font-family:var(--mono);font-size:.7rem;
+  letter-spacing:.12em;text-transform:uppercase;color:#cfe0f0;
+  background:rgba(6,10,18,.5);border:1px solid rgba(150,175,205,.2);border-radius:0;padding:5px 9px}
+.stage .axis-f{position:absolute;left:16px;bottom:12px;font-family:var(--mono);font-size:.68rem;color:#9fb4cc}
+.stage .axis-t{position:absolute;right:16px;bottom:12px;font-family:var(--mono);font-size:.68rem;color:#9fb4cc}
+.stage .ctl{position:absolute;top:12px;right:12px;display:flex;gap:6px;pointer-events:auto}
+.stage .ctl .btn{background:rgba(6,10,18,.55);color:#cfe0f0;border-color:rgba(150,175,205,.22)}
+.stage .ctl .btn:hover{border-color:var(--amber);color:#fff}
+.wf-legend{display:flex;flex-wrap:wrap;gap:8px 14px;margin-top:16px;font-family:var(--mono);font-size:.72rem}
+.wf-legend span{display:inline-flex;align-items:center;gap:7px;color:var(--ink-dim)}
+.wf-legend i{width:11px;height:11px;border-radius:0;display:inline-block}
+
+
+.sechead{display:flex;flex-direction:column;gap:12px;margin-bottom:34px}
+.sechead h2{font-size:clamp(1.7rem,3.6vw,2.7rem)}
+.sechead .n{font-family:var(--mono);color:var(--amber);font-size:.8rem;letter-spacing:.2em}
+.sechead p{color:var(--ink-dim);max-width:var(--measure)}
+
+/* generic card */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:20px}
+.grid{display:grid;gap:18px}.grid>*{min-width:0}
+@media(min-width:820px){.cols2{grid-template-columns:1fr 1fr}.cols5-7{grid-template-columns:5fr 7fr}.cols7-5{grid-template-columns:7fr 5fr}}
+
+/* pipeline flow */
+.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;font-family:var(--mono);font-size:.74rem}
+.flow .stg{background:var(--bg-2);border:1px solid var(--line);border-radius:0;padding:8px 11px;
+  display:flex;flex-direction:column;gap:3px;min-width:0;transition:.2s}
+.flow .stg .t{color:var(--ink);font-weight:600}
+.flow .stg .s{color:var(--ink-faint);font-size:.68rem}
+.flow .stg.hot{border-color:var(--amber);box-shadow:none}
+.flow .arr{align-self:center;color:var(--ink-faint)}
+
+/* interactive handshake */
+.hs-controls{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:8px}
+.hs-controls label{font-family:var(--mono);font-size:.72rem;color:var(--ink-dim);letter-spacing:.06em;text-transform:uppercase}
+input.call{font-family:var(--mono);font-size:1rem;letter-spacing:.12em;text-transform:uppercase;
+  background:var(--bg-2);border:1px solid var(--line);color:var(--ink);border-radius:0;padding:9px 12px;width:9.5em}
+input.call:focus{border-color:var(--amber);outline:none}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:0;overflow:hidden}
+.seg button{font-family:var(--mono);font-size:.72rem;background:var(--bg-2);color:var(--ink-dim);
+  border:none;padding:8px 12px;cursor:pointer;border-right:1px solid var(--line)}
+.seg button:last-child{border-right:none}
+.seg button.on{background:var(--amber);color:#20221f;font-weight:700}
+:root[data-theme="light"] .seg button.on{color:#fff}
+.readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:1px;
+  background:var(--line);border:1px solid var(--line);border-radius:0;overflow:hidden;margin-top:6px}
+.readout div{background:var(--panel);padding:10px 12px}
+.readout .k{font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint)}
+.readout .v{font-family:var(--mono);font-size:1rem;color:var(--amber-hi);font-weight:600;overflow-wrap:anywhere}
+.kat{font-family:var(--mono);font-size:.72rem;margin-top:10px;display:inline-flex;align-items:center;gap:8px}
+.kat.ok{color:var(--good)} .kat.no{color:var(--pend)}
+.binline{font-family:var(--mono);font-size:.72rem;color:var(--ink-dim);word-spacing:.1em;line-height:1.8;
+  overflow-x:auto;white-space:nowrap;padding-bottom:4px}
+.binline b{color:var(--amber-hi)}
+
+canvas.c2d{display:block;width:100%;border-radius:0;background:var(--bg-3);border:1px solid var(--line)}
+
+/* tables */
+.tbl-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r)}
+table{border-collapse:collapse;width:100%;font-size:.86rem;min-width:520px}
+th,td{text-align:left;padding:9px 13px;border-bottom:1px solid var(--line-2);vertical-align:top}
+th{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-faint);
+  font-weight:600;background:var(--bg-2)}
+td.mono,td .m{font-family:var(--mono)}
+td.num{font-variant-numeric:tabular-nums;font-family:var(--mono)}
+tr:last-child td{border-bottom:none}
+.val{color:var(--amber-hi);font-family:var(--mono)}
+
+details.spec{border:1px solid var(--line);border-radius:var(--r);margin-bottom:14px;background:var(--panel);overflow:hidden}
+details.spec>summary{cursor:pointer;padding:15px 18px;font-weight:650;list-style:none;display:flex;
+  align-items:center;gap:12px;font-size:1.02rem}
+details.spec>summary::-webkit-details-marker{display:none}
+details.spec>summary .mk{font-family:var(--mono);color:var(--amber);transition:.2s;font-size:.9rem}
+details.spec[open]>summary .mk{transform:rotate(90deg)}
+details.spec>summary .sub{font-family:var(--mono);font-size:.68rem;color:var(--ink-faint);font-weight:400;margin-left:auto}
+.spec-body{padding:0 18px 18px}
+
+.callout{border-left:3px solid var(--pend);background:color-mix(in srgb,var(--pend) 9%,var(--panel));
+  border-radius:0 var(--r) var(--r) 0;padding:16px 18px}
+.callout.info{border-left-color:var(--cyan);background:color-mix(in srgb,var(--cyan) 8%,var(--panel))}
+.callout h4{font-size:1rem;margin-bottom:6px;display:flex;gap:10px;align-items:center}
+.callout p{margin:0;color:var(--ink-dim);font-size:.92rem}
+
+/* stat tiles */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:15px 16px}
+.tile .big{font-family:var(--mono);font-size:1.7rem;font-weight:700;color:var(--amber-hi);
+  font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.tile .lab{font-family:var(--mono);font-size:.64rem;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-faint);margin-top:2px}
+
+/* ARQ ladder + state diagram */
+.states{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-family:var(--mono);font-size:.74rem}
+.states .st{border:1px solid var(--line);border-radius:0;padding:9px 13px;background:var(--bg-2);transition:.25s}
+.states .st.on{border-color:var(--amber);color:var(--amber-hi);box-shadow:none}
+.states .a{color:var(--ink-faint)}
+
+footer{padding:60px 0 90px;border-top:1px solid var(--line-2);color:var(--ink-faint);font-size:.85rem}
+footer .wrap{display:flex;flex-direction:column;gap:14px}
+
+.hl-amber{color:var(--amber-hi)} .hl-cyan{color:var(--cyan)} .hl-mag{color:var(--magenta)}
+sup.q{color:var(--pend);font-family:var(--mono);font-size:.7em;cursor:help}
+
+@media (prefers-reduced-motion: reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important}}
+
+/* Reading controls stay visible without colour or animation. */
+.btn{min-height:44px}a{text-underline-offset:.2em}.hero .kicker{border:0;border-bottom:1px solid var(--line);padding:6px 0}.topbar .brand{text-decoration:none;color:var(--ink)}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+/* Inline so each explainer also works as a standalone file. */
+.site-header{position:sticky;top:0;z-index:60;background:var(--bg);color:var(--ink);border-bottom:1px solid var(--line)}
+.site-header-inner{width:min(1100px,calc(100% - 36px));margin:auto;padding:10px 0}
+.site-heading{display:flex;align-items:center;gap:16px;font:12px/1.5 var(--mono)}
+.site-home{font-weight:700;text-decoration:underline;text-underline-offset:4px;color:var(--ink)}
+.site-title{margin-right:auto;color:var(--ink)}
+.site-theme{font:12px var(--mono);min-height:44px;padding:8px 12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);cursor:pointer}
+.site-nav{display:flex;flex-wrap:wrap;gap:2px 20px;padding-top:6px;font:12px/1.5 var(--mono)}
+.site-nav a{display:inline-flex;align-items:center;min-height:38px;color:var(--ink);text-decoration:none;border-bottom:2px solid transparent}
+.site-nav a[aria-current=page]{border-bottom-color:currentColor;font-weight:bold}
+.page-contents{margin:0;padding:0;border:0;font:12px/1.5 var(--mono)}
+.page-contents summary{margin:0;min-height:38px;padding:10px 0;cursor:pointer;font:inherit}
+.page-contents .rail{position:static;transform:none;display:flex;flex-wrap:wrap;gap:4px 20px;padding:0 0 10px}
+.page-contents .rail a{display:inline-flex;min-height:38px;align-items:center;color:var(--ink);font:12px/1.5 var(--mono);text-decoration:underline;text-underline-offset:4px}
+html{scroll-padding-top:170px}
+@media(max-width:600px){.site-nav{gap:2px 16px}.site-heading{gap:12px}.site-title{font-size:11px}html{scroll-padding-top:200px}}
+@media print{.site-header{display:none}}
+</style>
+<link rel="stylesheet" href="guide.css">
+
+<header class="site-header"><div class="site-header-inner"><div class="site-heading"><a class="site-home" href="../README.md">Documentation</a><span class="site-title">hfmodem / VARA</span></div><nav class="site-nav" aria-label="Modes"><a href="flock-compared.html" data-route="compared">Comparison</a><a href="pactor-explained.html" data-route="pactor">PACTOR</a><a href="vara-explained.html" data-route="vara" aria-current="page">VARA</a><a href="ardop-explained.html" data-route="ardop">ARDOP</a><a href="sabir-explained.html" data-route="sabir">sabir</a></nav><details class="page-contents"><summary>On this page</summary><nav class="rail" aria-label="sections"><a href="#occupancy">Channel occupancy</a><a href="#handshake">Link entry</a><a href="#ofdm">Frame structure and coding</a><a href="#arq">ARQ and host interface</a><a href="#numbers">Rate selection and values</a><a href="#results">Observed results</a></nav></details></div></header>
+
+
+
+<!-- ================================================================ HERO -->
+<header class="hero wrap" id="air">
+  <span class="kicker">Functional specification &nbsp;·&nbsp; <b>waveform, coding, ARQ</b></span>
+  <h1>VARA</h1>
+  <p class="lede">The VARA mode in hfmodem uses kestrel for link entry, coded data and session control. MFSK bursts establish the link before payload transmission.</p>
+
+  <div class="metastrip">
+    <span><b>500 / 2300 / 2750&nbsp;Hz</b> bandwidths</span>
+    <span><b>MFSK</b> handshake &nbsp;→&nbsp; <b>OFDM</b> payload</span>
+    <span>turbo <b>(13,15)</b> FEC · <b>CRC-16/GENIBUS</b></span>
+    <span>host TCP <b>8300 / 8301</b></span>
+  </div>
+
+  <div class="stage" id="wfStage">
+    <canvas id="wf" aria-label="3D time-frequency waterfall of a full VARA session"></canvas>
+    <div class="ovl">
+      <div class="badge">Schematic exchange · frequency × time</div>
+      <div class="axis-f">frequency 0 – 2.4 kHz →</div>
+      <div class="axis-t">time ↘</div>
+    </div>
+    <div class="ctl">
+      <button class="btn" id="wfView">2D</button>
+      <button class="btn" id="wfPlay">❚❚</button>
+    </div>
+  </div>
+  <div class="wf-legend" id="wfLegend"></div>
+  <p class="dim" style="margin-top:14px;font-size:.9rem;max-width:var(--measure)">Schematic exchange: three MFSK handshake bursts, a wideband link-setup frame carrying the caller’s identity, and data bursts with acknowledgements. The callsigns are K7ABC and W2XYZ.</p>
+</header>
+
+<section id="occupancy"><div class="wrap"><div class="sechead"><h2>Channel occupancy</h2><p>Audio-frequency positions for BW500 subbands and BW2300 rec3 bins. The active bin changes with each emission column.</p></div><div class="card">
+      <div class="eyebrow" style="margin-bottom:10px">Carrier occupancy</div>
+      <canvas class="c2d" id="carrierCanvas" height="150"></canvas>
+      <div class="seg" id="carrierSeg" style="margin-top:12px">
+        <button data-b="500" class="on">BW500 · 2 subbands</button>
+        <button data-b="2300">BW2300 rec3 · one-hot bins</button>
+      </div>
+    </div></div></section>
+<!-- =========================================================== HANDSHAKE -->
+<section id="handshake"><div class="wrap">
+  <div class="sechead">
+    <span class="n">CONNECTION SETUP</span>
+    <h2>Link entry</h2>
+    <p>Connect-request, connect-response and connected-ack use one MFSK tone per symbol. Their tone patterns come from a Visual Basic 6 <code>Rnd()</code> sequence seeded by the called callsign. The bursts carry no FEC.</p>
+  </div>
+
+  <div class="grid cols7-5">
+    <div class="card">
+      <div class="hs-controls">
+        <label>Called callsign</label>
+        <input class="call" id="callIn" value="K7ABC" maxlength="10" spellcheck="false" autocomplete="off">
+        <span class="seg" id="burstSeg">
+          <button data-k="CR" class="on">connect-request</button>
+          <button data-k="RESP">response</button>
+          <button data-k="ACK">ack</button>
+        </span>
+      </div>
+      <canvas class="c2d" id="hsCanvas" height="300"></canvas>
+      <div class="binline" id="hsBins"></div>
+      <div class="kat" id="hsKat"></div>
+    </div>
+
+    <div class="grid" style="align-content:start;gap:14px">
+      <div class="card">
+        <div class="eyebrow" style="margin-bottom:10px">The generator, per symbol</div>
+        <div class="readout" id="hsReadout"></div>
+      </div>
+      <div class="card">
+        <div class="eyebrow" style="margin-bottom:10px">Closed form (exact integer)</div>
+<pre class="mono" style="margin:0;font-size:.72rem;line-height:1.65;color:var(--ink-dim);overflow-x:auto">crc  = CRC16/GENIBUS(callsign)
+seed = (crc + <span class="hl-amber">SEED_OFF</span>) &amp; 0x7FFF
+mult = G(callsign) + ((crc+50) &gt;&gt; 15)
+s = start(seed)
+repeat (mult + <span class="hl-amber">PREADV</span>): s = LCG(s)
+for k in 0..N-1:
+  s=LCG(s); P = ⌊ s/2²⁴ · 5 ⌋      <span class="faint"># 0..4</span>
+  s=LCG(s); D = ⌊ s/2²⁴ · 7 ⌋      <span class="faint"># 0..6</span>
+  bin[k] = (29 + (k even) + 14·P + 2·D) &amp; 0xFF
+<span class="hl-cyan">LCG(s)=(s·0x43FD43FD + 0xC39EC3) &amp; 0xFFFFFF</span></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid cols2" style="margin-top:18px">
+    <div class="callout info">
+      <h4>Callsign addressing</h4>
+      <p>The responder computes the expected tones from <code>MYCALL</code> and correlates them with received audio. The last three callsign characters enter the hash <code>G</code>; the CRC includes the full callsign.</p>
+    </div>
+    <div class="callout">
+      <h4>Caller identification</h4>
+      <p>All three MFSK bursts address the called station. A BW2300 rec3 link-setup frame carries the caller’s identity.</p>
+    </div>
+  </div>
+</div></section>
+
+<!-- =============================================================== OFDM -->
+<section id="ofdm"><div class="wrap">
+  <div class="sechead">
+    <span class="n">THE OFDM DATA PATH</span>
+    <h2>Frame structure and coding</h2>
+    <p>BW500 level 4 uses differential BPSK across two subbands. BW2300 rec3 encodes values as active-bin positions. Higher BW2300 records use denser constellations and longer symbols with a cyclic prefix.</p>
+  </div>
+
+  <div class="card">
+    <div class="flow" id="ofdmFlow"></div>
+    <p class="dim" style="font-size:.86rem;margin:16px 0 0">
+      <span class="hl-amber">43 payload bytes</span> + marker + 2-byte CRC →
+      368 bits → XOR whitener → turbo <b>(13,15)</b> rate-½ + 12-bit tail → <b>748 coded bits</b> →
+      stage-1 raster → differential-BPSK across 394 columns → ⊗ reference grid → 2-subband WOLA at
+      <span class="hl-cyan">1350 / 1650 Hz</span></p>
+  </div>
+
+  <div class="grid cols2" style="margin-top:18px">
+    <div class="card">
+      <div class="eyebrow" style="margin-bottom:4px">Differential-BPSK, de-rotated</div>
+      <p class="dim" style="font-size:.84rem;margin:0 0 10px">Each column's cell is de-rotated by a
+        unit-modulus reference, then <code>bit = 1 if Re(vₖ·conj(vₖ₋₁)) &lt; 0</code>. Two subbands
+        alternate the active tone symbol-to-symbol.</p>
+      <canvas class="c2d" id="constCanvas" height="300"></canvas>
+      <div class="seg" id="constSeg" style="margin-top:12px">
+        <button data-m="bpsk" class="on">BW500 diff-BPSK</button>
+        <button data-m="lut">BW2300 records 9–16 · 64-pt LUT</button>
+      </div>
+      <p class="faint" style="font-size:.76rem;margin:10px 0 0">The constellation lookup table applies to BW2300 records 9–16. The base level uses one-hot index modulation with a constant cell value of <code>−1j</code>.</p>
+    </div>
+    <div class="card">
+      <div class="eyebrow" style="margin-bottom:4px">Turbo constituent — (13,15) RSC, 8 states</div>
+      <p class="dim" style="font-size:.84rem;margin:0 0 10px">Two identical recursive-systematic
+        encoders operate in parallel, with log-MAP decoding. State
+        <code>s = r₀|r₁&lt;&lt;1|r₂&lt;&lt;2</code>; feedback <code>a=u⊕r₁⊕r₂</code>;
+        parity <code>p=a⊕r₀⊕r₂</code>.</p>
+      <canvas class="c2d" id="trellisCanvas" height="300"></canvas>
+    </div>
+  </div>
+
+  <div class="grid cols2" style="margin-top:18px">
+
+    <div class="callout" style="align-self:stretch">
+      <h4>Link-setup frame</h4>
+      <p>The link-setup frame uses the BW2300 rec3 waveform and <span data-fig="bw2300.frame_bytes"></span>-byte container. Its one-hot raster selects one bin per emission column across a <span data-fig="bw2300.span"></span>-bin span. The frame maps <span data-fig="bw2300.n_info"></span> information bits to <span data-fig="bw2300.coded"></span> coded bits. The caller’s callsign is packed in six-bit characters at the frame start.</p>
+    </div>
+  </div>
+</div></section>
+
+<!-- ================================================================ ARQ -->
+<section id="arq"><div class="wrap"><figure class="link-exchange"><div class="exchange" role="img" aria-label="Schematic exchange: sender on left transmits data to receiver on right, then receiver replies to sender"><div class="station">Sender</div><div class="station">Receiver</div><div class="transmit">Data frame →</div><div class="reply">← ACK · received data</div></div><figcaption>Schematic · data left to right; reply right to left</figcaption></figure>
+  <div class="sechead">
+    <span class="n">ARQ &amp; THE HOST INTERFACE</span>
+    <h2>ARQ and turn-taking</h2>
+    <p>VARA uses stop-and-wait ARQ. A data burst is answered by an acknowledgement. Applications use separate command and data TCP connections.</p>
+  </div>
+
+  <div class="grid cols7-5">
+    <div class="card">
+      <div class="eyebrow" style="margin-bottom:14px">Connect → transfer → disconnect</div>
+      <div class="states" id="stateRow"></div>
+      <canvas class="c2d" id="ladderCanvas" height="360" style="margin-top:16px"></canvas>
+    </div>
+    <div class="grid" style="align-content:start;gap:14px">
+      <div class="card">
+        <div class="eyebrow" style="margin-bottom:10px">Host TCP interface</div>
+        <table style="min-width:0"><tbody>
+          <tr><td class="mono val">8300</td><td class="dim">command channel — ASCII, <code>\r</code>-terminated</td></tr>
+          <tr><td class="mono val">8301</td><td class="dim">data channel — raw un-framed bytes</td></tr>
+          <tr><td class="mono">CONNECT</td><td class="dim">start an ARQ session → <code>PENDING</code>/<code>CONNECTED</code></td></tr>
+          <tr><td class="mono">BUFFER n</td><td class="dim">raw host bytes still queued; drains per ACKed block</td></tr>
+          <tr><td class="mono">BW500/2300</td><td class="dim">select bandwidth</td></tr>
+          <tr><td class="mono">PTT ON/OFF</td><td class="dim">host keys the radio each burst</td></tr>
+        </tbody></table>
+      </div>
+      <div class="tiles">
+        <div class="tile"><div class="big">~85<span style="font-size:1rem">ms</span></div><div class="lab">TX→RX turnaround</div></div>
+        <div class="tile"><div class="big">43<span style="font-size:1rem">B</span></div><div class="lab">block @ level 4</div></div>
+        <div class="tile"><div class="big">1</div><div class="lab">window (stop&amp;wait)</div></div>
+      </div>
+    </div>
+  </div>
+</div></section>
+
+<!-- ============================================================ NUMBERS -->
+<section id="numbers"><div class="wrap">
+  <div class="sechead">
+    <span class="n">THE NUMBERS</span>
+    <h2>Implementation values</h2>
+    <p>The tables describe the parameters used by kestrel.</p>
+  </div>
+
+  <details class="spec" open>
+    <summary><span class="mk">▸</span> MFSK handshake — physical &amp; generator <span class="sub">§4.2</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>Modulation</td><td class="mono">single tone / symbol · <span class="val">sin(2π·carrier·n/2048)</span></td></tr>
+      <tr><td>Tone → frequency</td><td class="mono val">f = carrier · 48000 / 2048  (= 23.4375 Hz/bin)</td></tr>
+      <tr><td>Sample rate</td><td class="num val">48000 Hz</td></tr>
+      <tr><td>Symbol stride</td><td class="num val">2074 samples</td></tr>
+      <tr><td>Inter-symbol shaping</td><td class="mono">N=32 raised-cosine WOLA · hop = 2042</td></tr>
+      <tr><td>LCG (VB6 Rnd)</td><td class="mono val">state = (state·0x43FD43FD + 0xC39EC3) &amp; 0xFFFFFF</td></tr>
+      <tr><td>CR (preamble/N/off/adv)</td><td class="mono">[74,68,70,60,60,77,50,76,78,74] · N=31 · <span class="val">(50, 1)</span></td></tr>
+      <tr><td>connect-response</td><td class="mono">[62,67,55,66,59,72,68,55] · N=15 · <span class="val">(289, 511)</span></td></tr>
+      <tr><td>connected-ack</td><td class="mono">[62] · N=12 · <span class="val">(289, 31)</span></td></tr>
+      <tr><td>G basis (last 3 chars)</td><td class="mono" style="font-size:.72rem">[-3]=110,220,440,338,134,310 · [-2]=102,204,408,274,6,22 · [-1]=32,64,128,258,36,216</td></tr>
+    </tbody></table></div></div>
+  </details>
+
+  <details class="spec">
+    <summary><span class="mk">▸</span> BW500 / L4 OFDM data path <span class="sub">§3.6</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>Sub-bands</td><td class="mono">2 · centers <span class="val">1350 / 1650 Hz</span></td></tr>
+      <tr><td>Samples / symbol</td><td class="num val">512</td></tr>
+      <tr><td>Columns / frame · coded cells</td><td class="num"><span class="val">394</span> cols · <span class="val">748</span> coded</td></tr>
+      <tr><td>Modulation</td><td class="mono">differential-BPSK · bit = Re(vₖ·conj(vₖ₋₁)) &lt; 0</td></tr>
+      <tr><td>Frame-start column c₀</td><td class="num val">9</td></tr>
+      <tr><td>Reference read idx (sub1/sub0)</td><td class="mono" style="font-size:.72rem">471+(462+col)%471 · (460+col)%469</td></tr>
+      <tr><td>Whitener</td><td class="mono">additive PN over 368 input bits (VB6-Rnd regenerable)</td></tr>
+      <tr><td>FEC</td><td class="mono">turbo · two (13,15)-octal RSC · rate-½ (L4) · 12-bit dual tail</td></tr>
+      <tr><td>RSC step</td><td class="mono" style="font-size:.72rem">a=u⊕r₁⊕r₂ · p=a⊕r₀⊕r₂ · s'=a|r₀&lt;&lt;1|r₁&lt;&lt;2</td></tr>
+      <tr><td>Decoder</td><td class="mono">log-MAP (max*) BCJR · ~12 iterations</td></tr>
+      <tr><td>CRC</td><td class="mono">CRC-16/GENIBUS (0x1021, init/xor 0xFFFF, no reflect) over frame[:44]</td></tr>
+      <tr><td>Frame payload</td><td class="num"><span class="val">43</span> bytes + marker + 2B CRC</td></tr>
+    </tbody></table></div></div>
+  </details>
+
+  <details class="spec">
+    <summary><span class="mk">▸</span> BW2300 OFDM — base level and the ladder above it <span class="sub">§1</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>Base level</td><td class="mono">record <span data-fig="bw2300.base_level"></span>, host <code>BITRATE (4)</code> · index modulation, <span class="val">175 bps</span></td></tr>
+      <tr><td>Samples / symbol</td><td class="num"><span class="val" data-fig="bw2300.dw50"></span> · no cyclic prefix, no window, no overlap-add</td></tr>
+      <tr><td>Symbol rate · transform</td><td class="num"><span class="val" data-fig="bw2300.baud"></span> Bd · plain length-<span data-fig="bw2300.dw50"></span> IFFT per symbol</td></tr>
+      <tr><td>Emission</td><td class="mono">one-hot: exactly one lit bin per symbol, <span class="val">−1j</span>-phased, constant magnitude</td></tr>
+      <tr><td>Bin span</td><td class="mono">bins <span class="val" id="binSpan"></span> of the <span data-fig="bw2300.dw50"></span>-point grid · <span data-fig="bw2300.span"></span> bins at <span data-fig="bw2300.hz_per_bin"></span> Hz</td></tr>
+      <tr><td>Bits per column</td><td class="num"><span class="val" data-fig="bw2300.bpc"></span> — carried by <em>which</em> bin is lit, Gray-mapped</td></tr>
+      <tr><td>Columns per over</td><td class="num"><span class="val" data-fig="bw2300.columns"></span> = <span data-fig="bw2300.data_columns"></span> data + <span data-fig="bw2300.reference_columns"></span> reference</td></tr>
+      <tr><td>Occupied bandwidth</td><td class="num val">~735 – 2350 Hz</td></tr>
+      <tr><td>Frame container</td><td class="num"><span class="val" data-fig="bw2300.frame_bytes"></span> bytes · <span data-fig="bw2300.n_info"></span> turbo input bits → <span data-fig="bw2300.coded"></span> coded</td></tr>
+      <tr><td>2048-point analysis window</td><td class="dim">Four 512-sample columns overlap in each analysis frame. This produces apparent occupancy across bins 34–98 at 23.4375 Hz spacing, with a ~23.7 Bd stride and 100 analysis frames per burst. A 512-point FFT recovers each individual emission column.</td></tr>
+      <tr><td>High-throughput records 9–16</td><td class="mono" style="font-size:.72rem">span 32 · dw50 1152 with a 128-sample cyclic prefix · LUT column <code>pos</code> per record · CRC → turbo(13,15) → whiten → interleave → Gray → LUT</td></tr>
+      <tr><td>Constellation LUT</td><td class="mono">64-entry, records 9–16 only · truncated prefix of 6 columns (BPSK/QPSK/8-PSK · 16-QAM 1.1 · 32-QAM cross 1.5 · 64-QAM 1.6)</td></tr>
+    </tbody></table></div></div>
+  </details>
+
+  <details class="spec">
+    <summary><span class="mk">▸</span> Caller-ID link-setup frame <span class="sub">§4.2A · BW2300 rec3 OFDM</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>Waveform</td><td class="mono">the ordinary BW2300 rec3 wideband OFDM burst — same waveform, coding chain and container as a DATA over. There is no separate narrowband burst</td></tr>
+      <tr><td>Geometry</td><td class="mono"><span data-fig="bw2300.dw50"></span>-sample symbols · one-hot over a <span data-fig="bw2300.span"></span>-bin span · <span class="val" data-fig="bw2300.data_columns"></span> data emission columns × <span data-fig="bw2300.bpc"></span> bits = <span data-fig="bw2300.coded"></span> coded bits</td></tr>
+      <tr><td>FEC</td><td class="mono">turbo · (13,15)-octal RSC · rate-½ · N=<span data-fig="bw2300.n_info"></span> → <span data-fig="bw2300.coded"></span> coded (2N+12)</td></tr>
+      <tr><td>Internal turbo interleaver</td><td class="mono">native <code>interleave_stage2</code> column 3, <code>perm[i] = IL2[3+17·i][:N]</code> — a clean 0..N−1 permutation used directly, with <b>no pruning</b>. Deriving it by dropping entries ≥ N from a larger column yields a different permutation and will not interoperate</td></tr>
+      <tr><td>Channel interleaver</td><td class="mono"><code>interleave_stage1</code> column 3, first <span data-fig="bw2300.coded"></span> entries · GATHER: <code>onair[k] = coded[π[k]]</code></td></tr>
+      <tr><td>Frame / callsign</td><td class="mono"><span data-fig="bw2300.frame_bytes"></span>-byte frame · CRC-16/GENIBUS(body[0:90]) · caller callsign 6-bit packed at the frame start (A–Z→1–26, 0–9→27–36), SSID in <code>body[5]</code></td></tr>
+    </tbody></table></div></div>
+  </details>
+
+  <details class="spec">
+    <summary><span class="mk">▸</span> ARQ &amp; host API <span class="sub">§5 · §7</span></summary>
+    <div class="spec-body"><div class="tbl-scroll"><table><tbody>
+      <tr><th>Quantity</th><th>Value</th></tr>
+      <tr><td>States</td><td class="mono">DISCONNECTED · LISTENING · CONNECTING · CONNECTED · DISCONNECTING</td></tr>
+      <tr><td>ARQ scheme</td><td class="mono">stop-and-wait · window 1 · 1 DATA over ⇄ 1 ACK over</td></tr>
+      <tr><td>Connect sequence</td><td class="mono" style="font-size:.72rem" id="connectSeq"></td></tr>
+      <tr><td>Data exchange</td><td class="mono" style="font-size:.72rem">Over → peer's two-tone ACK → turn release → peer's over. The caller releases the sending turn with the confirm; the answering station sends the first data burst.</td></tr>
+      <tr><td>Turn release</td><td class="mono"><span class="val" id="releaseRow"></span> · <code>SEED_OFF 61</code>, <code>PREADV 391</code> on the <code>(62, 67)</code> preamble · both stations key it, and the peer answers it by transmitting</td></tr>
+      <tr><td>Turnaround</td><td class="num">~85 ms, transmit to receive</td></tr>
+      <tr><td>Blocks / over</td><td class="mono">grows 1→2 after consecutive successes</td></tr>
+      <tr><td>Disconnect</td><td class="mono">one <span class="val" id="discRow"></span> burst, keyed to the called callsign, unanswered · <code>SEED_OFF 60</code>, <code>PREADV 125</code></td></tr>
+      <tr><td>Ports</td><td class="num val">8300 cmd · 8301 data</td></tr>
+    </tbody></table></div></div>
+  </details>
+</div></section>
+
+<section id="results"><div class="wrap"><div class="sechead"><h2>Observed results</h2><p>Mail reception through K0SI at BW2300 and confirmed outbound delivery through KB8AY (message <code>NL03TXWQ8SGL</code>). Multiple deliveries confirmed by the operator. The KB8AY delivery used a registered third-party client SID.</p><p><a href="../STATUS.md">Implementation evidence</a> records the session conditions.</p></div></div></section>
+<footer><div class="wrap">
+  <p style="color:var(--ink-dim);max-width:var(--measure)">Interactive figures use kestrel’s waveform and coding tables.</p>
+
+</div></footer>
+
+<script>
+"use strict";
+/* ---- generated by docs/viz/build.py; do not edit by hand ---- */
+const FIG = {"bw2300": {"base_level": 3, "baud": 93.75, "blocks_s": 4.363, "bpc": 4, "coded": 1484, "columns": 395, "cp": 0, "data_columns": 371, "dw50": 512, "first_bin": 9, "frame_bytes": 92, "hi_hz": 2250.0, "hz_per_bin": 93.75, "keyable": [0, 1, 2, 3, 9, 10, 11, 12, 13, 14, 15, 16], "law": "index", "lead_blocks": 14, "levels": [{"bpc": 3, "dw50": 2048, "frame_bytes": 12, "law": "index", "level": 0, "name": "rec0-floor", "span": 64}, {"bpc": 3, "dw50": 1024, "frame_bytes": 25, "law": "index", "level": 1, "name": "rec1-robust", "span": 32}, {"bpc": 4, "dw50": 1024, "frame_bytes": 50, "law": "index", "level": 2, "name": "rec2-robust", "span": 32}, {"bpc": 4, "dw50": 512, "frame_bytes": 92, "law": "index", "level": 3, "name": "rec3-base", "span": 16}, {"bpc": 4, "dw50": 512, "frame_bytes": 92, "law": "index", "level": 103, "name": "rec3-base-2750", "span": 20}, {"bpc": 3, "dw50": 2048, "frame_bytes": 12, "law": "index", "level": 100, "name": "rec0-floor-2750", "span": 80}, {"bpc": 3, "dw50": 1024, "frame_bytes": 25, "law": "index", "level": 101, "name": "rec1-robust-2750", "span": 40}, {"bpc": 4, "dw50": 1024, "frame_bytes": 50, "law": "index", "level": 102, "name": "rec2-robust-2750", "span": 40}, {"bpc": 2, "dw50": 1152, "frame_bytes": 899, "law": "const", "level": 9, "name": "QPSK-1/2", "span": 32}, {"bpc": 2, "dw50": 1152, "frame_bytes": 1199, "law": "const", "level": 10, "name": "QPSK-2/3", "span": 32}, {"bpc": 2, "dw50": 1152, "frame_bytes": 1439, "law": "const", "level": 11, "name": "QPSK-4/5", "span": 32}, {"bpc": 3, "dw50": 1152, "frame_bytes": 1799, "law": "const", "level": 12, "name": "8PSK-2/3", "span": 32}, {"bpc": 3, "dw50": 1152, "frame_bytes": 2159, "law": "const", "level": 13, "name": "8PSK-4/5", "span": 32}, {"bpc": 4, "dw50": 1152, "frame_bytes": 2713, "law": "const", "level": 14, "name": "16APSK-5/6", "span": 32}, {"bpc": 5, "dw50": 1152, "frame_bytes": 3257, "law": "const", "level": 15, "name": "32APSK-4/5", "span": 32}, {"bpc": 5, "dw50": 1152, "frame_bytes": 213, "law": "const", "level": 16, "name": "32APSK-4/5", "span": 32}], "lo_hz": 843.75, "n_info": 736, "payload_bytes": 90, "reference_columns": 24, "span": 16, "stride": 1}, "bw500": {"coded": 748, "columns": 394, "first_column": 3, "info_bits": 368, "payload_bytes": 43, "samples_per_symbol": 512, "subbands": [[0, 1350.0], [1, 1650.0]]}, "mfsk": {"bursts": {"CR": {"n_payload": 31, "name": "connect-request", "preadv": 1, "preamble": [74, 68, 70, 60, 60, 77, 50, 76, 78, 74], "seconds": 1.7493, "seed_off": 50, "symbols": 41}, "DISCONNECT": {"n_payload": 31, "name": "session-disconnect-request", "preadv": 125, "preamble": [74], "seconds": 1.3653, "seed_off": 60, "symbols": 32}, "RELEASE": {"n_payload": 15, "name": "session-turn-release", "preadv": 391, "preamble": [62, 67], "seconds": 0.7253, "seed_off": 61, "symbols": 17}, "RESP": {"n_payload": 15, "name": "connect-response", "preadv": 511, "preamble": [62, 67, 55, 66, 59, 72, 68, 55], "seconds": 0.9813, "seed_off": 289, "symbols": 23}}, "fs": 48000, "hop": 2048, "hz_per_bin": 23.4375, "nfft": 2048, "stride": 2080, "wola_n": 32}};
+/* ---- end generated ---- */
+/* ===================================================================== */
+/*  VARA MFSK handshake tone generator                                   */
+/* ===================================================================== */
+function crc16_genibus(bytes){let c=0xFFFF;for(const b of bytes){c^=(b<<8);for(let i=0;i<8;i++){c=(c&0x8000)?(((c<<1)^0x1021)&0xFFFF):((c<<1)&0xFFFF);}}return c^0xFFFF;}
+const LCG_M=0x43FD43FD%0x1000000, LCG_A=0xC39EC3;
+function lcg(s){return (s*LCG_M+LCG_A)%0x1000000;}
+function hi32(x){const b=new ArrayBuffer(8),d=new DataView(b);d.setFloat64(0,x,true);return d.getUint32(4,true);}
+function fold(h){return ((((h&0xFFFF)<<8)^((h>>>8)&0xFFFF00))>>>0)&0xFFFFFF;}
+function startState(seed){return (((fold(hi32(seed))&0xFFFF00)|0x86)>>>0);}
+const GB={"-3":[110,220,440,338,134,310],"-2":[102,204,408,274,6,22],"-1":[32,64,128,258,36,216]};
+function ghash(cs){let v=254;for(const off of[-3,-2,-1]){if(cs.length>=-off){const code=cs.charCodeAt(cs.length+off)^0x41;let t=0;for(let i=0;i<6;i++)if((code>>i)&1)t^=GB[off][i];v^=t;}}return v;}
+const BURSTS={
+  CR:{name:"connect-request",pre:[74,68,70,60,60,77,50,76,78,74],n:31,off:50,adv:1},
+  RESP:{name:"connect-response",pre:[62,67,55,66,59,72,68,55],n:15,off:289,adv:511},
+  ACK:{name:"connected-ack",pre:[62],n:12,off:289,adv:31}
+};
+function genBurst(cs,kind){
+  cs=(cs||"").toUpperCase();const bytes=[];for(const ch of cs)bytes.push(ch.charCodeAt(0)&0xFF);
+  const K=BURSTS[kind];const crc=crc16_genibus(bytes);
+  const seed=(crc+K.off)&0x7FFF;const mult=ghash(cs)+((crc+50)>>15);
+  let s=startState(seed);const adv=mult+K.adv;
+  for(let i=0;i<adv;i++)s=lcg(s);
+  const steps=[],bins=[];
+  for(let k=0;k<K.n;k++){
+    s=lcg(s);const P=Math.floor(s*5/0x1000000);
+    s=lcg(s);const D=Math.floor(s*7/0x1000000);
+    const parity=(k%2===0)?1:0;const bin=(29+parity+14*P+2*D)&0xFF;
+    steps.push({P,D,parity,bin});bins.push(bin);
+  }
+  return {crc,seed,mult,adv,pre:K.pre.slice(),bins,steps,tones:K.pre.concat(bins),n:K.n};
+}
+// Known-answer vectors (spec §4.2.4a) for the live match badge.
+const KAT={
+  CR:{K7ABC:[36,53,86,69,52,85,76,61,98,49,64,71,68,73,52,61,74,85,90,45,46,89,44,37,82,83,36,61,38,43,32],
+      W2XYZ:[44,33,64,49,62,33,70,53,72,35,94,89,80,77,60,89,88,81,40,73,78,61,72,95,78,77,70,61,78,93,78],
+      BBBB2:[44,97,68,93,50,63,66,97,36,73,78,71,52,95,80,71,62,41,46,87,34,47,90,67,40,89,94,89,32,91,44],
+      AAAA1:[80,85,90,65,88,43,78,69,52,85,90,39,94,73,98,71,68,59,62,95,78,77,78,43,94,65,72,41,56,81,58]},
+  RESP:{K7ABC:[80,71,84,77,70,33,56,79,56,95,98,59,50,29,76]},
+  ACK:{K7ABC:[66,45,36,43,58,73,64,39,34,37,48,71],BBBB2:[86,81,86,29,56,85,88,37,90,69,58,71]}
+};
+const HZ_PER_BIN=FIG.mfsk.hz_per_bin, SYM_S=FIG.mfsk.hop/FIG.mfsk.fs;
+
+/* ===================================================================== */
+/*  Shared helpers                                                       */
+/* ===================================================================== */
+const prefersReduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
+function cssv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+const CM=[[0.00,[5,7,13]],[0.16,[16,32,74]],[0.36,[59,47,143]],[0.55,[184,58,134]],[0.75,[242,131,59]],[0.90,[255,209,92]],[1.0,[255,246,216]]];
+function colormap(t){t=Math.max(0,Math.min(1,t));for(let i=1;i<CM.length;i++){if(t<=CM[i][0]){const a=CM[i-1],b=CM[i];const f=(t-a[0])/(b[0]-a[0]);return[a[1][0]+(b[1][0]-a[1][0])*f,a[1][1]+(b[1][1]-a[1][1])*f,a[1][2]+(b[1][2]-a[1][2])*f];}}return CM[CM.length-1][1];}
+function fitCanvas(cv,h){
+  const dpr=Math.min(2,devicePixelRatio||1),w=cv.clientWidth;
+  const bw=Math.round(w*dpr),bh=Math.round(h*dpr);
+  if(cv.width!==bw||cv.height!==bh){cv.width=bw;cv.height=bh;cv.style.height=h+'px';}
+  const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
+  return{ctx,w,h};
+}
+
+// Drive a canvas animation only while it's on screen; one static frame if motion is off.
+function registerLoop(el,step){
+  if(prefersReduce){step(0);return;}
+  const o={vis:true};
+  const pump=()=>{if(o._on)return;o._on=true;const tick=t=>{if(!o.vis){o._on=false;return;}step(t);requestAnimationFrame(tick);};requestAnimationFrame(tick);};
+  new IntersectionObserver(es=>{o.vis=es[0].isIntersecting;if(o.vis)pump();},{threshold:.05}).observe(el);
+  pump();
+}
+
+/* ===================================================================== */
+/*  Build the session energy grid (shared by 3D + 2D waterfall)          */
+/* ===================================================================== */
+const NF=128;            // frequency bins (0..NF-1 -> 0..~3000Hz)
+const F_TOP=NF*HZ_PER_BIN;
+function hz2row(hz){return Math.round(hz/F_TOP*(NF-1));}
+function buildSession(){
+  const cr=genBurst("K7ABC","CR"), resp=genBurst("W2XYZ","RESP"), ack=genBurst("K7ABC","ACK");
+  let t=0.3; const seq=[];
+  seq.push({type:"mfsk",label:"connect-request",tones:cr.tones,t0:t,dur:cr.tones.length*SYM_S}); t+=cr.tones.length*SYM_S+0.09;
+  seq.push({type:"mfsk",label:"connect-response",tones:resp.tones,t0:t,dur:resp.tones.length*SYM_S}); t+=resp.tones.length*SYM_S+0.09;
+  const R=FIG.bw2300, rlo=R.first_bin*R.hz_per_bin/HZ_PER_BIN, rhi=(R.first_bin+R.span-1)*R.hz_per_bin/HZ_PER_BIN;
+  seq.push({type:"onehot",label:"link-setup / caller-ID (BW2300 rec3)",t0:t,dur:R.blocks_s,lo:rlo,hi:rhi});
+  t+=R.blocks_s+0.09;
+  seq.push({type:"mfsk",label:"connected-ack",tones:ack.tones,t0:t,dur:ack.tones.length*SYM_S}); t+=ack.tones.length*SYM_S+0.15;
+  // CONNECTED: two DATA overs (BW500) + short ACKs
+  for(let i=0;i<2;i++){seq.push({type:"data",label:"DATA over (BW500)",t0:t,dur:2.6}); t+=2.6+0.085;
+    seq.push({type:"ack",label:"ACK over",t0:t,dur:0.45}); t+=0.45+0.085;}
+  const total=t+0.2;
+  const NT=Math.round(total/0.028); const dt=total/NT;
+  const grid=new Float32Array(NT*NF);
+  const rnd=(()=>{let x=12345;return()=>{x=(x*1103515245+12345)&0x7fffffff;return x/0x7fffffff;};})();
+  function add(ti,ri,v){if(ri<0||ri>=NF||ti<0||ti>=NT)return;grid[ti*NF+ri]=Math.max(grid[ti*NF+ri],v);}
+  function blob(ti,ri,v,rw){for(let d=-rw;d<=rw;d++)add(ti,ri+d,v*Math.exp(-(d*d)/(rw*0.8+0.4)));}
+  for(const e of seq){
+    const c0=Math.floor(e.t0/dt), c1=Math.floor((e.t0+e.dur)/dt);
+    if(e.type==="mfsk"){
+      for(let k=0;k<e.tones.length;k++){const ta=e.t0+k*SYM_S;const tc=Math.floor(ta/dt);
+        const ri=hz2row(e.tones[k]*HZ_PER_BIN);for(let dd=0;dd<2;dd++)blob(tc+dd,ri,0.92,2);}
+    }else if(e.type==="onehot"){
+      // Four 512-sample columns land in one analysis frame at this resolution,
+      // which is what a 2048-point window reads as 65 simultaneous carriers.
+      for(let ti=c0;ti<c1;ti++)for(let k=0;k<4;k++){
+        const b=e.lo+Math.floor(rnd()*(e.hi-e.lo+1));blob(ti,hz2row(b*HZ_PER_BIN),0.55+0.35*rnd(),1);}
+    }else if(e.type==="data"){
+      for(let ti=c0;ti<c1;ti++){const side=(ti%2===0)?1350:1650;blob(ti,hz2row(side),0.85,2);blob(ti,hz2row(1500),0.3,1);}
+    }else if(e.type==="ack"){
+      for(let ti=c0;ti<c1;ti++){blob(ti,hz2row(1500),0.6,2);blob(ti,hz2row(1350),0.28,1);blob(ti,hz2row(1650),0.28,1);}
+    }
+  }
+  return {grid,NT,NF,dt,total,seq};
+}
+const SESSION=buildSession();
+
+(function(){const L=document.getElementById('wfLegend');
+  const items=[["MFSK handshake","#f2a63b"],["BW2300 rec3 link-setup","#8a7be8"],["BW500 DATA over","#e8608f"],["ACK","#57d69a"]];
+  L.innerHTML=items.map(([t,c])=>`<span><i style="background:${c}"></i>${t}</span>`).join('');
+})();
+
+/* ===================================================================== */
+/*  Minimal mat4 + WebGL2 waterfall surface                              */
+/* ===================================================================== */
+const M4={
+  persp(fov,a,n,f){const t=1/Math.tan(fov/2);return[t/a,0,0,0, 0,t,0,0, 0,0,(f+n)/(n-f),-1, 0,0,2*f*n/(n-f),0];},
+  mul(a,b){const o=new Array(16);for(let r=0;r<4;r++)for(let c=0;c<4;c++){let s=0;for(let k=0;k<4;k++)s+=a[k*4+r]*b[c*4+k];o[c*4+r]=s;}return o;},
+  lookAt(e,c,u){const z=norm(sub(e,c)),x=norm(cross(u,z)),y=cross(z,x);
+    return[x[0],y[0],z[0],0, x[1],y[1],z[1],0, x[2],y[2],z[2],0, -dot(x,e),-dot(y,e),-dot(z,e),1];},
+  rotY(a){const s=Math.sin(a),c=Math.cos(a);return[c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1];}
+};
+function sub(a,b){return[a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function cross(a,b){return[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function norm(a){const l=Math.hypot(a[0],a[1],a[2])||1;return[a[0]/l,a[1]/l,a[2]/l];}
+
+const wfCanvas=document.getElementById('wf');
+let gl=null, wfProg=null, wfBuffers=null, wfMode3D=true, wfPaused=false, wfAngle=0.5, wfDragging=false, wfLast=0;
+function initGL(){
+  gl=wfCanvas.getContext('webgl2',{antialias:true,alpha:false});
+  if(!gl){wfMode3D=false;return false;}
+  const vs=`#version 300 es
+  precision highp float;
+  layout(location=0) in vec3 pos; layout(location=1) in vec3 nrm; layout(location=2) in float energy;
+  uniform mat4 uMVP; uniform float uFlat; out float vE; out float vShade;
+  void main(){ vE=energy;
+    vec3 L=normalize(vec3(0.3,0.9,0.35)); float relief=0.55+0.45*max(0.0,dot(normalize(nrm),L));
+    vShade=mix(1.0,relief,uFlat);
+    gl_Position=uMVP*vec4(pos.x, pos.y*uFlat, pos.z, 1.0);}`;
+  const fs=`#version 300 es
+  precision highp float; in float vE; in float vShade; out vec4 o;
+  vec3 cmap(float t){ t=clamp(t,0.0,1.0);
+    vec3 c0=vec3(0.02,0.03,0.05),c1=vec3(0.06,0.13,0.29),c2=vec3(0.23,0.18,0.56),
+         c3=vec3(0.72,0.23,0.53),c4=vec3(0.95,0.51,0.23),c5=vec3(1.0,0.82,0.36),c6=vec3(1.0,0.96,0.85);
+    if(t<0.16)return mix(c0,c1,t/0.16);
+    if(t<0.36)return mix(c1,c2,(t-0.16)/0.20);
+    if(t<0.55)return mix(c2,c3,(t-0.36)/0.19);
+    if(t<0.75)return mix(c3,c4,(t-0.55)/0.20);
+    if(t<0.90)return mix(c4,c5,(t-0.75)/0.15);
+    return mix(c5,c6,(t-0.90)/0.10);}
+  void main(){ vec3 col=cmap(vE)*vShade; col=mix(vec3(0.03,0.05,0.09),col,clamp(vE*2.2,0.15,1.0));
+    o=vec4(col,1.0);}`;
+  function sh(t,src){const s=gl.createShader(t);gl.shaderSource(s,src);gl.compileShader(s);return s;}
+  wfProg=gl.createProgram();gl.attachShader(wfProg,sh(gl.VERTEX_SHADER,vs));gl.attachShader(wfProg,sh(gl.FRAGMENT_SHADER,fs));
+  gl.linkProgram(wfProg);
+  buildMesh();
+  gl.enable(gl.DEPTH_TEST);
+  return true;
+}
+function buildMesh(){
+  const NX=SESSION.NF, NZ=Math.min(360,SESSION.NT);
+  const {grid,NT,NF}=SESSION;
+  const H=(xi,zi)=>{const ti=Math.floor(zi/(NZ-1)*(NT-1));return grid[ti*NF+xi];};
+  const verts=new Float32Array(NX*NZ*7);
+  let p=0;
+  for(let zi=0;zi<NZ;zi++)for(let xi=0;xi<NX;xi++){
+    const x=(xi/(NX-1)-0.5)*2.4;
+    const z=(zi/(NZ-1)-0.5)*2.4;
+    const e=H(xi,zi);
+    const y=Math.pow(e,1.15)*0.62;
+    const hl=H(Math.max(0,xi-1),zi), hr=H(Math.min(NX-1,xi+1),zi);
+    const hd=H(xi,Math.max(0,zi-1)), hu=H(xi,Math.min(NZ-1,zi+1));
+    const nx=(hl-hr), nz=(hd-hu), ny=0.16;
+    const nl=Math.hypot(nx,ny,nz)||1;
+    verts[p++]=x;verts[p++]=y;verts[p++]=z;
+    verts[p++]=nx/nl;verts[p++]=ny/nl;verts[p++]=nz/nl;
+    verts[p++]=e;
+  }
+  const idx=new Uint32Array((NX-1)*(NZ-1)*6);let q=0;
+  for(let zi=0;zi<NZ-1;zi++)for(let xi=0;xi<NX-1;xi++){
+    const a=zi*NX+xi,b=a+1,c=a+NX,d=c+1;
+    idx[q++]=a;idx[q++]=c;idx[q++]=b; idx[q++]=b;idx[q++]=c;idx[q++]=d;
+  }
+  const vao=gl.createVertexArray();gl.bindVertexArray(vao);
+  const vb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vb);gl.bufferData(gl.ARRAY_BUFFER,verts,gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,28,0);
+  gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,3,gl.FLOAT,false,28,12);
+  gl.enableVertexAttribArray(2);gl.vertexAttribPointer(2,1,gl.FLOAT,false,28,24);
+  const ib=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,idx,gl.STATIC_DRAW);
+  wfBuffers={vao,count:idx.length};
+}
+function resizeGL(){const dpr=Math.min(2,devicePixelRatio||1);const w=wfCanvas.clientWidth,h=wfCanvas.clientHeight;
+  wfCanvas.width=w*dpr;wfCanvas.height=h*dpr;if(gl)gl.viewport(0,0,wfCanvas.width,wfCanvas.height);}
+function renderGL(){
+  if(!gl)return;
+  gl.clearColor(0.02,0.03,0.05,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  gl.useProgram(wfProg);
+  const asp=wfCanvas.width/wfCanvas.height;
+  const proj=M4.persp(0.82,asp,0.1,20);
+  let view,model,flat;
+  if(wfMode3D){
+    view=M4.lookAt([0,1.55,3.0],[0,-0.15,0],[0,1,0]);
+    model=M4.rotY(wfAngle); flat=1;
+  }else{
+    view=M4.lookAt([0,3.0,0.0001],[0,0,0],[0,0,-1]);
+    model=M4.rotY(0); flat=0;
+  }
+  const mvp=M4.mul(proj,M4.mul(view,model));
+  gl.uniformMatrix4fv(gl.getUniformLocation(wfProg,'uMVP'),false,new Float32Array(mvp));
+  gl.uniform1f(gl.getUniformLocation(wfProg,'uFlat'),flat);
+  gl.bindVertexArray(wfBuffers.vao);
+  gl.drawElements(gl.TRIANGLES,wfBuffers.count,gl.UNSIGNED_INT,0);
+}
+// Fallback only: used when WebGL2 is unavailable, so the canvas is free for a 2D context.
+function render2D(){
+  const dpr=Math.min(2,devicePixelRatio||1);const w=wfCanvas.clientWidth,h=wfCanvas.clientHeight;
+  wfCanvas.width=w*dpr;wfCanvas.height=h*dpr;
+  const ctx=wfCanvas.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.fillStyle="#05070d";ctx.fillRect(0,0,w,h);
+  const {grid,NT,NF}=SESSION;
+  const cw=w/NT, ch=h/NF;
+  for(let ti=0;ti<NT;ti++)for(let ri=0;ri<NF;ri++){const e=grid[ti*NF+ri];if(e<0.03)continue;
+    const c=colormap(Math.pow(e,0.85));ctx.fillStyle=`rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+    ctx.fillRect(ti*cw,h-(ri+1)*ch,Math.ceil(cw)+0.5,Math.ceil(ch)+0.5);}
+}
+(function initWaterfall(){
+  const ok=initGL();
+  const stage=document.getElementById('wfStage');
+  resizeGL();
+  if(!ok){document.getElementById('wfView').style.display='none';render2D();
+    addEventListener('resize',()=>{render2D();});return;}
+  function step(t){if(!wfMode3D)return;if(!wfDragging&&!wfPaused){const dt=(t-wfLast)||16;wfAngle+=dt*0.00016;}wfLast=t;renderGL();}
+  registerLoop(stage,step);
+  renderGL();
+  document.getElementById('wfPlay').onclick=function(){wfPaused=!wfPaused;this.textContent=wfPaused?'▶':'❚❚';};
+  document.getElementById('wfView').onclick=function(){wfMode3D=!wfMode3D;this.textContent=wfMode3D?'2D':'3D';renderGL();};
+  let px=0;
+  const down=e=>{wfDragging=true;px=(e.touches?e.touches[0].clientX:e.clientX);};
+  const move=e=>{if(!wfDragging)return;const x=(e.touches?e.touches[0].clientX:e.clientX);wfAngle+=(x-px)*0.008;px=x;if(wfMode3D)renderGL();};
+  const up=()=>{wfDragging=false;};
+  wfCanvas.addEventListener('mousedown',down);addEventListener('mousemove',move);addEventListener('mouseup',up);
+  wfCanvas.addEventListener('touchstart',down,{passive:true});addEventListener('touchmove',move,{passive:true});addEventListener('touchend',up);
+  addEventListener('resize',()=>{resizeGL();renderGL();});
+})();
+
+/* ===================================================================== */
+/*  Scene 2 — interactive handshake tone generator                       */
+/* ===================================================================== */
+const hsCanvas=document.getElementById('hsCanvas');
+let curCall="K7ABC",curKind="CR",hsBurst=genBurst(curCall,curKind),hsReveal=0;
+function drawHandshake(){
+  const {ctx,w,h}=fitCanvas(hsCanvas,300);
+  ctx.clearRect(0,0,w,h);
+  const b=hsBurst;const tot=b.tones.length;
+  const padL=34,padB=22,padT=10;
+  const gw=w-padL-8,gh=h-padB-padT;
+  const bins=b.tones;const mn=25,mx=100;
+  const x=i=>padL+gw*(i/(tot-1||1));
+  const y=v=>padT+gh*(1-(v-mn)/(mx-mn));
+  ctx.strokeStyle=cssv('--line-2');ctx.lineWidth=1;ctx.font="10px "+cssv('--mono');ctx.fillStyle=cssv('--ink-faint');
+  for(let f=1000;f<=2200;f+=400){const bin=f/HZ_PER_BIN;const yy=y(bin);ctx.beginPath();ctx.moveTo(padL,yy);ctx.lineTo(w-6,yy);ctx.stroke();ctx.fillText((f/1000).toFixed(1)+"k",4,yy+3);}
+  const nRev=prefersReduce?tot:Math.min(tot,Math.floor(hsReveal));
+  const preN=b.pre.length;
+  ctx.fillStyle=cssv('--line-2');ctx.fillRect(padL,padT,x(preN-0.5)-padL,gh);
+  ctx.fillStyle=cssv('--ink-faint');ctx.fillText("preamble",padL+2,h-8);
+  ctx.fillText("payload (callsign-keyed)",x(preN)+2,h-8);
+  ctx.strokeStyle=cssv('--amber');ctx.lineWidth=1.5;ctx.beginPath();
+  for(let i=0;i<nRev;i++){const xx=x(i),yy=y(bins[i]);i?ctx.lineTo(xx,yy):ctx.moveTo(xx,yy);}ctx.stroke();
+  for(let i=0;i<nRev;i++){const xx=x(i),yy=y(bins[i]);const pre=i<preN;
+    ctx.fillStyle=pre?cssv('--ink-faint'):cssv('--amber-hi');
+    ctx.beginPath();ctx.arc(xx,yy,pre?2.5:3.6,0,7);ctx.fill();
+    if(!pre&&i===nRev-1&&nRev<tot){ctx.strokeStyle=cssv('--amber-hi');ctx.lineWidth=1;ctx.beginPath();ctx.arc(xx,yy,7,0,7);ctx.stroke();}}
+  ctx.fillStyle=cssv('--ink-faint');ctx.fillText("tone → bin",padL,padT-1+9);
+}
+function updateHandshake(){
+  hsBurst=genBurst(curCall,curKind);hsReveal=0;
+  const b=hsBurst,K=BURSTS[curKind];
+  const R=document.getElementById('hsReadout');
+  R.innerHTML=[
+    ["CRC-16","0x"+b.crc.toString(16).toUpperCase().padStart(4,'0')],
+    ["seed = (crc+"+K.off+")&0x7FFF",b.seed],
+    ["mult = G+carry",b.mult],
+    ["pre-advance draws",b.adv],
+    ["payload tones N",K.n],
+    ["burst",K.name]
+  ].map(([k,v])=>`<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+  document.getElementById('hsBins').innerHTML=
+    "<span class='faint'>preamble</span> "+b.pre.join(' ')+"  <b>"+b.bins.join(' ')+"</b>";
+  const kd=(KAT[curKind]||{})[curCall];const kb=document.getElementById('hsKat');
+  if(kd){const ok=kd.length===b.bins.length&&kd.every((v,i)=>v===b.bins[i]);
+    kb.className="kat "+(ok?"ok":"no");kb.innerHTML=(ok?"✓ ":"✕ ")+"matches published known-answer vector for "+curCall;}
+  else{kb.className="kat";kb.style.color=cssv('--ink-faint');kb.innerHTML="↳ live generator output (no stored KAT for this callsign)";}
+  drawHandshake();
+}
+document.getElementById('callIn').addEventListener('input',e=>{curCall=e.target.value.toUpperCase().replace(/[^A-Z0-9/\-]/g,'');e.target.value=curCall;updateHandshake();});
+document.getElementById('burstSeg').addEventListener('click',e=>{const bn=e.target.closest('button');if(!bn)return;
+  [...e.currentTarget.children].forEach(c=>c.classList.remove('on'));bn.classList.add('on');curKind=bn.dataset.k;updateHandshake();});
+updateHandshake();
+registerLoop(hsCanvas,()=>{if(hsReveal<hsBurst.tones.length)hsReveal+=0.4;drawHandshake();});
+
+/* ===================================================================== */
+/*  Scene 3 — OFDM pipeline flow                                          */
+/* ===================================================================== */
+const OFDM_STAGES=[
+  ["43 payload bytes","host frame"],["+ CRC-16","GENIBUS, big-endian"],["368 bits","serialize"],
+  ["XOR whitener","additive PN"],["turbo (13,15)","rate-½ + tail"],["748 coded","raster place"],
+  ["diff-BPSK","394 columns"],["⊗ ref grid","de-rotation"],["WOLA synth","1350/1650 Hz"]
+];
+(function(){const f=document.getElementById('ofdmFlow');
+  OFDM_STAGES.forEach((s,i)=>{const d=document.createElement('div');d.className='stg';d.dataset.i=i;
+    d.innerHTML=`<span class="t">${s[0]}</span><span class="s">${s[1]}</span>`;f.appendChild(d);
+    if(i<OFDM_STAGES.length-1){const a=document.createElement('span');a.className='arr';a.textContent='→';f.appendChild(a);}});
+  let hot=0,acc=0;
+  registerLoop(f,(t)=>{acc+=1;if(acc<48)return;acc=0;const st=f.querySelectorAll('.stg');
+    st.forEach(s=>s.classList.remove('hot'));st[hot].classList.add('hot');hot=(hot+1)%st.length;});
+})();
+
+/* Scene 3 — constellation (diff-BPSK / BW2300 LUT) */
+const LUT=[[1,0],[1,0],[1,0],[-0.7778,-0.7778],[0.2121,0.2121],[-1.1314,-1.1314],[-1,0],[0,1],[0.7071,0.7071],[-0.7778,-0.2593],[0.6364,0.2121],[-1.1314,-0.8081],[0,0],[-0,-1],[-0.7071,0.7071],[-0.7778,0.7778],[0.6364,1.0607],[-1.1314,-0.1616],[0,0],[-1,0],[0,1],[-0.7778,0.2593],[1.0607,0.2121],[-1.1314,-0.4849],[0,0],[0,0],[0.7071,-0.7071],[-0.2593,-0.7778],[0.2121,0.6364],[-1.1314,1.1314],[0,0],[0,0],[-0,-1],[-0.2593,-0.2593],[0.6364,0.6364],[-1.1314,0.8081],[0,0],[0,0],[-1,0],[-0.2593,0.7778],[0.2121,1.0607],[-1.1314,0.1616],[0,0],[0,0],[-0.7071,-0.7071],[-0.2593,0.2593],[1.0607,0.6364],[-1.1314,0.4849],[0,0],[0,0],[0,0],[0.7778,-0.7778],[0.2121,-0.2121],[-0.8081,-1.1314],[0,0],[0,0],[0,0],[0.7778,-0.2593],[0.6364,-0.2121],[-0.8081,-0.8081],[0,0],[0,0],[0,0],[0.7778,0.7778]];
+const constCanvas=document.getElementById('constCanvas');let constMode="bpsk",constPh=0;
+function drawConst(){
+  const {ctx,w,h}=fitCanvas(constCanvas,300);ctx.clearRect(0,0,w,h);
+  const cx=w/2,cy=h/2,R=Math.min(w,h)*0.36;
+  ctx.strokeStyle=cssv('--line-2');ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(cx-R*1.5,cy);ctx.lineTo(cx+R*1.5,cy);ctx.moveTo(cx,cy-R*1.5);ctx.lineTo(cx,cy+R*1.5);ctx.stroke();
+  ctx.beginPath();ctx.arc(cx,cy,R,0,7);ctx.stroke();
+  if(constMode==="bpsk"){
+    ctx.fillStyle=cssv('--amber');
+    for(const s of[1,-1]){ctx.beginPath();ctx.arc(cx+s*R,cy,6,0,7);ctx.fill();}
+    ctx.fillStyle=cssv('--ink-faint');ctx.font="11px "+cssv('--mono');
+    ctx.fillText("bit 0",cx+R-10,cy-12);ctx.fillText("bit 1",cx-R-10,cy-12);
+    for(let i=0;i<60;i++){const b=(i%2);const bx=b?-1:1;const jitter=prefersReduce?0:0.10;
+      const ang=Math.sin(constPh*0.02+i)*jitter;const rr=1+Math.cos(constPh*0.03+i*1.7)*jitter;
+      const px=bx*Math.cos(ang)*rr,py=bx*Math.sin(ang)*rr;
+      ctx.fillStyle=b?cssv('--cyan'):cssv('--magenta');ctx.globalAlpha=0.5;
+      ctx.beginPath();ctx.arc(cx+px*R,cy+py*R,2,0,7);ctx.fill();}
+    ctx.globalAlpha=1;
+    ctx.fillStyle=cssv('--ink-dim');ctx.fillText("differential-BPSK across columns",cx-R*1.4,cy+R*1.4);
+  }else{
+    const seen=new Set();
+    for(let i=0;i<LUT.length;i++){const[re,im]=LUT[i];if(re===0&&im===0)continue;
+      const key=re.toFixed(2)+","+im.toFixed(2);const dup=seen.has(key);seen.add(key);
+      const mag=Math.hypot(re,im);const hue=colormap(mag/1.6);
+      ctx.fillStyle=`rgb(${hue[0]|0},${hue[1]|0},${hue[2]|0})`;ctx.globalAlpha=dup?0.5:1;
+      ctx.beginPath();ctx.arc(cx+re*R,cy-im*R,3.4,0,7);ctx.fill();}
+    ctx.globalAlpha=1;ctx.fillStyle=cssv('--ink-dim');ctx.font="11px "+cssv('--mono');
+    ctx.fillText("64-entry LUT · truncated prefix of 6 columns",cx-R*1.45,cy+R*1.45);
+  }
+}
+document.getElementById('constSeg').addEventListener('click',e=>{const bn=e.target.closest('button');if(!bn)return;
+  [...e.currentTarget.children].forEach(c=>c.classList.remove('on'));bn.classList.add('on');constMode=bn.dataset.m;drawConst();});
+registerLoop(constCanvas,()=>{constPh++;if(constMode==="bpsk"||constPh<2)drawConst();});
+
+/* Scene 3 — turbo (13,15) 8-state trellis */
+const trellisCanvas=document.getElementById('trellisCanvas');
+function rscNext(s,u){const r0=s&1,r1=(s>>1)&1,r2=(s>>2)&1;const a=u^r1^r2;const ns=a|(r0<<1)|(r1<<2);return ns;}
+let trPulse=0;
+function drawTrellis(){
+  const {ctx,w,h}=fitCanvas(trellisCanvas,300);ctx.clearRect(0,0,w,h);
+  const cols=6,padL=30,padR=14,padT=16,padB=16;
+  const cw=(w-padL-padR)/(cols-1),ch=(h-padT-padB)/7;
+  const X=c=>padL+c*cw, Y=s=>padT+s*ch;
+  ctx.font="10px "+cssv('--mono');ctx.fillStyle=cssv('--ink-faint');ctx.fillText("state ↓",2,10);
+  for(let c=0;c<cols-1;c++)for(let s=0;s<8;s++){
+    for(const u of[0,1]){const ns=rscNext(s,u);
+      const lit=((trPulse*0.02|0)%(cols-1))===c;
+      ctx.strokeStyle=u?cssv('--cyan'):cssv('--line');ctx.globalAlpha=u?0.85:0.5;
+      ctx.lineWidth=(lit&&u)?2:1;ctx.beginPath();ctx.moveTo(X(c),Y(s));ctx.lineTo(X(c+1),Y(ns));ctx.stroke();}}
+  ctx.globalAlpha=1;
+  for(let c=0;c<cols;c++)for(let s=0;s<8;s++){ctx.fillStyle=cssv('--amber');ctx.beginPath();ctx.arc(X(c),Y(s),2.6,0,7);ctx.fill();}
+  for(let s=0;s<8;s++){ctx.fillStyle=cssv('--ink-faint');ctx.fillText(s.toString(2).padStart(3,'0'),4,Y(s)+3);}
+  ctx.fillStyle=cssv('--ink-dim');ctx.fillText("input 0",padL,h-4);ctx.fillStyle=cssv('--cyan');ctx.fillText("input 1",padL+60,h-4);
+}
+registerLoop(trellisCanvas,()=>{trPulse++;drawTrellis();});
+
+/* Scene 3 — carrier occupancy */
+const carrierCanvas=document.getElementById('carrierCanvas');let carrierBW="500",carPh=0;
+function drawCarriers(){
+  const {ctx,w,h}=fitCanvas(carrierCanvas,150);ctx.clearRect(0,0,w,h);
+  const padL=32,padB=32,gw=w-padL-32,gh=h-padB-22;
+  const f2x=f=>padL+gw*(f/3000);
+  ctx.strokeStyle=cssv('--line-2');ctx.font="10px "+cssv('--mono');ctx.fillStyle=cssv('--ink-faint');
+  for(let f=0;f<=3000;f+=500){const x=f2x(f);ctx.beginPath();ctx.moveTo(x,8);ctx.lineTo(x,h-padB);ctx.stroke();ctx.fillText(f?f+"":"0",x+2,h-6);}
+  ctx.fillText("Hz",w-18,h-6);
+  if(carrierBW==="500"){
+    for(const [c,lab] of [[1350,"sub 0"],[1650,"sub 1"]]){const x=f2x(c);
+      const active=((carPh*0.03|0)%2===0)===(c===1350);
+      ctx.fillStyle=active?cssv('--amber'):cssv('--line');ctx.globalAlpha=active?1:0.5;
+      ctx.fillRect(x-5,8,10,gh);ctx.globalAlpha=1;ctx.fillStyle=cssv('--ink-dim');ctx.fillText(lab,x-12,h-6);}
+    const x=f2x(1500);ctx.fillStyle=cssv('--cyan');ctx.globalAlpha=0.5;ctx.fillRect(x-2,8,4,gh);ctx.globalAlpha=1;
+  }else{
+    const R=FIG.bw2300, lit=R.first_bin+((carPh*0.06|0)%R.span)*R.stride;
+    for(let b=R.first_bin;b<R.first_bin+R.span;b++){const x=f2x(b*R.hz_per_bin);const on=b===lit;
+      ctx.fillStyle=on?cssv('--amber'):cssv('--line');ctx.globalAlpha=on?1:0.45;
+      ctx.fillRect(x-2.6,on?8:8+gh*0.72,5.2,on?gh:gh*0.28);}
+    ctx.globalAlpha=1;ctx.fillStyle=cssv('--ink-dim');
+    ctx.fillText(`${R.span} bins · ${R.lo_hz}–${R.hi_hz} Hz · one lit per column`,f2x(700),22);
+  }
+}
+document.getElementById('carrierSeg').addEventListener('click',e=>{const bn=e.target.closest('button');if(!bn)return;
+  [...e.currentTarget.children].forEach(c=>c.classList.remove('on'));bn.classList.add('on');carrierBW=bn.dataset.b;drawCarriers();});
+registerLoop(carrierCanvas,()=>{carPh++;drawCarriers();});
+
+/* ===================================================================== */
+/*  Scene 4 — ARQ state row + session ladder                             */
+/* ===================================================================== */
+const STATES=["DISCONNECTED","LISTENING","CONNECTING","CONNECTED","DISCONNECTING"];
+(function(){const r=document.getElementById('stateRow');
+  STATES.forEach((s,i)=>{const d=document.createElement('span');d.className='st';d.dataset.i=i;d.textContent=s;r.appendChild(d);
+    if(i<STATES.length-1){const a=document.createElement('span');a.className='a';a.textContent='→';r.appendChild(a);}});
+})();
+const MB=FIG.mfsk.bursts;
+const LADDER=[
+  {from:"A",label:`connect-request  (MFSK, ${MB.CR.symbols} sym, ${MB.CR.seconds.toFixed(2)}s)`,st:2,c:"--amber"},
+  {from:"B",label:`connect-response  (MFSK, ${MB.RESP.symbols} sym, ${MB.RESP.seconds.toFixed(2)}s)`,st:2,c:"--amber"},
+  {from:"A",label:`link-setup + caller ID  (BW2300 rec3, ${FIG.bw2300.blocks_s.toFixed(2)}s)`,st:2,c:"--violet"},
+  {from:"B",label:"connected-ack  (MFSK)",st:3,c:"--amber"},
+  {from:"A",label:`DATA over  →  BUFFER ${FIG.bw500.payload_bytes}↓`,st:3,c:"--magenta"},
+  {from:"B",label:"ACK over  (~85ms turnaround)",st:3,c:"--good"},
+  {from:"A",label:`turn release  (${MB.RELEASE.symbols} sym, ${MB.RELEASE.seconds.toFixed(3)}s)`,st:3,c:"--cyan"},
+  {from:"B",label:"the peer's own over",st:3,c:"--magenta"},
+  {from:"A",label:`disconnect  (one ${MB.DISCONNECT.symbols}-symbol burst, ${MB.DISCONNECT.seconds.toFixed(3)}s, unanswered)`,st:4,c:"--ink-dim"}
+];
+const ladderCanvas=document.getElementById('ladderCanvas');let ladProg=0;
+function drawLadder(){
+  const {ctx,w,h}=fitCanvas(ladderCanvas,360);ctx.clearRect(0,0,w,h);
+  const laneA=w*0.16,laneB=w*0.84,padT=26;const rowH=(h-padT-14)/LADDER.length;
+  ctx.font="11px "+cssv('--mono');ctx.textAlign="center";
+  ctx.fillStyle=cssv('--amber-hi');ctx.fillText("initiator  A",laneA,16);
+  ctx.fillStyle=cssv('--cyan');ctx.fillText("responder  B",laneB,16);
+  ctx.strokeStyle=cssv('--line-2');ctx.lineWidth=1;
+  [laneA,laneB].forEach(x=>{ctx.beginPath();ctx.moveTo(x,padT-6);ctx.lineTo(x,h-8);ctx.stroke();});
+  const shown=prefersReduce?LADDER.length:Math.min(LADDER.length,Math.floor(ladProg));
+  let curState=0;
+  for(let i=0;i<shown;i++){const e=LADDER[i];const y=padT+i*rowH+rowH/2;
+    const x0=e.from==="A"?laneA:laneB, x1=e.from==="A"?laneB:laneA;
+    ctx.strokeStyle=cssv(e.from==='A'?'--signal':'--secondary');ctx.lineWidth=2;ctx.globalAlpha=(i===shown-1&&shown<LADDER.length)?0.6:1;
+    ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x1,y);ctx.stroke();
+    const dir=x1>x0?1:-1;ctx.beginPath();ctx.moveTo(x1,y);ctx.lineTo(x1-dir*8,y-4);ctx.lineTo(x1-dir*8,y+4);ctx.closePath();ctx.fillStyle=cssv(e.from==='A'?'--signal':'--secondary');ctx.fill();
+    ctx.globalAlpha=1;ctx.fillStyle=cssv('--ink-dim');ctx.textAlign="center";ctx.font="10px "+cssv('--mono');
+    ctx.fillText(e.label,(x0+x1)/2,y-6);
+    curState=e.st;
+  }
+  document.querySelectorAll('#stateRow .st').forEach(el=>el.classList.toggle('on',+el.dataset.i===curState));
+}
+registerLoop(ladderCanvas,()=>{ladProg+=0.03;if(ladProg>LADDER.length+8)ladProg=0;drawLadder();});
+
+/* ===================================================================== */
+/*  Numbers — every value cell reaches back into the generated block      */
+/* ===================================================================== */
+(function(){
+  const at=p=>p.split('.').reduce((o,k)=>o[k],FIG);
+  document.querySelectorAll('[data-fig]').forEach(el=>{el.textContent=String(at(el.dataset.fig));});
+  const R=FIG.bw2300;
+  document.getElementById('binSpan').textContent=`${R.first_bin}–${R.first_bin+R.span-1}`;
+  document.getElementById('releaseRow').textContent=
+    `${MB.RELEASE.symbols} symbols · ${MB.RELEASE.seconds.toFixed(3)} s`;
+  document.getElementById('discRow').textContent=
+    `${MB.DISCONNECT.symbols}-symbol · ${MB.DISCONNECT.seconds.toFixed(3)} s`;
+  document.getElementById('connectSeq').textContent=
+    `CR ${MB.CR.seconds.toFixed(2)}s → response ${MB.RESP.seconds.toFixed(2)}s `+
+    `→ link-setup rec3 ${R.blocks_s.toFixed(2)}s → connected-ack`;
+})();
+
+/* ===================================================================== */
+/*  Theme toggle + rail scroll-spy                                        */
+/* ===================================================================== */
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>location.reload());
+const railLinks=[...document.querySelectorAll('.rail a')];
+const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
+  railLinks.forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+e.target.id));}});},{rootMargin:"-40% 0px -55% 0px"});
+["air","handshake","ofdm","arq","numbers"].forEach(id=>{const s=document.getElementById(id);if(s)io.observe(s);});
+</script>
+
+
+<script>document.querySelectorAll('.page-contents a').forEach(a=>a.addEventListener('click',()=>{a.closest('details').open=false;}));</script>
+
+</html>

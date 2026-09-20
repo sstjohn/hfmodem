@@ -1,0 +1,57 @@
+# Home site: the kestrel loopback plus a sabir virtual-air pair, all on one
+# machine, no radio. The sabir pair rides simulated time — conformance and
+# plumbing only, no honest performance numbers until real-time pacing or M2
+# audio. Both modems are spawned on demand by creance.
+
+[site]
+name = "home"
+mycall = "N0CAL"
+results_dir = "results"
+
+[responder]
+pending_timeout_s = 30
+hello_timeout_s = 10
+max_session_s = 900
+on_plain_peer = "sink"
+
+[initiator]
+connect_timeout_s = 90
+max_session_s = 900        # hard cap on one session, campaigns included
+on_plain_peer = "disconnect"
+
+# One process fronts both sabir stations. python3 here is a placeholder for the
+# interpreter hfmodem is installed into; add `cwd` if your modem needs one.
+[spawn_group.sabir-pair]
+spawn = ["python3", "-m", "hfmodem.sabir.host.run_server", "--ports", "8320", "8330",
+         "--profile", "good", "--snr", "20", "--quiet"]
+
+[[modem]]
+name = "kestrel"
+cmd_port = 8300
+data_port = 8301
+spawn = ["python3", "-m", "hfmodem.kestrel.host.run_server", "--cmd-port", "8300", "--data-port", "8301",
+         "--iamalive-interval", "2", "--quiet"]
+bandwidth = "2300"
+compression = "OFF"
+rev = "loopback"
+
+[modem.quirks]
+iamalive_s = 2
+preconnect_queue = true
+
+# One CBOR socket per simulated station. No radio is used.
+[[modem]]
+name = "sabir-A"
+dialect = "hostapi"
+cmd_port = 8320
+data_port = 0
+spawn_group = "sabir-pair"
+sim_time = true
+
+[[modem]]
+name = "sabir-B"
+dialect = "hostapi"
+cmd_port = 8330
+data_port = 0
+spawn_group = "sabir-pair"
+sim_time = true
