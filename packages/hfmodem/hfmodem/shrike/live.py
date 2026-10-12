@@ -62,6 +62,9 @@ class RollingRx:
         # Set by a caller that does not have the cycle grid yet, and cleared the
         # moment it does; see rxfront.decode_events.
         self.acquiring = False
+        # A called station's callsign and CONIntegrity; see rxfront.decode_events.
+        self.mycall: str | None = None
+        self.strict = False
         self.fs = fs
         self.win = int(window_s * fs)
         self.slide = int((window_s - keep_s) * fs)
@@ -213,6 +216,7 @@ class RollingRx:
         with gil.breathing():
             for ev in rxfront.decode_events(seg, cs_max_errors=self.cs_max_errors,
                                             acquiring=self.acquiring,
+                                            mycall=self.mycall, strict=self.strict,
                                             p3_envelope=False,
                                             p3_packets=read_p3,
                                             p3_packets_after=(None if self._p3_packets_after is None
@@ -241,13 +245,15 @@ def _print_event(ev) -> None:
 
 
 def listen(on_event, *, device=None, fs: int = rxfront.FS,
-           window_s: float = WINDOW_S, keep_s: float = KEEP_S, stop=None) -> None:
+           window_s: float = WINDOW_S, keep_s: float = KEEP_S, stop=None,
+           mycall: str | None = None, strict: bool = False) -> None:
     """Stream the audio device through RollingRx until `stop` is set (Ctrl-C)."""
     import queue
     import sounddevice as sd
 
     q: queue.Queue = queue.Queue()
     rx = RollingRx(on_event, fs=fs, window_s=window_s, keep_s=keep_s)
+    rx.mycall, rx.strict = mycall, strict
 
     def cb(indata, frames, time_info, status):
         q.put(indata[:, 0].copy())
@@ -284,11 +290,13 @@ def main() -> int:
             host.on_rx_event(ev)
         on_ev = on_event
     else:
+        host = None
         print("# shrike live monitor", flush=True)
         on_ev = _print_event
 
     try:
-        listen(on_ev, device=args.device)
+        listen(on_ev, device=args.device, mycall=host and host.mycall,
+               strict=bool(host and host.arq.cfg.conintegrity))
     except KeyboardInterrupt:
         pass
     return 0

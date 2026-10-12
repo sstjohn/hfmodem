@@ -79,15 +79,15 @@ def test_unsupported_or_inconsistent_geometry_remains_unconfirmed(mutation):
     assert hs.state == VA.VaraState.DISCONNECTED
 
 
-def test_lower_record_does_not_accept_the_base_records_clipped_tail():
-    from .test_head_cut_continue import recorded, pending as base_pending
+def test_lower_record_accepts_the_base_records_clipped_tail():
+    # Stock's hold ACK at records 0 and 100 is frame 0 of the answer stream,
+    # the base record's continue  [data-ack-pairs-0919].
+    from .test_head_cut_continue import recorded
     hs, io = sender(2)
     hs._tx_pending = phy.vara_body(b'x' * 22, hs.caller, tail=0x89, body_len=23), 2, 101
     hs._txq = [b'last']
     x = recorded('night-caller-over2')
-    base, _ = base_pending()
-    assert base._peer_head_cut_continue(x, VA._top3_track(x, band=base._band))
-    assert not hs._peer_head_cut_continue(x, VA._top3_track(x, band=hs._band))
+    assert hs._peer_head_cut_continue(x, VA._top3_track(x, band=hs._band))
 
 
 FIXTURES = Path(__file__).with_name('fixtures') / 'lower-answer-recovery'

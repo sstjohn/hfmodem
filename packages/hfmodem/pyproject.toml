@@ -4,31 +4,34 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hfmodem"
-version = "0.1.0"
-description = "Four HF softmodems — PACTOR-1/2/3, VARA, ARDOP and sabir — and one station process that owns the radio."
+version = "0.2.0"
+maintainers = [{ email = "hfmodem@ssj.lol" }]
+description = "Experimental HF modems, receive monitors and shared radio station tools."
 # Inline, not a file path: this package directory carries no README.md, and
 # `readme = "README.md"` quietly built wheels whose long description was empty
 # -- a blank PyPI page. The text lives here so the metadata cannot dangle.
 readme = { content-type = "text/markdown", text = """
-Four HF softmodems — **shrike** (PACTOR-1/2/3, the waveform published as
-ITU-R M.1798), **kestrel** (VARA), **besra** (ARDOP) and **sabir** (a
-clean-sheet protocol) — and one station process that owns the radio: the
-PTT-keyed transceiver, the sound card, and the host ports mail clients speak.
+HF softmodems — **shrike** (PACTOR-1/2/3), **kestrel** (VARA), **besra**
+(ARDOP), **sabir**, **lanner** (RTTY, SITOR-B and NAVTEX), **brubru**
+(Robust Packet) and **bateleur** (military waveforms, ALE and selcall) — with
+shared station control, host ports and operator tools.
 
 Everything runs from recordings with no radio attached, and `transmit = false`
 in the station file is a hard interlock.
 
 Outbound mail delivery is confirmed over PACTOR-3, VARA and ARDOP.
-PACTOR-1 has received gateway mail. All four modems remain pre-alpha;
-the project README records the tested paths and remaining limits.
+PACTOR-1 has received gateway mail. This is an experimental prerelease for
+developers only; do not rely on it for any purpose, especially emergency
+communications. The project README records tested paths and remaining limits.
 """ }
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 license = "AGPL-3.0-only"
 # NOTICE is a licence file, not a courtesy: besra reproduces parts of ardopcf,
 # whose MIT terms require the copyright and permission notice to travel with every
 # copy, and NOTICE is the only place that text exists.
 license-files = ["LICENSE", "NOTICE"]
-keywords = ["ham radio", "winlink", "hf", "modem", "arq", "pactor", "vara", "ardop"]
+keywords = ["ham radio", "winlink", "hf", "modem", "arq", "pactor", "vara", "ardop",
+            "mil-std-188-110", "stanag-4285"]
 # No `License ::` classifier: PyPI rejects metadata carrying both that and the
 # License-Expression the SPDX string above produces.
 classifiers = [
@@ -39,7 +42,7 @@ classifiers = [
 # hfhost supplies the config primitives and the client the station probes itself
 # through. The dependency runs one way only and tests/gates/test_import_direction.py
 # enforces it: hfhost must stay able to drive a modem it knows nothing about.
-dependencies = ["hfhost>=0.0.1", "numpy>=1.24", "scipy>=1.10"]
+dependencies = ["hfhost>=0.2.0", "creance>=0.2.0", "numpy>=1.24", "scipy>=1.10", "sounddevice>=0.4", "pyserial>=3.5"]
 
 [project.urls]
 Homepage = "https://hfmodem.ssj.lol"
@@ -47,8 +50,10 @@ Source = "https://github.com/sstjohn/hfmodem"
 Issues = "https://github.com/sstjohn/hfmodem/issues"
 
 [project.optional-dependencies]
-# The sound card. Everything else runs on recordings.
-radio = ["sounddevice>=0.4"]
+# Kept for existing installation commands; sound-card support is installed by default.
+radio = []
+# Optional logbook certificate signing.
+operator = ["cryptography>=42"]
 dev = ["pytest>=7", "ruff>=0.5"]
 
 [project.scripts]
@@ -61,12 +66,10 @@ include = ["hfmodem*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-# One entry, and it is the whole of what this project ships as data. Every table
-# shrike and kestrel's receivers use is computed at the point of use by
-# `shrike/tablegen.py` and `kestrel/rx/tablegen.py`; the two that no formula
-# reaches are integers written out as literals in the latter. What is left is the
-# BW500 synthesis pulse, which is a deconvolution of recorded audio -- a
-# measurement, not a derivation, so there is nothing to compute it from.
+"hfmodem.shrike" = ["assets/c2-*.swaps.z"]
+"hfmodem.shrike.c2proof" = ["cml_generate.c", "upstream/srandom.h", "NOTICE.md", "COPYING.LESSER"]
+# The pulse is a separately cleared measurement. P4 uses the approved exact
+# replay swaps above; its original constructor is an offline proof tool.
 "hfmodem.kestrel.tx" = ["assets/*.npz"]
 
 [tool.pytest.ini_options]

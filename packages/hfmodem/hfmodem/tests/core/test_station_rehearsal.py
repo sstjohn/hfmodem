@@ -374,7 +374,7 @@ def test_the_key_brackets_the_burst_at_both_edges(bench, ahead, lead_lo, lead_hi
 def test_the_identification_reaches_the_card_as_audio(bench):
     """A callsign nobody transmitted looks exactly like the incident it explains.
 
-    §97.119 is discharged by RF, not by a line in the log, and an identification
+    An identification has to reach RF, not just a line in the log, and an identification
     whose audio never reached the card would present as several seconds of keyed
     transmitter carrying nothing — which is what the operator reported on
     2026-07-28 and what nothing on the bench has yet accounted for. So the
@@ -519,12 +519,12 @@ def test_the_lanes_are_flushed_past_the_stations_own_carrier(bench):
 def test_a_refused_burst_never_reaches_the_keying_line(bench):
     """The gate is only a gate if the transmitter stays cold behind it.
 
-    A 4 kHz emission is refused by §97.307(f)(3) inside `Rig.key`, after the
+    A 4 kHz emission exceeds the part97 profile ceiling inside `Rig.key`, after the
     arbiter has already armed the audio — so the refusal has to reach the card as
     well as the caller. Nothing may be keyed and nothing may be converted.
     """
     b = bench(profile=Part97(licence="general"))
-    with pytest.raises(Refused, match="97.307"):
+    with pytest.raises(Refused, match="part97 bandwidth"):
         b.arb.submit(b.request(tone(1000.0, 1.0),
                                emission=centred(7_100_000, 4000.0)))
     time.sleep(0.05)

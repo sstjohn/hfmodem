@@ -21,8 +21,14 @@ def receiving(protocol=spec.Protocol.PACTOR3):
 def test_exhausted_budget_does_not_key_fallback_after_refused_qrt(refuse_controls):
     a, io = receiving()
     io.refuse_ack = refuse_controls
-    for _ in range(a.cfg.max_retries + 1):
+    # This close requires a current supported peer that remains CRC-less for
+    # the approved 96-short-tick budget. Naked ticks now enter quiet RX.
+    ticks = a.cfg.max_retries + 1 if refuse_controls else arq.P3_CRC_WAIT_TICKS
+    for _ in range(ticks):
+        token = a.begin_receive_opportunity()
+        assert a.qualify_peer(token, a._link_generation, "unit-short-header")
         a.on_cycle()
+        a.finish_receive_opportunity(token)
     assert a._qrt_pending and a._budget_goodbye
     io.events.clear()
     a.on_cycle()
@@ -79,3 +85,26 @@ def test_crc_repeats_do_not_spend_the_silence_budget():
         a.on_cycle()
     assert a.state == arq.State.CONNECTED
     assert not a._qrt_pending and not a._budget_goodbye
+
+
+def test_unqualified_budget_exhaustion_is_quiet_without_a_qrt():
+    a, io = receiving()
+    queued = bytes(range(8))
+    a.on_host_data(queued)
+    acked = a.tx_acked_bytes
+    for _ in range(arq.P3_DARK_WINDOWS):
+        token = a.begin_receive_opportunity()
+        a.on_cycle()
+        a.finish_receive_opportunity(token)
+    assert a.p3_receive_only and a.state == arq.State.CONNECTED
+    assert not a._qrt_pending and not a._budget_goodbye
+    before = list(io.events)
+    for _ in range(arq.P3_CRC_WAIT_TICKS - arq.P3_DARK_WINDOWS):
+        token = a.begin_receive_opportunity()
+        a.on_cycle()
+        a.finish_receive_opportunity(token)
+    assert a.state == arq.State.DISCONNECTED
+    assert io.events == before
+    assert a.tx_acked_bytes == acked
+    assert a.transfer_unconfirmed["suffix"] == queued
+    assert not a.said_goodbye and not a._qrt_pending

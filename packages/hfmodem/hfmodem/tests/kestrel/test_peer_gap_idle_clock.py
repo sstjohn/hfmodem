@@ -94,7 +94,7 @@ def test_retained_n5tw_prompt_survives_idle_tick_while_window_end_is_pending():
         "20323032362d30392d31302030343a3030205554437d0d0a5b574c324b2d352e302d4232"
         "465749484a4d245d0d3b50513a2037313181"),)
     hs._last_window_complete = True
-    hs._reack_frame = VA.OVER_CONTINUE_CAPTURED
+    hs._reack_frame = VA.OVER_CONTINUE_BURST
     hs._reacks = 2
     hs._keyed_on_peer_burst = True
     hs.idle_keyed = 2

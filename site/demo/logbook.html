@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Public recordings · hfmodem logbook</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="logbook-ui.css?v=public-six-1">
+<script src="embedded-theme.js?v=public-six-1"></script>
+<script defer src="accessibility.js?v=public-six-1"></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to recorded sessions</a>
+<header aria-label="Recorded logbook">
+<h1>Logbook <span>W9SSJ · public recordings</span></h1>
+<div class="counts" id="counts"></div>
+<span class="snapshot-note">Six curated exchanges · read only</span>
+</header>
+<div class="controls" role="region" aria-label="Logbook filters and view">
+<button class="view-button" id="bookView" aria-pressed="true" aria-controls="bookViewPanel">Recorded sessions</button>
+<button class="view-button" id="summaryView" aria-pressed="false" aria-controls="summary">Summary</button>
+<label>Station <select id="peer"><option value="">All stations</option></select></label>
+<label>Mode <select id="protocol"><option value="">All modes</option></select></label>
+<label>Role <select id="role"><option value="">Send and receive</option><option>Send</option><option>Receive</option></select></label>
+<label>Band <select id="band"><option value="">All bands</option></select></label>
+<label>Search call <input type="search" id="search" autocomplete="off" spellcheck="false"></label>
+<button class="filter-more" id="moreFilters" aria-expanded="false" aria-controls="extraFilters">More filters</button>
+<button class="filter-more" id="reset">Reset filters</button>
+</div>
+<div class="extra-filters" id="extraFilters" role="region" aria-label="Date filters" hidden>
+<label>From <input type="date" id="since"></label>
+<label>Through <input type="date" id="until"></label>
+<span>Dates and times are UTC.</span>
+</div>
+<p id="loadStatus" class="book-count-note" role="status">Loading the six approved recordings…</p>
+<button id="retry" class="retry" hidden>Retry loading recordings</button>
+<main id="main" tabindex="-1">
+<section id="bookViewPanel" aria-label="Recorded sessions">
+<div class="book" role="region" aria-label="Recorded sessions table" tabindex="0">
+<table>
+<caption>Selected Winlink mail exchanges. Open station details for the evidence and limitations.</caption>
+<thead><tr>
+<th scope="col" aria-sort="descending"><button class="sort-column" data-sort="startedUtc">UTC</button></th>
+<th scope="col"><button class="sort-column" data-sort="peer">Station</button></th>
+<th scope="col"><button class="sort-column" data-sort="protocol">Mode</button></th>
+<th scope="col">Role</th>
+<th scope="col"><button class="sort-column" data-sort="band">Band</button></th>
+<th scope="col">Recorded speed</th>
+<th scope="col">Mail result</th>
+<th scope="col">Replay</th>
+</tr></thead>
+<tbody id="rows"></tbody>
+</table>
+</div>
+<p id="empty" class="empty" hidden>No recordings match these filters.</p>
+<div class="details-list" id="details"></div>
+</section>
+<section id="summary" aria-labelledby="summaryTitle" hidden>
+<h2 id="summaryTitle">Mail summary</h2>
+<p class="report-note">Counts use the current filters. These six examples were selected to show mail transfers; they are not a sample for estimating gateway reliability. Sent mail and separately confirmed destination delivery are counted separately.</p>
+<div id="reportCards" class="report-cards"></div>
+<div class="report-table" role="region" aria-label="Summary by mode" tabindex="0">
+<table><caption>Mail outcomes by mode within the current filters</caption>
+<thead><tr><th scope="col">Mode</th><th scope="col">Exchanges</th><th scope="col">Sent</th><th scope="col">Received</th><th scope="col">Destination receipts</th></tr></thead>
+<tbody id="reportModes"></tbody></table>
+</div>
+</section>
+</main>
+<footer class="book-count-note">
+<p>Open a session’s inspector for packet timing, decoded bytes and available audio.</p>
+<a href="../examples/logbook/#data-loss" target="_blank" rel="noopener">Data-loss incident and surviving evidence</a> ·
+<a href="../examples/" target="_blank" rel="noopener">About the recordings</a>
+</footer>
+<script type="module" src="public-logbook.mjs?v=public-six-1"></script>
+</body>
+</html>

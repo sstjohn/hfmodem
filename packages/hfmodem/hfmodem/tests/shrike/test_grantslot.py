@@ -156,7 +156,12 @@ def _log(tmp: Path, *flags: str, grant: bool = True) -> str:
     wav = tmp / f"peer{'-grant' if grant else ''}.wav"
     if not wav.exists():
         _peer_wav(wav, slots=16, grant=grant)
-    return _run(wav, tmp / "out", *flags)
+    outdir = tmp / "out"
+    number = 1
+    while outdir.exists():
+        outdir = tmp / f"out-{number}"
+        number += 1
+    return _run(wav, outdir, *flags)
 
 
 def _session(tmp: Path, *flags: str, grant: bool = True) -> list[tuple[str, str]]:

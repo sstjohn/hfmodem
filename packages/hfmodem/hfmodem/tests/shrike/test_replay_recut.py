@@ -255,11 +255,14 @@ def _changeover(host: PtcHost, times: int) -> None:
         arrives(host, CHANGEOVER_SL, 0x00, CHANGEOVER_FIELD, breakin=True)
 
 
-def test_a_repeated_changeover_packet_draws_a_gear_on_the_fourth():
-    """18:49's stall, with the flag the 18:37 arm flew."""
+def test_a_repeated_changeover_packet_never_draws_a_gear():
+    """18:49's stall: the repeat gear declines to count a break-in, so four
+    copies of the changeover packet draw four plain acknowledgements and the
+    role still turns over to IRS."""
     host, seam = linked(role=arq.ISS, repeat_gear=3)
     _changeover(host, 4)
-    assert seam.words == [arq.CS_ACK] * 3 + [arq.CS_SPEED_UP]
+    assert seam.words == [arq.CS_ACK] * 4
+    assert arq.CS_SPEED_UP not in seam.words
     assert host.arq.role == arq.IRS
 
 
@@ -276,11 +279,3 @@ def test_the_flag_at_zero_answers_every_changeover_repeat_with_CS1():
     _changeover(host, 12)
     assert seam.words == [arq.CS_ACK] * 12
     assert arq.CS_SPEED_UP not in seam.words
-
-
-def test_the_gear_run_restarts_behind_its_own_request():
-    """A gateway that goes on repeating is asked again, not asked every cycle."""
-    host, seam = linked(role=arq.ISS, repeat_gear=3)
-    _changeover(host, 8)
-    assert seam.words.count(arq.CS_SPEED_UP) == 2
-    assert seam.words[3] == seam.words[7] == arq.CS_SPEED_UP

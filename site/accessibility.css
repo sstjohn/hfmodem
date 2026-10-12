@@ -1,0 +1,50 @@
+/* Shared access rules apply to every theme and to generated source pages. */
+:focus-visible { outline:3px solid var(--ink, #242522)!important; outline-offset:4px!important; }
+main:focus { outline:none; }
+.skip { position:fixed!important; left:1rem; top:-10rem!important; z-index:1000!important;
+  padding:1rem!important; background:var(--bg, #fff); color:var(--ink, #111); border:2px solid currentColor; }
+.skip:focus { top:1rem!important; }
+button,select,input:not([type=checkbox]):not([type=radio]),summary { min-height:44px; }
+button,select,summary { touch-action:manipulation; }
+input[type=checkbox],input[type=radio] { width:1.25rem; height:1.25rem; vertical-align:middle; }
+label:has(input[type=checkbox]),label:has(input[type=radio]) { display:inline-flex; align-items:center; gap:.5rem; min-height:44px; }
+summary { cursor:pointer; padding-block:.5rem; }
+nav a { display:inline-flex; align-items:center; min-height:44px; }
+header,nav,footer { flex-wrap:wrap; }
+.keyboard-preferences { flex-basis:100%; font:14px/1.6 Arial,Helvetica,sans-serif; padding:1rem 0; }
+.keyboard-preferences label { color:inherit; }
+.keyboard-preferences form { display:flex; gap:.75rem; align-items:center; flex-wrap:wrap; margin-top:1rem; }
+.keyboard-preferences input[type=text] { font:inherit; max-width:100%; }
+.keyboard-preferences p { flex-basis:100%; }
+.table-wrap,.table-scroll,.tbl-scroll,.spectrum-scroll,.scroll,pre { max-width:100%; }
+.table-wrap { overflow:auto; }
+[tabindex="0"] { scroll-margin-block:7rem; }
+a { text-underline-offset:.2em; }
+p a,li a,td a,.sourcebar a,.example-footer a { text-decoration:underline; }
+@media(max-width:600px) {
+  .masthead nav,.site-global-nav,.site-nav { flex-wrap:wrap; gap:.5rem 1rem; }
+  .transport,.panelhead,.buildbar,.packetheading,.packetfooter { flex-wrap:wrap; }
+  .transport > *,select,input { max-width:100%; }
+  #events button { flex-wrap:wrap; gap:.5rem; }
+  #events small { margin-left:0; }
+  #ladder { margin-inline:0; padding-inline:0; }
+  #ladder button { grid-template-columns:1fr; }
+  #ladder small { grid-column:1; }
+  #anatomyParts { flex-wrap:wrap; }
+  #anatomyParts button { flex:1 1 120px!important; white-space:normal; }
+  #anatomyCursor { display:none; }
+  dl { grid-template-columns:minmax(0,1fr) minmax(0,2fr); }
+}
+@media(prefers-reduced-motion:reduce) {
+  *,*::before,*::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; }
+}
+@media(forced-colors:active) {
+  :focus-visible { outline-color:Highlight!important; }
+  button.selected,[aria-pressed=true] { border:3px solid Highlight!important; }
+  .receiver,.linkstate { background:Canvas; }
+}
+[aria-disabled=true] { cursor:default; }
+button[aria-disabled=true] { color:var(--muted, var(--ink-dim, #62635d)); }
+p,li,dd,a,caption,h1,h2,h3 { overflow-wrap:anywhere; }
+.csbits,.tblwrap { max-width:100%; overflow-x:auto; }
+td,th { overflow-wrap:anywhere; }

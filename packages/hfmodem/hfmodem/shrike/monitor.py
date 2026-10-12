@@ -33,7 +33,8 @@ from . import compress, p2rx, pactor2, rxfront, spec
 
 _TAG = {"connect": "CONNECT", "cs": "CS", "packet": "HEADER",
         "detect": "P2-PAIR", "fsk": "P1-FSK", "p1reply": "P1-BURST",
-        "unassigned": "SPARE-CS", "callb": "CALL-B"}
+        "unassigned": "SPARE-CS", "callb": "CALL-B", "word": "P4-WORD", "body": "P4-BODY",
+        "short": "P4-SHORT", "long": "P4-LONG", "normal": "P4-NORMAL", "chirp": "P4-CHIRP"}
 """Display name per `rxfront.EVENT_KINDS`. Two of these deliberately do not match
 their kind: `p1reply` reads P1-BURST and `detect` reads P2-PAIR, because the kinds
 are a published interface that cannot be renamed cheaply while the tag is what an
@@ -63,10 +64,14 @@ class _Text:
     Only where it reads as text: an 8-bit-mode field can carry binary (a
     Winlink B2F transfer), and dumping that helps nobody. A pure idle fill
     decodes to nothing and prints nothing.
+
+    Supervisor blocks are read off the stream as the PTC's listen mode reads
+    them: a `B` is the sender's call, `<<ID: DL0WAA>>` (Z80 PTC manual, LCall).
     """
 
     def __init__(self):
         self._dec = compress.Decoder()
+        self._si = compress.Supervisor()
         self._last = None
 
     def lines(self, ev) -> list[str]:
@@ -76,16 +81,25 @@ class _Text:
         if not (ok and payload) or (status, payload) == self._last:
             return []
         self._last = (status, payload)
-        dt = (status >> 2) & 0x7
-        data = self._dec.feed(payload, dt)
+        dt = (status >> 2) & (0b11 if ev.protocol == spec.Protocol.PACTOR1
+                              else 0b111)
+        data = self._si.feed(self._dec.feed(payload, dt, ev.protocol))
+        blocks = [f"{'':7s}  {'SI':8s} " + _supervisor_text(*block)
+                  for block in self._si.blocks]
+        self._si.blocks.clear()
         printable = sum(32 <= b < 127 or b in (9, 10, 13) or b >= 128
                         for b in data)
         if not data or printable < 0.9 * len(data):
-            return []
+            return blocks
         tag = compress.MODE_NAMES.get(dt, f"type {dt}")
         body = data.decode("cp437").replace("\r\n", "\n").replace("\r", "\n")
         return [f"{'':7s}  {'TEXT':8s} [{tag}] {line}"
-                for line in body.split("\n")]
+                for line in body.split("\n")] + blocks
+
+
+def _supervisor_text(code: str, params: bytes) -> str:
+    text = params.decode("cp437")
+    return f"<<ID: {text}>>" if code == "B" else f"supervisor: {code} {text}".rstrip()
 
 
 def _p2_data_events(audio) -> list[rxfront.Event]:

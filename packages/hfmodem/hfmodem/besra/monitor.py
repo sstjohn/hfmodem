@@ -33,13 +33,14 @@ from pathlib import Path
 
 import numpy as np
 
+from ..core import wav
 from ..core.rates import CARD_RATE_HZ, to_native
 from .frame import frame as F
 from .phy.demodulator import SAMPLE_RATE, DecodedFrame, Demodulator
 
 
 def _load_wav(path: str) -> np.ndarray:
-    with wave.open(path) as w:
+    with wave.open(wav.source(path)) as w:
         if w.getframerate() != SAMPLE_RATE or w.getnchannels() != 1:
             raise SystemExit(f"{path}: need 12 kHz mono, got "
                              f"{w.getframerate()} Hz / {w.getnchannels()} ch")
@@ -182,9 +183,9 @@ class LiveMonitor:
         self.pump()                              # whatever the last cadence left queued
         self._rolling.flush()                    # the tail the step cadence never reached
         self._wav.close()
-        self._path.with_suffix(".json").write_text(
-            json.dumps(self._sidecar(), indent=2) + "\n")
-        print(f"# recorded {self._n / self._rate:.1f} s to {self._path.name}  "
+        kept = self._sidecar() | wav.store(self._path)
+        self._path.with_suffix(".json").write_text(json.dumps(kept, indent=2) + "\n")
+        print(f"# recorded {self._n / self._rate:.1f} s to {kept['wav']}  "
               f"peak {_dbfs(self.level.peak):.1f} dBFS  rms {_dbfs(self.level.rms):.1f} dBFS  "
               f"railed {self.level.railed_pct:.3f}%  frames {self._frames}\n"
               f"# {self._rolling.funnel}", flush=True)

@@ -35,8 +35,11 @@ spec/01 §2300.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
+from ..arq import phy as _phy
 from ..coding.crc import crc16_genibus
 from ..rx import varahf500 as _rx500
 from ..rx import varahf2300 as _rx
@@ -74,21 +77,27 @@ LINK_SETUP_BW = frozenset(_vf.LINK_SETUP_BODY)
 
 
 def link_setup_tx(caller_callsign: str, over: int = 0,
-                  bw: str = "2300", level: int = 4) -> np.ndarray:
+                  bw: str = "2300", level: int = 4, ask: int = 4,
+                  grade: int = 0x80, high_speed: bool = False,
+                  lead: _tx.VB6Rnd | None = None,
+                  compression: str = "OFF") -> np.ndarray:
     """Render caller identity at the offer's host speed level (1..4).
 
     ``level`` is the host speed, unlike ``data_over_tx``'s record index.
     The default preserves the established level-4 waveform at each bandwidth.
+    ``lead`` is the session's lead stream  [see data_over_tx].
     """
-    frame = _vf.link_setup_frame(caller_callsign, bw, level)
+    frame = _vf.link_setup_frame(caller_callsign, bw, level, ask, grade, high_speed, compression)
     if str(bw) == "500":
         return _tx500.synth_burst(frame, onset=ONSET_500, ncol=_NCOL_500,
-                                  level=level)
-    return _tx.synth_frame(frame, _rx.BASE_LEVELS[str(bw)] - 4 + level, over)
+                                  level=level, lead=lead)
+    return _tx.synth_frame(frame, _rx.BASE_LEVELS[str(bw)] - 4 + level,
+                           over if lead is None else lead)
 
 
-def data_over_tx(body: bytes, over: int = 0, level: int = _rx.BASE_LEVEL,
-                 bw: str = "2300") -> np.ndarray:
+def data_over_tx(body: bytes | Sequence[bytes], over: int = 0,
+                 level: int = _rx.BASE_LEVEL, bw: str = "2300",
+                 lead: _tx.VB6Rnd | None = None) -> np.ndarray:
     """Synthesize one DATA over carrying one speed level's VARA body.
 
     The same burst as the link-setup at either bandwidth, so this is
@@ -100,16 +109,27 @@ def data_over_tx(body: bytes, over: int = 0, level: int = _rx.BASE_LEVEL,
     records 4 (legacy alias 3), 2, 1 or 0 respectively. ``over`` does not
     reach its waveform, which carries no per-over preamble stream.
 
+    Several bodies make one burst of several frames, which a BW500 sender keys
+    at its base record once a delivery has run six single overs.
+
+    ``lead`` is the session's lead stream, owned by the ARQ: each renderer
+    draws its row's lead from it, advancing it by the row's cost (12 at the
+    wideband L4 preamble, 18 at BW500's, 9 per band at a tone row, lead x
+    carriers x frames at an OFDM row), and ``over`` is then unused. A record
+    above the base one is a host level above 4, keyed by its family
+    [see arq.phy.render_level], and it needs the stream.
+
     The CRC-16 trailer is appended here so a caller only ever handles the body
     (``arq.phy.vara_body`` builds one)."""
-    b = bytes(body)
-    frame = b + crc16_genibus(b).to_bytes(2, "big")
+    bodies = [bytes(body)] if isinstance(body, (bytes, bytearray)) else list(body)
+    if level not in (_BW500_RECORDS if str(bw) == "500" else _rx.RECORDS):
+        return _phy.render_level(bodies, bw, _phy.host_level(bw, level), lead)
+    frames = [b + crc16_genibus(b).to_bytes(2, "big") for b in bodies]
     if str(bw) == "500":
-        if level not in _BW500_RECORDS:
-            raise ValueError(f"unsupported BW500 DATA record {level}")
-        return _tx500.synth_burst(frame, onset=ONSET_500, ncol=_NCOL_500,
-                                  level=_BW500_RECORDS[level])
-    return _tx.synth_frame(frame, level, over)
+        return _tx500.synth_burst(frames if len(frames) > 1 else frames[0],
+                                  onset=ONSET_500, ncol=_NCOL_500,
+                                  level=_BW500_RECORDS[level], lead=lead)
+    return _tx.synth_frame(frames[0], level, over if lead is None else lead)
 
 
 def link_setup_rx(samples: np.ndarray, tries: int = 6,
@@ -132,6 +152,13 @@ def link_setup_rx(samples: np.ndarray, tries: int = 6,
     Validated at both bandwidths on real captured VARA link-setup overs (the
     recovered caller matches the recording station's) and on kestrel's own TX
     round-trip."""
+    frame = link_setup_read(samples, tries, bw)
+    return None if frame is None else _vf.caller_from_link_setup(frame)
+
+
+def link_setup_read(samples: np.ndarray, tries: int = 6,
+                    bw: str = "2300") -> bytes | None:
+    """The link-setup frame :func:`link_setup_rx` reads the caller from, or None."""
     x = np.asarray(samples, float)
     if str(bw) == "500":
         spans = _rx500.burst_spans(x)
@@ -143,4 +170,4 @@ def link_setup_rx(samples: np.ndarray, tries: int = 6,
                              level=_rx.BASE_LEVELS[str(bw)])
     if not fr.crc_ok or not _vf.is_link_setup(fr.frame_bytes):
         return None
-    return _vf.caller_from_link_setup(fr.frame_bytes)
+    return bytes(fr.frame_bytes)

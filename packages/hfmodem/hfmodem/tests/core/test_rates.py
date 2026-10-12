@@ -191,7 +191,7 @@ def test_the_two_capture_paths_answer_alike_on_identical_data(seconds):
     core = StationAudio.__new__(StationAudio)
     core._fit = pts
     shrike = _LiveInput.__new__(_LiveInput)
-    shrike._fit, shrike.fs = pts, CARD_RATE_HZ
+    shrike._fit, shrike._fits, shrike.fs = pts, [], CARD_RATE_HZ
 
     assert core.clock_ppm()[0] == shrike.clock_ppm()
     assert abs(shrike.clock_ppm() + 4860.0) < 2.0, shrike.clock_ppm()

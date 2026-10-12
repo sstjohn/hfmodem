@@ -30,7 +30,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hfmodem.tests import evidence
+from hfmodem.tests import d_evidence as E
 from hfmodem.tests.kestrel import corpora
 from hfmodem.besra import radio as R
 from hfmodem.besra.arq import session as S
@@ -389,8 +389,8 @@ def test_the_repeats_are_folded_through_the_rolling_windows():
 #: `JWKY65C2OZES`: the gateway's BREAK to its first IDLE. Everything this station
 #: keyed inside it is a bodyless control, which the memory takes no key from, so
 #: the slice reproduces what the whole 302 s replay does at a ninth of the cost.
-_W6IDS = evidence.LOGS / "onair" / "20260829T185417Z-besra-7060000.wav"
-_W6IDS_LOG = evidence.WORKING / "onair-0829-1354" / "ardop-day-03-w6ids-third.log"
+#: The surviving tap is sliced at +273 s for 400 s, preserving this stint's zero.
+_W6IDS_LOG = "ardop-day-03-w6ids-third.log"
 _STINT = (140.0, 212.0)
 
 
@@ -406,11 +406,14 @@ def _muted_stint() -> list[bytes]:
     """
     rehear = corpora.harness("rehear.besra")
     sessionlog = corpora.harness("rehear.sessionlog")
-    card = rehear._capture(_W6IDS)
+    card = E.card(E.PROPOSAL)
     edges, _, level = rehear._key_edges(rehear.from_card(card, SAMPLE_RATE))
-    log = sessionlog.read(_W6IDS_LOG)
+    log = sessionlog.read(E.log(_W6IDS_LOG))
     where = sessionlog.align(log, [a for a, _ in edges],
                              rehear._quieter(level, log.keyed))
+    assert where.anchors == 63 and where.corroborated == 62, str(where)
+    assert where.offset == pytest.approx(1.338, abs=0.01), str(where)
+    assert where.residual < 0.01, str(where)
     keyed = rehear._merge(sorted(rehear._on_this_recording(
         log.keyed, where.offset, card.size / R.FS_RADIO)))
 
@@ -452,13 +455,13 @@ def test_a_block_the_peer_moved_on_from_is_not_put_back_into_the_next_one():
     because the `.E` between the two was acquired out of order and reached
     `keep()` behind a frame that had already been reported.
 
-    The run this recording can show ends at the address: the station acknowledged
-    the invented block, so W6IDS never resent the real one and the subject is not
-    in the file under any decode.
+    The surviving tap delivers five unique blocks with the same proposal prefix.
+    Its different receive path can read more than the lost rig capture; the pin
+    here is the prefix and absence of a repeated block, not the old recording's
+    unreadable subject.
     """
-    if not (_W6IDS.is_file() and _W6IDS_LOG.is_file()):
-        pytest.skip(f"{_W6IDS.name} or its transcript is not in this checkout")
     blocks = _muted_stint()
+    assert len(blocks) == 5, blocks
     assert len(set(blocks)) == len(blocks), f"a block was delivered twice: {blocks}"
     assert b"".join(blocks).startswith(
         b";PM: W9SSJ JWKY65C2OZES 524 saul.stjohn@gmail.co"), blocks

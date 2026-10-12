@@ -199,26 +199,33 @@ def test_a_recovered_turn_comes_back_to_the_comb_it_left():
 
 # -- risk 2: `_p3_raster_run` across a role round trip ----------------------
 
-def test_a_corroborated_raster_survives_a_role_round_trip_and_still_expires():
-    """Reset only on a protocol change, and that is the right subject.
+def test_a_role_round_trip_reseats_the_raster_and_it_is_re_earned():
+    """A returning stint starts its own run, and the corroboration is re-earned.
 
-    The raster is the PEER's cycle grid. Our role does not move it, so a
-    corroboration earned before an ISS stint is still a corroboration after one.
-    What could be minutes old is the FRESHNESS, and that is not what the run
-    carries: `p3_control_refusal` ages `_p3_heard_at` on every cycle either way,
-    and the run only chooses which of the two bounds it ages against.
+    The raster is the PEER's cycle grid, but the stint that is over places
+    nothing in this one: a packet decoded in the cycle that turned the link is
+    the changeover, and it is the new stint's first frame, so the round trip
+    comes back with a run of one, which ages against `ONSET_MAX_CYCLES`. Three
+    frames of THIS stint agreeing carry the reply until the ARQ's silence
+    budget ends it.
     """
     g = a5_grid()
     assert g._p3_raster_corroborated
     g.reverse(to_iss=True)
     g.reverse(to_iss=False)
-    assert g._p3_raster_corroborated
+    assert g._p3_raster_origin == A5_PEER + 5 * CYCLE
+    assert g._p3_raster_run == 1 and not g._p3_raster_corroborated
     slot = round((A5_PEER + 5 * CYCLE + REPLY_N - g.anchor) / CYCLE)
-    assert g.p3_control_refusal(slot + onair.ONSET_MAX_CYCLES) is None
     assert "no fresh packet clock" in g.p3_control_refusal(
-        slot + onair.RASTER_PROJECT_CYCLES)
+        slot + onair.ONSET_MAX_CYCLES)
+    for k in (6, 7):
+        g.note_p3_packet(A5_PEER + k * CYCLE, PACKET_N, CYCLE, identity=IDENTITY)
+        g.cycles += 1
+    assert g._p3_raster_corroborated
+    slot = round((A5_PEER + 7 * CYCLE + REPLY_N - g.anchor) / CYCLE)
+    assert g.p3_control_refusal(slot + onair.RASTER_PROJECT_CYCLES) is None
     # ...and a packet off the projection is a new raster, not a longer run.
-    g.note_p3_packet(A5_PEER + 6 * CYCLE + 4 * PULL_N, PACKET_N, CYCLE,
+    g.note_p3_packet(A5_PEER + 8 * CYCLE + 4 * PULL_N, PACKET_N, CYCLE,
                      identity=IDENTITY)
     assert g._p3_raster_run == 1 and not g._p3_raster_corroborated
 
@@ -243,8 +250,8 @@ def test_an_undecoded_burst_cannot_walk_the_peers_raster_off_the_last_decode(
     once and refused from the second cycle on -- it cannot drag the origin along
     with it, and the reply comb, which answers `_p3_peer[0]` and not the burst,
     does not move at all. What a peer that has walked out of the window loses is
-    the evidence it is still transmitting, and that ends the reply on
-    `p3_control_refusal`'s own bound rather than on a collision.
+    the evidence it is still transmitting; on a corroborated raster the ARQ's
+    silence budget ends the reply, not a collision.
     """
     g = a5_grid()
     tx = driver(g, tmp_path)
@@ -261,9 +268,9 @@ def test_an_undecoded_burst_cannot_walk_the_peers_raster_off_the_last_decode(
     assert placed == [REPLY_N] * 9                  # the comb never followed
     assert g._p3_peer[0] == last and g._p3_raster_origin == A5_PEER
     assert g._p3_heard_at == A5_PEER + 6 * CYCLE + PULL_N
-    # ...and with nothing refreshing it, the corroborated bound is what ends it.
+    # ...and with nothing refreshing it, the corroborated comb still keys.
     assert g.p3_control_refusal(first_slot + 6 + onair.RASTER_PROJECT_CYCLES) \
-        is not None
+        is None
 
 
 # -- risk 4: `P3_LONG_REPLY_S` is inert, and right by construction ----------

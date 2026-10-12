@@ -1,0 +1,9 @@
+{
+  "source": "working/p4-oracle/kiwi/20260924/7101500/seg-0003.wav",
+  "source_start_s": 1458.0800000000002,
+  "source_end_s": 1459.0600000000002,
+  "source_rate": 11998.90779,
+  "frequency_shift_hz": -910,
+  "rate": 12000,
+  "sha256": "a598469f4f380f7cf3351c1c906bf24bca3bd19ad0717394f0a9fb4b4499045e"
+}

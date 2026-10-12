@@ -3,8 +3,8 @@
 
 """The 288/1117 responder over-NAK at BW2750, and the bounded resend it licenses.
 
-KC9GHZ answered every final-answer query of ours on the 2026-09-16 BW2750 tape
-with SESSION_OVER_NAK_RESPONDER — the responder counterpart of the NAK this
+VE3WLR answered two queries on the 2026-09-23 BW2750 tap at 106.791 and
+139.889 s with SESSION_OVER_NAK_RESPONDER — the responder counterpart of the NAK this
 station keys during recovery. A keyed NAK is a positive ask, so it resends the
 outstanding over once even where host retries are disabled; the retry budget
 still bounds it.
@@ -31,10 +31,10 @@ class KeyIO(_IO):
             self.keyups.append(self.now)
 
 
-def sending(*, allow_retries=False, transmits=True):
+def sending(*, allow_retries=False, transmits=True, called="KC9GHZ"):
     io = KeyIO(transmits)
     hs = VA.VaraStationHandshake(["W9SSJ"], io, bw="2750")
-    hs.role, hs.called, hs.caller = "initiator", "KC9GHZ", "W9SSJ"
+    hs.role, hs.called, hs.caller = "initiator", called, "W9SSJ"
     hs.state, hs.step = VA.VaraState.CONNECTED, VA._I_CONNECTED
     hs.turn = VA._TURN_OURS
     hs.allow_data_retries = allow_retries
@@ -119,26 +119,34 @@ def test_nak_with_nothing_pending_keys_nothing():
     assert any("nothing outstanding" in m for m in io.msgs)
 
 
-@corpora.requires_onair_responder_nak_2750
-@pytest.mark.parametrize("at", [69.312, 81.093, 92.837])
-def test_frame_is_recognized_on_the_kc9ghz_tape(at):
-    x = corpora.wav_mono(corpora.ONAIR_RESPONDER_NAK_2750)
+# Each clip starts 1.5 s before its NAK and ends 4 s after its onset.
+TAPE_NAKS = (
+    "ve3wlr-0923-nak-106791.flac",
+    "ve3wlr-0923-nak-139889.flac",
+    pytest.param(None, marks=pytest.mark.skip(reason=
+        "The third KC9GHZ BW2750 NAK recording is lost; restore with a BW2750 "
+        "connected flight eliciting a third responder NAK, rig-rx recorded. "
+        "The surviving KC9GHZ 0926 candidate is BW2300, not this pin."),
+        id="third-bw2750-nak-needs-flight"),
+)
+
+
+@pytest.mark.parametrize("name", TAPE_NAKS)
+def test_frame_is_recognized_on_the_ve3wlr_tape(name):
+    x = corpora.c_samples(name)
+    at = 1.5
     kind = VF.for_bw(VF.SESSION_OVER_NAK_RESPONDER, "2750")
     span = VA._span(kind)
     a = int((at - 0.2) * MK.FS)
     seg = x[a:a + span + int(0.6 * MK.FS)]
-    tones = np.asarray(VF.handshake_tones("KC9GHZ", kind), dtype=np.int32)
+    tones = np.asarray(VF.handshake_tones("VE3WLR", kind), dtype=np.int32)
     heard = VA._payload_alignment(seg, kind, tones, band=MK.band_for("2750"))
-    assert VF.recognize([int(t) for t in heard], "KC9GHZ", kind)
+    assert VF.recognize([int(t) for t in heard], "VE3WLR", kind)
 
 
-#: Where the three NAKs start on the tape, and so where each one's last symbol is.
-TAPE_NAKS = (69.312, 81.093, 92.837)
-
-
-def _drive_live(x, t0, t1, block=0.125):
+def _drive_live(x, t0, t1, block=0.125, called="KC9GHZ"):
     """The tape through `_stream_answer` exactly as the receive path feeds it."""
-    hs, io = sending(allow_retries=False)
+    hs, io = sending(allow_retries=False, called=called)
     n = int(block * MK.FS)
     for a in range(int(t0 * MK.FS), int(t1 * MK.FS), n):
         io.now = a / MK.FS + block
@@ -146,9 +154,8 @@ def _drive_live(x, t0, t1, block=0.125):
     return hs, io
 
 
-@corpora.requires_onair_responder_nak_2750
-@pytest.mark.parametrize("start", TAPE_NAKS)
-def test_the_resend_is_keyed_after_the_naks_last_symbol(start):
+@pytest.mark.parametrize("name", TAPE_NAKS)
+def test_the_resend_is_keyed_after_the_naks_last_symbol(name):
     """The over answering a NAK must not go out on top of the NAK.
 
     The arm opens at `_SESSION_MIN` (0.726 s) and the frame is 1.366 s, so a fit
@@ -156,9 +163,10 @@ def test_the_resend_is_keyed_after_the_naks_last_symbol(start):
     over across a half-duplex peer still transmitting, and two rungs of the retry
     budget spent on one ask.
     """
-    x = corpora.wav_mono(corpora.ONAIR_RESPONDER_NAK_2750)
+    x = corpora.c_samples(name)
+    start = 1.5
     last_symbol = start + VA._span(VF.for_bw(VF.SESSION_OVER_NAK_RESPONDER, "2750")) / MK.FS
-    hs, io = _drive_live(x, start - 1.5, start + 4.0)
+    hs, io = _drive_live(x, start - 1.5, start + 4.0, called="VE3WLR")
     assert io.keyups, "the NAK drew no resend at all"
     assert len(io.keyups) == 1, f"one ask, one resend: {io.keyups}"
     assert io.keyups[0] >= last_symbol, (
@@ -242,10 +250,9 @@ def test_a_stale_nak_is_past_the_peers_listening_gap():
     assert not hs._peer_responder_nak(stale)
 
 
-@corpora.requires_onair_responder_nak_2750
 def test_no_responder_nak_in_a_quiet_stretch_of_the_tape():
-    x = corpora.wav_mono(corpora.ONAIR_RESPONDER_NAK_2750)
-    hs, _ = sending()
+    x = corpora.c_samples("ve3wlr-0923-whole-session.flac", external=True)
+    hs, _ = sending(called="VE3WLR")
     span = VA._span(VF.for_bw(VF.SESSION_OVER_NAK_RESPONDER, "2750"))
     for at in (3.0, 40.0):
         a = int(at * MK.FS)

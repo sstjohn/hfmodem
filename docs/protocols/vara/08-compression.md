@@ -1,96 +1,131 @@
 # 08 — Payload compression (host bytes → pre-FEC frame)
 
-Compression sits between the host data port (8301, raw bytes in) and the
-CRC+FEC+OFDM frame builder ([`03`](03-coding.md), [`04`](04-frame-block-formats.md)).
-The host writes **uncompressed** bytes; VARA compresses them; the compressed
-container is what CRC+turbo+OFDM then carry.
+VARA HF 4.9.0 has two distinct link codecs: TEXT uses static prefix codes;
+FILES uses raw deflate blocks. These findings were measured on 2026-09-27
+with a stock pair and independently decoded CRC-clean overs. The earlier
+version of this document described the 2021 HE0/HE3 reference implementation;
+its containers, transmitted tables and LSB packing do **not** describe the
+measured 4.9.0 wire format.
 
-**Registration.** VARA engages compression only on a registered build. An
-unregistered build passes the payload through unchanged whatever `COMPRESSION` is
-set to, so `BUFFER` clears identical byte counts either way
-([`06` §6.1](06-speed-gearshift.md)).
+## Mode and scope
 
-## 8.1 Codec identity
+The caller's link-setup body byte 7 selects the mode for both directions:
 
-VARA's modem-layer compression is **static, order-0 (memoryless) Huffman coding
-over 8-bit byte symbols, with a per-message code table transmitted inline.**
-
-| Attribute | Value |
+| High-speed caller | Mode |
 |---|---|
-| Family | static order-0 Huffman (byte alphabet) |
-| NOT | adaptive / canonical Huffman; **no** LZ / dictionary / match stage (not deflate) |
-| Table | per-message, built from that message's own byte frequencies, shipped inline |
-| Preset dictionary | none |
-| TEXT vs FILES | **one** modem-layer scheme; the container variant (HE0 vs HE3), not the codec, differs. `COMPRESSION TEXT/FILES/OFF` selects *whether/what* to compress, not a second algorithm |
+| `81` | OFF |
+| `83` | TEXT |
+| `85` | FILES |
 
-> The `zlib/deflate` sometimes associated with "Winlink" is the **B2F
-> application layer** (a different, higher layer), not VARA's port-8301 modem
-> compression. Do not conflate.
+Bit 0 denotes high-speed capability, bit 1 TEXT, bit 2 FILES. Speed-limited
+callers send plain data regardless of their compression preference. The called
+station follows the caller even when its own preference differs. OFF sends
+host bytes directly, without a container. The compression setting is frozen
+for the connection; host changes affect the next outbound connection.
 
-## 8.2 Container wire format
+## FILES
 
-Two containers. Header is 4 bytes.
+A delivery is a sequence of blocks, which may span over boundaries. Each
+block starts with a two-byte big-endian header:
 
-- **HE0** = `48 45 30 0D` (`"HE0\r"`) + **raw uncompressed bytes** (passthrough).
-- **HE3** = `48 45 33 0D` (`"HE3\r"`) + compressed payload, laid out:
+- Bit 15: raw deflate (`1`) or stored bytes (`0`).
+- Bits 0–14: length of the body following the header, excluding the header.
 
-| Field | Width | Notes |
-|---|---|---|
-| Header | 4 B | `"HE3\r"` |
-| Parity | 1 B | **XOR (LRC)** of all *uncompressed* message bytes (the reference code labels it "CRC"; it is not CRC-8) |
-| Message length | 4 B **little-endian** | decoded length in bytes |
-| SymbolCount | 2 B **little-endian** | # distinct byte values = # Table-1 entries = # leaves (1..256) |
-| Huffman Table 1 | SymbolCount × 2 B | per entry `[symbol_byte][code_length_bits]`, ordered by ascending byte value |
-| Encoded body | var | concatenated prefix codes; final partial byte zero-padded |
-| Huffman Table 2 | var | the codeword bit-strings, same symbol order as Table 1; lengths known from Table 1; final partial byte zero-padded |
+Input blocks contain at most 32,500 host bytes. Compress each independently
+with raw RFC 1951 deflate (`wbits=-15`); store the input when compression does
+not reduce its length. Different valid deflate encoders need not produce the
+same compressed bytes. FILES has no per-over compression flag.
 
-> Consequence: Table 2 (needed to interpret the body) **trails** the body, so the
-> whole HE3 message must be buffered before decoding.
-> The byte offsets that follow from these widths — parity at 4, length 5–8,
-> symcount 9–10, Table 1 at 11 — are those of the reference implementation; this
-> document does not fix them independently against a pre-FEC frame.
+On receive, consume exactly the advertised number of bytes. For compressed
+blocks, require deflate EOF, no unused input or unconsumed tail, and at most
+32,500 output bytes. A truncated stream can produce all its apparent output
+without reaching EOF. Stored blocks obey the same output limit. A closing
+over must leave no partial header or block buffered.
 
-## 8.3 Bit packing (the load-bearing detail)
+Current transmission limits each delivery to 50,000 host bytes: one stock
+64-KiB run lost the bytes after 50,000 despite a drained transmit buffer.
+That observation has not been replicated, so the receiver-limit explanation
+remains provisional. FILES BUFFER accounting uses container bytes.
 
-**LSB-first** within each byte, for BOTH the encoded body and Table 2's codeword
-bits: `bitValue[8] = {1,2,4,8,16,32,64,128}`, fill `bitPos` 0→7.
-- encode: `byte |= bitValue[bitPos]` when the code bit is 1; flush at `bitPos==8`.
-- decode: bit = `(byte & bitValue[bitPos]) != 0`.
+## TEXT
 
-## 8.4 Encoder (tree build) and decoder
+In a TEXT session, field bit `20` marks a coded over; with it clear, payload
+is verbatim. OFF sessions always pass bytes through, regardless of this bit. Each
+coded over is independently decoded, with MSB-first bits and a three-bit
+header:
 
-- **Encoder:** count byte frequencies; one leaf per byte with count>0; greedily
-  merge the two lowest-weight unparented nodes (`MaxNodes=511`); `CreateBitSequences`
-  = recursive DFS, **left child appends bit 0, right child bit 1**; single-symbol
-  special case forces code length 1. Tie-break is a fixed nested comparison
-  (deterministic, non-canonical) — only matters for byte-identical output.
-- **Decoder:** does NOT need VARA's tree builder. Read Table 1 (symbol + bitlen),
-  read Table 2 bits (LSB-first) to recover each symbol's codeword, insert each
-  `(symbol,codeword)` into a trie, walk the body bit-by-bit emitting a symbol at
-  each leaf, stop at Message-length, verify XOR parity.
+| Header | Meaning supported today |
+|---|---|
+| `000` | Eight-bit line header follows |
+| `001` | Prose table, coded |
+| `010` | Prose table, continuing a raw escape run |
+| Other | Unsupported |
 
-## 8.5 Interop implication
+Only line header `AD` is implemented. It has 87 byte codes, two known tokens
+(` VARA`, ` has `), and ESC. The explicit table lives in
+`hfmodem.kestrel.vara.compression`. Its code space remains incomplete.
 
-For **decoding** VARA's output everything is exact (you read VARA's shipped
-tables). For **encoding**, you do **not** need to reproduce VARA's exact
-codewords: a real VARA decodes from *your* transmitted tables, so **any valid
-Huffman coding** with correct framing + LSB packing + correct XOR parity
-interoperates. Bit-exact encoder reproduction is needed only for identical test
-vectors, not for interop.
+ESC introduces raw eight-bit bytes until and including the first byte having
+a code in the table. CR introduces framing: optional `10000` for LF, then an
+eight-bit line header unless the over ends there. This applies to raw CR too.
+Padding is 1–8 copies of the complement of the last data bit. All reads,
+including the optional LF, must stay before the pad-stripped end.
 
-## 8.6 Not specified here
+Unsupported headers, unknown code prefixes and unfinished symbols/raw bytes/
+line headers stop decoding. The verified prefix can be delivered; nothing
+from or after the unreadable portion can be passed as intact host data.
 
-All four are container-boundary questions; none touches the codec.
+## Implementation and host integration
 
-1. The exact HE3 field byte-offsets (parity and length position), per §8.2.
-2. Version drift: this description follows the reference as published in 2021 and
-   does not cover any divergence in v4.9.0.
-3. VARA's HE0-vs-HE3 selection heuristic — the rule by which it decides to
-   compress. This does not affect correctness. *Implementation note: this is not
-   something VARA specifies to a peer, so an encoder here picks its own rule.*
-4. How the HE0/HE3 blob is segmented and embedded into VARA's CRC+turbo+OFDM block
-   framing ([`04`](04-frame-block-formats.md)).
+`VaraStationHandshake` applies compression at its host-data seams. FILES
+encoding precedes over framing, and parsing follows ARQ duplicate suppression.
+TEXT retries are compared as decoded bytes because re-encoding at another
+over size changes their wire representation.
 
-## References
-- EA5HVK, *VARA HUFFMAN COMPRESSION.pdf* + `VaraHuffOriginal.vb.txt` (Feb 2021).
-- `github.com/pengowray/VaraHuffmanNet` (mirror + C# port; `VHuffman.cs`).
+Both modes latch a damaged receive direction until the connection ends.
+Already verified bytes remain delivered; later bytes in that direction are
+withheld. ARQ still acknowledges CRC-clean overs. One
+`WRONG COMPRESSED DATA offset=...` warning is emitted, with details in the log.
+Offsets identify wire bytes, including FILES headers; TEXT errors also identify
+a bit position within the failing over. A new session clears the latch.
+
+`tools/kestrel_host.py` is the audio-backed TCP host entry point. It supplies
+`VaraHostModem` to `VaraServer` and drives the existing audio transport plus
+connection/recovery/idle cadences on one owner thread. Host threads enqueue
+commands; receive faults reach the command socket. The adapter defaults to
+high-speed capability; `--speed-limited` explicitly disables it. The separate
+package host CLI still defaults to loopback.
+
+The launcher defaults to BlackHole cables and reports PTT ON/OFF to the host;
+it does not configure or key CAT. It can be started with:
+
+```sh
+python tools/kestrel_host.py --tx-device "BlackHole 16ch" --rx-device "BlackHole 64ch"
+```
+
+A defensive DISCONNECT while idle or connecting cancels that attempt, without
+arming a close on the next session. A connected caller drains its queue before
+closing. The existing driver cannot key a called-station close: that request
+reports `WRONG DISCONNECT` and leaves no close pending. LISTEN preserves
+pre-connect host writes until the caller's mode is known. Public driver methods
+provide queue accounting and pre-connect data; the adapter does not inspect
+private queue fields.
+
+Direct callers select `compression="FILES"` with `high_speed=True`, or use
+`tools/kestrel_connect.py --compression FILES`. OFF remains the CLI default.
+TEXT requests advertise OFF until the remaining receive tables are derived.
+An inbound TEXT caller receives plain, flag-clear responses while the partial
+TEXT receiver decodes supported overs and reports/latches gaps.
+
+The prose encoder is available for generated tests, **not live transmission**.
+Stock acceptance of `AD` on lines that stock would code with a different table
+still needs a bench check. The non-prose tables and additional tokens are also
+unresolved. No bench audio or extracted vectors are shipped.
+
+## Verification
+
+Generated tests cover stored/deflated block boundaries and limits, truncation,
+trailing input, damage latching, mode negotiation, retries, host command/warning
+routing, and the prose code table. Two malformed TEXT regressions are pinned:
+`29 b8 ff` returns only `a` with an error; `28 86 c0` returns only `aa\r` with
+an error, never an LF fabricated from padding.

@@ -147,10 +147,10 @@ def acknowledged(*args, **kwargs) -> tuple[dict, list[int]]:
     """One hold, plus the payload that was under each acknowledgement in it."""
     seen, real = [], PactorArq._on_ack
 
-    def counted(self):
+    def counted(self, **kw):
         if self._inflight is not None:
             seen.append(len(self._inflight.payload))
-        return real(self)
+        return real(self, **kw)
 
     PactorArq._on_ack = counted
     try:

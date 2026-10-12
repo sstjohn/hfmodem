@@ -8,7 +8,7 @@ Three of them corroborated a peer and linked -- WS8EOC on 80 m twice
 40 m (`...40-sense-20260916T150811Z`), which then read two 0x59A and a CS2 off
 the peer in session. The fourth, `...80-sense-20260916T150542Z`, accepted five
 zero-error codewords, corroborated none of them, and printed `no PACTOR-1 control
-signal decoded` over its own log. Its tape says those five are noise: each sits
+signal decoded` over its own log. The tape alone does not establish a reply: each sits
 inside the tape's own band statistic, a witness receiver 160 miles from the
 gateway shows our bursts and nothing in the gaps, and the search accepts in 6.6%
 of that tape's windows with nothing in them at all.
@@ -73,8 +73,8 @@ def test_the_level_gate_keeps_every_link_and_takes_the_corpus_off_the_rule():
 
     Negatives are the 699 accepts of `connect-ceiling-negatives.json` re-run
     through the same search -- every accept in every recording of that corpus
-    able to hold three, which is the whole population `_ConnectEvidence` can
-    fire on. Positives are the nine accepts three sessions of 2026-09-16 built a
+    able to hold three under the historical rule. The complete pair-capable
+    population is priced in test_connect_gate. Positives are the nine accepts three sessions of 2026-09-16 built a
     link out of. They separate: the negatives run 1.06 median and 2.11 at the
     99th percentile, and the weakest accept a link was ever made on stands at
     1.73.
@@ -102,40 +102,31 @@ def test_the_level_gate_keeps_every_link_and_takes_the_corpus_off_the_rule():
 
 
 def test_the_gate_closes_the_last_false_link_in_the_corpus():
-    """...and it is the rule's own input that changes, not the rule.
+    """The full 1,012-recording sweep prices the shipped hybrid: 1 raw, 0 gated.
 
-    `_ConnectEvidence` fires on one of the 1012 negative recordings ungated. No
-    accept of that recording clears the gate, so the search stops handing the
-    rule the coincidence, and nothing in `N`, `SPAN` or `TOL_S` has to move to
-    get there.
+    The superseded level-blind pair rule costs 38/55 raw fires (slot/read),
+    pinned against the full fixture in test_connect_gate.
     """
-    by_rec: dict[str, list] = {}
-    windows: dict[str, int] = {}
-    for name, n, k, d, _cs, _sense, x in LEVELS["negatives"]["rows"]:
-        by_rec.setdefault(name, []).append((k, d, x))
-        windows[name] = n
-    fires = {g: [name for name, acc in by_rec.items()
-                 if _closes([(k, d) for k, d, x in acc if x >= g],
-                            windows[name]) is not None]
-             for g in (0.0, onair.ANSWER_CODEWORD_X)}
-    assert len(fires[0.0]) == 1, fires[0.0]
-    assert fires[onair.ANSWER_CODEWORD_X] == [], fires[onair.ANSWER_CODEWORD_X]
+    sweep = json.loads(_LEVELS_FILE.with_name("connect-ceiling-negatives.json").read_text())
+    rows = [(c, [(k, d, x) for k, d, _cs, _sense, x in c["read"]])
+            for c in sweep["candidates"]]
+    assert sum(_closes(acc, c["windows"], gate=0) is not None for c, acc in rows) == 1
+    assert not any(_closes(acc, c["windows"]) is not None for c, acc in rows)
 
 
-def test_the_disputed_call_loses_its_floor_accepts_and_keeps_its_pair():
-    """What the gate does to the call that started this, and what it does not.
+def test_the_disputed_call_keeps_two_weak_accepts_without_corroborating():
+    """The operator heard WS8EOC; the tape/witness conflict remains unresolved.
 
-    Three of the five go: two that sat in the first 4 ms of the band and the one
-    at 119 ms. The pair at 76 and 78 ms survives at 1.9-2.0x -- two accepts are
-    not three, so the arm still does not connect, and the log now shows the
-    operator two candidates and three discards instead of five answers.
+    Three of five accepts fail 1.4x. The 76/78 ms pair survives that gate but
+    falls below the 2.1x pair floor, leaving this call at base's no-connect.
+    This is a decision pin, not evidence that the operator heard a false reply.
     """
     arm = LEVELS["positives"]["ws8eoc-80-sense-20260916T150542Z"]
     assert arm["linked_on"] == []
     kept = [a for a in arm["accepts"] if a[4] >= onair.ANSWER_CODEWORD_X]
     assert [a[1] for a in kept] == [77.5, 76.3]
-    assert onair._ConnectEvidence.N > len(kept), \
-        "two accepts now name a station, which is not what the rule says"
+    assert all(a[4] < onair._ConnectEvidence.PAIR_X for a in kept)
+    assert _closes([(a[0], a[1] / 1000, a[4]) for a in kept], 35) is None
 
 
 def test_a_real_group_mixes_codeword_and_shift():

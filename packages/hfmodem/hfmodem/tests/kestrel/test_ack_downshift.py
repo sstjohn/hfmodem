@@ -57,7 +57,7 @@ def test_native_query_reply_retires_only_pending_and_repacks_unsent(requested, c
 
 def test_direct_downshift_matches_stock_and_preserves_exact_multiple_close():
     hs, io, payload = sender(total=178+94)
-    x = np.pad(M.synth_tone_pairs(F.OVER_CONTINUE_RESPONDER_DOWN_BY_LINK['W9SSJ','KC9GHZ','2750']), (4800,4800))
+    x = np.pad(M.synth_tone_pairs(F.over_continue_down('KC9GHZ', '2750')[1]), (4800,4800))
     assert hs._peer_over_continue(x)
     hs._took_over_continue()
     assert hs._tx_pending[2] == 102

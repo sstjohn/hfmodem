@@ -37,9 +37,18 @@ import shlex
 import sys
 from unittest import mock
 
+import pytest
+
 from hfmodem.shrike import arq, onair, pactor1
 
 BASE = ["onair", "--dxcall", "WS8EOC", "--mycall", "W9SSJ"]
+
+
+@pytest.fixture(autouse=True)
+def _scratch_cwd(tmp_path, monkeypatch):
+    # An arm with no --outdir allocates under ./captures.
+    monkeypatch.chdir(tmp_path)
+
 
 ok = True
 
@@ -83,18 +92,17 @@ def the_upgrade_arm_is_unchanged() -> None:
           str(args.p1_status_bits45))
     check("the upgrade is not refused", not args.pactor1_only)
     check("and nothing has forced a hold", args.hold == 0, str(args.hold))
-    check("an answered entry packet runs traffic at speed level 3",
-          args.p3_traffic_sl == arq.ArqConfig.traffic_sl == 3,
+    check("an answered entry retains the acquired speed by default",
+          args.p3_traffic_sl is arq.ArqConfig.traffic_sl is None,
           str(args.p3_traffic_sl))
 
 
 def the_traffic_level_is_the_operators() -> None:
-    """The one flag a peer that read only the entry packet needs, and it is
-    nobody's default: a mail arm does not derive it either."""
+    """An explicit experimental override remains available; defaults retain speed."""
     print("\nthe level the traffic runs at")
     check("a named level stands", _armed("--p3-traffic-sl", "1").p3_traffic_sl == 1)
     check("...and a mail arm still flies the default",
-          _armed("--mail-fetch").p3_traffic_sl == 3)
+          _armed("--mail-fetch").p3_traffic_sl is None)
     check("the entry level is the operator's on the same terms",
           (_armed("--p3-entry-sl", "1").p3_entry_sl,
            _armed("--mail-fetch").p3_entry_sl) == (1, arq.ArqConfig.entry_sl))
@@ -193,7 +201,9 @@ def test_transcript_records_resolved_namespace_and_keeps_password_path(tmp_path)
     assert str(path) in line and "private-password" not in line
     assert "--mail-password=***" in line
     assert "--pactor1-only=True" in line and "--p1-status-bits45=0" in line
-    first = line.splitlines()[0]
+    lines = line.splitlines()
+    assert lines[0].startswith("  identity: ")
+    first = lines[1]
     assert first.startswith("  argv: ")
     assert "--mail-fetch --decline-grant --p1-drive 0 --mail-password-file" in first
     assert "unrelated-caller" not in first  # Preserve the parsed arm, not later sys.argv.
@@ -337,8 +347,9 @@ def test_typed_arguments_keep_order_and_both_password_spellings_are_redacted():
         expected = BASE[1:] + ["--p1-drive", "0"] + (
             ["--mail-password", "***"] if len(secret) == 2 else
             ["--mail-password=***"]) + ["--hold", "7"]
-        assert lines[0] == "  argv: " + shlex.join(expected)
-        assert lines[1].startswith("  resolved args: ")
+        assert lines[0].startswith("  identity: ")
+        assert lines[1] == "  argv: " + shlex.join(expected)
+        assert lines[2].startswith("  resolved args: ")
         assert word not in output.getvalue()
 
 
@@ -348,5 +359,7 @@ def test_direct_namespace_caller_does_not_invent_a_typed_command():
     output = io.StringIO()
     with contextlib.redirect_stdout(output), contextlib.suppress(SystemExit):
         onair.run(args)
-    assert output.getvalue().startswith("  argv: unavailable (run received a namespace)")
+    lines = output.getvalue().splitlines()
+    assert lines[0].startswith("  identity: ")
+    assert lines[1] == "  argv: unavailable (run received a namespace)"
     assert "resolved args:" in output.getvalue()

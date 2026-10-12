@@ -32,6 +32,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from hfmodem.tests.evidence import require_input
+
 _TOOLS = Path(__file__).resolve().parents[5] / "tools"
 
 pytestmark = pytest.mark.skipif(not _TOOLS.is_dir(),
@@ -39,6 +41,7 @@ pytestmark = pytest.mark.skipif(not _TOOLS.is_dir(),
 
 
 def _tool():
+    require_input(_TOOLS / "grid_phase.py")
     spec = importlib.util.spec_from_file_location("_tool_grid_phase",
                                                   _TOOLS / "grid_phase.py")
     mod = importlib.util.module_from_spec(spec)

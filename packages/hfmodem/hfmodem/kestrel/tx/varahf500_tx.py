@@ -60,6 +60,14 @@ _PN = _rx._PN
 grid480_index = _rx.grid480_index
 
 _CELL_INDEX = {(s, co): n for n, (s, co) in enumerate(_CELLS)}   # (sub,col) -> emit index
+_FRAME_CELL_INDEX = {0: _CELL_INDEX}
+
+
+def _cell_index(advance: int) -> dict:
+    if advance not in _FRAME_CELL_INDEX:
+        _FRAME_CELL_INDEX[advance] = {c: n for n, c in
+                                      enumerate(_rx.frame_cells(advance))}
+    return _FRAME_CELL_INDEX[advance]
 
 # The two subbands share one real envelope and are staggered by half a hop.
 # The old low-passed correlation estimate blurred that envelope and placing
@@ -90,54 +98,83 @@ def encode_coded(frame_bytes: bytes) -> np.ndarray:
     return pf
 
 
-def build_cells(pf: np.ndarray, ncol: int, ref: int = +1) -> dict:
+def build_cells(pf: np.ndarray, ncol: int, ref: int = +1, advance: int = 0) -> dict:
     """Accumulate the +-1 differential-BPSK reference cells per sub-band.
 
     Frame column fc (0..392) sits at emission column c0+fc. Data cells flip the
     running product by their coded bit; non-data (pilot) columns and the fc=0
     reference do not flip. Columns before/after the frame are held at the
-    reference (clean, de-rotatable filler)."""
+    reference (clean, de-rotatable filler). A burst's later frame places its
+    coded bits ``advance`` cells on, over its own cells
+    [rx.varahf500.frame_cells, _cells_llr]."""
     grid = {0: np.full(ncol, ref, dtype=float), 1: np.full(ncol, ref, dtype=float)}
+    index = _cell_index(advance)
     for s in (0, 1):
         val = float(ref)
         for fc in range(NSYM):          # 0..393
             ec = C0 + fc
             if ec >= ncol:
                 break
-            if fc >= 1 and (s, fc) in _CELL_INDEX:
-                bit = int(pf[_P[_CELL_INDEX[(s, fc)]]])
+            if fc >= 1 and (s, fc) in index:
+                bit = int(pf[_P[(index[(s, fc)] + advance) % CODED]])
                 val = val * (1.0 if bit == 0 else -1.0)
             grid[s][ec] = val
     return grid
 
 
-def symbols(pf: np.ndarray, ncol: int | None = None, ref: int = +1) -> dict:
-    """Air symbols ck[sub][emission_col] = OUT_SCALE * cell * conj(grid480[idx])."""
+def symbols(pf: np.ndarray, ncol: int | None = None, ref: int = +1,
+            advance: int = 0) -> dict:
+    """Air symbols ck[sub][emission_col] = OUT_SCALE * cell * conj(grid480[idx]),
+    the reference read ``advance`` entries on for a burst's later frames."""
     if ncol is None:
         ncol = C0 + NSYM + 8
-    grid = build_cells(pf, ncol, ref)
+    grid = build_cells(pf, ncol, ref, advance)
     ck = {}
     for s in (0, 1):
-        idx = grid480_index(s, ncol)
+        idx = grid480_index(s, ncol) + advance
         ck[s] = OUT_SCALE * grid[s] * np.conj(_GRID480[idx[:ncol]])
     return ck
 
 
-def synth_burst(frame_bytes: bytes, onset: int = 0, ncol: int | None = None,
-                length: int | None = None, ref: int = +1,
-                level: int = BASE_LEVEL) -> np.ndarray:
-    """Render one data frame to real 48 kHz audio.
+def synth_burst(frame_bytes: bytes | Sequence[bytes], onset: int = 0,
+                ncol: int | None = None, length: int | None = None, ref: int = +1,
+                level: int = BASE_LEVEL, lead=None) -> np.ndarray:
+    """Render one data frame, or several back to back, to real 48 kHz audio.
 
     ``onset`` is the sample index of emission column 0's centre; ``length`` the
     total output length (defaults to just past the last symbol). ``ncol`` and
     ``ref`` belong to the base level's differential grid: an index record's
-    emission length is fixed by the record."""
+    emission length is fixed by the record.
+
+    A later frame starts ``NSYM`` columns behind the one before it and reads the
+    reference one entry further on, its first ``C0`` columns being the tail of
+    the frame ahead  [rx.varahf500._frame_gh]: 797 columns for two, where a stock
+    sender's two-frame over measures 796.
+
+    ``lead``, the session's ``VB6Rnd``, keys the eight columns ahead of the
+    reference in the tone family's layout with a half-turn alphabet
+    (docs/protocols/vara/evidence/LEAD-CHECK-tone.md, 318/318 cells): 18 draws
+    of ``Int(Rnd*2)``, time-major over the two sub-bands; row 0 turns the
+    sub-band's reference and rows 1..8 are the lead, each times conj(grid480)
+    at the index the data eight columns later reads. Without it those columns
+    stay silent."""
     if level != BASE_LEVEL:
         return synth_l3_burst(frame_bytes, onset, length, level)
-    pf = encode_coded(frame_bytes)
+    frames = [frame_bytes] if isinstance(frame_bytes, bytes) else list(frame_bytes)
     if ncol is None:
         ncol = C0 + NSYM + 8
-    ck = symbols(pf, ncol, ref)
+    ck = symbols(encode_coded(frames[0]), ncol, ref)
+    for fk, fb in enumerate(frames[1:], 1):
+        later = symbols(encode_coded(fb), C0 + NSYM, ref, advance=fk)
+        ck = {s: np.concatenate([ck[s][:NSYM * fk + C0], later[s][C0:]])
+              for s in (0, 1)}
+    if lead is not None:
+        q = 2 * np.array([lead.draw(1) for _ in range(18)]).reshape(9, 2).T
+        for s in (0, 1):
+            idx = grid480_index(s, C0 + 8)[C0:]
+            ck[s] = ck[s] * 1j ** q[s, 0]
+            ck[s][C0 - 8:C0] = OUT_SCALE * 1j ** q[s, 1:] * np.conj(_GRID480[idx])
+    ncol = len(ck[0])
     last_center = onset + (ncol - 1) * H
     if length is None:
         length = last_center + H // 2 + _DSPAN[-1] + 1

@@ -259,7 +259,7 @@ class _Placed(onair.RadioTx):
         self.at: list[tuple[str, int]] = []
 
     def _tx(self, audio, what, drive=None, lead_n=0, *, strict_guard=False,
-            pulse_offsets=None):
+            pulse_offsets=None, tail_n=0):
         self.at.append((what, self.boundary))
         # Record the shaped waveform's phase reference separately from its
         # audio onset. This seam models placement, without emitting any audio.
@@ -657,7 +657,7 @@ def _peer_wav(path: Path, slots: int = 10) -> None:
 
 def _run_loop(wav: Path, outdir: Path, *, head_read: bool = True,
               hold: int = BREAKIN_SLOT + 3, over: bool = False,
-              cycles: int = 3, retries: int = 0) -> dict:
+              cycles: int = 3, retries: int = 0, call_hush: str = "") -> dict:
     """One whole `shrike.onair` session over `wav`, with the loop instrumented.
 
     Instrumented rather than read back out of the log: the claims below are about
@@ -674,11 +674,11 @@ def _run_loop(wav: Path, outdir: Path, *, head_read: bool = True,
             made.append(self)
 
         def _tx(self, audio, what, drive=None, lead_n=0, *, strict_guard=False,
-                pulse_offsets=None):
+                pulse_offsets=None, tail_n=0):
             keyed.append((what, self.boundary))
             keyed_roles.append((what, self.host.arq.role))
             super()._tx(audio, what, drive=drive, lead_n=lead_n,
-                        strict_guard=strict_guard, pulse_offsets=pulse_offsets)
+                        strict_guard=strict_guard, pulse_offsets=pulse_offsets, tail_n=tail_n)
 
     class _Grid(onair._MasterGrid):
         def __init__(self, *a, **kw):
@@ -707,6 +707,8 @@ def _run_loop(wav: Path, outdir: Path, *, head_read: bool = True,
                 "--max-cycles", str(cycles), "--retries", str(retries),
                 "--mycall", "W9SSJ", "--dxcall", "K7ABC",
                 "--dial", "7100000", "--outdir", str(outdir)]
+    if call_hush:
+        sys.argv += ["--call-hush", call_hush]
     if over:
         sys.argv.append("--over")
     try:
@@ -856,9 +858,10 @@ def the_break_in_the_anchor_could_not_be_aimed_at() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         # The connect took until cycle 36 of this recording and the hold runs to
         # the end of the audio; a session that stops short of either never
-        # reaches the changeover at all.
+        # reaches the changeover at all. The recorded arm called 4,6, and the
+        # replay's placement on the recording's raster depends on those hushes.
         run = _run_loop(Path(archive.K4MSU_BREAKIN), Path(tmp) / "out",
-                        hold=12, cycles=60, retries=60)
+                        hold=12, cycles=60, retries=60, call_hush="4,6")
 
     log, host = run["log"], run["host"]
     check("the loop reads the codeword and yields the channel",

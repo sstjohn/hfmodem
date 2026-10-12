@@ -26,10 +26,23 @@ is 32768, so a sample written at the rail reads back at the rail.
 `write` is for a capture already in hand; `CaptureRecorder` is the same
 convention for one that arrives a block at a time and outlives the memory to hold
 it. Both live here so a recording from any stack in this tree grades the same.
+
+Everything here works in WAV; at rest a recording is FLAC. `store` turns a closed
+WAV into a FLAC that decodes back to the same bytes, header and all, and deletes
+the WAV only once that is proven. `source` is the other direction, and it is what
+every reader opens: a recording named `x.wav` is found as `x.flac` once stored.
 """
 from __future__ import annotations
 
+import functools
+import hashlib
+import io
 import json
+import logging
+import os
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import wave
@@ -40,6 +53,122 @@ import numpy as np
 from scipy.io import wavfile
 
 from . import levels
+
+log = logging.getLogger(__name__)
+
+
+def stored(path: str | Path) -> Path:
+    """The file on disk holding the recording `path` names, WAV or FLAC.
+
+    A path read out of a log or a sidecar was written while the recording was
+    still a WAV, so either spelling finds it; a real `path` wins. A recording in
+    neither form comes back as `path`, for the caller's own error to name.
+    Only absent candidates are ignored; other filesystem faults propagate.
+    """
+    path = Path(path)
+    for p in (path, path.with_suffix(".wav"), path.with_suffix(".flac")):
+        try:
+            p.stat()
+        except FileNotFoundError as exc:
+            if exc.filename != os.fspath(p):
+                raise
+        else:
+            return p
+    return path
+
+
+def source(path: str | Path) -> str | io.BytesIO:
+    """What to hand `wave.open` or `wavfile.read` for the recording `path` names.
+
+    A WAV on disk comes back as its path, so a caller can still mmap it; a
+    stored one as the original WAV's bytes, decoded in memory.
+    """
+    p = stored(path)
+    if p.suffix in {".wav", ".flac"} and p.exists():
+        from .capture_identity import validate_artifact
+        validate_artifact(p)
+    if p.suffix != ".flac":
+        return str(p)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / p.with_suffix(".wav").name
+        _flac("-d", "--keep-foreign-metadata-if-present", "-o", out, p)
+        return io.BytesIO(out.read_bytes())
+
+
+def store(path: str | Path, *, ownership=None) -> dict:
+    """Keep the closed WAV at `path` as FLAC, byte for byte, and delete the WAV.
+
+    Returns sidecar fields: `wav`, the name of the file now holding the
+    recording, and `sha256`, the original WAV's, which the FLAC decodes back
+    to. Anything short of a verified round trip leaves the WAV in place and
+    says why under `kept`. Never raises: this runs as recorders close, and a
+    recording is worth more than its compression.
+    """
+    path = Path(path)
+    if ownership is not None:
+        ownership.audio.check()
+        if path.absolute() != ownership.audio.path:
+            raise ValueError('Recording ownership path differs')
+    flac, part = path.with_suffix(".flac"), path.with_suffix(".flac.part")
+    try:
+        facts = {"wav": path.name, "sha256": _sha256(path)}
+    except OSError as exc:
+        return _kept({"wav": path.name}, f"unreadable: {exc}")
+    try:
+        wave.open(str(path)).close()
+    except (wave.Error, EOFError) as exc:
+        return _kept(facts, f"not integer PCM, the only kind FLAC holds ({exc})")
+    try:
+        if ownership is not None:
+            part, reserved = ownership.container.temporary()
+            reserved.close()
+        _flac("-8", "--keep-foreign-metadata", "-o", part, path)
+        with tempfile.TemporaryDirectory() as tmp:
+            back = Path(tmp) / path.name
+            _flac("-d", "--keep-foreign-metadata", "-o", back, part)
+            if _sha256(back) != facts["sha256"]:
+                return _kept(facts, "the FLAC does not decode back to this WAV")
+        if ownership is None:
+            part.replace(flac)
+        else:
+            if _sha256(path) != facts['sha256']:
+                return _kept(facts, 'the owned WAV changed during compression')
+            ownership.container.publish_file(part)
+            facts['container_sha256'] = _sha256(flac)
+            facts['container_artifact_id'] = ownership.container.record['artifact_id']
+        path.unlink()
+    except OSError as exc:
+        return _kept(facts, str(exc))
+    finally:
+        if ownership is None:
+            part.unlink(missing_ok=True)
+    return facts | {"wav": flac.name}
+
+
+@functools.cache
+def _flac_exe() -> str | None:
+    return shutil.which("flac")
+
+
+def _flac(*args) -> None:
+    if not (exe := _flac_exe()):
+        raise OSError("no `flac` on PATH to store or read FLAC recordings")
+    # An absolute path and inherited fds are what let CPython posix_spawn rather
+    # than fork a process that may be holding a live audio stream.
+    run = subprocess.run([exe, "-s", "-f", *map(str, args)], close_fds=False,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if run.returncode:
+        raise OSError(f"flac {' '.join(map(str, args))}: {run.stderr.strip()}")
+
+
+def _sha256(path: Path) -> str:
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+def _kept(facts: dict, why: str) -> dict:
+    log.warning("%s stays WAV: %s", facts["wav"], why)
+    return facts | {"kept": why}
 
 
 def read(path: str | Path, target_fs: int | None = None) -> np.ndarray:
@@ -52,7 +181,8 @@ def read(path: str | Path, target_fs: int | None = None) -> np.ndarray:
     where there were 196, and the corpus's longest run of real PACTOR-1 packets
     sat unread the whole time.
     """
-    fs, raw = wavfile.read(str(path), mmap=True)
+    src = source(path)
+    fs, raw = wavfile.read(src, mmap=isinstance(src, str))
     a = np.asarray(raw)
     if a.ndim > 1:
         a = a[:, 0]
@@ -75,7 +205,7 @@ def read(path: str | Path, target_fs: int | None = None) -> np.ndarray:
 
 
 def write(path: str | Path, audio: np.ndarray, fs: int, *,
-          channels: int = 1, **facts) -> dict:
+          channels: int = 1, ownership=None, **facts) -> dict:
     """Write mono float samples as int16 PCM at `fs`, and the sidecar beside them.
 
     `fs` is required. A WAV writer with a default rate is how a 12 kHz capture
@@ -91,16 +221,34 @@ def write(path: str | Path, audio: np.ndarray, fs: int, *,
     # Before the WAV, so a writer that dies mid-file still leaves the levels: the
     # audio without them is a recording nobody can grade, and the sidecar without
     # the audio at least says what was there.
-    path.with_suffix(".json").write_text(json.dumps(side, indent=2) + "\n")
+    if ownership is None:
+        path.with_suffix(".json").write_text(json.dumps(side, indent=2) + "\n")
+    else:
+        if path.absolute() != ownership.audio.path:
+            raise ValueError('Recording ownership path differs')
+        if path.exists() or path.is_symlink():
+            raise FileExistsError('Owned recording already exists')
+        ownership.sidecar.update(side | {'capture_state': 'partial'})
 
     pcm = np.clip(np.round(x * 32768.0), -32768, 32767).astype("<i2")
     if channels > 1:
         pcm = np.repeat(pcm[:, None], channels, axis=1).reshape(-1)
-    with wave.open(str(path), "wb") as w:
-        w.setnchannels(channels)
-        w.setsampwidth(2)
-        w.setframerate(fs)
-        w.writeframes(pcm.tobytes())
+    temporary = None
+    sink = None
+    if ownership is not None:
+        temporary, sink = ownership.audio.temporary()
+    try:
+        with wave.open(str(path) if sink is None else sink, "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(2)
+            w.setframerate(fs)
+            w.writeframes(pcm.tobytes())
+    finally:
+        if sink is not None:
+            sink.close()
+    if ownership is not None:
+        ownership.audio.publish_file(temporary)
+        return ownership.sidecar.update(side | {'capture_state': 'finalized', 'sha256': _sha256(path)})
     return side
 
 
@@ -169,13 +317,26 @@ class CaptureRecorder:
     ended.
     """
 
-    def __init__(self, path, *, rate: int, source: str = "") -> None:
+    def __init__(self, path, *, rate: int, source: str = "", ownership=None) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.facts: dict = {}
         self._rate = rate
         self._source = source
-        self._wav = wave.open(str(self.path), "wb")
+        self._ownership = ownership
+        self._component = 'stream-' + ownership.audio.record['artifact_id'] if ownership else None
+        if ownership is not None:
+            ownership.audio.writer.update_status(state='ongoing', pending=1, component=self._component)
+        self._owned_handle = None
+        if ownership is not None:
+            if self.path.absolute() != ownership.audio.path:
+                raise ValueError('Recording ownership path differs')
+            if self.path.exists() or self.path.is_symlink():
+                raise FileExistsError('Owned continuous recording already exists')
+            ownership.sidecar.update({'wav': self.path.name, 'samplerate': rate,
+                                      'channels': 1, 'samples': 0, 'capture_state': 'ongoing'})
+            self._owned_handle = ownership.audio.open()
+        self._wav = wave.open(str(self.path) if ownership is None else self._owned_handle, "wb")
         self._wav.setnchannels(1)
         self._wav.setsampwidth(2)
         self._wav.setframerate(rate)
@@ -209,22 +370,64 @@ class CaptureRecorder:
                 np.clip(np.round(b * 32768.0), -32768, 32767).astype("<i2").tobytes())
 
     def close(self) -> None:
+        if self._wav is None:
+            return
+        try:
+            self._close()
+        except BaseException:
+            if self._ownership is not None:
+                writer = self._ownership.audio.writer
+                writer._status['failed'] = True
+                try:
+                    writer.update_status(
+                        state='partial', written=1 if self.path.exists() or
+                        self.path.with_suffix('.flac').exists() else 0, partial=1,
+                        component=self._component)
+                except BaseException as trouble:
+                    # Preserve the original recording failure; durable ongoing
+                    # metadata remains conservative if the journal itself failed.
+                    writer._status['journal_error'] = type(trouble).__name__
+            raise
+        else:
+            if self._ownership is not None:
+                self._ownership.audio.writer.update_status(state='finalized', written=1, component=self._component)
+
+
+    def _close(self) -> None:
         """Flush, close the WAV, and leave the sidecar — even if the flush fails.
 
         The sidecar is what states how long the file is, so a final write that
         failed without one would leave a short recording nothing can tell is
         short. It goes in the `finally` for that reason, and the failure is
         raised over the top of it for the owner to report.
+
+        A recording that closed cleanly is then stored as FLAC, and the sidecar
+        rewritten to name the file it ended up in. The first write stands until
+        then, so an owner killed while the FLAC is made still leaves a graded WAV.
         """
         if self._wav is None:                    # teardown can reach here twice
             return
+        side = self.path.with_suffix(".json")
+        completed = False
         try:
             self.drain()
+            completed = True
         finally:
             self._wav.close()
             self._wav = None
-            self.path.with_suffix(".json").write_text(
-                json.dumps(self._sidecar(), indent=2) + "\n")
+            if self._owned_handle is not None:
+                self._owned_handle.close()
+            if self._ownership is None:
+                side.write_text(json.dumps(self._sidecar(), indent=2) + "\n")
+            else:
+                self._ownership.sidecar.update(self._sidecar() | {
+                    'capture_state': 'finalized' if completed else 'partial',
+                    'sha256': _sha256(self.path)})
+        facts = self._sidecar() | store(self.path, ownership=self._ownership)
+        if self._ownership is None:
+            side.write_text(json.dumps(facts, indent=2) + "\n")
+        else:
+            self._ownership.sidecar.update(facts | {'capture_state': 'finalized'})
 
     def _sidecar(self) -> dict:
         rms = (self._sumsq / self._n) ** 0.5 if self._n else 0.0

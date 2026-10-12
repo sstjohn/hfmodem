@@ -27,6 +27,7 @@ from hfmodem.kestrel.vara.vara_frames import (
     crc16_genibus,
     is_link_setup,
     link_setup_frame,
+    link_setup_marks,
 )
 
 _probe = harness("linksetup_probe")
@@ -165,3 +166,18 @@ def test_a_bw500_data_over_is_not_read_as_a_link_setup():
     same `04 82` tail — only bytes 7 and 8 separate the two."""
     over = bytes.fromhex("000102030405060714ba" + "00" * 32 + "0482" + "e822")
     assert not is_link_setup(over)
+
+
+@pytest.mark.parametrize("bw", ["2300", "500"])
+def test_a_high_speed_capable_callers_link_setup_is_accepted(bw):
+    """A high speed capable caller's frame differs from a free build's in
+    body[7] 0x81 for 0x80 and ask 6 for 4, CRC recomputed over the changed body
+    (docs/protocols/vara/evidence/HIGH-SPEED-MARKER.md)."""
+    free = link_setup_frame("N0CALL", bw=bw)
+    body = bytearray(free[:-2])
+    body[7], body[-2] = 0x81, 6
+    high_speed = bytes(body) + crc16_genibus(bytes(body)).to_bytes(2, "big")
+    assert is_link_setup(high_speed) and is_link_setup(free)
+    assert caller_from_link_setup(high_speed) == "N0CALL"
+    assert link_setup_marks(high_speed) == (True, 6)
+    assert link_setup_marks(free) == (False, 4)

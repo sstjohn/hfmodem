@@ -31,6 +31,7 @@ import pytest
 from scipy.signal import hilbert
 
 from hfmodem.shrike import arq, onair, p3acquire, placement
+from hfmodem.tests.evidence import SWEEP_FLOOR
 from hfmodem.tests.shrike import test_control_offset_follow as follow
 from hfmodem.tests.shrike import test_p3_reply_placement as reply
 
@@ -191,10 +192,11 @@ def test_the_padded_transform_finds_the_same_words_over_the_whole_corpus(
                     bad.append((path.name, lo, search.__name__))
                 elif slow is not None:
                     assert fast.quality == slow.quality
-    assert tried > 500 and found > 20, (tried, found)
+    assert tried > SWEEP_FLOOR[0] and found > SWEEP_FLOOR[1], (tried, found)
     assert not bad, bad
 
 
+@pytest.mark.realtime
 def test_an_awkward_window_length_is_what_the_pad_is_for():
     """2 x 41 x 1301 samples: `onair-0913-1629`'s own 2.222 s hold windows.
 
@@ -213,6 +215,7 @@ def test_an_awkward_window_length_is_what_the_pad_is_for():
     assert padded * 1.5 < bare, (padded, bare)
 
 
+@pytest.mark.realtime
 def test_the_refinement_is_not_a_cost_the_cycle_can_feel():
     """It reads forty terms out of an array the accept tensors already built."""
     audio = rendered(-26.0)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import time
+import types
 from collections import deque
 
 import numpy as np
@@ -360,6 +361,7 @@ def test_a_header_only_drop_after_a_turnaround_is_not_acked():
         return False
 
     pair.relay.corrupt = corrupt
+    pair.responder._tx_even = not acked & 1       # WW2MI's ISS reopens every stint on even
     pair.responder.queue_data(forward)
     pair.pump()
 
@@ -767,6 +769,55 @@ def test_pump_survives_a_decode_exception():
         assert m._running and m._pump.is_alive(), "pump kept decoding after the fault"
     finally:
         m.stop()
+
+
+def test_a_frame_keyed_from_the_receive_path_repeats_from_its_own_end(monkeypatch):
+    """W6IDS 2026-09-24 02:13z: two ACKs handed up across a data frame's playback
+    keyed the next frame on a session clock still at the one before, and its first
+    repeat went out 0.17 s after it ended, over wherever the answer would have been.
+    The timer pump cannot tick while a transmission holds the lock, so a frame the
+    receive path keys has only the receive path's clock to go by."""
+    import hfmodem.besra.arq.modem as modem_mod
+    clock = [5000.0]
+    m = BesraModem(bandwidth=500)
+    monkeypatch.setattr(modem_mod, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(modem_mod, "threading", types.SimpleNamespace(
+        Thread=lambda **kw: types.SimpleNamespace(start=lambda: None)))
+    keyed: list[float] = []
+
+    def air(samples):
+        keyed.append(clock[0])
+        clock[0] += len(samples) / 12000
+
+    m.audio_out = air
+    m.set_mycall("W9SSJ")
+    origin = clock[0]
+    m.start(_Obs(), threaded=True)
+    sid = crc.session_id("W9SSJ", "W6IDS")
+
+    def pump():
+        m.tick(clock[0] - origin)
+
+    def hear(ft):
+        m.receive_frames([DecodedFrame(type=ft, session_id=sid, ok=True)])
+
+    m.connect("W6IDS")
+    for ft in (S.CONACK[500], 0xFF):
+        clock[0] += 0.6
+        pump()
+        hear(ft)
+    m.transmit(bytes(600))
+    clock[0] += 0.6
+    pump()
+    hear(0xFF)
+    hear(0xFF)
+    ended = clock[0]
+    sent = len(keyed)
+    while len(keyed) == sent and clock[0] < ended + 10:
+        clock[0] += 0.1
+        pump()
+
+    assert keyed[sent] - ended >= 2.0 - 1e-9, f"repeat keyed {keyed[sent] - ended:.2f} s after its frame"
 
 
 def _spin(pred, timeout: float = 2.0) -> None:

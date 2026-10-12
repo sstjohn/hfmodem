@@ -112,6 +112,7 @@ class MailClient:
         self._send = send
         self._stage = ""
         self._logged = 0
+        self.progress = None
         self._watch()
 
     def link_up(self) -> None:
@@ -122,6 +123,13 @@ class MailClient:
     def on_link_data(self, blob: bytes) -> None:
         """The link delivered payload: feed it, transmit the answer."""
         self._push(self.session.feed(blob))
+        if self.progress is not None:
+            self.progress.update(source=bool(blob))
+        self._watch()
+
+    def on_empty_turn(self) -> None:
+        """The link accepted a new empty invitation to take the channel."""
+        self._push(self.session.empty_turn())
         self._watch()
 
     def _watch(self) -> None:
@@ -135,6 +143,8 @@ class MailClient:
     def _push(self, tx: bytes) -> None:
         if tx:
             self._send(tx)
+        if self.progress is not None:
+            self.progress.update(sent=bool(tx))
 
     @property
     def done(self) -> bool:

@@ -97,8 +97,12 @@ def _scan(z: np.ndarray, templates: dict, cfos: np.ndarray):
         return 0.0, None, 0.0
     n = z.size
     tt = np.arange(n) / _BB_FS
-    csum = np.concatenate(([0.0], np.cumsum(np.abs(z) ** 2)))
-    energy = np.sqrt(np.maximum(csum[length:] - csum[:-length], 1e-12))
+    # Float32 cumulative subtraction can lose the entire energy of quiet
+    # windows following a loud burst, producing correlations greater than 1.
+    csum = np.concatenate(([0.0], np.cumsum(np.abs(z.astype(np.complex128)) ** 2)))
+    power = np.maximum(csum[length:] - csum[:-length], 0.)
+    supported = power > max(float(power.max()) * 1e-10, 1e-24)
+    energy = np.sqrt(power)
     spectra = {key: np.fft.fft(np.conj(tp[::-1]), 2 * n)
                for key, tp in templates.items()}
     best = (0.0, None, 0.0)
@@ -106,7 +110,9 @@ def _scan(z: np.ndarray, templates: dict, cfos: np.ndarray):
         zz = np.fft.fft(z * np.exp(-2j * np.pi * cfo * tt), 2 * n)
         for key, tf in spectra.items():
             c = np.abs(np.fft.ifft(zz * tf))[length - 1:n]
-            r = float((c / energy[:c.size]).max())
+            normalized = np.zeros_like(c)
+            np.divide(c, energy[:c.size], out=normalized, where=supported[:c.size])
+            r = float(normalized.max())
             if r > best[0]:
                 best = (r, key, float(cfo))
     return best
@@ -181,16 +187,29 @@ def spread_score(seg: np.ndarray, fs: float = 48000.0) -> float:
     return r
 
 
-def header_score(seg: np.ndarray, fs: float = 48000.0):
+def header_score(seg: np.ndarray, fs: float = 48000.0,
+                 cfo_hz: float | None = None, near: float = 0.0):
     """Best (score, root, shift, cfo) over the full Chu19 header family.
 
     The confirming statistic, 342 templates: on the recorded emissions it runs
     ~0.1 above `spread_score` and pins the root, at a cost that belongs offline
     -- rescans and reports, not the cycle loop.
+
+    THE ROOT IS WHAT IT PINS, AND NOT THE SHIFT. A cyclic shift of a Chu
+    sequence is a frequency translation of it: at root 14 one step is 82.9 Hz,
+    so with the offset free the 4-step aliases 5/9/13/17 land 5.9 Hz apart and
+    score within 0.005 of each other, and nine to thirteen templates tie inside
+    0.05 on every measured cycle. Across 25 cycles at two gateways the root
+    reads 14 every time, best other root 0.36 against 0.45. `cfo_hz` pins the
+    search to one offset -- the session's own measured peer carrier -- which
+    narrows the tie without making the shift an identity. Unpinned, the search
+    runs +/-30 Hz about `near`, the carrier a wider lock already found.
     """
     z = _baseband(seg, fs)
     templates = {(u, s): _header_template(u, s)
                  for u in range(1, CHU_LEN) for s in range(CHU_LEN)}
-    r, key, cfo = _scan(z, templates, np.arange(-30.0, 31.0, 4.0))
+    cfos = (np.array([float(cfo_hz)]) if cfo_hz is not None
+            else near + np.arange(-30.0, 31.0, 4.0))
+    r, key, cfo = _scan(z, templates, cfos)
     root, shift = key if key else (0, 0)
     return r, root, shift, cfo

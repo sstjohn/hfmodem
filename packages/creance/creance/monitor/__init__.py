@@ -11,9 +11,10 @@ of creance), and the merge preserves each detection's confidence grade so a
 tentative signal is never dressed up as a confirmed station.
 """
 
-from .activity import (ACTIVE_CONFIRMED, ACTIVE_TENTATIVE, CONFIRMED, QUIET,
-                       STREAM_CLOCK, TENTATIVE, WALL_CLOCK, ActivityView,
-                       Detection, format_detection, render_summary)
+from .activity import (ACTIVE_CONFIRMED, ACTIVE_TENTATIVE, CONFIRMED, OURS,
+                       QUIET, ROLES, STREAM_CLOCK, TENTATIVE, TRACKER,
+                       WALL_CLOCK, ActivityView, Detection, format_detection,
+                       render_summary)
 from .aggregate import run
 from .driver import (ModemMonitor, MonitorSpec, default_specs,
                      device_source)
@@ -21,4 +22,5 @@ from .driver import (ModemMonitor, MonitorSpec, default_specs,
 __all__ = ["run", "ActivityView", "Detection", "MonitorSpec", "ModemMonitor",
            "default_specs", "device_source", "format_detection",
            "render_summary", "CONFIRMED", "TENTATIVE", "ACTIVE_CONFIRMED",
-           "ACTIVE_TENTATIVE", "QUIET", "STREAM_CLOCK", "WALL_CLOCK"]
+           "ACTIVE_TENTATIVE", "QUIET", "STREAM_CLOCK", "WALL_CLOCK", "ROLES",
+           "TRACKER", "OURS"]

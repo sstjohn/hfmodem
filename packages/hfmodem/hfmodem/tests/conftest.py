@@ -46,3 +46,15 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.skip(
                 reason="set HFMODEM_AUDIO=1 (sound card, and the machine to "
                        "itself) or HFMODEM_RIG=1 (transmitter)"))
+
+
+@pytest.fixture
+def tools(monkeypatch):
+    """`tools/` importable, for a test of a station instrument only a checkout has."""
+    from hfmodem.tests.evidence import TREE
+
+    path = TREE / "tools"
+    if not path.is_dir():
+        pytest.skip("tools/ not present (installed-wheel run)")
+    monkeypatch.syspath_prepend(str(path))
+    return path

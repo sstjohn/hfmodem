@@ -269,9 +269,9 @@ def run(tmp_path):
             argv += ["--rigctld", f"127.0.0.1:{server.port}"]
         # An `--analyze` run takes none of the station flags: it never opens a device
         # and never asks a radio anything.
-        # 20 WPM, not the 30 this used to pass to run faster: §97.119(b)(1) caps a
+        # 20 WPM, not the 30 this used to pass to run faster: the encoder caps a
         # CW identification there and core.cwid refuses above it. A test that asks
-        # the tool to send something the rule forbids is testing the wrong tool.
+        # the tool to send above that ceiling is testing the wrong range.
         # --no-line-ptt: the bench keys through the fake daemon, because no
         # test machine has a line whose pin moves (TIOCMBIC on /dev/null or a
         # pty is ENOTTY) and a run asking for one refuses before the first

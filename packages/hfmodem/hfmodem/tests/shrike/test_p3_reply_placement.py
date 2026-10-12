@@ -113,8 +113,8 @@ def test_a_corroborated_raster_outlives_one_reading_of_it():
     slot = A5_SLOT + 5
     assert g._p3_raster_corroborated
     assert g.p3_control_refusal(slot + onair.ONSET_MAX_CYCLES) is None
-    assert "no fresh packet clock" in g.p3_control_refusal(
-        slot + onair.RASTER_PROJECT_CYCLES)
+    # ...and the silence budget, not the guard, ends it (VE3KPG 0924-0033).
+    assert g.p3_control_refusal(slot + onair.RASTER_PROJECT_CYCLES) is None
 
 
 def late_comb(error_n):

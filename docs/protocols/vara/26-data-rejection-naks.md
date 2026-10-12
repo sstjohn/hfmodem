@@ -10,10 +10,14 @@ The session failed because these NACK forms had no connected DATA handler.
 | Direct response to DATA | 289 / 31 | 15 | NACK; retry one record lower |
 | Response to state query | 288 / 63 | 31 | Same NACK; retry one record lower |
 
-The short payload is identical to `SESSION_CONNECT_CONFIRM`. The connection
-interpretation remains confined to the outstanding link-setup state. Recognizing
-that waveform during a DATA turnaround must neither acknowledge bytes nor reset
-the connection.
+The short payload is also what a peer keys behind a link-setup it cannot read
+(`SESSION_LINK_SETUP_NAK`). It was taken for a connect confirmation until
+2026-09-23. K0SI keyed it behind our link-setup on both 09-16 tapes, and on the
+09-17..23 tapes K0SI, K7EK-10, KB8AY and KC9GHZ keyed it behind six more; no link
+it "confirmed" carried a byte. Behind a link-setup the caller keys the
+link-setup again at once, at the level already offered: what a stock caller does
+there has not been recorded. During a DATA turnaround the waveform must neither
+acknowledge bytes nor reset the connection.
 
 ## Independent stock comparison
 
@@ -42,8 +46,9 @@ change merely because both are negative feedback.
 The new action is scoped to a default BW2300 initiator with a full base-record
 frame pending and a complete delivery boundary queued. The short NACK requires a
 fresh post-DATA window; the long NACK requires a successful, fresh query for the
-same pending frame. Unsupported bandwidths, explicit transmit ladders, short
-final frames, and further NACKs at a lower record do not acquire this action.
+same pending frame. Unsupported bandwidths and explicit transmit ladders do not
+acquire this action; a short final frame now does, as its own delivery boundary
+([29](29-low-level-data-nacks.md)).
 
 Recognition uses the called station's payload, at least 13 exact clear symbols
 for the short form or 20 for the long form, no contradictory clear symbols, and

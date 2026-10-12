@@ -48,7 +48,7 @@ def test_recorded_kb5_partial_frame_survives_idle_after_peer_gap_reack():
     hs.role, hs.caller, hs.called = 'initiator', 'W9SSJ', 'KB5LZK'
     hs.state, hs.step, hs.turn = VA.VaraState.CONNECTED, VA._I_CONNECTED, VA._TURN_PEER
     hs._answer_owed = VA._OWED_OVER
-    hs._reack_frame = VA.OVER_CONTINUE_CAPTURED
+    hs._reack_frame = VA.OVER_CONTINUE_BURST
     hs._reacks = 1
     hs._peer_over = 1
     # The measured preceding second rung is a generated 32-symbol continue.

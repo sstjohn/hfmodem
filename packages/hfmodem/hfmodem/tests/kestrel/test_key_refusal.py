@@ -84,7 +84,7 @@ class _Card:
     def __init__(self):
         self.played: list[np.ndarray] = []
 
-    def query_devices(self, name): return {"max_output_channels": 2}
+    def query_devices(self, name, kind=None): return {"max_output_channels": 2}
     def InputStream(self, **kw): return _In()
     def OutputStream(self, **kw): return _Out(self)
 

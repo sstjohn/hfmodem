@@ -23,12 +23,14 @@ from __future__ import annotations
 import os
 import sys
 import tomllib
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from hfhost.config import ConfigError, build_section, choice
 
-from hfmodem.core import band, levels
+from hfmodem.core import band, identification, levels
+from hfmodem.core.config_validation import PROTOCOL_VALIDATORS, check_linking_protection
 from hfmodem.core.regulatory import Control, Profile, profile
 from hfmodem.winlink.session import CLIENT_SID
 
@@ -65,10 +67,10 @@ class Station:
     grid: str = ""
     #: `local` covers local and remote control — a human is at the control point.
     #: `automatic` is the station answering on its own, which is what any
-    #: `listen = true` amounts to. No default: several regimes treat the two very
-    #: differently and none treats automatic as the easier case.
+    #: `listen = true` amounts to. No default: the operator selects which
+    #: control setting the profile's checks use.
     control: str = ""
-    #: Which rules this station operates under. No default — see core.regulatory.
+    #: Which emission limits to apply. No default — see core.regulatory.
     regulatory: str = ""
     #: Profile-specific settings, e.g. `licence` for part97.
     regulatory_settings: dict = field(default_factory=dict)
@@ -80,6 +82,8 @@ class Station:
     #: half of the B2F SID, ours by default. The capability letters are not in
     #: here — see `winlink.session._CAPABILITIES`.
     client_sid: str = CLIENT_SID
+    #: CW station identity; empty falls back to the effective digital mycall.
+    idcall: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,12 +103,13 @@ class Rig:
     #: The CHANNEL CENTRE, as a gateway list publishes it. The dial is derived.
     centre_hz: int = 0
     max_key_s: float = 30.0
-    #: PEP the transmitter is set to, in watts. Optional everywhere except a band
-    #: that carries its own limit, where §97.313 refuses an emission that does not
-    #: state its power — the alternative being to transmit an unknown amount into
-    #: a capped band. Without this there was no way to say, so 30 m refused every
-    #: protocol and no configuration could fix it.
+    #: PEP the transmitter is set to, in watts. The part97 profile requires it
+    #: for segments with a specific power ceiling. Without this setting there
+    #: was no way to supply power, so the profile refused every protocol on 30 m.
     power_w: float | None = None
+    #: The receiver's audio passband, lo and hi Hz: what a monitor on this rig
+    #: can hear, read off its SSB filter. Nothing sends it to the radio.
+    filter_hz: tuple[int, int] = (300, 2900)
     ptt: Ptt = field(default_factory=Ptt)
 
     @property
@@ -126,17 +131,45 @@ class Audio:
     #: From core.levels for the same reason input_gain is: one transmit level for
     #: one interface, not one per protocol.
     tx_drive: float = levels.TX_DRIVE
-    #: Milliseconds of ADC→DAC loop latency the driver does not report, added to
-    #: the measured offset on every burst this station schedules. `lat` is the
-    #: converter's own `outputBufferDacTime − inputBufferAdcTime`; what it leaves
-    #: out is the codec's in-and-out delay, and on 2026-09-14 that put every
-    #: emission 20 ms later in the peer's cycle than the scheduler believed —
-    #: measured twice over, from the PACTOR-3 witness chain and from the peer's
-    #: PACTOR-1 answer position, agreeing to 1 ms. It is a property of the audio
-    #: path and not of any protocol, so it is here and not in a modem constant.
-    #: Zero until a station has measured its own.
-    tx_latency_ms: float = 0.0
+    tx_latency_ms: float | None = None
     capture_dir: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ChainAudio:
+    """Selected non-mobile chain. None means unmeasured or unconfigured."""
+    input: str = ""
+    output: str = ""
+    rate: int = 48000
+    blocksize: int = 128
+    latency: str = "low"
+    input_gain: float | None = None
+    gain_range: tuple[float, float] | None = None
+    tx_drive: float | None = None
+    p1_drive: float | None = None
+    p3_drive: float | None = None
+    p4_drive: float | None = None
+    rx_floor_dbfs: float | None = None
+    rx_hot_rms: float = 0.30
+    rx_silent_rms: float = 0.001
+    peak_limit_dbfs: float = -3.0
+    peak_target_dbfs: float = -6.0
+    tx_latency_ms: float | None = None
+    capture_dir: str = ""
+    calibration_status: str = "UNMEASURED"
+    calibration_evidence: str = ""
+    # Signed residual after the existing TX latency correction, scoped to P4.
+    p4_answer_residual_ms: float = 0.0
+    p4_answer_residual_evidence: str = ""
+
+    def drive_for(self, preset: str = "", override: float | None = None) -> float:
+        value = override if override is not None else getattr(self, f"{preset}_drive", None)
+        if value is None:
+            value = self.tx_drive
+        if value is None:
+            warn_config("selected audio chain has no tx_drive; using provisional playback drive 0.6")
+            value = levels.TX_DRIVE
+        return _unit_interval(value, "tx_drive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,14 +182,81 @@ class ProtocolConfig:
     pty: str = ""
     bandwidth: str = ""
     listen: bool = False
+    # bateleur with host = "s5066": the modem mode the node starts in
+    # ("110 1200L" and the like); its address is ``addresses``' one.
+    mode: str = ""
+    # ALE only ([protocols.ale]): the station's own addresses, the channels
+    # it scans as dial frequencies in Hz (as ALE channel lists publish them),
+    # how fast it scans, and how long a quiet link lasts (0: until hung up).
+    addresses: tuple = ()
+    channels: tuple = ()
+    scan_rate: float = 2.0
+    activity_s: float = 30.0
+    sound_s: float = 0.0
+    # The nets it belongs to: {address, member, slot} each — the net's
+    # address, the station's own address it answers with, its slot.
+    nets: tuple = ()
+    # Linking protection (MIL-STD-188-141B appendix B): 0 off, 1 AL-1,
+    # 2 AL-2, and the 56-bit key as 14 hex digits.
+    lp_level: int = 0
+    lp_key: str = ""
+    # A network's operating conventions over the standard's defaults:
+    # "hflink" for the amateur ALE network's (bateleur.ale.hflink: its nets
+    # answered, 15 s calls, TWAS sounds, a six-minute idle link). With it,
+    # ``base`` sounds each hour on ``pilot_channels`` (dial frequencies in
+    # Hz, among ``channels``; empty: all of them).
+    conventions: str = ""
+    base: bool = False
+    pilot_channels: tuple = ()
+    # ALE: directories of who is on the air (bateleur.ale.directory), as
+    # URLs or files; "default" is the monitoring list. Read in the
+    # background at start; the host port then says who a station is.
+    directory: tuple = ()
+    # Selcall only ([protocols.selcall]): ``addresses`` are its own, one of
+    # four digits and/or one of six; the dot pattern ahead of a call (2 s
+    # for a radio sitting on the channel, 6 or more for scanning ones); an
+    # acknowledgment call answered to calls that ask; and 1870 Hz sent as 0
+    # rather than 1 (an inverted sideband somewhere).
+    dots_s: float = 6.0
+    emergency: bool = False
+    acknowledge: bool = False
+    invert: bool = False
+    options: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class StationConfig:
     station: Station
     rig: Rig
-    audio: Audio
+    audio: Audio | ChainAudio
     protocols: dict[str, ProtocolConfig]
+    selected_rig: str = "ft891"
+    rig_source: str = "default"
+    audio_chain: str = "ft891_external"
+    resolved_profile: dict = field(default_factory=dict)
+    resolution_sources: dict = field(default_factory=dict)
+    audio_calibration: dict = field(default_factory=dict)
+
+    def require_audio(self, operation: str, *, input=False, output=False,
+                      drive=False, floor=False, preset="", drive_override=None) -> None:
+        """Warn on missing calibration; require a name only for needed devices."""
+        missing = [key for key, needed in (("input", input), ("output", output))
+                   if needed and not getattr(self.audio, key, None)]
+        advisory = []
+        if floor and getattr(self.audio, "rx_floor_dbfs", None) is None:
+            advisory.append("rx_floor_dbfs")
+        if drive and isinstance(self.audio, ChainAudio):
+            if drive_override is not None:
+                _unit_interval(drive_override, "tx_drive")
+            elif (getattr(self.audio, f"{preset}_drive", None) is None
+                  and self.audio.tx_drive is None):
+                advisory.append("tx_drive")
+        if advisory or missing:
+            warn_config(f"{operation}: incomplete {self.selected_rig.upper()} audio configuration "
+                        f"[audio.chains.{self.audio_chain}]: missing "
+                        + ", ".join(missing + advisory) + "; continuing with provisional calibration")
+        if missing:
+            raise ConfigError(f"{operation}: device cannot be named: " + ", ".join(missing))
 
     @property
     def control(self) -> Control:
@@ -176,20 +276,24 @@ _PROTOCOL_HOSTS = {
     "vara": ("vara",),
     "ardop": ("ardop",),
     "sabir": ("hostapi",),
+    "bateleur": ("bateleur", "s5066"),
+    "ale": ("ale",),
+    "selcall": ("selcall",),
+    "rpr": ("kiss", "mail"),
 }
 
 
-def load(path: str | Path) -> StationConfig:
+def load(path: str | Path, *, rig_name=None, environ=None) -> StationConfig:
     """Read and validate a station file. Every error names its key."""
     raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
-    return parse(raw)
+    return parse(raw, rig_name=rig_name, environ=environ)
 
 
 def station_profile() -> Profile | None:
-    """The regime this station declared, or None when no station file is named.
+    """The emission profile this station selected, or None when no station file is named.
 
     For the tools that key a transmitter and hold no station file of their own.
-    None is not a default regime — it is the absence of a declaration, and a
+    None is not a default profile — it is the absence of a declaration, and a
     caller that has to assume something should assume the stricter thing.
     """
     path = os.environ.get(STATION_ENV)
@@ -211,12 +315,23 @@ def tx_drive(override: float | None = None) -> float:
     could set it, watch nothing change, and conclude drive was not the problem.
     """
     if override is not None:
+        from .rigs import resolve_rig
+        if resolve_rig() != "ft891":
+            override = _unit_interval(override, "tx_drive")
         return override
     path = os.environ.get(STATION_ENV)
     if not path:
+        from .rigs import resolve_rig
+        if resolve_rig() != "ft891":
+            warn_config("selected audio chain has no tx_drive; using provisional playback drive 0.6")
+            return levels.TX_DRIVE
         return levels.TX_DRIVE
     try:
-        return load(path).audio.tx_drive
+        value = load(path).audio.tx_drive
+        if value is None:
+            warn_config("selected audio chain has no tx_drive; using provisional playback drive 0.6")
+            return levels.TX_DRIVE
+        return value
     except (OSError, ConfigError) as exc:
         raise ConfigError(f"{STATION_ENV} names {path}: {exc}") from exc
 
@@ -228,29 +343,9 @@ TX_LATENCY_RANGE_MS = (0.0, 60.0)
 
 
 def tx_latency_ms(override: float | None = None) -> float:
-    """Milliseconds to key every burst early for this station's audio path: the
-    flag if one was given, else `[audio] tx_latency_ms`, else nothing.
+    from .rigs import resolve_tx_timing
 
-    Read like `tx_drive` and bounded here rather than at each caller, so a flag
-    and a file cannot disagree about what is a plausible correction.
-    """
-    value = override
-    if value is None:
-        path = os.environ.get(STATION_ENV)
-        if not path:
-            return 0.0
-        try:
-            value = load(path).audio.tx_latency_ms
-        except (OSError, ConfigError) as exc:
-            raise ConfigError(f"{STATION_ENV} names {path}: {exc}") from exc
-    lo, hi = TX_LATENCY_RANGE_MS
-    if not lo <= value <= hi:
-        raise ConfigError(
-            f"tx_latency_ms {value} is outside {lo}–{hi} ms. It is the part of "
-            "the ADC→DAC loop the driver does not report, measured by keying "
-            "into a loopback and reading where our own burst lands in our own "
-            "capture; this station measured 20.")
-    return value
+    return resolve_tx_timing(override).tx_latency_ms
 
 
 def client_sid(override: str = "") -> str:
@@ -309,19 +404,37 @@ def mail_password(flag: str = "", path: str = "") -> str:
     return flag or os.environ.get(PASSWORD_ENV, "")
 
 
-def grid() -> str:
-    """The station file's `[station] grid`, for the B2F comment line.
+def _station_field(name: str, what: str, hint: str, path: str | None) -> str:
+    path = path or os.environ.get(STATION_ENV)
+    found = ""
+    if path:
+        try:
+            found = getattr(load(path).station, name)
+        except (OSError, ValueError) as exc:
+            warn_config(f"{STATION_ENV} names {path}: {exc}")
+    if not found:
+        warn_config(f"no {what} configured: {hint} in the file {STATION_ENV} names")
+    return found
+
+
+def mycall(path: str | None = None) -> str:
+    """The callsign a tool signs with: `$MYCALL`, else `[station] mycall`.
+
+    Empty, with a warning, when neither names one; a tool carries on without it.
+    `path` names the station file when it is not the one in the environment.
+    """
+    return os.environ.get("MYCALL") or _station_field(
+        "mycall", "callsign", "export MYCALL, or set [station] mycall", path)
+
+
+def grid(path: str | None = None) -> str:
+    """`[station] grid`, for the B2F comment line and for tools that place the station.
 
     Pat writes `; TARGET DE MYCALL (LOCATOR)` and so does every other B2F client
-    a gateway sees; a station that declared its grid should say it.
+    a gateway sees; a station that declared its grid should say it. Empty, with a
+    warning, when none is declared.
     """
-    path = os.environ.get(STATION_ENV)
-    if not path:
-        return ""
-    try:
-        return load(path).station.grid
-    except (OSError, ConfigError) as exc:
-        raise ConfigError(f"{STATION_ENV} names {path}: {exc}") from exc
+    return _station_field("grid", "grid", "set [station] grid", path)
 
 
 def _check_client_sid(value: str, where: str) -> str:
@@ -337,7 +450,100 @@ def _check_client_sid(value: str, where: str) -> str:
     return value
 
 
-def parse(raw: dict) -> StationConfig:
+def warn_config(message):
+    print(f"warning: {message}", file=sys.stderr)
+
+
+def _unit_interval(value, key):
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or not 0 <= value <= 1):
+        warn_config(f"{key} must be finite and between 0 and 1; using provisional 0.6")
+        return levels.TX_DRIVE
+    return value
+
+
+def _chain_audio(raw: dict, common: dict, chain: str, *, device_default="") -> ChainAudio:
+    table = {key: common[key] for key in ("rate", "blocksize", "latency", "capture_dir")
+             if key in common}
+    table.update(raw)
+    defaults = ChainAudio(input=device_default, output=device_default)
+    def discard(key, reason):
+        warn_config(f"[audio.chains.{chain}]: {key} {reason}; using provisional default")
+        table.pop(key, None)
+    for key, value in list(table.items()):
+        if key not in ChainAudio.__dataclass_fields__:
+            discard(key, "is unknown")
+        elif key == "p4_answer_residual_ms":
+            if (type(value) not in (int, float) or not math.isfinite(value)
+                    or not -60 <= value <= 60):
+                raise ConfigError("p4_answer_residual_ms must be finite in [-60, 60] ms")
+        elif key == "gain_range":
+            if (not isinstance(value, list) or len(value) != 2
+                    or any(type(v) not in (int, float) or not math.isfinite(v) for v in value)
+                    or not 0 <= value[0] <= value[1] <= 1):
+                discard(key, "must be two finite bounds in [0, 1]")
+            else:
+                table[key] = tuple(value)
+        elif key in ("input_gain", "tx_drive", "p1_drive", "p3_drive", "p4_drive",
+                     "rx_floor_dbfs", "tx_latency_ms", "rx_hot_rms", "rx_silent_rms",
+                     "peak_limit_dbfs", "peak_target_dbfs"):
+            valid = type(value) in (int, float) and math.isfinite(value)
+            if key.endswith("drive") or key == "input_gain":
+                valid = valid and 0 <= value <= 1
+            elif key == "tx_latency_ms":
+                valid = valid and 0 <= value <= 60
+            elif key.endswith("dbfs"):
+                valid = valid and value < 0
+            else:
+                valid = valid and 0 < value <= 1
+            if not valid:
+                discard(key, "has an invalid range or non-finite value")
+        elif key in ("rate", "blocksize"):
+            if type(value) is not int or value <= 0:
+                discard(key, "must be a positive integer")
+        elif key == "latency":
+            if value not in ("low", "high"):
+                discard(key, "must be low or high")
+        elif key == "calibration_status":
+            if value not in ("UNMEASURED", "PROVISIONAL", "INFERRED", "MEASURED"):
+                discard(key, "is unknown")
+        elif not isinstance(value, str):
+            discard(key, "must be a string")
+    if table.get("gain_range") and table.get("input_gain") is not None:
+        lo, hi = table["gain_range"]
+        if not lo <= table["input_gain"] <= hi:
+            warn_config(f"[audio.chains.{chain}]: input_gain outside gain_range; retaining operator value")
+    if table.get("calibration_status") == "MEASURED" and not table.get("calibration_evidence"):
+        warn_config(f"[audio.chains.{chain}]: MEASURED requires calibration_evidence; treating as PROVISIONAL")
+        table["calibration_status"] = "PROVISIONAL"
+    for lo, hi in (("rx_silent_rms", "rx_hot_rms"), ("peak_target_dbfs", "peak_limit_dbfs")):
+        if table.get(lo, getattr(defaults, lo)) >= table.get(hi, getattr(defaults, hi)):
+            discard(lo, "conflicts with " + hi)
+            discard(hi, "conflicts with " + lo)
+    for key in ("input", "output"):
+        if not table.get(key):
+            table[key] = device_default
+    if table.get("p4_answer_residual_ms") and not table.get("p4_answer_residual_evidence", "").strip():
+        raise ConfigError("p4_answer_residual_ms requires p4_answer_residual_evidence")
+    return ChainAudio(**table)
+
+
+def _optional_tables(raw, known, where):
+    if not isinstance(raw, dict):
+        warn_config(f"{where}: expected tables; ignored")
+        return {}
+    tables = {}
+    for key, table in raw.items():
+        if key not in known or not isinstance(table, dict):
+            warn_config(f"{where}.{key}: unknown or invalid table; ignored")
+        else:
+            tables[key] = dict(table)
+    return tables
+
+
+def parse(raw: dict, *, rig_name=None, environ=None) -> StationConfig:
+    from .rigs import RIGS, resolve_profile
+    environ = os.environ if environ is None else environ
     if raw.get("schema") != SCHEMA:
         raise ConfigError(f"schema must be {SCHEMA} (got {raw.get('schema')!r})")
     body = {k: v for k, v in raw.items() if k != "schema"}
@@ -356,11 +562,56 @@ def parse(raw: dict) -> StationConfig:
             f"{band.DIAL_OFFSET_HZ} Hz. Getting this wrong is silent and kills "
             "both directions.")
     rig_raw = dict(body.get("rig", {}))
-    ptt = build_section(Ptt, dict(rig_raw.pop("ptt", {})), "[rig.ptt]")
+    profiles = _optional_tables(rig_raw.pop("profiles", {}), RIGS, "[rig.profiles]")
+    legacy_model = rig_raw.get("model") or None
+    name, selected, sources = resolve_profile(rig_name, environ=environ,
+                                              legacy_model=legacy_model, profiles=profiles)
+    rig_source = ("operator-flag" if rig_name else "HFMODEM_RIG" if environ.get("HFMODEM_RIG")
+                  else "[rig] model" if legacy_model else "default")
+    ptt_raw = dict(rig_raw.pop("ptt", {}))
+    if name == "ft891":
+        if "ptt_port" in profiles.get("ft891", {}) or environ.get("PTT_PORT"):
+            ptt_raw["port"] = selected.get("ptt_port", "")
+        if "settle" in profiles.get("ft891", {}):
+            ptt_raw["settle_s"] = selected["settle"]
+    else:
+        rig_raw["model"] = name
+        rig_raw["mode"] = selected["mode"]
+        ptt_raw.pop("port", None)  # legacy mobile port never crosses rigs
+        ptt_raw["port"] = selected.get("ptt_port", "")
+        ptt_raw["settle_s"] = selected["settle"]
+    ptt = build_section(Ptt, ptt_raw, "[rig.ptt]")
+    if "filter_hz" in rig_raw:
+        lo_hi = rig_raw["filter_hz"]
+        if not (isinstance(lo_hi, list) and len(lo_hi) == 2
+                and all(isinstance(v, int) for v in lo_hi) and 0 <= lo_hi[0] < lo_hi[1]):
+            raise ConfigError("[rig]: filter_hz is [lo, hi] in whole Hz, lo below hi")
+        rig_raw["filter_hz"] = tuple(lo_hi)
     rig = build_section(Rig, rig_raw, "[rig]", ptt=ptt)
-    audio = build_section(Audio, dict(body.get("audio", {})), "[audio]")
+    audio_raw = dict(body.get("audio", {}))
+    known_chains = {r.get("audio_chain") for r in RIGS.values()} - {None}
+    chains = _optional_tables(audio_raw.pop("chains", {}), known_chains, "[audio.chains]")
+    if name == "ft891":
+        optional_keys = ("gain_range", "rx_floor_dbfs", "p1_drive", "p3_drive",
+                         "p4_drive", "calibration_status", "calibration_evidence")
+        calibration = {key: audio_raw.pop(key) for key in optional_keys if key in audio_raw}
+        if calibration:
+            checked = _chain_audio(calibration, {}, "ft891_external")
+            calibration = {key: getattr(checked, key) for key in calibration}
+        audio = build_section(Audio, audio_raw, "[audio]")
+        chain = "ft891_external"
+    else:
+        calibration = {}
+        # Check flat spelling without constructing the mobile Audio defaults.
+        unknown = set(audio_raw) - set(Audio.__dataclass_fields__)
+        if unknown:
+            warn_config(f"[audio]: unknown key(s) {', '.join(sorted(unknown))}; ignored")
+        chain = selected["audio_chain"]
+        audio = _chain_audio(chains.get(chain, {}), audio_raw, chain,
+                             device_default=selected.get("audio_device", ""))
 
     protocols = {}
+    selected_name = name
     for name, table in body.get("protocols", {}).items():
         if name not in _PROTOCOL_HOSTS:
             raise ConfigError(
@@ -369,9 +620,12 @@ def parse(raw: dict) -> StationConfig:
         p = build_section(ProtocolConfig, dict(table), f"[protocols.{name}]")
         if p.enabled:
             choice(p.host, _PROTOCOL_HOSTS[name], f"[protocols.{name}]", "host")
+        if name in PROTOCOL_VALIDATORS:
+            PROTOCOL_VALIDATORS[name](p, f"[protocols.{name}]", frozenset(table))
         protocols[name] = p
 
-    cfg = StationConfig(station, rig, audio, protocols)
+    cfg = StationConfig(station, rig, audio, protocols, selected_name, rig_source, chain,
+                        selected, sources, calibration)
     _validate(cfg)
     return cfg
 
@@ -383,32 +637,43 @@ def _validate(cfg: StationConfig) -> None:
         raise ConfigError(
             "[station]: control is required and has no default — 'local' if an "
             "operator is at the control point, 'automatic' if the station answers "
-            "on its own. Several regimes treat the two very differently.")
+            "on its own. The selected profile uses this setting.")
     choice(st.control, tuple(c.value for c in Control), "[station]", "control")
 
     if not st.regulatory:
         raise ConfigError(
-            "[station]: regulatory is required and has no default. 'part97' for "
-            "the US amateur service (add licence = \"general\"|…), or "
-            "'unregulated' if you operate under rules hfmodem does not model "
-            "(add because = \"…\"), in which case you are answerable for every "
-            "emission.")
+            "[station]: regulatory is required and has no default. 'part97' applies "
+            "configured emission limits (add licence = \"general\"|…), or "
+            "'unregulated' applies no emission limits (add because = \"…\").")
     cfg.profile  # raises ValueError naming the profile, and validates its settings
+    ale = cfg.protocols.get("ale")
+    if ale is not None and ale.enabled:
+        check_linking_protection(st.regulatory, ale.lp_level)
 
     choice(st.id_mode, ("cw", "none"), "[station]", "id_mode")
+    if st.idcall != "":
+        try:
+            identification.validate_call(st.idcall, "[station] idcall")
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
     _check_client_sid(st.client_sid, "[station]")
 
-    lo, hi = GAIN_RANGE
-    if not lo <= audio.input_gain <= hi:
-        raise ConfigError(
-            f"[audio]: input_gain {audio.input_gain} is outside {lo}–{hi}. The "
-            "measured working point at this station is 0.040; it has been wrong "
-            "at 0.51, 0.50, 0.18 and 0.118, and a hot input presents as a working "
-            "radio that decodes nothing.")
+    if isinstance(audio, Audio):
+        if not 0 <= audio.tx_drive <= 1:
+            raise ConfigError(f"[audio]: tx_drive {audio.tx_drive} must be between 0 and 1")
+        lo, hi = cfg.audio_calibration.get("gain_range", GAIN_RANGE)
+        if not lo <= audio.input_gain <= hi and "gain_range" in cfg.audio_calibration:
+            warn_config("[audio]: input_gain outside configured gain_range; retaining operator value")
+        elif not lo <= audio.input_gain <= hi:
+            raise ConfigError(
+                f"[audio]: input_gain {audio.input_gain} is outside {lo}–{hi}. The "
+                "measured working point at this station is 0.040; it has been wrong "
+                "at 0.51, 0.50, 0.18 and 0.118, and a hot input presents as a working "
+                "radio that decodes nothing.")
 
     enabled = {n: p for n, p in cfg.protocols.items() if p.enabled}
 
-    if enabled and not audio.output:
+    if enabled and not audio.output and isinstance(audio, Audio):
         raise ConfigError(
             "[audio]: output is required when any protocol is enabled. An unset "
             "device means the system default, which is the built-in speakers.")
@@ -438,4 +703,3 @@ def _validate(cfg: StationConfig) -> None:
             "other than the configured one. Use backend = \"rts\" with the PTT "
             "interface's own port.")
     choice(rig.ptt.backend, ("rts",), "[rig.ptt]", "backend")
-

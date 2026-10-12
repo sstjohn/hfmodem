@@ -1,0 +1,6 @@
+{
+  "source": "working/p4-oracle/ve3kpg-0926/a1228/ve3kpg-breakin-body-k13.txt",
+  "transform": "invert every tracked bit; bit 0 = +1 on training phase",
+  "order": "channel",
+  "symbol_interleaver": "0xba890_840"
+}

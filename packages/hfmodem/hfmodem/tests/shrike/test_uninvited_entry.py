@@ -157,7 +157,7 @@ def test_the_granted_door_keeps_its_own_level():
     assert _granted(entry_sl=6).tx.p3 == [("entry", GRANT_ENTRY_SL)]
 
 
-def test_the_flag_reaches_the_link_the_arm_builds():
+def test_the_flag_reaches_the_link_the_arm_builds(tmp_path, monkeypatch):
     """The other half of the chain: `onair.run` resolves the namespace and hands
     the level to the host it builds. `entry_sl` had no flag at all, so all 27
     uninvited entries on record went out at the default and no hand-flown arm
@@ -165,10 +165,20 @@ def test_the_flag_reaches_the_link_the_arm_builds():
     built, real = [], onair.PtcHost
     argv = ["onair", "--dxcall", "WS8EOC", "--mycall", "W9SSJ",
             "--p3-entry-sl", "1"]
+    argv += ["--outdir", str(tmp_path / "arm-output")]
     parsed = []
     with mock.patch.object(onair, "run", lambda a: parsed.append(a) or 0), \
             mock.patch.object(sys, "argv", argv):
         onair.main()
+    parsed[0].outdir = str(tmp_path / 'capture')
+    assert not (parsed[0].transmit or parsed[0].listen_only or parsed[0].preflight or parsed[0].tune or parsed[0].reply_wav)
+    stopped = []
+    def stop_after_host_configuration(host):
+        assert built and host is built[0]
+        stopped.append(host)
+        raise SystemExit
+    monkeypatch.setattr(onair, "find_device", lambda *_a, **_kw: 0)
+    monkeypatch.setattr(onair, "_SessionRx", stop_after_host_configuration)
     with mock.patch.object(onair, "PtcHost",
                            lambda **kw: built.append(real(**kw)) or built[-1]), \
             contextlib.redirect_stdout(io.StringIO()), \
@@ -178,3 +188,4 @@ def test_the_flag_reaches_the_link_the_arm_builds():
     assert built, "run never built a host"
     assert built[0].arq.cfg.entry_sl == 1
     assert built[0].arq.entry_level == 1
+    assert stopped == [built[0]]

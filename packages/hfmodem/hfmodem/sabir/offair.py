@@ -40,6 +40,7 @@ import numpy as np
 from scipy.io import wavfile
 from scipy.signal import resample_poly
 
+from hfmodem.core import wav as recordings
 from hfmodem.sabir.arq import wire
 from hfmodem.sabir.floor import beacon as wspr
 from hfmodem.sabir.floor.mfsk import FloorModem
@@ -63,7 +64,7 @@ def wav_read(path: str) -> np.ndarray:
     symbol slip over a burst -- tolerated because the beacon bursts are short,
     not because the floor/beacon receivers track sample-clock (they don't; only
     the OFDM sync does)."""
-    rate, data = wavfile.read(path)
+    rate, data = wavfile.read(recordings.source(path))
     if data.ndim > 1:
         data = data[:, 0]
     x = data.astype(np.float64)

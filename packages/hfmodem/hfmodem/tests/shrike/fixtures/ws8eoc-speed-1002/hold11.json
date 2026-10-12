@@ -1,0 +1,13 @@
+{
+  "source": "captures/onair-1002-1132/stream.flac",
+  "source_sha256": "3e14638927cbea5121ed8b8756d9c24bb3d0543c855ba0ef9dcd5acd287b2670",
+  "start": 1358400,
+  "end": 1409136,
+  "sample_rate": 48000,
+  "samples": 50736,
+  "row0": 1373760,
+  "level": 3,
+  "status": 3,
+  "payload_bytes": 45,
+  "payload_sha256": "c4818428b5922179fec9cdf603934d78b095ecb81dedb88611bcec35901a12a2"
+}

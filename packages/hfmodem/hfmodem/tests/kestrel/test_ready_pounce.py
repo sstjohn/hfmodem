@@ -179,7 +179,7 @@ def test_exhausted_wait_reaches_shell_and_closes_audio(monkeypatch):
     kc = corpora.harness("kestrel_connect")
     stopped = []
     monkeypatch.setattr(kc, "AudioVaraIO", lambda *a, **kw: SimpleNamespace(
-        stop=lambda: stopped.append(True)))
+        bursts_sent=0, burst_level=None, stop=lambda: stopped.append(True)))
     monkeypatch.setattr(kc, "VaraStationHandshake", lambda *a, **kw: object())
     monkeypatch.setattr(kc, "attach_mail", lambda *a, **kw: (None, None))
 

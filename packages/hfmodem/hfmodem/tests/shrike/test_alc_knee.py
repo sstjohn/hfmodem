@@ -24,6 +24,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from hfmodem.tests.evidence import require_input
+
 from hfmodem.core import levels
 from hfmodem.shrike import pactor1, placement, spec
 
@@ -34,6 +36,7 @@ pytestmark = pytest.mark.skipif(not _TOOLS.is_dir(),
 
 
 def _tool(name: str):
+    require_input(_TOOLS / f"{name}.py")
     spec_ = importlib.util.spec_from_file_location(f"_tool_{name}",
                                                    _TOOLS / f"{name}.py")
     mod = importlib.util.module_from_spec(spec_)

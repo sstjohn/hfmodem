@@ -27,7 +27,7 @@ from . import session, spec
 from ..core.devices import find_device
 from ..core.ptt import PttError
 from ..core.rigs import RIGS
-from .ota import Rig, _play, center_to_dial, ptt_device, GATEWAYS
+from .ota import Rig, _play, center_to_dial, mode_passband, ptt_device, GATEWAYS
 
 
 def main():
@@ -71,7 +71,7 @@ def main():
     rig = Rig(r["model"], args.serial, args.baud or r["baud"],
               ptt_type=r.get("ptt_type", "RIG"), ptt_port=ptt_port)
     try:
-        rig.set_mode(r["mode"]); rig.set_freq(dial)
+        rig.set_mode(r["mode"], mode_passband(r)); rig.set_freq(dial)
         centre = dial + int(spec.CENTER_FREQ_HZ)
         print(f"beacon: dial {dial} Hz, signal centre ~{centre} Hz {r['mode']}  "
               f"({args.count} x {dur:.1f}s connect, {args.gap}s gap ~= "

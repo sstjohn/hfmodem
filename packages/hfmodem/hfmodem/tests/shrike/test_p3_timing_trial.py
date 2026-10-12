@@ -72,7 +72,7 @@ def test_real_emission_uses_selected_epoch(tmp_path, arm, gap, delay):
     if arm == 'B':
         assert (pulse-entry)%CYCLE == ROTATION
     else:
-        assert pulse-g._p3_peer[0] == round(.890*FS)+852
+        assert pulse-g._p3_peer[0] == round(onair.P3_REPLY_S*FS)+852
     assert trial.opportunities == 1
     assert trial.replies[-1]['cs'] == 1
 
@@ -96,10 +96,13 @@ def test_duplicate_quiet_cs2_and_offset_keep_entry_phase(tmp_path):
     assert [r['cs'] for r in trial.replies] == [1,1,2]
 
 
-def test_last_guard_refuses_expired_trial_and_close_runs_once(tmp_path):
+@pytest.mark.parametrize('pending', [False, True])
+def test_last_guard_refuses_expired_trial_and_close_runs_once(tmp_path, pending):
     s, tx, live, g = setup(tmp_path, 'B')
     t = tx.timing_trial
     receive(s, tx, live, g, t.entry_phase+round(.925*FS))
+    if pending:
+        s.host.arq.on_host_data(b'pending application bytes beyond the trial')
     tx.aim(g, 1)
     onair._p3_place_reply(g, tx, 1)
     live.now = live.pos = t.opened+20*FS
@@ -109,6 +112,9 @@ def test_last_guard_refuses_expired_trial_and_close_runs_once(tmp_path):
     assert onair._timing_trial_close(tx, s.host, live.now)
     assert t.closing and s.host.arq._disconnect_ticks == 0
     assert s.host.arq._qrt_pending and s.host.arq._breakin_pending
+    assert not s.host.arq._outbuf and s.host.arq._inflight is None
+    payload, status = s.host.arq.next_breakin_packet(3)
+    assert not payload and status & 0x80
     assert onair._timing_trial_close(tx, s.host, live.now) is None
 
 
@@ -206,7 +212,7 @@ def test_complete_recorded_session_loop_closes_trial(monkeypatch, tmp_path, arm)
 
     monkeypatch.setattr(onair, 'main', trial_main)
     result = loop.run_late(monkeypatch, tmp_path, 1, False)
-    trial = json.loads((tmp_path/'p3-timing-trial.json').read_text())
+    trial = json.loads((result['outdir']/'p3-timing-trial.json').read_text())
     assert trial['opened'] is not None, result['log']
     assert trial['closing'] and trial['reason'], result['log']
     assert trial['opportunities'] <= 12

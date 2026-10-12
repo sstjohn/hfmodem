@@ -178,7 +178,7 @@ def host_report() -> str:
 
 def clock_report(*, samples: int, lost: int, xruns: int, underruns: int,
                  points: Sequence[tuple[float, int]], blocksize: int,
-                 fs: int = CARD_RATE_HZ) -> str:
+                 fs: int = CARD_RATE_HZ, breaks: int = 0) -> str:
     """The line every capture path prints about its own timebase.
 
     One wording, because `tools/clock_shortfall.py` parses it out of every log on
@@ -195,6 +195,11 @@ def clock_report(*, samples: int, lost: int, xruns: int, underruns: int,
     one: corrected for an 8300 ppm framing error in the aligner it reads +260 ms
     against this counter's 295, i.e. consistent with it. The bound stands on the
     anchoring, not on that arm.
+
+    `breaks` is how many loss steps split the fit points, and `points` is then
+    the longest unbroken stretch: a step of seconds inside one fit reads as
+    thousands of ppm (-16015 on 0921-1209 for a crystal the peer's raster put
+    within 16), and no stretch is where the shortfall is measured.
     """
     ppm, sigma = rate_fit(points, fs)
     got = (f"{ppm:+.2f} ppm vs the system clock (fit sigma {sigma:.2f})"
@@ -203,8 +208,11 @@ def clock_report(*, samples: int, lost: int, xruns: int, underruns: int,
     gap = (f" -- and {lost} samples ({lost / fs * 1e3:.0f} ms, "
            f"{lost / (samples + lost) * 100:.2f}% of what was captured) the "
            f"converter timestamped never reached us. THE STREAM IS SPLICED: its "
-           f"clock reads that far short of the air by the end, and a shortfall is "
-           f"what any ppm above is measuring"
+           f"clock reads that far short of the air by the end"
+           + (f"; the ppm above is fitted on the longest of the {breaks + 1} "
+              f"unbroken stretches, {points[-1][0] - points[0][0]:.0f} s of it"
+              if breaks and len(points) > 1 else
+              ", and a shortfall is what any ppm above is measuring")
            if lost >= blocksize else
            " -- and no loss we can see, which is as far as this goes: the count "
            "is anchored on the converter's own timestamps and says nothing about "

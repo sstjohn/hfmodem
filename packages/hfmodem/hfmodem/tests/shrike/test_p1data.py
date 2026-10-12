@@ -113,8 +113,10 @@ every quiet one, and a 172 s fixture read whole hides its own weak frames. This 
 how the corpus sweep was run and how a streaming front end sees audio anyway."""
 
 
-def _host_port(pkt) -> bytes:
-    """What a station holding this link hands its host for one decoded packet.
+def _named_caller(pkt) -> tuple[str, bytes]:
+    """Whom a called station names for one decoded packet, and what it hands its
+    host besides. The announcement is the modem's: SCS reads the caller off it
+    and passes nothing of it up.
 
     The seam the data mode's width actually reaches. `arq.PactorArq` is given the
     packet at `P1_SPEED_LEVEL` and under the protocol `rxfront` read it in, which
@@ -126,7 +128,7 @@ def _host_port(pkt) -> bytes:
     host.arq.on_rx_connect("W9SSJ", "DL6MAA")
     host.arq.on_rx_packet(arq.P1_SPEED_LEVEL, pkt.payload, pkt.status, True,
                           protocol=spec.Protocol.PACTOR1)
-    return bytes(host.channel(host.ptchn).rx)
+    return host.arq.dxcall, bytes(host.channel(host.ptchn).rx)
 
 
 def packets(audio: np.ndarray) -> list:
@@ -212,9 +214,10 @@ def main() -> int:
     for name, want in (("oracle_pactor3_dl6maa", DL6MAA_TEXT),
                        ("pos_pactor1_local", b"1w4dna\r")):
         for pkt in decoded.get(name, ()):
-            got = _host_port(pkt)
-            check(f"{name}: its announcement reaches the host data port as "
-                  f"{want.decode('latin-1')!r}", got == want, repr(got))
+            got = _named_caller(pkt)
+            caller = want[1:-1].decode("latin-1").upper()
+            check(f"{name}: its announcement names the caller {caller}",
+                  got == (caller, b""), repr(got))
 
     # -- the negatives: swept, and required to be silent --------------------
     #

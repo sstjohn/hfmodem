@@ -134,7 +134,7 @@ section:first-of-type{border-top:none}
 .hs-controls label{font-family:var(--mono);font-size:.72rem;color:var(--ink-dim);letter-spacing:.06em;text-transform:uppercase}
 input.call{font-family:var(--mono);font-size:1rem;letter-spacing:.12em;text-transform:uppercase;
   background:var(--bg-2);border:1px solid var(--line);color:var(--ink);border-radius:0;padding:9px 12px;width:9.5em}
-input.call:focus{border-color:var(--amber);outline:none}
+input.call:focus{border-color:var(--amber);outline:revert}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:0;overflow:hidden}
 .seg button{font-family:var(--mono);font-size:.72rem;background:var(--bg-2);color:var(--ink-dim);
   border:none;padding:8px 12px;cursor:pointer;border-right:1px solid var(--line)}
@@ -225,7 +225,8 @@ html{scroll-padding-top:170px}
 </style>
 <link rel="stylesheet" href="guide.css">
 
-<header class="site-header"><div class="site-header-inner"><div class="site-heading"><a class="site-home" href="../README.md">Documentation</a><span class="site-title">hfmodem / VARA</span></div><nav class="site-nav" aria-label="Modes"><a href="flock-compared.html" data-route="compared">Comparison</a><a href="pactor-explained.html" data-route="pactor">PACTOR</a><a href="vara-explained.html" data-route="vara" aria-current="page">VARA</a><a href="ardop-explained.html" data-route="ardop">ARDOP</a><a href="sabir-explained.html" data-route="sabir">sabir</a></nav><details class="page-contents"><summary>On this page</summary><nav class="rail" aria-label="sections"><a href="#occupancy">Channel occupancy</a><a href="#handshake">Link entry</a><a href="#ofdm">Frame structure and coding</a><a href="#arq">ARQ and host interface</a><a href="#numbers">Rate selection and values</a><a href="#results">Observed results</a></nav></details></div></header>
+<header class="site-header"><div class="site-header-inner"><div class="site-heading"><a class="site-home" href="../README.md">Documentation</a><span class="site-title">hfmodem / VARA</span></div><nav class="site-nav" aria-label="Modes"><a href="flock-compared.html" data-route="compared">Comparison</a><a href="pactor-explained.html" data-route="pactor">PACTOR</a><a href="vara-explained.html" data-route="vara" aria-current="page">VARA</a><a href="ardop-explained.html" data-route="ardop">ARDOP</a><a href="sabir-explained.html" data-route="sabir">sabir</a><a href="robust-packet-explained.html" data-route="robust-packet">Robust Packet</a><a href="stanag-explained.html" data-route="stanag">STANAG</a><a href="rtty-explained.html" data-route="rtty">RTTY / SITOR / NAVTEX</a></nav><details class="page-contents"><summary>On this page</summary><nav class="rail" aria-label="sections"><a href="#occupancy">Channel occupancy</a><a href="#handshake">Link entry</a><a href="#ofdm">Frame structure and coding</a><a href="#highspeed">High-speed cells and coding</a><a href="#arq">ARQ and host interface</a><a href="#numbers">Rate selection and values</a><a href="#results">Observed results</a></nav></details></div></header>
+<main id="main" tabindex="-1">
 
 
 
@@ -243,24 +244,24 @@ html{scroll-padding-top:170px}
   </div>
 
   <div class="stage" id="wfStage">
-    <canvas id="wf" aria-label="3D time-frequency waterfall of a full VARA session"></canvas>
+    <canvas aria-describedby="wf-description" id="wf" role="img" aria-label="3D time-frequency waterfall of a full VARA session"></canvas>
     <div class="ovl">
       <div class="badge">Schematic exchange · frequency × time</div>
       <div class="axis-f">frequency 0 – 2.4 kHz →</div>
       <div class="axis-t">time ↘</div>
     </div>
     <div class="ctl">
-      <button class="btn" id="wfView">2D</button>
-      <button class="btn" id="wfPlay">❚❚</button>
+      <button class="btn" id="wfView" type="button">Show 2D view</button><button class="btn" id="wfLeft" type="button">Rotate left</button><button class="btn" id="wfRight" type="button">Rotate right</button>
+      <button class="btn" id="wfPlay" type="button" aria-pressed="false">Play diagrams</button>
     </div>
   </div>
   <div class="wf-legend" id="wfLegend"></div>
-  <p class="dim" style="margin-top:14px;font-size:.9rem;max-width:var(--measure)">Schematic exchange: three MFSK handshake bursts, a wideband link-setup frame carrying the caller’s identity, and data bursts with acknowledgements. The callsigns are K7ABC and W2XYZ.</p>
+  <p id="wf-description" class="dim" style="margin-top:14px;font-size:.9rem;max-width:var(--measure)">Schematic exchange: three MFSK handshake bursts, a wideband link-setup frame carrying the caller’s identity, and data bursts with acknowledgements. The callsigns are K7ABC and W2XYZ.</p>
 </header>
 
 <section id="occupancy"><div class="wrap"><div class="sechead"><h2>Channel occupancy</h2><p>Audio-frequency positions for BW500 subbands and BW2300 rec3 bins. The active bin changes with each emission column.</p></div><div class="card">
       <div class="eyebrow" style="margin-bottom:10px">Carrier occupancy</div>
-      <canvas class="c2d" id="carrierCanvas" height="150"></canvas>
+      <canvas class="c2d" id="carrierCanvas" height="150" role="img" aria-label="Selected VARA bandwidth carrier occupancy"></canvas>
       <div class="seg" id="carrierSeg" style="margin-top:12px">
         <button data-b="500" class="on">BW500 · 2 subbands</button>
         <button data-b="2300">BW2300 rec3 · one-hot bins</button>
@@ -271,32 +272,31 @@ html{scroll-padding-top:170px}
   <div class="sechead">
     <span class="n">CONNECTION SETUP</span>
     <h2>Link entry</h2>
-    <p>Connect-request, connect-response and connected-ack use one MFSK tone per symbol. Their tone patterns come from a Visual Basic 6 <code>Rnd()</code> sequence seeded by the called callsign. The bursts carry no FEC.</p>
+    <p>Connect-request and connect-response use one MFSK tone per symbol, from a Visual Basic 6 <code>Rnd()</code> sequence seeded by the called callsign, with no FEC. Connected acknowledgement uses an 11-symbol two-tone control frame: a fixed opening followed by a session-generated tail.</p>
   </div>
 
   <div class="grid cols7-5">
     <div class="card">
       <div class="hs-controls">
-        <label>Called callsign</label>
+        <label for="callIn">Called callsign</label>
         <input class="call" id="callIn" value="K7ABC" maxlength="10" spellcheck="false" autocomplete="off">
         <span class="seg" id="burstSeg">
           <button data-k="CR" class="on">connect-request</button>
           <button data-k="RESP">response</button>
-          <button data-k="ACK">ack</button>
         </span>
       </div>
-      <canvas class="c2d" id="hsCanvas" height="300"></canvas>
-      <div class="binline" id="hsBins"></div>
+      <canvas class="c2d" id="hsCanvas" height="300" role="img" aria-label="Called-callsign handshake tones"></canvas>
+      <div class="binline" id="hsBins" tabindex="0" role="region" aria-label="Handshake tone-bin sequence"></div>
       <div class="kat" id="hsKat"></div>
     </div>
 
     <div class="grid" style="align-content:start;gap:14px">
       <div class="card">
         <div class="eyebrow" style="margin-bottom:10px">The generator, per symbol</div>
-        <div class="readout" id="hsReadout"></div>
+        <div class="readout" id="hsReadout" aria-live="polite"></div>
       </div>
       <div class="card">
-        <div class="eyebrow" style="margin-bottom:10px">Closed form (exact integer)</div>
+        <div class="eyebrow" style="margin-bottom:10px">Calling burst generator (integer tone law)</div>
 <pre class="mono" style="margin:0;font-size:.72rem;line-height:1.65;color:var(--ink-dim);overflow-x:auto">crc  = CRC16/GENIBUS(callsign)
 seed = (crc + <span class="hl-amber">SEED_OFF</span>) &amp; 0x7FFF
 mult = G(callsign) + ((crc+50) &gt;&gt; 15)
@@ -306,7 +306,7 @@ for k in 0..N-1:
   s=LCG(s); P = ⌊ s/2²⁴ · 5 ⌋      <span class="faint"># 0..4</span>
   s=LCG(s); D = ⌊ s/2²⁴ · 7 ⌋      <span class="faint"># 0..6</span>
   bin[k] = (29 + (k even) + 14·P + 2·D) &amp; 0xFF
-<span class="hl-cyan">LCG(s)=(s·0x43FD43FD + 0xC39EC3) &amp; 0xFFFFFF</span></pre>
+<span class="hl-cyan">LCG(s)=(s·0x43FD43FD + 0xC39EC3) &amp; 0xFFFFFF</span></pre><p class="faint">This integer floor law is the calling-burst tone generator. DATA permutation draws instead reproduce VB6 float32 multiplication and rounding; the two laws must not be substituted for each other.</p>
       </div>
     </div>
   </div>
@@ -318,7 +318,7 @@ for k in 0..N-1:
     </div>
     <div class="callout">
       <h4>Caller identification</h4>
-      <p>All three MFSK bursts address the called station. A BW2300 rec3 link-setup frame carries the caller’s identity.</p>
+      <p>The calling and response MFSK bursts address the called station; native connected acknowledgements use the session control generator. A BW2300 rec3 link-setup frame carries the caller’s identity.</p>
     </div>
   </div>
 </div></section>
@@ -328,7 +328,7 @@ for k in 0..N-1:
   <div class="sechead">
     <span class="n">THE OFDM DATA PATH</span>
     <h2>Frame structure and coding</h2>
-    <p>BW500 level 4 uses differential BPSK across two subbands. BW2300 rec3 encodes values as active-bin positions. Higher BW2300 records use denser constellations and longer symbols with a cyclic prefix.</p>
+    <p>BW500 level 4 uses differential BPSK across two subbands. BW2300 rec3 encodes values as active-bin positions. Above it, levels 5–9 are a few differential-QPSK tones and levels 10–16 are OFDM with a cyclic prefix: differential PSK first, then coherent QAM.</p>
   </div>
 
   <div class="card">
@@ -346,12 +346,12 @@ for k in 0..N-1:
       <p class="dim" style="font-size:.84rem;margin:0 0 10px">Each column's cell is de-rotated by a
         unit-modulus reference, then <code>bit = 1 if Re(vₖ·conj(vₖ₋₁)) &lt; 0</code>. Two subbands
         alternate the active tone symbol-to-symbol.</p>
-      <canvas class="c2d" id="constCanvas" height="300"></canvas>
+      <canvas class="c2d" id="constCanvas" height="300" role="img" aria-label="Selected constellation geometry"></canvas>
       <div class="seg" id="constSeg" style="margin-top:12px">
         <button data-m="bpsk" class="on">BW500 diff-BPSK</button>
-        <button data-m="lut">BW2300 records 9–16 · 64-pt LUT</button>
+        <button data-m="lut">Historic 64-entry LUT prefix</button>
       </div>
-      <p class="faint" style="font-size:.76rem;margin:10px 0 0">The constellation lookup table applies to BW2300 records 9–16. The base level uses one-hot index modulation with a constant cell value of <code>−1j</code>.</p>
+      <p class="faint" style="font-size:.76rem;margin:10px 0 0">The historic LUT plot combines truncated prefixes from several columns; complete labelled constellations appear below. The lookup table serves the OFDM levels 10–16, and its QPSK column steps the tone levels 5–9. The base level uses one-hot index modulation with a constant cell value of <code>−1j</code>.</p>
     </div>
     <div class="card">
       <div class="eyebrow" style="margin-bottom:4px">Turbo constituent — (13,15) RSC, 8 states</div>
@@ -359,7 +359,7 @@ for k in 0..N-1:
         encoders operate in parallel, with log-MAP decoding. State
         <code>s = r₀|r₁&lt;&lt;1|r₂&lt;&lt;2</code>; feedback <code>a=u⊕r₁⊕r₂</code>;
         parity <code>p=a⊕r₀⊕r₂</code>.</p>
-      <canvas class="c2d" id="trellisCanvas" height="300"></canvas>
+      <canvas class="c2d" id="trellisCanvas" height="300" role="img" aria-label="Eight-state recursive convolutional encoder transitions"></canvas>
     </div>
   </div>
 
@@ -373,6 +373,66 @@ for k in 0..N-1:
 </div></section>
 
 <!-- ================================================================ ARQ -->
+<section id="highspeed"><div class="wrap"><div class="sechead">
+<span class="n">HIGH-SPEED DATA · ALPHA IMPLEMENTATION</span><h2>More bits in each cell</h2>
+<p>Higher VARA levels change constellation width and the amount of parity retained,
+while keeping the same frame-to-cell pipeline. A wider constellation packs more
+bits into a cell; fewer parity bits raise throughput and demand cleaner channel
+observations. The receiver's native answer chooses the next level.</p></div>
+<div class="card"><div class="flow" role="img" aria-label="VARA DATA pipeline: payload plus control and CRC; MSB-first bits and zero pad; packet-reset whitening; turbo with stage-2 input permutation and dual tails; group puncture; stage-1 gather; map cells and phase scramble; IFFT with cyclic prefix and edge blend.">
+<div class="stg"><b>Frame</b><br><small>payload · control · CRC</small></div><div class="arr" aria-hidden="true">→</div>
+<div class="stg"><b>Whiten</b><br><small>MSB bits + zero pad</small></div><div class="arr" aria-hidden="true">→</div>
+<div class="stg"><b>Turbo</b><br><small>C2 stage-2 gather</small></div><div class="arr" aria-hidden="true">→</div>
+<div class="stg"><b>Puncture</b><br><small>group parity + dual tails</small></div><div class="arr" aria-hidden="true">→</div>
+<div class="stg"><b>Stage 1</b><br><small>channel gather</small></div><div class="arr" aria-hidden="true">→</div>
+<div class="stg"><b>Cells → audio</b><br><small>labels · phase · IFFT/CP</small></div></div>
+<p class="dim">Two identical (13,15) recursive constituents start at zero.
+Their three termination steps serialize as <code>[s₁,p₁,s₂,p₂] × 3</code>.
+Higher-rate groups retain one parity alongside k systematic bits, alternating
+C1 and C2 by group. Systematic and component parity streams use this group order.</p></div>
+<div class="grid cols2" style="margin-top:18px"><div class="card"><h3>Full constellation columns</h3>
+<p class="dim">These are the generated labelled points, including the points
+outside the historic 64-entry LUT's truncated prefix. OFDM bit groups index
+these labels directly, with no additional Gray pass.</p>
+<svg id="highConstellation" viewBox="0 0 330 300" role="img" aria-labelledby="highConstTitle highConstDesc" style="width:100%;height:auto;color:var(--ink)"><title id="highConstTitle">VARA full QPSK constellation</title><desc id="highConstDesc">Ideal generated constellation points labelled by raw bit-group index. This is a geometry diagram, not a received signal measurement.</desc><g id="highConstPoints"></g></svg>
+<div class="seg" id="highConstSeg"><button style="min-height:44px" data-pos="1" class="on" aria-pressed="true">QPSK</button><button style="min-height:44px" data-pos="2" aria-pressed="false">8PSK</button><button style="min-height:44px" data-pos="3" aria-pressed="false">16QAM</button><button style="min-height:44px" data-pos="4" aria-pressed="false">32-cross</button></div>
+<p class="faint">QPSK and 8PSK are differential across time from a reference.
+16QAM and 32-cross are coherent on pilots. The cross constellation has 32 points
+on a 6×6 odd-coordinate grid, with its four corners removed.</p></div>
+<div class="card"><h3>One OFDM clock, three carrier sets</h3>
+<p>The useful IFFT has <span data-fig="highspeed.fft"></span> samples, preceded
+by <span data-fig="highspeed.prefix"></span> cyclic-prefix samples. At 48 kHz,
+that gives <span data-fig="highspeed.symbol_samples"></span> samples per symbol
+and <span data-fig="highspeed.bin_hz"></span> Hz bin spacing.</p>
+<div class="tblwrap"><table><thead><tr><th>Bandwidth</th><th>Levels</th><th>Bins</th><th>Carriers</th></tr></thead><tbody id="highFamilies"></tbody></table></div>
+<p>Each family has three QPSK rows, two 8PSK rows, then 16QAM and 32-cross.
+Nominal rates follow 1/2, 2/3, 4/5, 2/3, 4/5, 5/6, 4/5.
+The widest top row is BW2750 L17: 3919 payload bytes per frame, with one or two
+frames per over. Its nominal speed is about 8489 bps; application throughput
+also includes control traffic, repeats and source framing.</p></div></div>
+<div class="grid cols2" style="margin-top:18px"><div class="card"><h3>Pilots create an observable grid</h3>
+<svg viewBox="0 0 400 145" role="img" aria-labelledby="pilotTitle pilotDesc" style="width:100%;height:auto;color:var(--ink)"><title id="pilotTitle">QAM pilot cadence schematic</title><desc id="pilotDesc">Pilots occur every eight symbol rows, at row eight j on even FFT bins and eight j plus one on odd FFT bins. This schematic shows two adjacent carriers over ten rows; generator-defined extra gap cells are not drawn.</desc>
+<g font-family="monospace" font-size="12" fill="currentColor"><text x="10" y="42">even bin</text><text x="10" y="90">odd bin</text><text x="116" y="125">row 0</text><text x="308" y="125">row 8</text></g>
+<path d="M108 36 H385 M108 84 H385" stroke="currentColor" opacity=".35"/>
+<g fill="currentColor"><rect x="112" y="26" width="20" height="20"/><rect x="304" y="26" width="20" height="20"/><rect x="136" y="74" width="20" height="20"/><rect x="328" y="74" width="20" height="20"/></g>
+</svg>
+<p class="dim">QAM pilots are staggered by bin parity. Each 154-row frame also
+has extra generator-defined gap cells; they must be skipped when assigning
+coded bits. PSK instead begins with a reference, then repeats its value at gap
+cells. Both multiply cells by the fixed per-bin phase scramble.</p></div>
+<div class="card"><h3>Reproduce the tables precisely</h3>
+<p>Stage 1 and stage 2 share each record's VB6 random stream: the second
+permutation continues the first, then remaining draws generate gaps and pilots.
+The 24-bit recurrence and float32 draw rounding matter. Whitening and cell
+scrambling separately reset to seed 29318. The random lead symbols use a
+session stream; lead draw cost and frame count matter to waveform reproduction.</p>
+<p><a href="../protocols/vara/implementation-constants.md">Complete constants,
+seeds, labelled points and public code map</a> ·
+<a href="../protocols/vara/06-speed-gearshift.md#61c-levels-by-bandwidth">All per-level
+rates, coded lengths and frame capacities</a> ·
+<a href="../protocols/vara/03-coding.md">Bit-exact coding and permutation order</a></p>
+</div></div></div></section>
+
 <section id="arq"><div class="wrap"><figure class="link-exchange"><div class="exchange" role="img" aria-label="Schematic exchange: sender on left transmits data to receiver on right, then receiver replies to sender"><div class="station">Sender</div><div class="station">Receiver</div><div class="transmit">Data frame →</div><div class="reply">← ACK · received data</div></div><figcaption>Schematic · data left to right; reply right to left</figcaption></figure>
   <div class="sechead">
     <span class="n">ARQ &amp; THE HOST INTERFACE</span>
@@ -384,7 +444,7 @@ for k in 0..N-1:
     <div class="card">
       <div class="eyebrow" style="margin-bottom:14px">Connect → transfer → disconnect</div>
       <div class="states" id="stateRow"></div>
-      <canvas class="c2d" id="ladderCanvas" height="360" style="margin-top:16px"></canvas>
+      <canvas class="c2d" id="ladderCanvas" height="360" style="margin-top:16px" role="img" aria-label="Link exchange or rate-selection values"></canvas>
     </div>
     <div class="grid" style="align-content:start;gap:14px">
       <div class="card">
@@ -394,7 +454,7 @@ for k in 0..N-1:
           <tr><td class="mono val">8301</td><td class="dim">data channel — raw un-framed bytes</td></tr>
           <tr><td class="mono">CONNECT</td><td class="dim">start an ARQ session → <code>PENDING</code>/<code>CONNECTED</code></td></tr>
           <tr><td class="mono">BUFFER n</td><td class="dim">raw host bytes still queued; drains per ACKed block</td></tr>
-          <tr><td class="mono">BW500/2300</td><td class="dim">select bandwidth</td></tr>
+          <tr><td class="mono">BW500/2300/2750</td><td class="dim">select bandwidth</td></tr>
           <tr><td class="mono">PTT ON/OFF</td><td class="dim">host keys the radio each burst</td></tr>
         </tbody></table>
       </div>
@@ -422,18 +482,18 @@ for k in 0..N-1:
       <tr><td>Modulation</td><td class="mono">single tone / symbol · <span class="val">sin(2π·carrier·n/2048)</span></td></tr>
       <tr><td>Tone → frequency</td><td class="mono val">f = carrier · 48000 / 2048  (= 23.4375 Hz/bin)</td></tr>
       <tr><td>Sample rate</td><td class="num val">48000 Hz</td></tr>
-      <tr><td>Symbol stride</td><td class="num val">2074 samples</td></tr>
-      <tr><td>Inter-symbol shaping</td><td class="mono">N=32 raised-cosine WOLA · hop = 2042</td></tr>
+      <tr><td>Symbol extent (including overlap)</td><td class="num val"><span data-fig="mfsk.stride"></span> samples</td></tr>
+      <tr><td>Inter-symbol shaping</td><td class="mono">N=<span data-fig="mfsk.wola_n"></span> raised-cosine WOLA · hop = <span data-fig="mfsk.hop"></span></td></tr>
       <tr><td>LCG (VB6 Rnd)</td><td class="mono val">state = (state·0x43FD43FD + 0xC39EC3) &amp; 0xFFFFFF</td></tr>
       <tr><td>CR (preamble/N/off/adv)</td><td class="mono">[74,68,70,60,60,77,50,76,78,74] · N=31 · <span class="val">(50, 1)</span></td></tr>
       <tr><td>connect-response</td><td class="mono">[62,67,55,66,59,72,68,55] · N=15 · <span class="val">(289, 511)</span></td></tr>
-      <tr><td>connected-ack</td><td class="mono">[62] · N=12 · <span class="val">(289, 31)</span></td></tr>
+      <tr><td>connected-ack</td><td class="mono"><span data-fig="mfsk.connected_ack_symbols"></span> two-tone symbols; fixed 4-symbol opening, 7 session-generated state symbols. <a href="../protocols/vara/04-frame-block-formats.md">Native control-frame constants</a>.</td></tr>
       <tr><td>G basis (last 3 chars)</td><td class="mono" style="font-size:.72rem">[-3]=110,220,440,338,134,310 · [-2]=102,204,408,274,6,22 · [-1]=32,64,128,258,36,216</td></tr>
     </tbody></table></div></div>
   </details>
 
   <details class="spec">
-    <summary><span class="mk">▸</span> BW500 / L4 OFDM data path <span class="sub">§3.6</span></summary>
+    <summary><span class="mk">▸</span> BW500 / L4 tone data path <span class="sub">§3.6</span></summary>
     <div class="spec-body"><div class="tbl-scroll"><table><tbody>
       <tr><th>Quantity</th><th>Value</th></tr>
       <tr><td>Sub-bands</td><td class="mono">2 · centers <span class="val">1350 / 1650 Hz</span></td></tr>
@@ -452,7 +512,7 @@ for k in 0..N-1:
   </details>
 
   <details class="spec">
-    <summary><span class="mk">▸</span> BW2300 OFDM — base level and the ladder above it <span class="sub">§1</span></summary>
+    <summary><span class="mk">▸</span> BW2300 — base level and the ladder above it <span class="sub">§1</span></summary>
     <div class="spec-body"><div class="tbl-scroll"><table><tbody>
       <tr><th>Quantity</th><th>Value</th></tr>
       <tr><td>Base level</td><td class="mono">record <span data-fig="bw2300.base_level"></span>, host <code>BITRATE (4)</code> · index modulation, <span class="val">175 bps</span></td></tr>
@@ -465,16 +525,18 @@ for k in 0..N-1:
       <tr><td>Occupied bandwidth</td><td class="num val">~735 – 2350 Hz</td></tr>
       <tr><td>Frame container</td><td class="num"><span class="val" data-fig="bw2300.frame_bytes"></span> bytes · <span data-fig="bw2300.n_info"></span> turbo input bits → <span data-fig="bw2300.coded"></span> coded</td></tr>
       <tr><td>2048-point analysis window</td><td class="dim">Four 512-sample columns overlap in each analysis frame. This produces apparent occupancy across bins 34–98 at 23.4375 Hz spacing, with a ~23.7 Bd stride and 100 analysis frames per burst. A 512-point FFT recovers each individual emission column.</td></tr>
-      <tr><td>High-throughput records 9–16</td><td class="mono" style="font-size:.72rem">span 32 · dw50 1152 with a 128-sample cyclic prefix · LUT column <code>pos</code> per record · CRC → turbo(13,15) → whiten → interleave → Gray → LUT</td></tr>
-      <tr><td>Constellation LUT</td><td class="mono">64-entry, records 9–16 only · truncated prefix of 6 columns (BPSK/QPSK/8-PSK · 16-QAM 1.1 · 32-QAM cross 1.5 · 64-QAM 1.6)</td></tr>
+      <tr><td>Levels above the base</td><td class="mono" style="font-size:.72rem">tone levels 5–9: 3–10 differential-QPSK tones, a 512-sample pulse each · OFDM levels 10–16: 49 carriers on 1024-point bins behind a 128-sample prefix, QPSK to 32-cross · CRC → whiten → turbo(13,15) → interleave → LUT</td></tr>
+    </tbody></table></div>
+    <div class="tbl-scroll" style="margin-top:12px"><table><tbody id="ladderRows">
+      <tr><th>Level</th><th>Family</th><th>Carriers</th><th>Bits / cell</th><th>Samples / symbol</th><th>Frame bytes</th></tr>
     </tbody></table></div></div>
   </details>
 
   <details class="spec">
-    <summary><span class="mk">▸</span> Caller-ID link-setup frame <span class="sub">§4.2A · BW2300 rec3 OFDM</span></summary>
+    <summary><span class="mk">▸</span> Caller-ID link-setup frame <span class="sub">§4.2A · BW2300 rec3 index waveform</span></summary>
     <div class="spec-body"><div class="tbl-scroll"><table><tbody>
       <tr><th>Quantity</th><th>Value</th></tr>
-      <tr><td>Waveform</td><td class="mono">the ordinary BW2300 rec3 wideband OFDM burst — same waveform, coding chain and container as a DATA over. There is no separate narrowband burst</td></tr>
+      <tr><td>Waveform</td><td class="mono">the ordinary BW2300 rec3 index waveform — same waveform, coding chain and container as a DATA over. There is no separate narrowband burst</td></tr>
       <tr><td>Geometry</td><td class="mono"><span data-fig="bw2300.dw50"></span>-sample symbols · one-hot over a <span data-fig="bw2300.span"></span>-bin span · <span class="val" data-fig="bw2300.data_columns"></span> data emission columns × <span data-fig="bw2300.bpc"></span> bits = <span data-fig="bw2300.coded"></span> coded bits</td></tr>
       <tr><td>FEC</td><td class="mono">turbo · (13,15)-octal RSC · rate-½ · N=<span data-fig="bw2300.n_info"></span> → <span data-fig="bw2300.coded"></span> coded (2N+12)</td></tr>
       <tr><td>Internal turbo interleaver</td><td class="mono">native <code>interleave_stage2</code> column 3, <code>perm[i] = IL2[3+17·i][:N]</code> — a clean 0..N−1 permutation used directly, with <b>no pruning</b>. Deriving it by dropping entries ≥ N from a larger column yields a different permutation and will not interoperate</td></tr>
@@ -500,16 +562,35 @@ for k in 0..N-1:
   </details>
 </div></section>
 
-<section id="results"><div class="wrap"><div class="sechead"><h2>Observed results</h2><p>Mail reception through K0SI at BW2300 and confirmed outbound delivery through KB8AY (message <code>NL03TXWQ8SGL</code>). Multiple deliveries confirmed by the operator. The KB8AY delivery used a registered third-party client SID.</p><p><a href="../STATUS.md">Implementation evidence</a> records the session conditions.</p></div></div></section>
+<section id="results"><div class="wrap"><div class="sechead"><h2>Observed results</h2><p>Mail reception through K0SI at BW2300 and confirmed outbound delivery through KB8AY (message <code>NL03TXWQ8SGL</code>). Multiple deliveries confirmed by the operator. VARA supports high speed capable and speed limited links.</p><p><a href="../STATUS.md">Implementation evidence</a> records the session conditions.</p></div></div></section>
+</main>
 <footer><div class="wrap">
   <p style="color:var(--ink-dim);max-width:var(--measure)">Interactive figures use kestrel’s waveform and coding tables.</p>
 
 </div></footer>
 
+
+<script>
+// Native controls and tables keep the figures usable without a pointer or sound.
+const guideValues=new WeakMap();
+function guideData(id,title,head,rows){
+  const canvas=document.getElementById(id);let details=document.getElementById(id+'-data');
+  if(!details){details=document.createElement('details');details.id=id+'-data';details.className='diagram-data';
+    const summary=document.createElement('summary');summary.id=id+'-summary';summary.textContent=title+' — text and values';details.append(summary);
+    const wrap=document.createElement('div');wrap.className='tbl-scroll';wrap.tabIndex=0;wrap.setAttribute('role','region');wrap.setAttribute('aria-label',title+' values');
+    const table=document.createElement('table');wrap.append(table);details.append(wrap);canvas.after(details);}
+  details.querySelector('summary').textContent=title+' — text and values';details.querySelector('[role=region]').setAttribute('aria-label',title+' values');
+  const value=JSON.stringify([title,head,rows]);if(guideValues.get(details)===value)return;guideValues.set(details,value);
+  const table=details.querySelector('table');table.replaceChildren();const caption=document.createElement('caption');caption.textContent=title;table.append(caption);
+  const thead=document.createElement('thead'),tr=document.createElement('tr');head.forEach(v=>{const th=document.createElement('th');th.scope='col';th.textContent=v;tr.append(th)});thead.append(tr);table.append(thead);
+  const body=document.createElement('tbody');rows.forEach(row=>{const tr=document.createElement('tr');row.forEach((v,i)=>{const cell=document.createElement(i?'td':'th');if(!i)cell.scope='row';cell.textContent=String(v);tr.append(cell)});body.append(tr)});table.append(body);
+  canvas.setAttribute('role','img');canvas.setAttribute('aria-label',title);canvas.setAttribute('aria-describedby',id+'-summary');canvas.setAttribute('aria-details',details.id);
+}
+</script>
 <script>
 "use strict";
 /* ---- generated by docs/viz/build.py; do not edit by hand ---- */
-const FIG = {"bw2300": {"base_level": 3, "baud": 93.75, "blocks_s": 4.363, "bpc": 4, "coded": 1484, "columns": 395, "cp": 0, "data_columns": 371, "dw50": 512, "first_bin": 9, "frame_bytes": 92, "hi_hz": 2250.0, "hz_per_bin": 93.75, "keyable": [0, 1, 2, 3, 9, 10, 11, 12, 13, 14, 15, 16], "law": "index", "lead_blocks": 14, "levels": [{"bpc": 3, "dw50": 2048, "frame_bytes": 12, "law": "index", "level": 0, "name": "rec0-floor", "span": 64}, {"bpc": 3, "dw50": 1024, "frame_bytes": 25, "law": "index", "level": 1, "name": "rec1-robust", "span": 32}, {"bpc": 4, "dw50": 1024, "frame_bytes": 50, "law": "index", "level": 2, "name": "rec2-robust", "span": 32}, {"bpc": 4, "dw50": 512, "frame_bytes": 92, "law": "index", "level": 3, "name": "rec3-base", "span": 16}, {"bpc": 4, "dw50": 512, "frame_bytes": 92, "law": "index", "level": 103, "name": "rec3-base-2750", "span": 20}, {"bpc": 3, "dw50": 2048, "frame_bytes": 12, "law": "index", "level": 100, "name": "rec0-floor-2750", "span": 80}, {"bpc": 3, "dw50": 1024, "frame_bytes": 25, "law": "index", "level": 101, "name": "rec1-robust-2750", "span": 40}, {"bpc": 4, "dw50": 1024, "frame_bytes": 50, "law": "index", "level": 102, "name": "rec2-robust-2750", "span": 40}, {"bpc": 2, "dw50": 1152, "frame_bytes": 899, "law": "const", "level": 9, "name": "QPSK-1/2", "span": 32}, {"bpc": 2, "dw50": 1152, "frame_bytes": 1199, "law": "const", "level": 10, "name": "QPSK-2/3", "span": 32}, {"bpc": 2, "dw50": 1152, "frame_bytes": 1439, "law": "const", "level": 11, "name": "QPSK-4/5", "span": 32}, {"bpc": 3, "dw50": 1152, "frame_bytes": 1799, "law": "const", "level": 12, "name": "8PSK-2/3", "span": 32}, {"bpc": 3, "dw50": 1152, "frame_bytes": 2159, "law": "const", "level": 13, "name": "8PSK-4/5", "span": 32}, {"bpc": 4, "dw50": 1152, "frame_bytes": 2713, "law": "const", "level": 14, "name": "16APSK-5/6", "span": 32}, {"bpc": 5, "dw50": 1152, "frame_bytes": 3257, "law": "const", "level": 15, "name": "32APSK-4/5", "span": 32}, {"bpc": 5, "dw50": 1152, "frame_bytes": 213, "law": "const", "level": 16, "name": "32APSK-4/5", "span": 32}], "lo_hz": 843.75, "n_info": 736, "payload_bytes": 90, "reference_columns": 24, "span": 16, "stride": 1}, "bw500": {"coded": 748, "columns": 394, "first_column": 3, "info_bits": 368, "payload_bytes": 43, "samples_per_symbol": 512, "subbands": [[0, 1350.0], [1, 1650.0]]}, "mfsk": {"bursts": {"CR": {"n_payload": 31, "name": "connect-request", "preadv": 1, "preamble": [74, 68, 70, 60, 60, 77, 50, 76, 78, 74], "seconds": 1.7493, "seed_off": 50, "symbols": 41}, "DISCONNECT": {"n_payload": 31, "name": "session-disconnect-request", "preadv": 125, "preamble": [74], "seconds": 1.3653, "seed_off": 60, "symbols": 32}, "RELEASE": {"n_payload": 15, "name": "session-turn-release", "preadv": 391, "preamble": [62, 67], "seconds": 0.7253, "seed_off": 61, "symbols": 17}, "RESP": {"n_payload": 15, "name": "connect-response", "preadv": 511, "preamble": [62, 67, 55, 66, 59, 72, 68, 55], "seconds": 0.9813, "seed_off": 289, "symbols": 23}}, "fs": 48000, "hop": 2048, "hz_per_bin": 23.4375, "nfft": 2048, "stride": 2080, "wola_n": 32}};
+const FIG = {"bw2300": {"base_level": 3, "baud": 93.75, "blocks_s": 4.363, "bpc": 4, "coded": 1484, "columns": 395, "data_columns": 371, "dw50": 512, "first_bin": 9, "frame_bytes": 92, "hi_hz": 2250.0, "hz_per_bin": 93.75, "ladder": [{"bpc": 3, "carriers": 1, "family": "index", "frame_bytes": 12, "level": 1, "samples": 2048}, {"bpc": 3, "carriers": 1, "family": "index", "frame_bytes": 25, "level": 2, "samples": 1024}, {"bpc": 4, "carriers": 1, "family": "index", "frame_bytes": 50, "level": 3, "samples": 1024}, {"bpc": 4, "carriers": 1, "family": "index", "frame_bytes": 92, "level": 4, "samples": 512}, {"bpc": 2, "carriers": 3, "family": "tone", "frame_bytes": 135, "level": 5, "samples": 512}, {"bpc": 2, "carriers": 4, "family": "tone", "frame_bytes": 176, "level": 6, "samples": 512}, {"bpc": 2, "carriers": 6, "family": "tone", "frame_bytes": 259, "level": 7, "samples": 512}, {"bpc": 2, "carriers": 8, "family": "tone", "frame_bytes": 344, "level": 8, "samples": 512}, {"bpc": 2, "carriers": 10, "family": "tone", "frame_bytes": 428, "level": 9, "samples": 512}, {"bpc": 2, "carriers": 49, "family": "ofdm", "frame_bytes": 899, "level": 10, "samples": 1152}, {"bpc": 2, "carriers": 49, "family": "ofdm", "frame_bytes": 1199, "level": 11, "samples": 1152}, {"bpc": 2, "carriers": 49, "family": "ofdm", "frame_bytes": 1439, "level": 12, "samples": 1152}, {"bpc": 3, "carriers": 49, "family": "ofdm", "frame_bytes": 1799, "level": 13, "samples": 1152}, {"bpc": 3, "carriers": 49, "family": "ofdm", "frame_bytes": 2159, "level": 14, "samples": 1152}, {"bpc": 4, "carriers": 49, "family": "ofdm", "frame_bytes": 2713, "level": 15, "samples": 1152}, {"bpc": 5, "carriers": 49, "family": "ofdm", "frame_bytes": 3257, "level": 16, "samples": 1152}], "lead_blocks": 14, "lo_hz": 843.75, "n_info": 736, "payload_bytes": 90, "reference_columns": 24, "span": 16, "stride": 1}, "bw500": {"coded": 748, "columns": 394, "first_column": 3, "info_bits": 368, "payload_bytes": 43, "samples_per_symbol": 512, "subbands": [[0, 1350.0], [1, 1650.0]]}, "highspeed": {"bin_hz": 46.875, "fft": 1024, "points": {"1": [[1.0, 0.0], [0.0, 1.0], [-0.0, -1.0], [-1.0, 0.0]], "2": [[1.0, 0.0], [0.707106781, 0.707106781], [-0.707106781, 0.707106781], [0.0, 1.0], [0.707106781, -0.707106781], [-0.0, -1.0], [-1.0, 0.0], [-0.707106781, -0.707106781]], "3": [[-0.777817459, -0.777817459], [-0.777817459, -0.259272486], [-0.777817459, 0.777817459], [-0.777817459, 0.259272486], [-0.259272486, -0.777817459], [-0.259272486, -0.259272486], [-0.259272486, 0.777817459], [-0.259272486, 0.259272486], [0.777817459, -0.777817459], [0.777817459, -0.259272486], [0.777817459, 0.777817459], [0.777817459, 0.259272486], [0.259272486, -0.777817459], [0.259272486, -0.259272486], [0.259272486, 0.777817459], [0.259272486, 0.259272486]], "4": [[0.212132034, 0.212132034], [0.636396103, 0.212132034], [0.636396103, 1.060660172], [1.060660172, 0.212132034], [0.212132034, 0.636396103], [0.636396103, 0.636396103], [0.212132034, 1.060660172], [1.060660172, 0.636396103], [0.212132034, -0.212132034], [0.636396103, -0.212132034], [0.636396103, -1.060660172], [1.060660172, -0.212132034], [0.212132034, -0.636396103], [0.636396103, -0.636396103], [0.212132034, -1.060660172], [1.060660172, -0.636396103], [-0.212132034, 0.212132034], [-0.636396103, 0.212132034], [-0.636396103, 1.060660172], [-1.060660172, 0.212132034], [-0.212132034, 0.636396103], [-0.636396103, 0.636396103], [-0.212132034, 1.060660172], [-1.060660172, 0.636396103], [-0.212132034, -0.212132034], [-0.636396103, -0.212132034], [-0.636396103, -1.060660172], [-1.060660172, -0.212132034], [-0.212132034, -0.636396103], [-0.636396103, -0.636396103], [-0.212132034, -1.060660172], [-1.060660172, -0.636396103]]}, "prefix": 128, "rows": [{"bpc": 2, "bw": 500, "carriers": 11, "coded": 3168, "first_bin": 27, "frame_bytes": 197, "info": 1578, "last_bin": 37, "level": 7}, {"bpc": 2, "bw": 500, "carriers": 11, "coded": 3168, "first_bin": 27, "frame_bytes": 263, "info": 2104, "last_bin": 37, "level": 8}, {"bpc": 2, "bw": 500, "carriers": 11, "coded": 3168, "first_bin": 27, "frame_bytes": 315, "info": 2524, "last_bin": 37, "level": 9}, {"bpc": 3, "bw": 500, "carriers": 11, "coded": 4752, "first_bin": 27, "frame_bytes": 395, "info": 3160, "last_bin": 37, "level": 10}, {"bpc": 3, "bw": 500, "carriers": 11, "coded": 4752, "first_bin": 27, "frame_bytes": 474, "info": 3792, "last_bin": 37, "level": 11}, {"bpc": 4, "bw": 500, "carriers": 11, "coded": 5720, "first_bin": 27, "frame_bytes": 594, "info": 4755, "last_bin": 37, "level": 12}, {"bpc": 5, "bw": 500, "carriers": 11, "coded": 7150, "first_bin": 27, "frame_bytes": 713, "info": 5708, "last_bin": 37, "level": 13}, {"bpc": 2, "bw": 2300, "carriers": 49, "coded": 14406, "first_bin": 8, "frame_bytes": 899, "info": 7197, "last_bin": 56, "level": 10}, {"bpc": 2, "bw": 2300, "carriers": 49, "coded": 14406, "first_bin": 8, "frame_bytes": 1199, "info": 9596, "last_bin": 56, "level": 11}, {"bpc": 2, "bw": 2300, "carriers": 49, "coded": 14406, "first_bin": 8, "frame_bytes": 1439, "info": 11512, "last_bin": 56, "level": 12}, {"bpc": 3, "bw": 2300, "carriers": 49, "coded": 21609, "first_bin": 8, "frame_bytes": 1799, "info": 14398, "last_bin": 56, "level": 13}, {"bpc": 3, "bw": 2300, "carriers": 49, "coded": 21609, "first_bin": 8, "frame_bytes": 2159, "info": 17276, "last_bin": 56, "level": 14}, {"bpc": 4, "bw": 2300, "carriers": 49, "coded": 26068, "first_bin": 8, "frame_bytes": 2713, "info": 21710, "last_bin": 56, "level": 15}, {"bpc": 5, "bw": 2300, "carriers": 49, "coded": 32585, "first_bin": 8, "frame_bytes": 3257, "info": 26056, "last_bin": 56, "level": 16}, {"bpc": 2, "bw": 2750, "carriers": 59, "coded": 17346, "first_bin": 3, "frame_bytes": 1083, "info": 8667, "last_bin": 61, "level": 11}, {"bpc": 2, "bw": 2750, "carriers": 59, "coded": 17346, "first_bin": 3, "frame_bytes": 1444, "info": 11556, "last_bin": 61, "level": 12}, {"bpc": 2, "bw": 2750, "carriers": 59, "coded": 17346, "first_bin": 3, "frame_bytes": 1733, "info": 13864, "last_bin": 61, "level": 13}, {"bpc": 3, "bw": 2750, "carriers": 59, "coded": 26019, "first_bin": 3, "frame_bytes": 2167, "info": 17338, "last_bin": 61, "level": 14}, {"bpc": 3, "bw": 2750, "carriers": 59, "coded": 26019, "first_bin": 3, "frame_bytes": 2600, "info": 20804, "last_bin": 61, "level": 15}, {"bpc": 4, "bw": 2750, "carriers": 59, "coded": 31388, "first_bin": 3, "frame_bytes": 3268, "info": 26145, "last_bin": 61, "level": 16}, {"bpc": 5, "bw": 2750, "carriers": 59, "coded": 39235, "first_bin": 3, "frame_bytes": 3922, "info": 31376, "last_bin": 61, "level": 17}], "symbol_samples": 1152}, "mfsk": {"bursts": {"CR": {"n_payload": 31, "name": "connect-request", "preadv": 1, "preamble": [74, 68, 70, 60, 60, 77, 50, 76, 78, 74], "seconds": 1.7493, "seed_off": 50, "symbols": 41}, "DISCONNECT": {"n_payload": 31, "name": "session-disconnect-request", "preadv": 125, "preamble": [74], "seconds": 1.3653, "seed_off": 60, "symbols": 32}, "RELEASE": {"n_payload": 15, "name": "session-turn-release", "preadv": 391, "preamble": [62, 67], "seconds": 0.7253, "seed_off": 61, "symbols": 17}, "RESP": {"n_payload": 15, "name": "connect-response", "preadv": 511, "preamble": [62, 67, 55, 66, 59, 72, 68, 55], "seconds": 0.9813, "seed_off": 289, "symbols": 23}}, "connected_ack": [[64, 67], [56, 74], [64, 69], [68, 78], [64, 90], [49, 59], [52, 94], [67, 75], [62, 98], [63, 87], [40, 78]], "connected_ack_preamble": [[64, 67], [56, 74], [64, 69], [68, 78]], "connected_ack_symbols": 11, "fs": 48000, "hop": 2048, "hz_per_bin": 23.4375, "nfft": 2048, "stride": 2080, "wola_n": 32}};
 /* ---- end generated ---- */
 /* ===================================================================== */
 /*  VARA MFSK handshake tone generator                                   */
@@ -522,11 +603,10 @@ function fold(h){return ((((h&0xFFFF)<<8)^((h>>>8)&0xFFFF00))>>>0)&0xFFFFFF;}
 function startState(seed){return (((fold(hi32(seed))&0xFFFF00)|0x86)>>>0);}
 const GB={"-3":[110,220,440,338,134,310],"-2":[102,204,408,274,6,22],"-1":[32,64,128,258,36,216]};
 function ghash(cs){let v=254;for(const off of[-3,-2,-1]){if(cs.length>=-off){const code=cs.charCodeAt(cs.length+off)^0x41;let t=0;for(let i=0;i<6;i++)if((code>>i)&1)t^=GB[off][i];v^=t;}}return v;}
-const BURSTS={
-  CR:{name:"connect-request",pre:[74,68,70,60,60,77,50,76,78,74],n:31,off:50,adv:1},
-  RESP:{name:"connect-response",pre:[62,67,55,66,59,72,68,55],n:15,off:289,adv:511},
-  ACK:{name:"connected-ack",pre:[62],n:12,off:289,adv:31}
-};
+const BURSTS=Object.fromEntries(['CR','RESP'].map(key=>{
+  const b=FIG.mfsk.bursts[key];
+  return [key,{name:b.name,pre:b.preamble,n:b.n_payload,off:b.seed_off,adv:b.preadv}];
+}));
 function genBurst(cs,kind){
   cs=(cs||"").toUpperCase();const bytes=[];for(const ch of cs)bytes.push(ch.charCodeAt(0)&0xFF);
   const K=BURSTS[kind];const crc=crc16_genibus(bytes);
@@ -548,8 +628,7 @@ const KAT={
       W2XYZ:[44,33,64,49,62,33,70,53,72,35,94,89,80,77,60,89,88,81,40,73,78,61,72,95,78,77,70,61,78,93,78],
       BBBB2:[44,97,68,93,50,63,66,97,36,73,78,71,52,95,80,71,62,41,46,87,34,47,90,67,40,89,94,89,32,91,44],
       AAAA1:[80,85,90,65,88,43,78,69,52,85,90,39,94,73,98,71,68,59,62,95,78,77,78,43,94,65,72,41,56,81,58]},
-  RESP:{K7ABC:[80,71,84,77,70,33,56,79,56,95,98,59,50,29,76]},
-  ACK:{K7ABC:[66,45,36,43,58,73,64,39,34,37,48,71],BBBB2:[86,81,86,29,56,85,88,37,90,69,58,71]}
+  RESP:{K7ABC:[80,71,84,77,70,33,56,79,56,95,98,59,50,29,76]}
 };
 const HZ_PER_BIN=FIG.mfsk.hz_per_bin, SYM_S=FIG.mfsk.hop/FIG.mfsk.fs;
 
@@ -569,13 +648,23 @@ function fitCanvas(cv,h){
 }
 
 // Drive a canvas animation only while it's on screen; one static frame if motion is off.
+let guideMotion=false;
+const guideLoops=[];
 function registerLoop(el,step){
-  if(prefersReduce){step(0);return;}
-  const o={vis:true};
-  const pump=()=>{if(o._on)return;o._on=true;const tick=t=>{if(!o.vis){o._on=false;return;}step(t);requestAnimationFrame(tick);};requestAnimationFrame(tick);};
-  new IntersectionObserver(es=>{o.vis=es[0].isIntersecting;if(o.vis)pump();},{threshold:.05}).observe(el);
-  pump();
+  const loop={el,step,visible:true};guideLoops.push(loop);step(0);
+  new IntersectionObserver(es=>{loop.visible=es[0].isIntersecting;},{threshold:.05}).observe(el);
 }
+function guideTick(t){
+  if(guideMotion&&!document.hidden)guideLoops.forEach(loop=>{if(loop.visible)loop.step(t)});
+  requestAnimationFrame(guideTick);
+}
+requestAnimationFrame(guideTick);
+matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{
+  guideMotion=false;wfPaused=true;document.getElementById('wfPlay').textContent='Play diagrams';
+  document.getElementById('wfPlay').setAttribute('aria-pressed','false');guideLoops.forEach(loop=>loop.step(0));
+});
+addEventListener('resize',()=>guideLoops.forEach(loop=>loop.step(0)));
+
 
 /* ===================================================================== */
 /*  Build the session energy grid (shared by 3D + 2D waterfall)          */
@@ -584,14 +673,14 @@ const NF=128;            // frequency bins (0..NF-1 -> 0..~3000Hz)
 const F_TOP=NF*HZ_PER_BIN;
 function hz2row(hz){return Math.round(hz/F_TOP*(NF-1));}
 function buildSession(){
-  const cr=genBurst("K7ABC","CR"), resp=genBurst("W2XYZ","RESP"), ack=genBurst("K7ABC","ACK");
+  const cr=genBurst("K7ABC","CR"), resp=genBurst("K7ABC","RESP"), ack=FIG.mfsk.connected_ack;
   let t=0.3; const seq=[];
   seq.push({type:"mfsk",label:"connect-request",tones:cr.tones,t0:t,dur:cr.tones.length*SYM_S}); t+=cr.tones.length*SYM_S+0.09;
   seq.push({type:"mfsk",label:"connect-response",tones:resp.tones,t0:t,dur:resp.tones.length*SYM_S}); t+=resp.tones.length*SYM_S+0.09;
   const R=FIG.bw2300, rlo=R.first_bin*R.hz_per_bin/HZ_PER_BIN, rhi=(R.first_bin+R.span-1)*R.hz_per_bin/HZ_PER_BIN;
   seq.push({type:"onehot",label:"link-setup / caller-ID (BW2300 rec3)",t0:t,dur:R.blocks_s,lo:rlo,hi:rhi});
   t+=R.blocks_s+0.09;
-  seq.push({type:"mfsk",label:"connected-ack",tones:ack.tones,t0:t,dur:ack.tones.length*SYM_S}); t+=ack.tones.length*SYM_S+0.15;
+  seq.push({type:"pairs",label:"connected-ack (two-tone)",pairs:ack,t0:t,dur:ack.length*SYM_S}); t+=ack.length*SYM_S+0.15;
   // CONNECTED: two DATA overs (BW500) + short ACKs
   for(let i=0;i<2;i++){seq.push({type:"data",label:"DATA over (BW500)",t0:t,dur:2.6}); t+=2.6+0.085;
     seq.push({type:"ack",label:"ACK over",t0:t,dur:0.45}); t+=0.45+0.085;}
@@ -606,6 +695,8 @@ function buildSession(){
     if(e.type==="mfsk"){
       for(let k=0;k<e.tones.length;k++){const ta=e.t0+k*SYM_S;const tc=Math.floor(ta/dt);
         const ri=hz2row(e.tones[k]*HZ_PER_BIN);for(let dd=0;dd<2;dd++)blob(tc+dd,ri,0.92,2);}
+    }else if(e.type==="pairs"){
+      e.pairs.forEach((pair,k)=>pair.forEach(bin=>{const tc=Math.floor((e.t0+k*SYM_S)/dt);for(let dd=0;dd<2;dd++)blob(tc+dd,hz2row(bin*HZ_PER_BIN),0.92,2);}));
     }else if(e.type==="onehot"){
       // Four 512-sample columns land in one analysis frame at this resolution,
       // which is what a 2048-point window reads as 65 simultaneous carriers.
@@ -642,7 +733,7 @@ function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
 function norm(a){const l=Math.hypot(a[0],a[1],a[2])||1;return[a[0]/l,a[1]/l,a[2]/l];}
 
 const wfCanvas=document.getElementById('wf');
-let gl=null, wfProg=null, wfBuffers=null, wfMode3D=true, wfPaused=false, wfAngle=0.5, wfDragging=false, wfLast=0;
+let gl=null, wfProg=null, wfBuffers=null, wfMode3D=true, wfPaused=true, wfAngle=0.5, wfDragging=false, wfLast=0;
 function initGL(){
   gl=wfCanvas.getContext('webgl2',{antialias:true,alpha:false});
   if(!gl){wfMode3D=false;return false;}
@@ -745,16 +836,18 @@ function render2D(){
   const stage=document.getElementById('wfStage');
   resizeGL();
   if(!ok){document.getElementById('wfView').style.display='none';render2D();
-    addEventListener('resize',()=>{render2D();});return;}
+    ['wfView','wfLeft','wfRight'].forEach(id=>document.getElementById(id).hidden=true);document.getElementById('wfPlay').onclick=function(){guideMotion=!guideMotion;this.textContent=guideMotion?'Pause diagrams':'Play diagrams';this.setAttribute('aria-pressed',String(guideMotion));};addEventListener('resize',()=>{render2D();});return;}
   function step(t){if(!wfMode3D)return;if(!wfDragging&&!wfPaused){const dt=(t-wfLast)||16;wfAngle+=dt*0.00016;}wfLast=t;renderGL();}
   registerLoop(stage,step);
   renderGL();
-  document.getElementById('wfPlay').onclick=function(){wfPaused=!wfPaused;this.textContent=wfPaused?'▶':'❚❚';};
-  document.getElementById('wfView').onclick=function(){wfMode3D=!wfMode3D;this.textContent=wfMode3D?'2D':'3D';renderGL();};
+  document.getElementById('wfPlay').onclick=function(){guideMotion=!guideMotion;wfPaused=!guideMotion;this.textContent=guideMotion?'Pause diagrams':'Play diagrams';this.setAttribute('aria-pressed',String(guideMotion));};
+  document.getElementById('wfView').onclick=function(){wfMode3D=!wfMode3D;this.textContent=wfMode3D?'Show 2D view':'Show 3D view';renderGL();};
   let px=0;
   const down=e=>{wfDragging=true;px=(e.touches?e.touches[0].clientX:e.clientX);};
   const move=e=>{if(!wfDragging)return;const x=(e.touches?e.touches[0].clientX:e.clientX);wfAngle+=(x-px)*0.008;px=x;if(wfMode3D)renderGL();};
   const up=()=>{wfDragging=false;};
+  document.getElementById('wfLeft').onclick=()=>{wfAngle-=.25;renderGL();};
+  document.getElementById('wfRight').onclick=()=>{wfAngle+=.25;renderGL();};
   wfCanvas.addEventListener('mousedown',down);addEventListener('mousemove',move);addEventListener('mouseup',up);
   wfCanvas.addEventListener('touchstart',down,{passive:true});addEventListener('touchmove',move,{passive:true});addEventListener('touchend',up);
   addEventListener('resize',()=>{resizeGL();renderGL();});
@@ -776,7 +869,7 @@ function drawHandshake(){
   const y=v=>padT+gh*(1-(v-mn)/(mx-mn));
   ctx.strokeStyle=cssv('--line-2');ctx.lineWidth=1;ctx.font="10px "+cssv('--mono');ctx.fillStyle=cssv('--ink-faint');
   for(let f=1000;f<=2200;f+=400){const bin=f/HZ_PER_BIN;const yy=y(bin);ctx.beginPath();ctx.moveTo(padL,yy);ctx.lineTo(w-6,yy);ctx.stroke();ctx.fillText((f/1000).toFixed(1)+"k",4,yy+3);}
-  const nRev=prefersReduce?tot:Math.min(tot,Math.floor(hsReveal));
+  const nRev=(!guideMotion||prefersReduce)?tot:Math.min(tot,Math.floor(hsReveal));
   const preN=b.pre.length;
   ctx.fillStyle=cssv('--line-2');ctx.fillRect(padL,padT,x(preN-0.5)-padL,gh);
   ctx.fillStyle=cssv('--ink-faint');ctx.fillText("preamble",padL+2,h-8);
@@ -807,6 +900,7 @@ function updateHandshake(){
   if(kd){const ok=kd.length===b.bins.length&&kd.every((v,i)=>v===b.bins[i]);
     kb.className="kat "+(ok?"ok":"no");kb.innerHTML=(ok?"✓ ":"✕ ")+"matches published known-answer vector for "+curCall;}
   else{kb.className="kat";kb.style.color=cssv('--ink-faint');kb.innerHTML="↳ live generator output (no stored KAT for this callsign)";}
+  guideData('hsCanvas',K.name+' for '+curCall,['Symbol','Tone / Hz','Bin'],b.tones.map((bin,i)=>[i+1,bin*HZ_PER_BIN,bin]));
   drawHandshake();
 }
 document.getElementById('callIn').addEventListener('input',e=>{curCall=e.target.value.toUpperCase().replace(/[^A-Z0-9/\-]/g,'');e.target.value=curCall;updateHandshake();});
@@ -836,6 +930,7 @@ const OFDM_STAGES=[
 const LUT=[[1,0],[1,0],[1,0],[-0.7778,-0.7778],[0.2121,0.2121],[-1.1314,-1.1314],[-1,0],[0,1],[0.7071,0.7071],[-0.7778,-0.2593],[0.6364,0.2121],[-1.1314,-0.8081],[0,0],[-0,-1],[-0.7071,0.7071],[-0.7778,0.7778],[0.6364,1.0607],[-1.1314,-0.1616],[0,0],[-1,0],[0,1],[-0.7778,0.2593],[1.0607,0.2121],[-1.1314,-0.4849],[0,0],[0,0],[0.7071,-0.7071],[-0.2593,-0.7778],[0.2121,0.6364],[-1.1314,1.1314],[0,0],[0,0],[-0,-1],[-0.2593,-0.2593],[0.6364,0.6364],[-1.1314,0.8081],[0,0],[0,0],[-1,0],[-0.2593,0.7778],[0.2121,1.0607],[-1.1314,0.1616],[0,0],[0,0],[-0.7071,-0.7071],[-0.2593,0.2593],[1.0607,0.6364],[-1.1314,0.4849],[0,0],[0,0],[0,0],[0.7778,-0.7778],[0.2121,-0.2121],[-0.8081,-1.1314],[0,0],[0,0],[0,0],[0.7778,-0.2593],[0.6364,-0.2121],[-0.8081,-0.8081],[0,0],[0,0],[0,0],[0.7778,0.7778]];
 const constCanvas=document.getElementById('constCanvas');let constMode="bpsk",constPh=0;
 function drawConst(){
+  guideData('constCanvas',constMode==='bpsk'?'Differential BPSK':'Historic truncated LUT prefix',['Entry','Real','Imaginary'],constMode==='bpsk'?[['Bit 0',1,0],['Bit 1',-1,0]]:LUT.map((v,i)=>[i,...v]));
   const {ctx,w,h}=fitCanvas(constCanvas,300);ctx.clearRect(0,0,w,h);
   const cx=w/2,cy=h/2,R=Math.min(w,h)*0.36;
   ctx.strokeStyle=cssv('--line-2');ctx.lineWidth=1;
@@ -889,10 +984,12 @@ function drawTrellis(){
   ctx.fillStyle=cssv('--ink-dim');ctx.fillText("input 0",padL,h-4);ctx.fillStyle=cssv('--cyan');ctx.fillText("input 1",padL+60,h-4);
 }
 registerLoop(trellisCanvas,()=>{trPulse++;drawTrellis();});
+guideData('trellisCanvas','RSC state transitions',['State','Input 0 next state','Input 1 next state'],Array.from({length:8},(_,s)=>[s,rscNext(s,0),rscNext(s,1)]));
 
 /* Scene 3 — carrier occupancy */
 const carrierCanvas=document.getElementById('carrierCanvas');let carrierBW="500",carPh=0;
 function drawCarriers(){
+  const R=FIG.bw2300;guideData('carrierCanvas',carrierBW==='500'?'BW500 alternating subbands':'BW2300 one-hot bins',['Position','Audio frequency / Hz'],carrierBW==='500'?[['Subband 0',1350],['Subband 1',1650],['Reference',1500]]:Array.from({length:R.span},(_,i)=>[R.first_bin+i,(R.first_bin+i)*R.hz_per_bin]));
   const {ctx,w,h}=fitCanvas(carrierCanvas,150);ctx.clearRect(0,0,w,h);
   const padL=32,padB=32,gw=w-padL-32,gh=h-padB-22;
   const f2x=f=>padL+gw*(f/3000);
@@ -931,7 +1028,7 @@ const LADDER=[
   {from:"A",label:`connect-request  (MFSK, ${MB.CR.symbols} sym, ${MB.CR.seconds.toFixed(2)}s)`,st:2,c:"--amber"},
   {from:"B",label:`connect-response  (MFSK, ${MB.RESP.symbols} sym, ${MB.RESP.seconds.toFixed(2)}s)`,st:2,c:"--amber"},
   {from:"A",label:`link-setup + caller ID  (BW2300 rec3, ${FIG.bw2300.blocks_s.toFixed(2)}s)`,st:2,c:"--violet"},
-  {from:"B",label:"connected-ack  (MFSK)",st:3,c:"--amber"},
+  {from:"B",label:"connected-ack  (two-tone control)",st:3,c:"--amber"},
   {from:"A",label:`DATA over  →  BUFFER ${FIG.bw500.payload_bytes}↓`,st:3,c:"--magenta"},
   {from:"B",label:"ACK over  (~85ms turnaround)",st:3,c:"--good"},
   {from:"A",label:`turn release  (${MB.RELEASE.symbols} sym, ${MB.RELEASE.seconds.toFixed(3)}s)`,st:3,c:"--cyan"},
@@ -947,7 +1044,7 @@ function drawLadder(){
   ctx.fillStyle=cssv('--cyan');ctx.fillText("responder  B",laneB,16);
   ctx.strokeStyle=cssv('--line-2');ctx.lineWidth=1;
   [laneA,laneB].forEach(x=>{ctx.beginPath();ctx.moveTo(x,padT-6);ctx.lineTo(x,h-8);ctx.stroke();});
-  const shown=prefersReduce?LADDER.length:Math.min(LADDER.length,Math.floor(ladProg));
+  const shown=(!guideMotion||prefersReduce)?LADDER.length:Math.min(LADDER.length,Math.floor(ladProg));
   let curState=0;
   for(let i=0;i<shown;i++){const e=LADDER[i];const y=padT+i*rowH+rowH/2;
     const x0=e.from==="A"?laneA:laneB, x1=e.from==="A"?laneB:laneA;
@@ -961,6 +1058,7 @@ function drawLadder(){
   document.querySelectorAll('#stateRow .st').forEach(el=>el.classList.toggle('on',+el.dataset.i===curState));
 }
 registerLoop(ladderCanvas,()=>{ladProg+=0.03;if(ladProg>LADDER.length+8)ladProg=0;drawLadder();});
+guideData('ladderCanvas','Schematic VARA exchange',['Step','Sender','Frame'],LADDER.map((e,i)=>[i+1,e.from,e.label]));
 
 /* ===================================================================== */
 /*  Numbers — every value cell reaches back into the generated block      */
@@ -970,6 +1068,9 @@ registerLoop(ladderCanvas,()=>{ladProg+=0.03;if(ladProg>LADDER.length+8)ladProg=
   document.querySelectorAll('[data-fig]').forEach(el=>{el.textContent=String(at(el.dataset.fig));});
   const R=FIG.bw2300;
   document.getElementById('binSpan').textContent=`${R.first_bin}–${R.first_bin+R.span-1}`;
+  document.getElementById('ladderRows').insertAdjacentHTML('beforeend',R.ladder.map(l=>
+    `<tr><td class="num">${l.level}</td><td class="mono">${l.family}</td><td class="num">${l.carriers}</td>`+
+    `<td class="num">${l.bpc}</td><td class="num">${l.samples}</td><td class="num">${l.frame_bytes}</td></tr>`).join(''));
   document.getElementById('releaseRow').textContent=
     `${MB.RELEASE.symbols} symbols · ${MB.RELEASE.seconds.toFixed(3)} s`;
   document.getElementById('discRow').textContent=
@@ -982,7 +1083,7 @@ registerLoop(ladderCanvas,()=>{ladProg+=0.03;if(ladProg>LADDER.length+8)ladProg=
 /* ===================================================================== */
 /*  Theme toggle + rail scroll-spy                                        */
 /* ===================================================================== */
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>location.reload());
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>guideLoops.forEach(loop=>loop.step(0)));
 const railLinks=[...document.querySelectorAll('.rail a')];
 const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
   railLinks.forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+e.target.id));}});},{rootMargin:"-40% 0px -55% 0px"});
@@ -990,6 +1091,42 @@ const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
 </script>
 
 
-<script>document.querySelectorAll('.page-contents a').forEach(a=>a.addEventListener('click',()=>{a.closest('details').open=false;}));</script>
+<script>
+document.querySelectorAll('.page-contents a').forEach(a=>a.addEventListener('click',()=>{
+  const target=document.getElementById(a.hash.slice(1));if(!target)return;
+  a.closest('details').open=false;target.tabIndex=-1;target.focus({preventScroll:true});
+}));
+document.querySelectorAll('.tbl-scroll,.table-scroll,.frequency-scroll,.scroll,.barwrap,[style*="overflow-x:auto"]').forEach((el,i)=>{
+  el.tabIndex=0;el.setAttribute('role','region');if(!el.hasAttribute('aria-label')){const title=el.closest('section,header,details')?.querySelector('h2,h3,summary')?.textContent;el.setAttribute('aria-label',(title||'Diagram or table')+' — scrollable values');}
+});
+document.querySelectorAll('.seg,.seg-ctl').forEach(group=>{
+  const sync=()=>group.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.classList.contains('on'))));sync();
+  group.addEventListener('click',()=>queueMicrotask(sync));
+});
+</script>
+
+
+<script>
+(function(){
+  const H=FIG.highspeed;
+  const names={1:'QPSK',2:'8PSK',3:'16QAM',4:'32-cross'};
+  function draw(pos){
+    const points=H.points[pos], group=document.getElementById('highConstPoints');
+    group.innerHTML='<path d="M20 150H310M165 15V285" stroke="currentColor" opacity=".25"/>'+points.map(([re,im],i)=>{
+      const x=165+re*85,y=150-im*85;
+      return `<circle cx="${x}" cy="${y}" r="4" fill="currentColor"/><text x="${x+7}" y="${y-5}" fill="currentColor" font-family="monospace" font-size="11">${i}</text>`;
+    }).join('');
+    guideData('highConstellation','VARA full '+names[pos]+' constellation',['Raw bit-group index','Real','Imaginary'],points.map((v,i)=>[i,...v]));
+    document.getElementById('highConstTitle').textContent=`VARA full ${names[pos]} constellation`;
+    document.querySelectorAll('#highConstSeg button').forEach(b=>{const selected=b.dataset.pos===String(pos);b.classList.toggle('on',selected);b.setAttribute('aria-pressed',String(selected));});
+  }
+  document.querySelectorAll('#highConstSeg button').forEach(b=>b.addEventListener('click',()=>draw(b.dataset.pos)));
+  draw(1);
+  document.getElementById('highFamilies').innerHTML=[500,2300,2750].map(bw=>{
+    const rows=H.rows.filter(r=>r.bw===bw), first=rows[0],last=rows[rows.length-1];
+    return `<tr><td>${bw}</td><td>L${first.level}–${last.level}</td><td>${first.first_bin}–${first.last_bin}</td><td>${first.carriers}</td></tr>`;
+  }).join('');
+})();
+</script>
 
 </html>

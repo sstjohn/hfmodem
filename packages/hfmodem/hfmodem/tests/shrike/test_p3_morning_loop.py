@@ -28,9 +28,9 @@ METADATA = FIXTURES / "metadata.json"
 ADDITIONAL = b" OK"
 # A 600 ms P3 role rotation, on the caller's unchanged 1250 ms comb.
 # The measured morning peer onset sits approximately 960 ms past that comb;
-# the resulting answer is 890 ms after the peer phase reference.
+# the resulting answer is `P3_REPLY_S` after the peer phase reference.
 PEER_OFFSET = 46080
-ANSWER_OFFSET = 42720
+ANSWER_OFFSET = round(onair.P3_REPLY_S * FS)
 
 
 def _recorded_changeover():
@@ -101,7 +101,7 @@ class MorningPeer(loop.LatePeer):
             key_up = self.keyed_at
             previous = first - phase
             # The peer uses nominal 810 ms frame extent and allows filter tails;
-            # accept the fixed 890 ms PULSE window and at least 20 ms
+            # accept the fixed `P3_REPLY_S` PULSE window and at least 20 ms
             # clear between the 810 ms data body and our PTT assertion.
             placed = (abs(pulse_phase - ANSWER_OFFSET) <= round(.005 * FS)
                       and key_up >= previous + round(.83 * FS)

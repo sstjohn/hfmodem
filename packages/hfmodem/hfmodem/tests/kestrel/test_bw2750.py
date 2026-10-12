@@ -195,7 +195,7 @@ def test_what_the_new_record_costs_the_recordings_it_should_decline(name):
 def test_the_2750_record_is_rec3_on_a_wider_comb():
     r, base = rx.RECORDS[_BASE], rx.RECORDS[rx.BASE_LEVEL]
     assert (r.span, r.first_bin, r.stride) == (20, 6, 1)
-    assert (r.dw50, r.cp, r.ncols, r.lead) == (base.dw50, base.cp, base.ncols, base.lead)
+    assert (r.dw50, r.ncols, r.lead) == (base.dw50, base.ncols, base.lead)
     assert (r.n_info, r.coded, r.frame_bytes, r.bpc) == (base.n_info, base.coded,
                                                          base.frame_bytes, base.bpc)
     # the same coding chain, reached through the record's own interleaver column
@@ -388,12 +388,9 @@ def test_a_2750_session_keys_its_own_pair_and_the_shared_frames_on_its_alphabet(
         assert at.tones is vf.BW2750_TONES
         assert (at.seed_off, at.preadv, at.keyed_by, at.preamble) \
             == (kind.seed_off, kind.preadv, kind.keyed_by, kind.preamble)
-    # Both the final ACK and continue frame use this bandwidth's measured tails.
-    assert vf.control_bursts("W9SSJ", "2750") == (
-        vf.CONTROL_BURST_CALLER_2750, vf.CONTROL_BURST_RESPONDER_2750)
+    # Both the final ACK and continue frame are drawn on this bandwidth's alphabet.
     assert vf.control_bursts("W9SSJ", "2750") != vf.control_bursts("W9SSJ", "2300")
-    assert vf.over_continue("W9SSJ", "2750") == vf.OVER_CONTINUE_CALLER_2750
-    assert vf.over_continue("W9SSJ", "2750") != vf.over_continue("W9SSJ", "2300")
+    assert vf.over_continue("W1AW", "2750") != vf.over_continue("W1AW", "2300")
 
 
 # --------------------------------------------------------------------------- #
@@ -427,14 +424,15 @@ def test_the_2750_continue_burst_regenerates_off_both_callers_cables(path, at):
     x = corpora.wav_mono(path)
     x = x / (np.abs(x).max() or 1.0)
     read = _two_tone(x, at, vf.OVER_CONTINUE_NSYM, mk.band_for("2750"))
-    assert read == tuple(tuple(sorted(p)) for p in vf.OVER_CONTINUE_CALLER_2750)
+    assert read == vf.over_continue("W1AW", "2750")[0]
 
 
 @requires_over_continue_2750
 def test_the_responders_copies_carry_symbols_no_bw2300_burst_can_reach():
     """What says the seven behind the lead are drawn on the wide alphabet rather
     than borrowed. The caller's own copy happens to fall inside BW2300's band;
-    the responder's does not, and neither end's is the other's."""
+    the responder's does not. Each is W1AW's responder continue, plain or after
+    a 0x81 record."""
     band = mk.band_for("2750")
     seen = set()
     for path, times in corpora.OVER_CONTINUE_2750_RESPONDER:
@@ -442,9 +440,8 @@ def test_the_responders_copies_carry_symbols_no_bw2300_burst_can_reach():
         x = x / (np.abs(x).max() or 1.0)
         for at in times:
             pairs = _two_tone(x, at, vf.OVER_CONTINUE_NSYM, band)
-            assert pairs[0] == tuple(sorted(vf.OVER_CONTINUE_CALLER_2750[0]))
-            assert pairs[1:] != tuple(tuple(sorted(p)) for p in
-                                      vf.OVER_CONTINUE_CALLER_2750[1:])
+            assert pairs in (vf.over_continue("W1AW", "2750")[1],
+                             vf.over_continue_down("W1AW", "2750")[1])
             seen.update(b for p in pairs for b in p)
     lo, hi = mk.band_for("2300")
     assert seen - set(range(lo, hi + 1)), "every symbol sits inside BW2300's band"

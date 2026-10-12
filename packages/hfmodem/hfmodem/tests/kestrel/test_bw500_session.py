@@ -117,16 +117,16 @@ def test_an_over_is_delivered_whole_and_answered_once(brackets, blocks):
 
 
 @corpora.requires_multiframe_session
-def test_an_unmeasured_link_gets_the_generated_narrow_continue(brackets):
-    """The unknown link gets short16 on its own alphabet; the old foreign
-    captured tail cost two idle gaps per over at stock K5FIT."""
+def test_the_link_gets_its_own_narrow_continue(brackets):
+    """The old foreign captured tail cost two idle gaps per over at stock K5FIT;
+    the link's own is drawn from the called station and the over's state."""
     hs, io = _station()
     hs.on_rx_audio(brackets[2][0])
     (out,) = io.sent
-    assert VF.over_continue_state(hs.caller, hs.called, *hs._peer_over_state) is None
-    kind = VF.for_bw(VF.SESSION_OVER_RESPONSE_SHORT, "500")
-    assert MK.demod_burst(out, kind, MK.band_for("500")) == VF.handshake_tones(hs.called, kind)
-    assert hs._reack_frame == VA.OVER_CONTINUE_SHORT
+    want = VF.over_continue_state(hs.called, *hs._peer_over_state)
+    heard = MK.demod_tone_pairs(out, VF.OVER_CONTINUE_NSYM, MK.band_for("500"))
+    assert tuple(tuple(sorted(p)) for p in heard) == want
+    assert hs._reack_frame == VA.OVER_CONTINUE_BURST
 
 
 @corpora.requires_multiframe_session

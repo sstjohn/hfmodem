@@ -589,6 +589,54 @@ P4_HEADER_VARIANTS = _reg(Unknown(
          "waveform candidate, not a decoded control meaning.",
 ))
 
+P4_ROBUST_BLOCK_MASK = _reg(Unknown(
+    key="P4_ROBUST_BLOCK_MASK",
+    what="Origin of the fixed 64-bit mask the robust short datablock is sent under",
+    status=OPEN,
+    value=0x063D3AA80E8AD124,
+    candidates=["a scrambling sequence from a generator not yet identified",
+                "a constant chosen by the manufacturer",
+                "a sequence derived from the header, the root or the session"],
+    evidence="Robust short packets from a third station, or any packet whose "
+             "six bits are known independently: either pins the absolute "
+             "labelling and so the mask, where seven packets from two stations "
+             "only pin the coset.",
+    note="The CODE is not open: the 64 datablock bits are this mask XOR a row "
+         "of the 64-point Sylvester Hadamard matrix on all seven packets on "
+         "file, zero residual, six of them out-of-sample against a mask fixed "
+         "by the first. What is open is where the mask comes from. It is not "
+         "p4frame.whiten at any bit offset in either bit order, not that "
+         "LFSR's raw state stream, not coding.whiten's crctable stream, not "
+         "any degree-6 m-sequence and not periodic at 8 or 16. Weight 26, "
+         "algebraic degree 5. Consequence: a value is pinned only up to a "
+         "fixed 6-bit XOR and the mask only up to a global complement, so "
+         "p4oracle's p4_value is a label, and only DIFFERENCES between values "
+         "are evidence.",
+))
+
+P4_ROBUST_BLOCK_MEANING = _reg(Unknown(
+    key="P4_ROBUST_BLOCK_MEANING",
+    what="What the robust short packet's six bits and its two headers say",
+    status=OPEN,
+    candidates=["status and counter, as the normal mode's own status byte",
+                "a link-setup or speed-level request",
+                "an address or session field spread over several packets"],
+    evidence="Keyed values against a Dragon with the reply's own value read "
+             "back (p4oracle), across contexts: a reply value that MOVES with "
+             "ours maps the code, where a constant reply maps nothing. The "
+             "header needs the same treatment -- taunus alternates A and B "
+             "over a repeated block, which is consistent with a packet parity "
+             "and with nothing else yet.",
+    note="SCS-P4 sec 6.2 gives the 64-symbol variant no user data field, so "
+         "there is no published field, CRC or counter to read the six bits "
+         "against. Measured: the tape's caller opened 6, 9, 8 under header A; "
+         "taunus sent 13, 13, 49, 49 under A, B, A, B, block independent of "
+         "header. The answerer's 27-symbol control burst is a six-bit field of "
+         "the same width, unspread, and no mask is known for it either -- two "
+         "or three of each burst's six steps are not on the differential-BPSK "
+         "grid at all.",
+))
+
 P4_TURBO_INTERLEAVER = _reg(Unknown(
     key="P4_TURBO_INTERLEAVER",
     what="P4 permutation feeding component encoder C2, including tail domain",
@@ -621,16 +669,32 @@ P4_SYMBOL_INTERLEAVER = _reg(Unknown(
 P4_TAIL_PADDING = _reg(Unknown(
     key="P4_TAIL_PADDING",
     what="P4 component termination, extra systematic bits and puncture treatment",
-    status=OPEN,
-    candidates=["tail bits plus fixed padding inside V0/C1/C2 fields",
-                "variant-specific termination/packing convention"],
-    evidence="Known input-to-coded-bit captures resolving all extra bits, both "
-             "component final states and puncturing phase; held-out payloads "
-             "must predict parity as well as pass CRC.",
-    note="SCS-P4 pp.3,11-13: Fig.7.2 publishes V0 then C1 then C2. V0 exceeds "
-         "8*N by 4 or 8 bits on long packets and 8 on normal short packets. "
-         "Three tail bits per component do not alone specify this packing. "
-         "Keep published puncture patterns; missing tail treatment is separate.",
+    status=RESOLVED,
+    value="Both normal variants -- short (SL5/SL6, D=352, N=43) and long "
+          "(D=1656, N=206) -- spend the eight bits D exceeds 8*N by the same "
+          "way: the field bits, then five zero bits, then the three "
+          "rsc_terminate returns for the state those leave the FIRST component "
+          "in. The second component reads the permuted D and is not "
+          "terminated. Both start from state (0,0,0). Rate 1/3 keeps V0, C1 "
+          "and C2 whole, so nothing is punctured",
+    evidence="All four CRC-valid Dragon frames on file -- two in tests/shrike/"
+             "fixtures/p4-short, two in fixtures/p4-long -- spend them that "
+             "way: re-rendered from their own decoded bytes under this packing "
+             "they read back as the identical frame, and the encoder leaves "
+             "the first component in state (0,0,0) (test_p4shorttx.py and "
+             "test_p4longtx.py, test_recorded_frames_survive_a_round_trip and "
+             "test_coded_field_dimensions_and_tail). The distances separating "
+             "this reading from every wrong one -- each at chance over D bits "
+             "-- are in shrike.p4shorttx's and shrike.p4longtx's own headers, "
+             "measured against raw decisions the decoder does not return; "
+             "test_the_chain_runs_forward_on_a_recorded_frame asserts them for "
+             "the long. Taking the eight as plain zeros is the reading C1 "
+             "cannot separate and C2 can: 659 and 639 bits out of 1656.",
+    note="SCS-P4 pp.3,11-13: Fig.7.2 publishes V0 then C1 then C2 and leaves "
+         "the difference between D and 8*N unspent. Measured on the two normal "
+         "BPSK variants, both from one recording and one station. Variants "
+         "whose D exceeds 8*N by four rather than eight are untouched by this, "
+         "and so is every punctured rate.",
 ))
 
 P4_SYMBOL_LABELS = _reg(Unknown(
@@ -651,19 +715,28 @@ P4_SYMBOL_LABELS = _reg(Unknown(
 P4_NORMAL_LAYOUT = _reg(Unknown(
     key="P4_NORMAL_LAYOUT",
     what="P4 training count/placement and conflicting normal-mode dimensions",
-    status=ASSUMED,
-    value="176 symbols per ordinary short data block; 32-symbol training from "
-          "the printed C loops; packet training count remains open",
+    status=RESOLVED,
+    value="Normal BPSK: 176 data symbols per short block and 207 per long, "
+          "32-symbol trainings from the printed C loops, and B+1 of them -- "
+          "seven for the short's six blocks, twenty-five for the long's "
+          "twenty-four, with nothing after the last",
     candidates=["176 versus literal 175 short data symbols",
                 "32 code-generated versus 33 prose-generated training symbols",
                 "B+1 training blocks from figure versus B from numbering prose"],
-    evidence="Locate training peaks and terminal training in clean short/long "
-             "packets; compare symbol counts, alternating conjugation and full "
-             "packet boundaries against both layout predictions.",
+    evidence="The four CRC-valid frames in tests/shrike/fixtures/p4-short and "
+             "fixtures/p4-long are decoded on 176x6 and 207x24 behind "
+             "32-symbol trainings and re-render byte-exact on the same "
+             "geometry. The terminal training is the measured half: in all "
+             "four, the slot after the last data block scores with the "
+             "trainings before it (0.56 to 0.66 short, in family long) and the "
+             "slot after THAT is silence at a twentieth of the body amplitude "
+             "-- test_both_recorded_frames_close_with_a_seventh_training and "
+             "its twenty-fifth counterpart.",
     note="SCS-P4 §6.4 pp.9-10: 6*175=1056 conflicts with 176 in table; C loops "
          "give C[9:16]+C[1:16]+C[1:8] (one-based inclusive). Fig.6.2 draws "
-         "seven T blocks for six data blocks; prose numbers training 1..6. "
-         "Working interpretations are not capture-confirmed or wired to runtime.",
+         "seven T blocks for six data blocks and the figure is right; the "
+         "prose numbering 1..6 is not. Break-in geometry (210x4) is untouched "
+         "by this, and so is every robust variant.",
 ))
 
 P4_SPECIAL_PACKETS = _reg(Unknown(
@@ -690,7 +763,10 @@ P4_EXTENDED_STATUS = _reg(Unknown(
              "state, compared with E=0 controls, to delimit and name fields.",
     note="SCS-P4 §5 pp.5-6 publishes the E bit and prefix location but its "
          "referenced layout is absent. Ordinary status is E/S1S0/M2M1M0/C1C0; "
-         "do not copy P3 independent status-bit handling.",
+         "do not copy P3 independent status-bit handling. WS8EOC 09-28 has "
+         "two single-copy CRC-valid 0x83 fields with prefix 01 01 01 before "
+         "the remaining challenge and CMS prompt. Only that exact prefix "
+         "under source mode 0/protocol 0 is admitted; semantics remain open.",
 ))
 
 P4_WHITENING = _reg(Unknown(

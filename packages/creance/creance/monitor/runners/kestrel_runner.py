@@ -3,13 +3,18 @@
 
 """kestrel monitor runner: live s16le on stdin -> normalised detection JSON out.
 
-This is the whole kestrel adapter. It reuses ``tools/vara_monitor``'s own
-streaming pieces — the ``MonitorGate`` that brackets keyed bursts exactly as
-that tool's own traffic log does, ``classify`` that names each one, and the
-``HandshakeScanner`` that reads connect-request and connect-response off the raw
-stream — so the detections are the same set the vara_monitor log path produces.
+This is the whole kestrel adapter. It reuses the streaming pieces of
+``hfmodem.kestrel.monitor`` that ``tools/vara_monitor``'s traffic log runs — the
+``MonitorGate`` that brackets keyed bursts, ``classify`` that names each one, and
+the ``HandshakeScanner`` that reads connect-request and connect-response off the
+raw stream — so the detections are the same set the vara_monitor log produces.
+The scanner's tone shift is the sender's tuning error, and it is the offset.
 Wideband overs are not decoded here (that is a ~20 s job that would back the live
 stream up), matching what vara_monitor does on ``--device``.
+
+``--centre HZ`` makes this a track's instance: the audio is cut to ``--bw`` around
+that centre and moved to 1500 Hz before anything reads it, and the offset is
+reported from where the track sits.
 
 ``normalize`` is pure and carries the confidence policy: a resolved caller or a
 gateway matched against the Winlink list, or a CRC-valid DATA over, is CONFIRMED;
@@ -20,13 +25,30 @@ identity. An unrecognised burst names no protocol at all.
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
 
-FS = 48000
+from hfmodem.monitor import FS
+
+#: How often a track's instance says how far it has decoded.
+HEARD_EVERY_S = 0.5
+#: One handshake read by two tiles is one burst.
+DUP_S = 0.2
+#: A track's instance scans its channel in tiles this far apart: the handshake
+#: scanner's own reach is +/-3 tone bins, so seven bins of 23.4375 Hz butt one
+#: tile's reach against the next's and keep every tile on the tone grid.
+TONE_HZ = 23.4375
+TILE_HZ = 7 * TONE_HZ
+#: How near the channel's edge the last tile's centre may sit: a BW500 request
+#: is 610 Hz wide.
+TILE_EDGE_HZ = 250.0
+#: VARA's widest waveform, BW2750, when no width is asked for
+BW_HZ = 3000.0
 READ_BYTES = 9600
 CONFIRMED, TENTATIVE = "confirmed", "tentative"
+GATEWAY_LIST = Path("winlink-vara-gateways.csv")
 
 _HANDSHAKE = {"CR", "connect-response", "connected-ack"}
 # Kinds that name no protocol. `one-hot burst` is here because its test is a
@@ -45,7 +67,8 @@ _UNNAMED = {"unknown", "one-hot burst", "DBPSK burst"}
 
 
 def normalize(t: float, kind: str, info: str = "", quality: str = "",
-              gateway: str = "", caller: str = "") -> dict:
+              gateway: str = "", caller: str = "",
+              offset_hz: float | None = None) -> dict:
     """A kestrel ``classify`` Result -> a normalised detection dict."""
     detail = "  ".join(p for p in (info, f"({quality})" if quality else "") if p)
     if caller:
@@ -54,7 +77,7 @@ def normalize(t: float, kind: str, info: str = "", quality: str = "",
         grade, proto, station, role = CONFIRMED, "VARA", gateway, "gateway"
     elif kind == "DATA over":
         grade, proto, station, role = CONFIRMED, "VARA", "", ""
-    elif kind in _HANDSHAKE or kind in ("wideband", "long burst"):
+    elif kind in _HANDSHAKE or kind in ("wideband", "long burst", "high-SL over"):
         grade, proto, station, role = TENTATIVE, "VARA", "", ""
     elif kind in _UNNAMED:
         grade, proto, station, role = TENTATIVE, "UNKNOWN", "", ""
@@ -62,7 +85,8 @@ def normalize(t: float, kind: str, info: str = "", quality: str = "",
         grade, proto, station, role = TENTATIVE, "VARA", "", ""
     return {"t": round(t, 3), "modem": "kestrel", "protocol": proto,
             "kind": kind, "grade": grade, "station": station, "role": role,
-            "detail": detail}
+            "detail": detail,
+            "offset_hz": None if offset_hz is None else round(offset_hz, 1)}
 
 
 def _emit(obj: dict) -> None:
@@ -71,32 +95,41 @@ def _emit(obj: dict) -> None:
 
 
 def _load_calls(vm) -> list:
-    """Gateway callsigns for handshake attribution, from a cached CSV only —
-    a monitor must not stall on a network fetch. No cache means no attribution,
-    so handshake bursts land as TENTATIVE, which is the honest grade for them."""
-    if not vm.GATEWAY_LIST.exists():
-        return []
+    """Gateway callsigns for handshake attribution, from the tree's cached export
+    only — a monitor must not stall on a network fetch. No cache means no
+    attribution, so handshake bursts land as TENTATIVE, which is the honest grade
+    for them."""
     try:
-        return vm.load_gateways(vm.GATEWAY_LIST, None, False)
-    except Exception:
+        export = GATEWAY_LIST.read_text()
+    except OSError:
         return []
+    return list(dict.fromkeys(call for call, _ in vm.vara_gateways(export)))
 
 
-def main() -> int:
-    # `from tools import vara_monitor` does not work: tools/ has no __init__.py
-    # and vara_monitor imports its siblings flat, so the package form raises
-    # ModuleNotFoundError on hfcapture. Putting tools/ on the path directly is
-    # what resolves both it and its siblings.
-    sys.path.insert(0, str(Path.cwd() / "tools"))
+def main(argv: list[str] | None = None) -> int:
     import numpy as np
-    import vara_monitor as vm
+    from hfmodem.kestrel import monitor as vm
 
+    from hfmodem.monitor.channel import tuned
+
+    ap = argparse.ArgumentParser()
     # A wideband over is a grid-lock plus up to ~26 turbo passes — seconds of CPU
     # per burst. On live audio that stalls the loop and backs the stream up, so it
     # is off by default and the over is reported as an undecoded TENTATIVE signal.
     # Offline over a recording there is no such pressure, and skipping it means
     # never exercising the decode that actually reads payload.
-    deep = "--deep" in sys.argv
+    ap.add_argument("--deep", action="store_true")
+    ap.add_argument("--centre", type=float)
+    ap.add_argument("--bw", type=float, default=BW_HZ)
+    args = ap.parse_args(argv)
+    deep = args.deep
+    if args.centre is not None:
+        # Moved by whole tone bins, a request on the grid stays on it and its
+        # offset reads exactly; moved by the aggregator's 100 Hz, it lands a few
+        # Hz off every bin and reads a bin either side.
+        args.centre = 1500.0 + round((args.centre - 1500.0) / TONE_HZ) * TONE_HZ
+    chan = tuned(args.centre, args.bw)
+    shift = chan.offset if chan else (lambda hz: hz)
 
     calls = _load_calls(vm)
     # The traffic log's gate, not the connect tool's. `Segmenter`'s 4.0x enter
@@ -120,6 +153,19 @@ def main() -> int:
     # 546 s of audio against 340 candidate callsigns, which is 60x real time and
     # nowhere near backing a live stream up.
     scan = vm.HandshakeScanner(calls)
+    # A track's centroid is the modem's centre only when the track holds that one
+    # emission. A BW500 request 900 Hz up the 2026-07-26 tape shares its track
+    # with a neighbour's overs, the centroid lands 153 Hz under it, and a scan
+    # of +/-70 Hz from there misses it; the tiles cover the channel instead.
+    tiles = [(0.0, None, scan)]
+    if chan:
+        from hfmodem.monitor.channel import Channel, NOMINAL_HZ
+
+        reach = int(max(0.0, args.bw / 2 - TILE_EDGE_HZ) // TILE_HZ)
+        tiles += [(k * TILE_HZ, Channel(args.centre + k * TILE_HZ, NOMINAL_HZ,
+                                        TILE_EDGE_HZ + TILE_HZ / 2),
+                   vm.HandshakeScanner(calls))
+                  for k in sorted(range(-reach, reach + 1), key=abs) if k]
 
     def _gate(bracketed) -> list:
         """Classified gate brackets, less the two kinds the scanner owns — so a
@@ -133,15 +179,45 @@ def main() -> int:
     def _emit_all(events: list) -> None:
         for start, r in sorted(events, key=lambda e: e[0]):
             _emit(normalize(start / FS, r.kind, r.info, r.quality,
-                            r.gateway, r.caller))
+                            r.gateway, r.caller, shift(r.offset_hz)))
 
+    def _scan(x, own, flush: bool = False) -> list:
+        """Every tile's handshakes, each once, the nearest tile's reading kept.
+        ``x`` is the input, ``own`` the channel's output of it."""
+        out = []
+        for moved, tile, scanner in tiles:
+            heard = own if tile is None else tile.flush() if flush else tile.push(x)
+            for start, r in scanner.push(heard):
+                if moved and r.offset_hz is not None:
+                    r.offset_hz += moved
+                if not any(q.kind == r.kind and abs(s - start) < DUP_S * FS
+                           for s, q in out):
+                    out.append((start, r))
+        return out
+
+    def heard() -> float:
+        """Where everything before has been said: the scanners' scored windows,
+        and the pre-roll of a burst the gate still holds open."""
+        at = min(scanner._t0 for _, _, scanner in tiles)
+        if seg.inb:
+            at = min(at, seg.start - seg.pad * vm.SEG_FRAME)
+        return at / FS
+
+    said = 0.0
     stdin = sys.stdin.buffer
     while True:
         raw = stdin.read(READ_BYTES)
         if not raw:
             break
-        x = np.frombuffer(raw, "<i2").astype(float) / 32768.0
-        _emit_all(_gate(seg.push(x)) + scan.push(x))
+        raw_x = np.frombuffer(raw, "<i2").astype(float) / 32768.0
+        x = chan.push(raw_x) if chan else raw_x
+        _emit_all(_gate(seg.push(x)) + _scan(raw_x, x))
+        if chan and heard() >= said + HEARD_EVERY_S:
+            said = heard()
+            _emit({"heard": round(said, 3)})
+    if chan:
+        x = chan.flush()
+        _emit_all(_gate(seg.push(x)) + _scan(None, x, flush=True))
     _emit_all(_gate(seg.flush()))
     return 0
 

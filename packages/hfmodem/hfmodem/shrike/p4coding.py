@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Offline primitives from SCS PACTOR-4 §§7–8, figures 7.1–7.2.
 
-This is not a packet encoder. Initial states, C2's input permutation and
-on-wire tail/padding placement remain unknown. Callers supply states and any
-permutation explicitly; component termination is deliberately separate.
+This is a generic component encoder, not a packet encoder. Callers supply states
+and a permutation explicitly; component termination is deliberately separate.
+Packet paths resolve these choices in p4shorttx, p4longtx,
+p4shortlevels and p4longrates, using p4c2's exact input permutations. Those
+packet-specific tail and padding rules are not implicit defaults here.
 
 State (s1, s2, s3) lists the newest delay first. The diagram gives recursive
 input u = x ^ s2 ^ s3, parity u ^ s1 ^ s3, next state (u, s1, s2).
@@ -87,10 +89,11 @@ def encode_components(
     bits: Iterable[int], *, permutation: Iterable[int],
     initial_states: tuple[State, State],
 ) -> tuple[ComponentResult, ComponentResult]:
-    """Encode two unterminated components using caller-supplied hypotheses.
+    """Encode two unterminated components using caller-supplied parameters.
 
-    C2 input position j receives bits[permutation[j]]. No default P4
-    interleaver is known. This permutation is distinct from symbol interleaving.
+    C2 input position j receives bits[permutation[j]]. Packet paths select the
+    appropriate p4c2 permutation; this generic primitive has no default size.
+    This permutation is distinct from symbol interleaving.
     """
     source = _bits(bits, "bits")
     order = tuple(permutation)

@@ -145,7 +145,9 @@ def test_the_peers_poll_is_still_answered_though_our_own_clock_is_silent():
     hs._took_poll()
     assert len(io.sent) == 1, "the peer's poll drew no answer"
     assert any("control-burst poll" in m for m in io.msgs), io.msgs
-    assert any("session-keepalive-a" in m for m in io.msgs), io.msgs
+    # Keepalive-B, as two stock 4.9s answered every callee poll on 2026-09-28
+    # (bench-idle500 r3a, r3b); this asserted keepalive-A until then.
+    assert any("session-keepalive-b" in m for m in io.msgs), io.msgs
 
 
 def test_a_down_transmitter_does_not_stall_the_silence_budget():

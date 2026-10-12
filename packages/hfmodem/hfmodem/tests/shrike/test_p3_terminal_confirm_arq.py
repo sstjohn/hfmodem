@@ -5,7 +5,7 @@ refusals. The marker waveform itself is covered by test_p3_terminal_marker.
 """
 import pytest
 
-from hfmodem.shrike import arq, rxfront, spec
+from hfmodem.shrike import arq, onair, rxfront, spec
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.tests.shrike.test_iss_login_advance import ScriptedPeer
 
@@ -82,6 +82,7 @@ def test_qrt_ack_retains_p3_until_emitted_marker_gets_opposite_ack(role):
     assert host.protocol == spec.Protocol.PACTOR1
     assert not a.terminal_confirm_pending and not a.terminal_confirm_emitted
     assert a.tx_seq is None
+    assert onair._goodbye_result(a) == "confirmed by the final P3 terminal acknowledgment"
 
 
 @pytest.mark.parametrize('counter', [1, 3])
@@ -128,6 +129,7 @@ def test_repeated_cs1_cannot_extend_terminal_confirmation_budget(refused):
     host.tick()
     assert host.arq.state == arq.State.DISCONNECTED
     assert not host.arq.goodbye_acked
+    assert "peer shutdown unconfirmed" in onair._goodbye_result(host.arq)
     assert peer.marker_calls == arq.GOODBYE_CYCLES
     assert peer.markers_emitted == (0 if refused else arq.GOODBYE_CYCLES)
 
@@ -181,6 +183,7 @@ def test_packet_and_abort_cannot_leak_terminal_state_into_next_link():
     host.arq._enter_connected()
     assert not host.arq.terminal_confirm_emitted
     assert not host.arq.goodbye_acked and host.arq.tx_seq is None
+    assert not host.arq.terminal_confirm_started
 
 
 def test_disabled_experiment_preserves_normal_qrt_ack_close():

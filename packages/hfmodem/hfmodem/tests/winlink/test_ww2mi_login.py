@@ -57,7 +57,11 @@ _PR = re.compile(r";PR: *([^\r\n]*)")
 #: beside a challenge, are thirty bits of MD5 to search a password with.
 _KEY = secrets.token_bytes(32)
 
-pytestmark = corpora.requires_ww2mi_arms
+_NEEDS_WW2MI = (
+    "Needs WW2MI 40 m ARDOP mail-fetch flight with rig RX: accepted ;PM:/FC offer "
+    "and a naturally occurring refused login in a paired recording. No surviving "
+    "refused arm; never deliberately spend a login attempt to draw one."
+)
 
 
 def _fingerprint(digits: str) -> str:
@@ -125,6 +129,8 @@ def arms() -> dict[str, Arm]:
     hint lifts the crispness floor under bodyless controls, and every frame this
     file reads carries a payload behind RS and a CRC.
     """
+    if not (corpora.WW2MI_ACCEPTED.is_file() and corpora.WW2MI_REFUSED.is_file()):
+        pytest.skip(_NEEDS_WW2MI)
     out = {}
     for name, path in (("accepted", corpora.WW2MI_ACCEPTED),
                        ("refused", corpora.WW2MI_REFUSED)):
@@ -146,6 +152,24 @@ def arms() -> dict[str, Arm]:
                         said=mask_pr("".join(ours[:4])),
                         masked=mask_pr(whole) == whole, frames=len(ours))
     return out
+
+
+def test_readback_masks_an_answer_split_across_frames():
+    """Offline control for the readback harness; no claim about a CMS verdict.
+
+    The real arms remain unavailable. Synthetic digits exercise the same joined
+    masking and repeat collapse without loading a credential or forging an arm.
+    """
+    from hfmodem.besra.phy.demodulator import DecodedFrame
+
+    first = DecodedFrame(0x40, 0x0D, True, b"[test]\r;P", "4PSK.500.100.E")
+    last = DecodedFrame(0x41, 0x0D, True, b"R: 12345678\r", "4PSK.500.100.O")
+    heard = [(1.0, first), (2.0, last), (3.0, last)]
+    spoken = B._spoken(heard, [(0.0, 4.0)])
+    said = "".join(_unescaped(h.detail) for h in spoken)
+    assert len(spoken) == 2
+    assert said == "[test]\r;PR: ########\r"
+    assert mask_pr(said) == said
 
 
 def test_each_arm_answered_the_challenge_its_own_gateway_issued(arms):

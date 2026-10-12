@@ -32,9 +32,9 @@ class Protocol(StrEnum):
     protocol used to be a boolean called `p1_link`, which could say "PACTOR-1" and
     "not PACTOR-1" and had no room for the third answer at all.
 
-    PACTOR-4 is deliberately absent: nothing in this package reads or writes it,
-    and a member that no decoder can ever produce is a name for a thing that does
-    not exist here.
+    This enum describes the shared PACTOR-1/2/3 receive path. PACTOR-4 has
+    separate framing, receiver and session modules; its absence from this enum
+    does not describe the package's complete protocol coverage.
     """
 
     PACTOR1 = "PACTOR-1"
@@ -454,6 +454,14 @@ CRC_POLY = 0x1021
 # (same 20 bits ⇒ 40-bit block).
 CONTROL_SIGNALS: tuple[int, ...] = (
     0x52D56, 0xAABA2, 0xAD45A, 0x95AC5, 0x74339, 0x4B4AD,
+)
+
+# Twenty-bit CS-burst table; the first six are the
+# ordinary reverse-channel words above. Recognition is separately restricted
+# by waveform and on-air provenance in p1rx.ROBUST_CS_HEARD.
+ROBUST_CONTROL_SIGNALS = CONTROL_SIGNALS + (
+    0x22ED9, 0x245E7, 0x0F5A0, 0xAF5F5, 0xF5FA5,
+    0x87137, 0x6F047, 0xEA7FC, 0xF0A47, 0x9BEC1,
 )
 
 # Canonical index -> name for the six CS, so the modem, monitor and decoders all

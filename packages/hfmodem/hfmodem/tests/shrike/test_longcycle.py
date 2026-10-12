@@ -296,7 +296,8 @@ class _Placed(onair.RadioTx):
         super().__init__(None, transmit=False, outdir=Path("."), settle=settle)
         self.at: list[tuple[str, int, int]] = []
 
-    def _tx(self, audio, what, drive=None, lead_n=0, *, pulse_offsets=None):
+    def _tx(self, audio, what, drive=None, lead_n=0, *, pulse_offsets=None,
+            rerender_on_late=False, crest=None):
         # `lead_n` is `RadioTx._tx`'s own adjustment, applied here for the same
         # reason: what is recorded has to be where the CARRIER comes up.
         self.at.append((what, self.boundary - lead_n, self.slot))

@@ -49,7 +49,7 @@ def called(monkeypatch):
 
     def call(*argv):
         with pytest.raises(_Reached):
-            ardop_call.main(["NS0A", "0", *argv])
+            ardop_call.main(["NS0A", "0", "--mycall", "N0CALL", *argv])
         return seen[-1]
 
     return call

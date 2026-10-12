@@ -310,6 +310,15 @@ class _Sub(Enum):
     IRS_FROM_ISS = 6   # new IRS after a role swap, first data completes it
 
 
+#: The handshake legs of `_state == ISS`/`IRS` that precede a peer's ConAck or
+#: first ACK — the state alone already reads ISS/IRS (`ArdopState.CONNECTED_STATES`
+#: covers both), but no link exists yet: `CONNECTED`/`ARQ CONNECTION ESTABLISHED
+#: WITH` fire only on the transition out of these subs (`_rx_iss`/`_rx_irs`).
+#: `connected` must read False through them, or a caller that never hears a ConAck
+#: reports itself linked from the moment it keys its first ConReq.
+_PRECONNECT_SUBS = (_Sub.ISS_CONREQ, _Sub.ISS_CONACK, _Sub.IRS_CONACK)
+
+
 class ArqSession:
     """One end of an ARDOP ARQ link. Feed it decoded frames via `on_receive`,
     outbound payload via `queue_data`, and wall-clock via `tick`; it drives the
@@ -391,7 +400,7 @@ class ArqSession:
 
     @property
     def connected(self) -> bool:
-        return self._state in P.CONNECTED_STATES
+        return self._state in P.CONNECTED_STATES and self._sub not in _PRECONNECT_SUBS
 
     @property
     def expected_session(self) -> int | None:
@@ -805,7 +814,10 @@ class ArqSession:
         if ok and _is_dataack(ft):
             self._set_state(P.ArdopState.ISS)
             self._sub = _Sub.ISS_DATA
-            self._tx_even = True
+            # Parity carries over the turnover, as `bytLastARQDataFrameAcked` does in
+            # the reference. A Trimode IRS keeps the type it last ACKed us across
+            # the reversal and ACKs an unreadable frame of that type as a repeat, so
+            # a stint that reopened on it lost its first frame's bytes.
             self._last_data_type = -1
             self._progress()
             self._send_data()

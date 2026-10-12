@@ -28,7 +28,7 @@ from hfmodem.besra.frame import frame as F
 from hfmodem.besra.phy.modulator import carrier_indices
 from hfmodem.core.busy import FULL_BAND, MIN_SHAPE_HZ, _widen
 from hfmodem.core.occupied import (
-    FILTER_HZ, OCCUPIED_HZ, clipped, keyed_hz, occupied_hz,
+    BEYOND_FILTER, FILTER_HZ, OCCUPIED_HZ, clipped, keyed_hz, occupied_hz,
 )
 from hfmodem.shrike import onair, session, spec
 
@@ -65,7 +65,19 @@ def test_the_width_every_path_asks_for_covers_every_emission_listed():
     and no capture exists at any other. Nothing we transmit may then be clipped
     by the width we chose."""
     for key in OCCUPIED_HZ:
+        if key in BEYOND_FILTER:
+            continue
         assert clipped(FILTER_HZ, occupied_hz(*key)) == "", key
+
+
+def test_a_row_beyond_the_filter_says_so_and_names_the_filter_it_needs():
+    """bateleur's untrimmed pulse is for a rig whose transmit audio reaches
+    3.2 kHz, and the setting that selects it is that edge. The standard width
+    must still clip it -- the exemption above is only honest if the row is
+    really wider -- and the edge it names must hold the whole row."""
+    for key in BEYOND_FILTER:
+        assert clipped(FILTER_HZ, occupied_hz(*key)) != "", key
+        assert occupied_hz(*key)[1] <= int(key[1]), key
 
 
 def test_the_band_judged_for_occupancy_reaches_the_width_the_rig_is_set_to():
@@ -80,6 +92,8 @@ def test_the_band_judged_for_occupancy_reaches_the_width_the_rig_is_set_to():
     """
     assert FULL_BAND[1] == FILTER_HZ
     for key, band in OCCUPIED_HZ.items():
+        if key in BEYOND_FILTER:
+            continue
         assert _widen(band, MIN_SHAPE_HZ)[1] >= band[1], key
 
 
@@ -193,7 +207,7 @@ def test_an_unlisted_mode_is_answered_wide():
 def _minus_26db_span(x, fs=48000):
     """Where a burst's spectrum last stands within 26 dB of its own peak.
 
-    §97.3(a)(8) writes bandwidth in 26 dB of attenuation, so this is the measure
+    The emission profile uses the table's -26 dB edges, so that is the measure
     the table has to survive. Rectangular and zero-padded rather than windowed:
     the DTFT of the finite burst is the burst's real spectrum, and a window would
     hide skirts the transmitter still emits.
@@ -284,3 +298,19 @@ def test_an_unpinned_call_is_judged_on_the_widest_burst_it_could_reach():
     assert keyed_hz("ardop") == OCCUPIED_HZ[("ardop", "2000")]
     assert keyed_hz("pactor") == OCCUPIED_HZ[("pactor", "")]
     assert occupied_hz("vara") == FULL_BAND
+
+
+@pytest.mark.parametrize("level", [0, 1])
+@pytest.mark.parametrize("limiter", [False, True])
+def test_the_rpr_row_covers_converted_station_output(level, limiter):
+    from hfmodem.brubru.tx import transmit
+    from hfmodem.tests.brubru.vectors import frames_for
+
+    assert ("rpr", "") in OCCUPIED_HZ
+    lo, hi = occupied_hz("rpr", "")
+    assert hi - lo < 600
+    for capacity in (15, 75, 345, 825):
+        for seed in (0, 7, 23):
+            burst, = transmit(frames_for(capacity, seed), level, limiter=limiter)
+            actual = _minus_26db_span(burst.card_audio())
+            assert lo <= actual[0] and actual[1] <= hi, (level, limiter, capacity, seed, actual)

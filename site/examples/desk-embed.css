@@ -1,0 +1,15 @@
+/* Embedded inspector: the same evidence and controls, in the desk theme. */
+:root[data-theme=light]{color-scheme:light;--bg:#f5f5ed;--panel:#fffef7;--line:#9aa58b;--muted:#485140;--ink:#202b19;--accent:#325828}
+:root[data-theme=light] button,:root[data-theme=light] select,:root[data-theme=light] input,:root[data-theme=light] #events button,:root[data-theme=light] #ladder button{background:#f0f2e7;color:var(--ink);border-color:var(--line)}
+:root[data-theme=light] .sourcebar,:root[data-theme=light] .linkstate,:root[data-theme=light] .receiver{background:var(--panel);color:var(--ink)}
+:root[data-theme=light] .bytespanel pre{background:#f0f2e7;color:var(--ink)}
+:root[data-theme=light] #linkPhase,:root[data-theme=light] #linkActivity,:root[data-theme=light] #packetMode,:root[data-theme=light] #plotBasis,:root[data-theme=light] #exchangeNote,:root[data-theme=light] .receiver h3,:root[data-theme=light] .receiver .stats,:root[data-theme=light] .inspectiongroup,:root[data-theme=light] #notice{color:#325828}
+:root[data-theme=light] .stationrails,:root[data-theme=light] #ladder small,:root[data-theme=light] #ladder time,:root[data-theme=light] .sender-tx,:root[data-theme=light] .sender-rx,:root[data-theme=light] .sender-selected{color:#36482c}
+:root[data-theme=light] #play{background:#d9e6c8;color:var(--ink)}
+:root[data-theme=light] button:hover,:root[data-theme=light] button.selected{background:#d9e6c8}
+header{gap:16px;flex-wrap:wrap}
+
+:root[data-theme=light] #events button>span,:root[data-theme=light] #ladder .flight{color:#325828!important}
+
+/* The enclosing desk keeps the warning visible above this embedded review. */
+.release-notice{display:none}

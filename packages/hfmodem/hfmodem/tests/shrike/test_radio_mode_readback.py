@@ -119,3 +119,86 @@ def test_stale_output_refuses_before_cat_request(tmp_path):
         rx.verify_receiver_startup(rig, expected_mode="PKTUSB", model=1036,
                                    pactor1_only=False, output_dir=tmp_path)
     assert rig.calls == [] and rig.keys == 0
+
+
+class Ftdx10Rig(StartupRig):
+    def __init__(self, width=4000, roof=12000, mode='PKTUSB'):
+        super().__init__()
+        self.width, self.roof, self.mode = width, roof, mode
+
+    def get_receiver_filters(self):
+        self.calls.append(('raw',))
+        return rx.RadioMode(self.mode, self.width, 'MD0C; SH0021; RF06;'), self.roof
+
+
+def test_ftdx10_startup_only_observes_raw_filters(tmp_path):
+    rig = Ftdx10Rig()
+    proof = rx.verify_receiver_startup(rig, expected_mode='PKTUSB', model=1042,
+                                      pactor1_only=False, output_dir=tmp_path)
+    assert rig.calls == [('raw',)]
+    assert proof['actual']['passband_hz'] == 4000 and proof['roofing_hz'] == 12000
+    assert proof['requested']['setters'] is False
+    assert proof['width_source'].startswith('FTDX10 raw CAT')
+    assert json.loads((tmp_path / 'radio-readback.json').read_text()) == proof
+
+
+@pytest.mark.parametrize('width,roof', [(3000, 12000), (4000, 500), (800, 12000),
+    (800, 500)])
+def test_ftdx10_startup_warns_and_continues_on_filter_mismatch(tmp_path, capsys, width, roof):
+    rig = Ftdx10Rig(width, roof)
+    proof = rx.verify_receiver_startup(rig, expected_mode='PKTUSB', model=1042,
+                                      pactor1_only=False, output_dir=tmp_path)
+    assert rig.calls == [('raw',)]
+    assert proof['status'] == 'mode_verified_filters_warning'
+    assert proof['actual']['passband_hz'] == width and proof['roofing_hz'] == roof
+    assert proof['warnings'] and proof['requested']['setters'] is False
+    assert json.loads((tmp_path / 'radio-readback.json').read_text()) == proof
+    output = capsys.readouterr().out
+    for warning in proof['warnings']:
+        assert f'!! {warning}' in output
+    assert 'nominal width verified' not in output
+
+
+def test_ftdx10_startup_refuses_wrong_mode(tmp_path):
+    rig = Ftdx10Rig(mode='USB')
+    with pytest.raises(SystemExit):
+        rx.verify_receiver_startup(rig, expected_mode='PKTUSB', model=1042,
+                                  pactor1_only=False, output_dir=tmp_path)
+    assert rig.calls == [('raw',)]
+
+
+@pytest.mark.parametrize('reply,rc', [('MD0C; SH0021; RF06;', 0),
+    ('MD0C; SH0021; RF09;', 0), ('MD0C; SH0021;', 0),
+    ('MD1C; SH1023; RF16;', 0), ('MD0C; SH0021; RF06;', 1),
+    ('MD0C; SH0023; RF06;', 0)])
+def test_raw_receiver_getter_uses_cat_only(monkeypatch, reply, rc):
+    rig = ota.Rig.__new__(ota.Rig)
+    rig.rigctl = Path('/mock/rigctl'); rig.model = 1042
+    rig.serial = '/mock/CAT'; rig.baud = 38400
+    calls = []
+    monkeypatch.setattr(rig, '_close', lambda: calls.append('close'))
+    def run(argv, **kwargs):
+        assert calls == ['close']
+        assert argv[-12:] == ['-P', 'NONE', 'w', 'VS;', 'w', 'MD0;',
+                              'w', 'MD1;', 'w', 'SH0;', 'w', 'RF0;']
+        assert kwargs['timeout'] == 8
+        return SimpleNamespace(stdout='VS0; ' + reply, stderr='', returncode=rc)
+    monkeypatch.setattr(ota.subprocess, 'run', run)
+    if rc or 'RF0' not in reply or 'MD0' not in reply or 'SH0023;' in reply:
+        with pytest.raises(rx.ReceiverReadbackError): rig.get_receiver_filters()
+    else:
+        actual, roof = rig.get_receiver_filters()
+        assert actual.mode == 'PKTUSB' and actual.passband_hz == 4000
+        assert roof == (500 if 'RF09;' in reply else 12000)
+
+
+
+def test_raw_receiver_getter_observes_selected_vfo(monkeypatch):
+    rig = ota.Rig.__new__(ota.Rig)
+    rig.rigctl = Path('/mock/rigctl'); rig.model = 1042
+    rig.serial = '/mock/CAT'; rig.baud = 38400
+    monkeypatch.setattr(rig, '_close', lambda: None)
+    monkeypatch.setattr(ota.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+        stdout='VS1; MD01; MD1C; SH0021; RF06;', stderr='', returncode=0))
+    actual, roof = rig.get_receiver_filters()
+    assert actual.mode == 'PKTUSB' and actual.passband_hz == 4000 and roof == 12000

@@ -63,7 +63,7 @@ SOH, STX, EOT = 0x01, 0x02, 0x04
 #: The name and version half of our SID. The operator may replace it — see
 #: `[station] client_sid` — because a gateway may refuse a client type it does
 #: not know, and only the operator can decide what their station announces.
-CLIENT_SID = "HFM-0.1"
+CLIENT_SID = "HFM-0.2"
 
 #: The other half, and NOT an operator setting. B2 forwarding, F compression,
 #: H hierarchical addresses, M message IDs: each letter is a promise this file
@@ -185,6 +185,22 @@ def mask_pr(text: str) -> str:
 def sid_line(client_sid: str = CLIENT_SID) -> str:
     """The SID a station with this name and version announces itself with."""
     return f"[{client_sid}-{_CAPABILITIES}]"
+
+
+_CMS_CONNECTED = re.compile(r"\*\*\* \S+ connected to cms\.?")
+
+
+def _verdict(line: str) -> bool:
+    said = line.casefold()
+    return (said.startswith(("invalid login challenge response", "login failed"))
+            or "attempts remaining" in said
+            or (said.startswith("*** ") and not _CMS_CONNECTED.fullmatch(said)))
+
+
+def _cut_short_connected(tail: str) -> bool:
+    """Whether an unterminated tail could still grow into the CMS notice."""
+    m = re.fullmatch(r"\*\*\* \S*(?: (.*))?", tail.casefold())
+    return m is not None and (m[1] is None or "connected to cms.".startswith(m[1]))
 
 
 def _is_forward(line: str) -> bool:
@@ -313,6 +329,8 @@ class B2FSession:
         self._buf = bytearray()
         self._state = _GREETING if role == "calling" else _ANSWER_HS
         self._remote_no_msgs = False
+        self._waiting_after_ff = False
+        self._empty_turns = 0
         self._quit = False
         self._proposed: list[_Outbound] = []
         self._free_lines = 0
@@ -472,8 +490,25 @@ class B2FSession:
 
     def _fail(self, why: str) -> None:
         self.failure = why
-        self._state = _DONE
+        self._close()
         self.log(f"session failed: {why}")
+
+    def _close(self) -> None:
+        # A gateway that gives up mid-sentence leaves its reason unterminated.
+        if self._state not in (_RECEIVING, _DONE):
+            for line in re.split(r"[\r\n]", self._buf.decode("latin-1")):
+                self._remember(line)
+        self._state = _DONE
+
+    def greeting_stalled(self) -> None:
+        """The far end went quiet before its prompt; say what it left us with."""
+        tail = _readable(self._buf.decode("latin-1"))
+        if _verdict(tail) and not _cut_short_connected(tail):
+            self._refused(tail)
+        elif self.remote_sid:
+            self._fail("gateway SID arrived without a prompt (CMS side?)")
+        else:
+            self._fail("gateway banner ended without a SID (CMS side?)")
 
     def _refused(self, line: str) -> None:
         self.remote_refusal = line
@@ -512,6 +547,9 @@ class B2FSession:
         damage, which this layer refuses on sight rather than waiting for the
         checksum to disagree.
         """
+        if _verdict(line):
+            self._refused(line)
+            return
         if self._in_props:
             self._fail(f"unexpected line inside a proposal block: {line!r}")
             return
@@ -591,18 +629,40 @@ class B2FSession:
         else:
             self._free_text(line)
 
+    def empty_turn(self) -> bytes:
+        """Six empty link invitations after our FF stand in for the peer's FF.
+
+        Quiet cycles and repeated packets are not invitations; the transport
+        calls this only for a newly accepted empty hand-back packet. Keep
+        remote_ff factual: the peer has not sent that command.
+        """
+        if (self._state != _THEIR_TURN or not self._waiting_after_ff
+                or self._buf or self._in_props):
+            return b""
+        self._empty_turns += 1
+        if self._empty_turns < 6:
+            return b""
+        self.log("six empty hand-back invitations after our FF; closing")
+        self._remote_no_msgs = True
+        out = bytearray()
+        self._our_turn(out)
+        return bytes(out)
+
     # -- our turn --------------------------------------------------------- #
     def _our_turn(self, out: bytearray) -> None:
+        self._waiting_after_ff = False
+        self._empty_turns = 0
         self._free_lines = 0            # the budget is per turn, not per session
         pending = [m for m in self._out if m.status == "pending"]
         if not pending:
             if self._remote_no_msgs:
                 out += self._encode(["FQ"])
                 self._quit = self.our_fq = True
-                self._state = _DONE
+                self._close()
                 self.log("session over (FQ)")
             else:
                 out += self._encode(["FF"])
+                self._waiting_after_ff = True
                 self._state = _THEIR_TURN
             return
         self._proposed = pending[:_MAX_PROPOSALS]
@@ -720,6 +780,7 @@ class B2FSession:
             return
         cmd = line[:2]                  # a bare "F" is nobody's command below
         if cmd in ("FA", "FB", "FC", "FD"):
+            self._waiting_after_ff = False
             self._in_sum += sum(line.encode("latin-1")) + 0x0D
             self._in_props.append(_Inbound(line))
         elif cmd == "FF":
@@ -728,7 +789,7 @@ class B2FSession:
             self._our_turn(out)
         elif cmd == "FQ":
             self._quit = True
-            self._state = _DONE
+            self._close()
             self.log("remote closed the session (FQ)")
         elif cmd == "F>":
             self._end_of_proposals(line, out)

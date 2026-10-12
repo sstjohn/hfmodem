@@ -6,7 +6,9 @@ TX retries count emitted copies, excluding refused slots. RX repeats count
 decoded copies, not transmissions inferred through an unreadable interval.
 Control replies have their own counter so they cannot reset packet retries.
 """
-from . import spec
+
+from ..winlink import mask_pr
+from . import compress, spec
 
 
 class TrafficLog:
@@ -17,6 +19,63 @@ class TrafficLog:
         self.requested_rx_level = None
         self._request_reported = False
         self.generations = {"RX": 0, "TX": 0}
+        self._mask = []
+        self._line_prefix = bytearray()
+        self._login_line = False
+        self._arq = None
+        self._mask_cursor = 0
+        self._pending = 0
+
+    def reset_login(self):
+        self._mask.clear()
+        self._line_prefix.clear()
+        self._login_line = False
+        self._mask_cursor = self._pending = 0
+
+    def _sync_pending(self):
+        pending = getattr(self._arq, "_buffer_raw", None)
+        if pending is not None:
+            consumed = self._pending - pending
+            if consumed > 0:
+                del self._mask[:consumed]
+            elif consumed < 0:
+                self._mask[:0] = [False] * -consumed
+            self._pending = pending
+            self._mask_cursor = 0
+        return pending
+
+    def queued(self, count):
+        self._sync_pending()
+        self._pending += count
+        self._mask.extend([False] * max(0, self._pending - len(self._mask)))
+
+    def withhold(self, blob):
+        pending = self._sync_pending()
+        if pending is not None:
+            del self._mask[pending:]
+        for byte in bytes(blob):
+            if byte in (10, 13):
+                self._line_prefix.clear()
+                self._login_line = False
+                hidden = False
+            else:
+                hidden = self._login_line and byte not in (9, 32)
+                if len(self._line_prefix) < 4:
+                    self._line_prefix.append(byte)
+                    self._login_line = self._line_prefix == b";PR:"
+            self._mask.extend([hidden] * len(compress.transparent(bytes((byte,)))))
+
+    def accepted(self, count):
+        self._mask_cursor += count
+
+    def _hidden(self, payload):
+        pending = getattr(self._arq, "_buffer_raw", None)
+        start = self._pending - pending if pending is not None else self._mask_cursor
+        if self._mask:
+            return [self._mask[i] if 0 <= i < len(self._mask) else False
+                    for i in range(start, start + len(payload))]
+        text = payload.decode("latin-1")
+        return [c != m for c, m in zip(text, mask_pr(text))]
 
     def _copy(self, stream, identity):
         old, count = self._copies.get(stream, (None, 0))
@@ -43,11 +102,20 @@ class TrafficLog:
                     f"SL{sl} {kind}")
         cycle = "long/3.75s" if long_cycle else "short/1.25s"
         crc = ("CRC-ENCODED" if direction == "TX" else "CRC-VALID") if crc_ok else "CRC-FAILED"
+        hidden = self._hidden(payload) if direction == "TX" else []
+        if any(hidden):
+            shown_hex = "".join("##" if h else f"{b:02x}"
+                                for b, h in zip(payload, hidden))
+            shown = bytes(0x23 if h else b for b, h in zip(payload, hidden))
+            field = information = None
+        else:
+            shown_hex, shown = payload.hex(), payload
         lines = [f"    [traffic] {direction} P3 {geometry} {cycle} "
                  f"seq={status & 3} type={(status >> 2) & 7} "
                  f"status=0x{status:02x} {counter} [{crc}]",
                  f"    [traffic] {direction} payload {len(payload)}B "
-                 f"hex={payload.hex()} bytes={payload!r}"]
+                 f"hex={shown_hex} bytes={shown!r}"
+                 + (" <PR>" if any(hidden) else "")]
         if field is not None:
             lines.append(f"    [traffic] {direction} field "
                          f"(data+fill+status+CRC, before FEC) hex={field.hex()}")
@@ -76,6 +144,13 @@ class TrafficLog:
 
     @staticmethod
     def control_meaning(direction, ci, arq=None):
+        if (direction == "RX" and arq is not None
+                and (getattr(arq, "_mail_cs4_wait", None) is not None
+                     or (ci == 3 and arq._inflight is not None
+                         and arq._inflight is getattr(arq, "_mail_cs4_candidate", None)))
+                and not (ci in (0, 1) and ci == (arq.tx_seq & 1)
+                         and arq._inflight.sent_at_level > 0)):
+            return f"UNCONFIRMED seq={arq.tx_seq} / WAIT CS1/CS2"
         if (direction == "RX" and ci in (3, 4) and arq is not None
                 and getattr(arq.io, "p3_tx_gear_hold", False)
                 and getattr(arq.io, "protocol", None) == spec.Protocol.PACTOR3
@@ -124,6 +199,9 @@ class TrafficLog:
                           else "next level (current RX level unknown or maximum)")
                 lines.append(f"    [speed] TX CS4 requests peer data {target}; "
                              "awaiting a decoded packet at the new level")
+            elif meaning.startswith("UNCONFIRMED "):
+                lines.append("    [speed] RX CS4 acceptance unconfirmed; exact field and "
+                             "counter retained, awaiting validating CS1/CS2")
             elif meaning.startswith("HELD "):
                 lines.append("    [speed] RX held CS4: trial retains the pending "
                              "TX packet and speed; no additional bytes acknowledged")
@@ -139,6 +217,7 @@ def for_host(host):
     if log is None:
         log = TrafficLog()
         host._p3_traffic_log = log
+    log._arq = getattr(host, "arq", None)
     return log
 
 

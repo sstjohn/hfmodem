@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""BW2300 wideband OFDM DATA transmitter — base + high-throughput speed levels.
+"""BW2300 wideband DATA transmitter — the index levels.
 
 Exact forward (inverse) of ``kestrel/rx/varahf2300.py``; built from the same spec
 sections (spec/01 §2300, spec/03 §3.5.3-3.5.4, spec/06 §6.1c-6.1d). Mirrors the
@@ -13,13 +13,10 @@ Chain (section refs in the RX module):
     payload (+marker for base) + CRC-16/GENIBUS   =  frame bytes
       -> serialize MSB-first, zero-pad to N info bits
       -> XOR PN whitener (BW2300 PN table; spec/03 §3.5.3)
-      -> turbo (13,15) encode: rate-1/2 (base, il2 col) | rate-1/2/punctured (high)
+      -> turbo (13,15) encode: rate-1/2 or 1/3 (il2 col)
       -> channel interleave (BW2300 il1 col):  onair[k] = coded[pi[k]]
-      -> value law:
-           index         : bpc on-air bits -> Gray -> one lit bin (−1j) in the
-                           record's FFT, one OFDM symbol per column, no CP.
-           high  (const) : bpc on-air bits -> Gray -> LUT[pos+6*coded] cell, packed
-                           span/symbol onto a 1024-IFFT + 128-sample CP.
+      -> bpc on-air bits -> Gray -> one lit bin (−1j) in the record's FFT, one
+         symbol per column, no CP
       -> real 48 kHz audio.
 
 Every index-law over is prefixed by the training preamble (spec/01 §2300 "gDC
@@ -32,9 +29,8 @@ below them it is 4096. It has no table of its own: symbol ``s``, counted from 1,
 takes the record's own column-allocation table at index ``s`` and offsets it by a
 draw exactly as a data column offsets it by a Gray value.
 
-No twiddle on the DATA path (spec/01 §2300 2026-07-20). The exact VARA carrier
-raster (alloc/map) is a spec gap for the high levels; kestrel uses a self-consistent
-sequential carrier assignment (identical TX/RX), which round-trips byte-exact.
+No twiddle on the DATA path (spec/01 §2300 2026-07-20). The OFDM levels are
+:mod:`hfmodem.kestrel.tx.varaofdm_tx`.
 """
 from __future__ import annotations
 
@@ -50,7 +46,7 @@ LEVELS = _rx.LEVELS
 BASE_LEVEL = _rx.BASE_LEVEL
 payload_bytes = _rx.payload_bytes
 
-OUT_SCALE = 1.0            # RX is scale-invariant (base) / self-consistent (high)
+OUT_SCALE = 1.0            # RX is scale-invariant
 
 # Training preamble (spec/01 §2300): its fixed length in samples, and the VB6 Rnd
 # state VARA reaches by the first DATA over of an ARQ session.
@@ -163,10 +159,8 @@ def frame_to_onair(frame_bytes: bytes, level: int) -> np.ndarray:
     perm = _rx.turbo_perm(level)
     if r.coded == 2 * r.n_info + 12:
         coded = _turbo.encode(info, perm=perm)
-    elif r.coded == 3 * r.n_info + 12:
-        coded = _turbo.encode_r13(info, perm)
     else:
-        coded = _turbo.encode_punctured(info, perm, r.coded)
+        coded = _turbo.encode_r13(info, perm)
     pi = _rx.chan_perm(level)
     return coded[pi]
 
@@ -199,48 +193,22 @@ def _synth_index(onair: np.ndarray, level: int) -> np.ndarray:
     return out * OUT_SCALE
 
 
-def _synth_const(onair: np.ndarray, level: int) -> np.ndarray:
-    """High-throughput dense constellation: span cells / (1024-IFFT + 128 CP) symbol."""
-    r = _rx.RECORDS[level]
-    pts = _rx.const_points(level)          # 2**bpc cells, already Gray-ordered
-    fft = r.dw50 - r.cp
-    ncell = (r.coded + r.bpc - 1) // r.bpc
-    # pack on-air bits (zero-padded to a whole cell) -> constellation cells
-    padded = np.zeros(ncell * r.bpc, int)
-    padded[:r.coded] = onair[:r.coded]
-    cells = np.empty(ncell, complex)
-    for i in range(ncell):
-        v = 0
-        for b in padded[i * r.bpc:i * r.bpc + r.bpc]:
-            v = (v << 1) | int(b)
-        cells[i] = pts[v]
-    nsym = (ncell + r.span - 1) // r.span
-    out = np.empty(nsym * r.dw50)
-    for s in range(nsym):
-        sp = np.zeros(fft, complex)
-        chunk = cells[s * r.span:(s + 1) * r.span]
-        sp[r.first_bin:r.first_bin + len(chunk)] = chunk
-        t = np.fft.ifft(sp).real                # real folding (undone by ×2 in RX)
-        out[s * r.dw50:s * r.dw50 + r.cp] = t[-r.cp:]     # cyclic prefix
-        out[s * r.dw50 + r.cp:(s + 1) * r.dw50] = t
-    return out * OUT_SCALE
-
-
 def synth_frame(frame_bytes: bytes, level: int = BASE_LEVEL,
-                over: int | None = 0) -> np.ndarray:
+                over: int | VB6Rnd | None = 0) -> np.ndarray:
     """Render an already-built frame (payload+marker+CRC) to audio.
 
-    ``over`` is the frame's position in the session's preamble stream; ``None``
-    emits the data columns alone (the preamble is training only), which is what a
-    record carrying no preamble (``lead`` 0) emits either way."""
+    ``over`` is the frame's position in the session's preamble stream, or the
+    session's own lead stream, which the preamble draws from and advances;
+    ``None`` emits the data columns alone (the preamble is training only), which
+    is what a record carrying no preamble (``lead`` 0) emits either way."""
     onair = frame_to_onair(frame_bytes, level)
     r = RECORDS[level]
-    if r.law != "index":
-        return _synth_const(onair, level)
     data = _synth_index(onair, level)
     if over is None or not r.lead:
         return data
-    return np.concatenate([synth_preamble(over_preamble_bins(over, level=level), level), data])
+    bins = (preamble_bins(over, level) if isinstance(over, VB6Rnd)
+            else over_preamble_bins(over, level=level))
+    return np.concatenate([synth_preamble(bins, level), data])
 
 
 def synth_burst(payload: bytes, level: int = BASE_LEVEL,

@@ -51,9 +51,10 @@ def test_recorded_greeting_reaches_host_and_retains_its_answer(chunk):
     assert any('12/24' in line and 'CRC clean' in line for line in io.logs)
 
 
-def test_weak_crc_failure_is_silent_and_does_not_create_a_nak_debt():
+def unreadable():
+    """The greeting with its coded payload destroyed and its native reference
+    columns kept."""
     x = audio()[:6 * 48000]
-    # Destroy the coded payload while keeping the native reference columns.
     refs = set(rx._ROLES[101][0])
     rng = np.random.default_rng(920)
     for col in range(rx.RECORDS[101].ncols):
@@ -61,11 +62,27 @@ def test_weak_crc_failure_is_silent_and_does_not_create_a_nak_debt():
             continue
         start = 4376 + col * 1024
         x[start:start + 1024] = rng.normal(0, .18, 1024)
+    return x
+
+
+def test_weak_crc_failure_is_silent_and_does_not_create_a_nak_debt():
+    x = unreadable()
     assert not rx.decode_over(x, 0, len(x), level=101).crc_ok
     hs, io = connected()
     feed(hs, io, x, 4800)
     assert not io.payloads and not io.answers, io.logs
     assert hs._answer_owed is None and not hs._owed_block
+
+
+@pytest.mark.parametrize('chunk', [960, 4800])
+def test_a_weak_frame_that_will_not_decode_is_tried_once(chunk, monkeypatch):
+    tried = []
+    alignments = rx._alignments
+    monkeypatch.setattr(rx, '_alignments', lambda x, tries, level=rx.BASE_LEVEL:
+                        tried.append(level) or alignments(x, tries, level))
+    hs, io = connected()
+    feed(hs, io, np.concatenate([unreadable(), np.zeros(3 * 48000)]), chunk)
+    assert tried == [101], tried
 
 
 def test_same_session_band_noise_does_not_key_or_deliver():

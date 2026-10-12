@@ -656,6 +656,27 @@ def test_the_concession_budget_resets_when_the_peer_takes_the_link():
     assert pair.caller.connected
 
 
+def test_an_unanswered_connect_never_reads_connected():
+    """Console counterexample (2026-09-24, N0DAJ 40m 500 Hz): six `TX ConReq500M`,
+    no ConAck, no `ARQ CONNECTION ESTABLISHED WITH`, then `CONNECT TO N0DAJ
+    FAILED!` and DISC — yet `run_server`'s mail loop printed "the link went down
+    mid-exchange", the wording for a link that was up and then dropped.
+    `connected` was reading True as soon as `connect()` fired the first ConReq
+    (state ISS, `_sub` still ISS_CONREQ), so a caller nobody ever answered looked
+    already linked. It must read False through the whole failed handshake."""
+    pair = Pair()
+    pair.caller.connect("K7ABC", repeats=5)          # 1 + 5 = six ConReq, as flown
+    assert not pair.caller.connected                 # keyed, but no ConAck yet
+    pair.relay.q.clear()                             # nobody answers
+    for _ in range(6):
+        pair.tick(2.5)
+        assert not pair.caller.connected
+    pair.tick(_CONNECT_TAIL_S)                       # the listening tail expires
+    assert pair.caller.state == P.ArdopState.DISC
+    assert not pair.caller.connected
+    assert pair.obs_a.connects == []                 # no CONNECTED, ever
+
+
 def test_disc_while_seizing_still_tears_down():
     """A peer may answer our BREAK with a disconnect (mail done, gateway
     leaving). IRStoISS answers DISC with END and tears down rather than
@@ -1156,3 +1177,105 @@ def test_a_nak_at_the_top_of_a_wide_ladder_walks_back_down_it():
     iss.ack(100)
     assert iss.session.queued == queued - len(chunk), \
         "the ACK deleted bytes the peer was never sent"
+
+
+# -- a new stint's first frame ------------------------------------------------
+
+class TrimodeIrs:
+    """WW2MI's receiving side, as its answers on 2026-09-24 read. It judges a
+    duplicate against the last frame it handed up, and forgets that at each
+    turnover; it does not forget the type it last ACKed, so a frame of that type
+    that will not read is ACKed as a repeat of one it already holds
+    (`ARQ.c:1696`; ardopcf clears the type on entry to IRS, `ARQ.c:326`)."""
+
+    def __init__(self) -> None:
+        self.delivered = bytearray()
+        self.last_to_host: int | None = None
+        self.last_acked: int | None = None
+
+    def take_the_turn_back(self) -> None:
+        self.last_to_host = None
+
+    def answer(self, ft: int, payload: bytes, readable: bool, quality: int) -> int:
+        if readable:
+            if ft != self.last_to_host:
+                self.delivered += payload
+                self.last_to_host = ft
+        elif ft != self.last_acked:
+            return _datanak_for(quality)
+        self.last_acked = ft
+        return _dataack_for(quality)
+
+
+def _stint(iss: Iss, peer: TrimodeIrs, script: list[tuple[bool | None, int]]) -> None:
+    """Answer each data frame as `script` says: readable or not at the peer and
+    the grade it sent back, or None for a transmission nobody heard. Frames past
+    the script's end read cleanly."""
+    script = list(script)
+    while iss.session.queued:
+        ft, payload = iss.tap.sent[-1]
+        assert _is_data(ft)
+        readable, quality = script.pop(0) if script else (True, 90)
+        iss.now += Iss.STEP_S
+        iss.session.tick(iss.now)
+        if readable is None:
+            iss.now += 1.0
+            iss.session.tick(iss.now)
+            continue
+        iss.session.on_receive(peer.answer(ft, payload, readable, quality), b"", iss.sid, True)
+
+
+def test_a_stint_opens_on_the_parity_after_the_last_frame_acked():
+    """WW2MI, 2026-09-24 14:08z. Our proposals ended on an ACKed 4FSK.500.100S.E,
+    and the message opened the next stint on 4FSK.500.100S.E again. That first
+    frame did not read at the gateway, which ACKed it (grade 38) as the frame it
+    already had, and the SOH header never reached the CMS: "Error check failed
+    on receiving B2 message. [Received data stream not a correct format]". W6IDS
+    refused 13:33z's body the same way after the same collision. The reference
+    ISS keeps its parity across a turnover (`bytLastARQDataFrameAcked`), which
+    no stale type can match. The peer's grades are the arm's, frame for frame."""
+    from datetime import datetime, timezone
+
+    from hfmodem.besra.arq import session as S
+    from hfmodem.winlink import B2FSession, compose
+
+    body = ("ARDOP delivery test via WW2MI, 2026-09-24 1406z.\n"
+            "mid I1FXQ8CVBI5B\n"
+            "Channel frequency: 7103600 Hz\n"
+            "Dial frequency: 7102100 Hz USB\n"
+            "Console command: tools/console ardop fly WW2MI-40m-7103600-2000 --bw 2000"
+            " --pounce 180 --send delivery --mail-password-file"
+            " /home/op/.config/winlink-password --execute\n"
+            "Git revision: 72c001295907e8f1214ead702ab019c8cc8cfe90 (dirty: True)\n"
+            "Runtime source SHA-256: eb77cbd19bb2a8b906b163220d2a11748d4e81b1d6e1394a45f034b75d596fd1\n"
+            "\nhttps://hfmodem.ssj.lol\n")
+    msg = compose("W9SSJ", "SMTP:w9ssj@winlink.org", "W9SSJ ARDOP test via WW2MI 2026-09-24 1406z",
+                  body, mid="I1FXQ8CVBI5B",
+                  date=datetime(2026, 9, 24, 14, 6, tzinfo=timezone.utc))
+    b2f = B2FSession("W9SSJ", target="WW2MI", password="pw", outbox=[msg])
+    proposal = b2f.feed(b"[WL2K-5.0-B2FWIHJM$]\r;PQ: 54281033\rCMS via WW2MI >\r")
+    iss, peer = Iss(bandwidth=2000), TrimodeIrs()
+
+    iss.session.queue_data(proposal)
+    _stint(iss, peer, [(False, 68), (False, 72), (True, 90), (True, 88), (True, 86)])
+    assert bytes(peer.delivered) == proposal
+
+    iss.now += 2.0
+    iss.session.tick(iss.now)
+    assert iss.tap.sent[-1][0] == S.IDLE
+    iss.session.on_receive(BREAK, b"", iss.sid, True)
+    iss.session.on_receive(S._type_of("4PSK.500.100.O"), b"FS Y\r", iss.sid, True, quality=80)
+    message = b2f.feed(b"FS Y\r")
+    assert message[:1] == b"\x01"
+    iss.session.queue_data(message)
+    assert iss.tap.sent[-1][0] == BREAK
+    peer.take_the_turn_back()
+    iss.session.on_receive(_dataack_for(100), b"", iss.sid, True)
+
+    _stint(iss, peer, [(False, 38), (True, 90), (True, 94), (True, 84), (False, 72),
+                       (False, 60), (None, 0), (True, 72), (False, 54), (True, 72),
+                       (True, 68), (True, 84), (True, 86), (True, 88), (True, 62),
+                       (False, 56), (True, 88), (True, 84)])
+
+    assert bytes(peer.delivered) == proposal + message, \
+        f"the gateway's copy opens {bytes(peer.delivered[len(proposal):][:8])!r}"

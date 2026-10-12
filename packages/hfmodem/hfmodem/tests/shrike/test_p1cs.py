@@ -751,10 +751,10 @@ def test_the_settle_decides_whether_a_peer_can_be_heard_at_all() -> None:
             (rig, line)
         seen.append((rig, fits))
     assert len(seen) >= 3, seen
-    # The table as it stands: one rig can call and hear an answer, two cannot.
-    # Stated because it is a fact about this station's hardware and it is the
-    # reason a g90 session has never connected.
-    assert dict(seen) == {"ft891": True, "g90": False, "x6100": False}, seen
+    # The table as it stands: the Yaesus can call and hear an answer, the Xiegus
+    # cannot. Stated because it is a fact about this station's hardware and it is
+    # the reason a g90 session has never connected.
+    assert dict(seen) == {"ft891": True, "ftdx10": True, "g90": False, "x6100": False}, seen
 
 
 def test_an_empty_acquisition_band_is_said_to_be_empty() -> None:
@@ -813,7 +813,7 @@ def test_a_schedule_that_does_not_close_refuses_to_key(rig, refuses, tmp_path,
     monkeypatch.setattr(sys, "argv",
                         ["onair", "--transmit", "--rig", rig, "--dial", "7101500",
                          "--dxcall", "N0DX", "--serial", "/dev/null",
-                         "--outdir", str(tmp_path)])
+                         "--outdir", str(tmp_path / "capture")])
     if refuses:
         with pytest.raises(SystemExit) as e:
             onair.main()
@@ -835,7 +835,7 @@ def _offer(ev, pairs):
         for _ in range(cycle - at):
             ev.note_search(0.075)
         at = cycle
-        if ev.offer(cycle, d):
+        if ev.offer(cycle, d, 2.1):
             fired.append(cycle)
     return fired
 
@@ -852,92 +852,46 @@ def _search(seg, since_tx=0):
 
 
 def test_one_codeword_is_not_a_station() -> None:
-    """Three accepts at one turnaround is an answer; one accept is a coin.
+    """Two strong agreeing answers need to fit within eight searched windows.
 
-    THE POPULATION IS THE POINT. A false-accept rate taken over gaussian noise
-    understates what a receiver meets on the air, so the floor is measured over
-    real off-air energy addressed to nobody: 31996 cycle-windows, 11.3 hours from
-    1005 recordings, all of rf-corpus and this station's own ARDOP captures. The
-    production search accepts in 2.7% of them; the longest run of ADJACENT accepts
-    agreeing on a turnaround to even 20 ms is TWO; and this rule fires on none of
-    the 416 recordings that hold an accept at all. Real stations are the other way
-    round: a peer answers every cycle at its own hardware turnaround until the
-    caller's first data packet decodes, so its accepts pile up on one offset.
-
-    That sweep is `working/pactor/analysis/p1cs/turnaround.py` and it needs the
-    whole corpus. What is asserted HERE is the part that travels with the repo:
-    the rule on offsets, and the six 2026-07-30 sessions committed under
-    `captures/`. Those are fixtures, not conveniences -- a run that cannot find
-    them fails rather than passing quietly, which is how the positive controls
-    came to be pointed at a directory that does not exist and nobody noticed.
-    The six sessions are 9.5 MB -- the 4.8 GB is the rest of `captures/`, which
-    is gitignored and lives in rf-corpus -- so every checkout has them, and a
-    checkout missing any of them is a broken tree that fails naming it. They do
-    NOT cross the publication boundary -- the wav deny spares only the besra
-    fixtures -- so from the distribution the whole set is absent by design, and
-    that one reading skips, naming what did not cross, the way `archive.py`
-    draws the same line for `working/`.
+    The six July 30 recordings pin when each real peer is accepted. The
+    level-gated negative sweep and the disputed September 16 weak pair
+    are pinned in test_connect_evidence_0916.
     """
     from hfmodem.shrike import onair  # noqa: E402
 
-    # -- the rule itself, on offsets rather than on audio -------------------
     scatter = onair._ConnectEvidence()
-    assert not _offer(scatter, ((1, 0.058), (2, 0.091), (3, 0.135))), \
-        f"three accepts scattered across the band connected: {scatter.candidates}"
+    assert not _offer(scatter, ((1, 0.058), (2, 0.091), (3, 0.135)))
     station = onair._ConnectEvidence()
-    fired = _offer(station, ((1, 0.0925), (3, 0.0938), (5, 0.0912)))
-    assert fired == [5], f"a station answering at one turnaround did not: {fired}"
-    # THE TWO BOUNDS, PLANTED. Widening either is what a later reader will be
-    # tempted into, so each has a case that goes red the moment it is: `stale`
-    # dies if `SPAN` grows, `scatter` if `TOL_S` does.
+    assert _offer(station, ((1, 0.0925), (3, 0.0938), (5, 0.0912))) == [3, 5]
     stale = onair._ConnectEvidence()
-    assert not _offer(stale, ((1, 0.0925), (12, 0.0938), (25, 0.0912))), \
-        "three agreeing accepts spread over a whole call connected"
-    # `stale` dies once `SPAN` reaches 25, and the bound stands at 12 -- the width
-    # the docstring prices at one false link over the 416 negative recordings, and
-    # the width WS8EOC's three answers of 2026-09-11 actually arrived in (searches
-    # 5, 7 and 13 of `onair-0911-2332`). A twenty-four-cycle spread is a call's
-    # worth of coincidence; nine searches is this station's own 4-call/6-hush
-    # rotation, and the case below is that peer rather than a hypothesis.
+    assert not _offer(stale, ((1, 0.0925), (12, 0.0938), (25, 0.0912)))
     wide = onair._ConnectEvidence()
-    assert _offer(wide, ((5, 0.098), (7, 0.100), (13, 0.099))) == [13], \
-        "WS8EOC's three answers spread over nine searches did not connect"
+    assert _offer(wide, ((5, 0.098), (7, 0.100), (13, 0.099))) == [7, 13]
     sparse = onair._ConnectEvidence()
-    # `onair-0730-2036` -- a real gateway, answered sparsely. The span has to
-    # hold it: measured on the negatives, nothing inside twelve cycles fires.
-    assert _offer(sparse, ((3, 0.1), (6, 0.11), (8, 0.0975))) == [], \
-        "an 11 ms spread is not one turnaround"
+    assert _offer(sparse, ((3, 0.1), (6, 0.11), (8, 0.0975))) == [6, 8]
     sparse = onair._ConnectEvidence()
-    assert _offer(sparse, ((3, 0.1), (6, 0.0988), (8, 0.0975))) == [8], \
-        "a sparse real answer was refused"
+    assert _offer(sparse, ((3, 0.1), (6, 0.0988), (8, 0.0975))) == [6, 8]
 
-    # ANY THREE, NOT THE LAST THREE. One chance accept landing between a peer's
-    # answers must not undo them, and taking the last three in the span is exactly
-    # a rule that lets it: the same four answers connect on their own and used to
-    # go unrecognised with a single 400 ms accept dropped in the middle. Measured
-    # over the corpus, 23% of eight-cycle spans of occupied HF hold a spurious
-    # accept, so this is the common case and not the corner.
+    # An intervening unrelated accept does not erase the agreeing pair.
     peer = [(1, 0.0925), (2, 0.0930), (4, 0.0921), (5, 0.0928)]
     clean = onair._ConnectEvidence()
-    assert _offer(clean, peer) == [4, 5], \
-        f"a peer at one turnaround did not connect: {clean.candidates}"
+    assert _offer(clean, peer) == [2, 4, 5]
     fouled = onair._ConnectEvidence()
-    assert _offer(fouled, sorted(peer + [(3, 0.400)])) == [4, 5], \
-        (f"one accept on noise defeated four agreeing answers: "
-         f"{fouled.candidates}")
+    assert _offer(fouled, sorted(peer + [(3, 0.400)])) == [2, 3, 4, 5]
 
     # -- and against the recordings, through the production search ----------
     #
     # Every one of these is committed under `captures/`, so `want` is the cycle
     # the rule closes in and not merely whether it does. Two of the six are real
-    # WS8EOC sessions the search never read three answers in: the rule declines
+    # WS8EOC sessions without an agreeing pair: the rule declines
     # them, which is the behaviour being asserted rather than a shortfall.
     controls = (
-        ("WS8EOC 2026-07-30 2036", SESSIONS / "onair-0730-2036", 7),
+        ("WS8EOC 2026-07-30 2036", SESSIONS / "onair-0730-2036", 5),
         ("WS8EOC 2026-07-30 2037", SESSIONS / "onair-0730-2037", None),
-        ("WS8EOC 2026-07-30 2039", SESSIONS / "onair-0730-2039", 5),
-        ("WS8EOC 2026-07-30 2047", SESSIONS / "onair-0730-2047", 4),
-        ("WS8EOC 2026-07-30 2049", SESSIONS / "onair-0730-2049", 5),
+        ("WS8EOC 2026-07-30 2039", SESSIONS / "onair-0730-2039", 4),
+        ("WS8EOC 2026-07-30 2047", SESSIONS / "onair-0730-2047", 3),
+        ("WS8EOC 2026-07-30 2049", SESSIONS / "onair-0730-2049", 4),
         ("WS8EOC 2026-07-30 2050", SESSIONS / "onair-0730-2050", None))
     if not any(any(path.glob("rx_*.wav")) for _, path, _ in controls):
         pytest.skip(f"the six 2026-07-30 sessions under {SESSIONS} are absent "
@@ -953,8 +907,9 @@ def test_one_codeword_is_not_a_station() -> None:
         for wav in wavs:
             cyc = int(wav.stem.split("_")[1])
             ev.note_search(0.075)
-            d = _search(rxfront.load_wav(str(wav)))
-            if d is not None and ev.offer(cyc, d) and at is None:
+            seg = rxfront.load_wav(str(wav))
+            d = _search(seg)
+            if d is not None and ev.offer(cyc, d, onair._candidate_excess(seg, d)) and at is None:
                 at = cyc
         print(f"  {name}: {len(ev.candidates)} candidate(s) "
               f"{[(c, round(d * 1e3)) for c, d, _ in ev.candidates]}, "
@@ -978,8 +933,9 @@ def test_one_codeword_is_not_a_station() -> None:
         for wav in wavs:
             cyc = int(wav.stem.split("_")[1])
             ev.note_search(0.075)
-            d = _search(rxfront.load_wav(str(wav)))
-            if d is not None and ev.offer(cyc, d) and at is None:
+            seg = rxfront.load_wav(str(wav))
+            d = _search(seg)
+            if d is not None and ev.offer(cyc, d, onair._candidate_excess(seg, d)) and at is None:
                 at = cyc
         print(f"  {name}: {len(ev.candidates)} candidate(s), "
               f"{'CONNECT at ' + str(at) if at else 'no connect'}")
@@ -1116,3 +1072,35 @@ def test_main() -> None:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+@pytest.mark.parametrize('spread,closes', [(.0100, True), (.0101, False)])
+def test_connect_pair_tolerance_boundary(spread, closes):
+    from hfmodem.shrike import onair
+    ev = onair._ConnectEvidence()
+    assert not ev.offer(1, .100, 2.1)
+    assert ev.offer(2, .100 + spread, 2.1) is closes
+
+
+@pytest.mark.parametrize('levels,at', [((2.1, 2.1), 2), ((2.099, 2.1), None),
+                                      ((2.1, 2.099), None), ((1.4, 1.4, 1.4), 3)])
+def test_connect_pair_needs_both_levels_or_a_third_answer(levels, at):
+    from hfmodem.shrike import onair
+    ev = onair._ConnectEvidence()
+    for cycle, level in enumerate(levels, 1):
+        ev.note_search(.075)
+        ev.offer(cycle, .100, level)
+    assert ev.at == at
+
+
+@pytest.mark.parametrize('cycles,level,at', [((1, 8), 2.1, 8),
+                                           ((1, 9), 2.1, None),
+                                           ((1, 6, 12), 1.4, 12),
+                                           ((1, 6, 13), 1.4, None)])
+def test_connect_pair_and_triple_search_age(cycles, level, at):
+    from hfmodem.shrike import onair
+    ev = onair._ConnectEvidence()
+    for cycle in cycles:
+        ev.searched = cycle
+        ev.offer(cycle, .100, level)
+    assert ev.at == at

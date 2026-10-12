@@ -75,7 +75,7 @@ def io(monkeypatch):
             return made["stream"]
 
         @staticmethod
-        def query_devices(_):
+        def query_devices(*_):
             return {"max_output_channels": 2}
 
     monkeypatch.setitem(sys.modules, "sounddevice", _FakeSd)
@@ -146,7 +146,7 @@ def test_the_constructor_asks_the_stream_for_nothing(monkeypatch):
                                          close=lambda: None)
 
         @staticmethod
-        def query_devices(_):
+        def query_devices(*_):
             return {"max_output_channels": 2}
 
     monkeypatch.setitem(sys.modules, "sounddevice", _FakeSd)

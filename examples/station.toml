@@ -1,30 +1,30 @@
 # hfmodem station configuration. One file, the whole station.
 #
-# Unknown keys are an error. That is deliberate: a typo'd key is a setting that
-# silently did not apply, and on a transmitter that is the difference between a
-# hot input and a working one.
+# Select this file with HFMODEM_STATION, then switch rigs with HFMODEM_RIG.
+# The flat audio table is the FT-891 external chain; the built-in codec has its
+# own table below. Configuration warnings are advisory; transmit remains false.
 schema = 1
 
 [station]
 mycall     = "N0CALL"          # yours. Nothing arms and nothing keys without it.
+# Optional CW identity for PACTOR/VARA/ARDOP closing IDs and the station
+# CW interlock. Omitted/empty falls back to the effective digital mycall.
+# idcall   = "N0CALL"          # e.g. mycall="TACTIC", idcall="N0CALL"
 grid       = "AA00"
 
-# Who is answerable at the moment a transmission is made. Required, no default.
+# Whether an operator is at the control point. Required, no default.
 #   local      an operator is at the control point (local or remote control)
 #   automatic  the station answers on its own — which is what listen = true means
 control    = "local"
 
-# Which rules this station operates under. Required, no default.
-#   part97        47 CFR Part 97, the US amateur service. Needs `licence` below.
-#   unregulated   no constraint modelled; you are answerable for every emission.
-#                 The honest choice under any regime hfmodem does not encode —
-#                 maritime, land mobile, experimental, outside the US, or a
-#                 bench. Needs `because = "..."`, which is recorded and shown in
-#                 status: a station running unchecked should not look like one
-#                 that made a considered choice.
+# Emission limits the operator chooses to apply. Required, no default.
+#   part97        configured limits, including a 2.8 kHz bandwidth ceiling;
+#                 `licence` selects data segments and power ceilings.
+#   unregulated   no emission limits applied; needs `because = "..."`, recorded
+#                 and shown in status so the unchecked choice is visible.
 regulatory = "part97"
 licence    = "technician"       # part97 only: technician | general | advanced | extra
-                                # No default. Guessing upward is the failure that matters.
+                                # No default; selects the profile's tables.
 
 # A hard interlock, not a preference. False and nothing can key, whatever else
 # is configured. This is what to set while working on the code.
@@ -34,7 +34,7 @@ id_interval_s = 540             # configured identification interval
 id_mode       = "cw"            # cw | none
 
 # What this station announces itself as to a Winlink gateway — the name and
-# version half of the B2F SID, which goes on the air as [HFM-0.1-B2FHM$]. The
+# version half of the B2F SID, which goes on the air as [HFM-0.2-B2FHM$]. The
 # capability letters are NOT in here: they state what this code can actually do
 # and are appended for you.
 #
@@ -43,7 +43,7 @@ id_mode       = "cw"            # cw | none
 # behind KX8U answered ours with "Unknown client types are not allowed on
 # production servers", before the login challenge and before any mail could
 # move. hfmodem ships its own honest name and will never ship anyone else's.
-client_sid = "HFM-0.1"
+client_sid = "HFM-0.2"
 
 [rig]
 model     = "ft891"
@@ -55,6 +55,7 @@ mode      = "PKTUSB"
 # centre − 1500 Hz. `dial_hz` is a rejected key and the error explains why.
 centre_hz = 7101500
 max_key_s = 30.0                # watchdog ceiling; per-burst deadlines are shorter
+# filter_hz = [300, 2900]       # the receiver's audio passband, what a monitor hears
 # PEP the transmitter is set to. Optional except on a band that carries its own
 # limit — 30 m is 200 W for everyone — where an emission that does not state its
 # power is refused rather than sent into a capped band as an unknown quantity.
@@ -117,3 +118,73 @@ enabled = true
 host    = "hostapi"
 port    = 8320
 listen  = true
+
+[protocols.ale]
+enabled    = false              # 2G ALE: scans, calls, links; retunes the rig
+host       = "ale"              # docs/protocols/bateleur/ALE-HOST.md
+port       = 8330
+addresses  = ["N0CALL"]         # this station's ALE address(es)
+channels   = [7102000, 10145500, 14109000]   # dial frequencies, Hz
+scan_rate  = 2.0                # channels a second while available (2 or 5)
+activity_s = 30.0               # a quiet link ends after this; 0: never
+sound_s    = 0.0                # sound each channel this often, s; 0: only on SOUND
+nets       = []                 # e.g. [{address = "NET1", member = "N0CALL", slot = 2}]
+lp_level   = 0                  # linking protection: 0 off, 1 AL-1, 2 AL-2
+lp_key     = ""                 # 14 hex digits when lp_level is set
+
+[protocols.bateleur]
+enabled   = false               # the bateleur modem: 188-110, 4285, 4539, 39- and 16-tone
+host      = "bateleur"          # docs/protocols/bateleur/HOST-API.md
+cmd_port  = 8310
+data_port = 8311
+bandwidth = "3000"              # rig's top TX audio edge; "3200" sends the untrimmed pulse
+# host = "s5066" runs a STANAG 5066 node on the modem instead, its clients on
+# `port` (docs/protocols/bateleur/S5066.md):
+#   addresses = ["0.0.0.1"]     # the node's own
+#   mode      = "110 1200L"     # where it starts
+#   port      = 5066
+
+[protocols.selcall]
+enabled     = false
+host        = "selcall"
+port        = 8340
+addresses   = ["1234"]
+dots_s      = 6.0
+acknowledge = false
+emergency   = false
+invert      = false
+
+[protocols.rpr]
+enabled = false
+host = "kiss"
+port = 8100
+listen = true
+
+[protocols.rpr.options]
+limiter = true
+level = 0
+# Total PTT-to-data time, in milliseconds.
+txdelay = 100
+persistence = 63
+slot_ms = 100
+# Set tx_events to an operator-selected transcript path to retain transmit events.
+
+# FTDX10 station: selected automatically by HFMODEM_RIG=ftdx10.
+# Endpoints and exact device names are installation-specific. Set cat_port and
+# ptt_port to this station's confirmed device names before enabling transmit.
+[rig.profiles.ftdx10]
+# Timing remains UNMEASURED until this USB chain is measured.
+# settle = 0.040
+# tr_switch_s = 0.070
+
+[audio.chains.ftdx10_usb]
+input = "USB AUDIO  CODEC"
+output = "USB AUDIO  CODEC"
+# Supply measured or explicit provisional drives here; never copy mobile presets.
+# tx_drive = 0.6
+# p1_drive = 0.6
+# p3_drive = 0.6
+# p4_drive = 0.6
+# tx_latency_ms = 7.0
+# input_gain is hardware-volume intent/metadata, never software sample scaling.
+# No independent witness input is selected automatically for this rig.

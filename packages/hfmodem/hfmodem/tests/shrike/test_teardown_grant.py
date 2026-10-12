@@ -79,6 +79,7 @@ def _wired(tmp_path, monkeypatch, *argv: str):
     """The config a session actually runs on, read off the host `run` builds."""
     built = []
     monkeypatch.setattr(onair.ota, "Rig", lambda *a, **kw: _Rig())
+    monkeypatch.setattr(onair.ota, "ptt_device", lambda *a, **kw: None)
     monkeypatch.setattr(onair, "find_device", lambda *a, **kw: 0)
     monkeypatch.setattr(onair, "_LiveInput", lambda *a, **kw: Clock())
     monkeypatch.setattr(onair, "_save_capture_async", lambda *a, **kw: None)
@@ -86,7 +87,7 @@ def _wired(tmp_path, monkeypatch, *argv: str):
     monkeypatch.setattr(onair, "PtcHost",
                         lambda **kw: built.append(host_cls(**kw)) or built[-1])
     onair.run(_parsed("--transmit", "--serial", "/dev/null",
-                      "--dial", "7100000", "--outdir", str(tmp_path),
+                      "--dial", "7100000", "--outdir", str(tmp_path / 'capture'),
                       "--pactor1-only", "--hold", "1", "--max-cycles", "1",
                       *argv))
     return built[0].arq.cfg

@@ -153,7 +153,10 @@ def test_the_negative_corpus_holds_no_answer_that_names_nobody():
         f"that holds none: {named}. Either the corpus has changed or the bar has.")
 
 
-@corpora.requires_onair_unanswered_call
+@pytest.mark.skipif(
+    not corpora.ONAIR_UNANSWERED_CALL.exists(),
+    reason="needs KC9GHZ 80 m BW2300 unanswered flight with a recorded preamble-only "
+           "phantom; the 0918 tap never reaches payload_states")
 def test_the_preamble_alone_would_have_taken_the_one_burst_the_generator_rejects():
     """The specimen the rejection is for.
 

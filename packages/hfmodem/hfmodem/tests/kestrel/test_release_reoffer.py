@@ -80,32 +80,58 @@ def test_the_peers_poll_after_our_release_is_answered_in_its_turnaround():
     assert hs.turn == VA._TURN_PEER
 
 
-def test_the_answer_is_the_cadences_burst_keyed_early():
-    """Charged to the budget as a cadence burst is, and counted for the clock
-    that drives the cadence, so the loop does not key another on top of it."""
+def test_the_answer_is_counted_for_the_cadence_clock_and_not_charged():
+    """Counted for the clock that drives the cadence, so the loop does not key
+    another on top of it, and not charged to the budget."""
+    # Until 2026-09-28 one poll in four drew a keepalive-A, charged to the budget.
+    # Two stock 4.9s that night answered every callee poll with keepalive-B, none
+    # charged, and the callee closed the link itself after seven (bench-idle500
+    # r3a, r3b). The 2.3 s polls of 2026-09-03 were the same frame, the callee's
+    # control stream 1080 frame 1 (20260903T044347Z-turn-release-rx.wav), repeated
+    # because nothing answered them.
     hs, io = _drained()
     before = (hs.progress, hs._since_progress, hs.idle_keyed)
     hs.on_rx_audio(_peer_control())
     assert hs.progress == before[0]
-    assert hs._since_progress == before[1] + 1
+    assert hs._since_progress == before[1]
     assert hs.idle_keyed == before[2] + 1
 
 
-def test_one_answer_per_cadence_and_not_one_per_poll():
+def test_every_poll_is_answered_with_keepalive_b():
+    # Until 2026-09-28 one poll in four drew a keepalive-A, charged to the budget.
+    # Two stock 4.9s that night answered every callee poll with keepalive-B, none
+    # charged, and the callee closed the link itself after seven (bench-idle500
+    # r3a, r3b). The 2.3 s polls of 2026-09-03 were the same frame, the callee's
+    # control stream 1080 frame 1 (20260903T044347Z-turn-release-rx.wav), repeated
+    # because nothing answered them.
     hs, io = _drained()
-    for _ in range(2 * VA._POLLS_PER_ANSWER):
+    for _ in range(8):
         hs.on_rx_audio(_peer_control())
-    assert _keepalives(io) == 2, io.msgs
+    assert _keepalives(io) == 8, io.msgs
+    assert not any("keepalive-a" in m for m in io.msgs), io.msgs
 
 
-def test_a_polling_peer_is_closed_by_the_give_up_budget():
+def test_a_polling_peer_is_left_to_close_the_link_itself():
+    # Until 2026-09-28 one poll in four drew a keepalive-A, charged to the budget.
+    # Two stock 4.9s that night answered every callee poll with keepalive-B, none
+    # charged, and the callee closed the link itself after seven (bench-idle500
+    # r3a, r3b). The 2.3 s polls of 2026-09-03 were the same frame, the callee's
+    # control stream 1080 frame 1 (20260903T044347Z-turn-release-rx.wav), repeated
+    # because nothing answered them.
     hs, io = _drained()
-    for _ in range(200):
+    for _ in range(20):
         hs.on_rx_audio(_peer_control())
-        if hs.state is not VA.VaraState.CONNECTED:
-            break
+        hs.idle_keepalive()
+    assert hs.state is VA.VaraState.CONNECTED, io.msgs[-3:]
+
+
+def test_a_peer_that_stops_polling_is_closed_by_the_give_up_budget():
+    hs, io = _drained()
+    hs.on_rx_audio(_peer_control())
+    hs.idle_keepalive()                      # the tick behind the poll is free
+    for _ in range(VA._MAX_WITHOUT_PROGRESS + 1):
+        hs.idle_keepalive()
     assert hs.state is not VA.VaraState.CONNECTED
-    assert _keepalives(io) == VA._MAX_WITHOUT_PROGRESS
 
 
 def test_the_poll_count_starts_again_at_every_release():

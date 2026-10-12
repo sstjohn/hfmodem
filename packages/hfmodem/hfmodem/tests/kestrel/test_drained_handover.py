@@ -184,21 +184,23 @@ def test_the_grant_route_still_takes_it_after_a_real_turn_request():
     assert any("turn granted" in m for m in io.msgs), io.msgs
 
 
-def test_the_narrow_stream_route_keys_nothing_at_it():
-    """At BW500 the stream owns the over and the recovery cue; this frame is the
-    bracket route's, and both routes answering it would key twice."""
+def test_the_narrow_stream_takes_it_once():
+    """The stream reads BW500's short frames now [KB0WZI, 2026-09-24], and the
+    bracket route stands down behind it, so the handover keys one over."""
     hs, io = _awaiting_release()
     _stream(hs, io, _clip())
-    assert len(io.sent) == 1 and hs.turn == VA._TURN_PEER
-    assert hs._answer_owed == VA._OWED_RELEASE
+    hs.on_rx_audio(_bracket())
+    assert len(io.sent) == 2 and hs.turn == VA._TURN_OURS
 
 
-def test_the_release_ladder_is_unchanged_where_the_peer_only_idles():
+def test_the_release_ladder_is_the_ask_where_the_peer_only_idles():
+    """With a queue this was the control burst again until 2026-09-29. Stock's
+    caller asks at the callee's 745 instead, every time (bench-745owed m4)."""
     hs, io = _awaiting_release()
     hs.on_rx_audio(MK.synth_burst(CALLED, VF.for_bw(VF.SESSION_RESPONDER_OVER_IDLE,
                                                     "500")))
-    assert hs.turn == VA._TURN_PEER and hs._reacks == 1
-    assert any("re-keying the 11-symbol control burst" in m for m in io.msgs), io.msgs
+    assert hs.turn == VA._TURN_ASKED and hs._asked == 1, io.msgs
+    assert not any("re-keying the 11-symbol control burst" in m for m in io.msgs)
 
 
 def test_the_wide_stream_keeps_the_release_and_declines_an_unowed_drained_frame():

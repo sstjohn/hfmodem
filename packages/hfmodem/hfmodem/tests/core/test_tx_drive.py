@@ -215,13 +215,13 @@ def _kestrel_played(audio, drive, monkeypatch):
     import kestrel_connect
 
     fake = types.ModuleType("sounddevice")
-    fake.query_devices = lambda dev: {"max_output_channels": 2}
+    fake.query_devices = lambda dev, kind=None: {"max_output_channels": 2}
     fake.InputStream = lambda **kw: types.SimpleNamespace(
         start=lambda: None, stop=lambda: None, close=lambda: None)
     monkeypatch.setitem(sys.modules, "sounddevice", fake)
     played = []
     monkeypatch.setattr(kestrel_connect, "play_drained",
-                        lambda block, fs, dev: played.append(np.asarray(block)))
+                        lambda block, fs, dev, **kw: played.append(np.asarray(block)))
     io = kestrel_connect.AudioVaraIO("stub", "stub", drive)
     io.tx(audio)
     return played[0]

@@ -3,7 +3,7 @@
 
 """End-to-end tests for the host-side VARA-protocol server.
 
-The headline test wires the project's OWN oracle client
+The headline test wires the project's OWN reference client
 (``oracle/vara_client.py``) to THIS server and drives a full session:
 handshake -> CONNECT -> data transfer -> DISCONNECT. Client and server are two
 independent implementations of the same documented spec, so a green run is a
@@ -45,7 +45,7 @@ def _make_transcript():
 
 
 class TestOracleClientLoopback(unittest.TestCase):
-    """The oracle client completes a real session against this server."""
+    """The reference client completes a real session against this server."""
 
     def test_connect_transfer_disconnect(self):
         srv = _make_server()

@@ -3,6 +3,8 @@
 # This is the configuration to develop against: no CAT port is opened, no keying
 # line is held, and no sound card is touched. `transmit = false` is a hard
 # interlock rather than a preference, so nothing downstream has to remember.
+# Keep HFMODEM_RIG unset (or ft891) to select this flat replay chain.
+# An FTDX10 selection uses its separate USB chain, not this recording.
 schema = 1
 
 [station]

@@ -41,9 +41,9 @@ MYCALL, CALLED = "W9SSJ", "KC9GHZ"
 #: Bursts of two-tone symbols, which carry no callsign and are named by their
 #: tones alone  [see vara_frames].
 _PAIRS = {
-    VA.OVER_CONTINUE_CAPTURED: VF.OVER_CONTINUE_CALLER_2300,
-    "control": VF.CONTROL_BURST_CALLER_2300,
-    "nak": VF.NAK_CALLER_2300,
+    VA.OVER_CONTINUE_BURST: VF.over_continue(CALLED, "2300")[0],
+    "control": VF.control_bursts(MYCALL, "2300")[0],
+    "nak": VF.nak(CALLED, "2300")[0],
 }
 #: And the generated ones, which are keyed to a callsign.
 _KEYED = {
@@ -212,7 +212,7 @@ def test_a_nak_from_the_peer_keys_the_next_rung():
     hs, io = _mid_delivery()
     assert hs._tx_pending is None
     hs.on_rx_audio(np.concatenate([np.zeros(int(0.3 * MK.FS)),
-                                   MK.synth_tone_pairs(VF.NAK_RESPONDER_2300),
+                                   MK.synth_tone_pairs(VF.nak(CALLED, "2300")[1]),
                                    np.zeros(int(0.25 * MK.FS))]))
     assert any("did not read our answer" in m for m in io.msgs), io.msgs
     assert keyed(io) == hs._reack_frame, io.msgs

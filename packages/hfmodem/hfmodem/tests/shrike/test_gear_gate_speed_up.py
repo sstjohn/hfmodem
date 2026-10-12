@@ -32,7 +32,7 @@ from __future__ import annotations
 import pytest
 
 from hfmodem.shrike import arq
-from hfmodem.tests.shrike.test_repeat_gear_stall import (STALL_SL, arrives,
+from hfmodem.tests.shrike.test_repeat_gear_stall import (FIELD, STALL_SL, arrives,
                                                          linked, status_at)
 
 #: What the ledger measured at speed level 1 before the rung was asked for:
@@ -147,17 +147,47 @@ def test_the_repeat_stall_under_hold_is_the_transcript_the_arm_keyed():
     """
     host, seam = linked_at("hold", repeat_gear=3, speed_up_after=3)
     for _ in range(36):
+        token = host.arq.begin_receive_opportunity()
         arrives(host)
+        host.arq.finish_receive_opportunity(token)
     assert seam.words == [arq.CS_REQUEST] * 36
     assert arq.CS_SPEED_UP not in seam.words
     assert host.arq.speed_level == STALL_SL
     assert host.arq.state is arq.State.CONNECTED
 
-    cycles = 0
-    while host.arq.state is arq.State.CONNECTED and cycles < 40:
-        host.arq.on_cycle()
-        cycles += 1
-    assert host.arq.cfg.max_retries < cycles <= host.arq.cfg.max_retries + 3
+    assert host.arq.rx_progress == 1
+    channel = host.channel(host.ptchn)
+    assert bytes(channel.rx) == FIELD
+    retained = bytes(channel.rx)
+    received, sent = host.rcvd_total, host.sent_total
+    acked, counter, sequence = host.arq.tx_acked_bytes, host.arq.rx_seq, host.arq.tx_seq
+    start_words = len(seam.words)
+    quiet_h = terminal_h = None
+    quiet_words = None
+    for physical_tick in range(1, arq.P3_CRC_WAIT_TICKS + 1):
+        token = host.arq.begin_receive_opportunity()
+        host.tick(elapsed_ticks=1, cycle_ticks=1)
+        host.arq.finish_receive_opportunity(token)
+        assert host.rcvd_total == received and host.sent_total == sent
+        assert host.arq.tx_acked_bytes == acked
+        assert bytes(channel.rx) == retained
+        assert not seam.packets and not host.arq.said_goodbye
+        assert arq.CS_SPEED_UP not in seam.words
+        assert host.arq.speed_level == STALL_SL
+        if host.arq._p3_receive_only and quiet_h is None:
+            quiet_h, quiet_words = physical_tick, len(seam.words)
+        if quiet_h is not None:
+            assert len(seam.words) == quiet_words
+        if host.arq.state is not arq.State.CONNECTED:
+            terminal_h = physical_tick
+            break
+        assert host.arq.rx_seq == counter and host.arq.tx_seq == sequence
+        assert host.arq.rx_progress == 1
+    # The last CRC's owed reply is the first subsequently unanswered callback.
+    assert quiet_h == 6
+    assert quiet_words - start_words + 1 == 5
+    assert terminal_h == arq.P3_CRC_WAIT_TICKS == 96
+    assert host.arq.state is arq.State.DISCONNECTED
 
 
 @pytest.mark.parametrize("repeat_gear", [0, 3])

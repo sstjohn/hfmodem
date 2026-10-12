@@ -21,6 +21,8 @@ dtypes those suites index into. The generation methods are:
 from __future__ import annotations
 
 from functools import cache
+import math
+from numbers import Integral
 
 import numpy as np
 
@@ -131,6 +133,86 @@ INTERLEAVERS = {
     "0xb81c0_4968": lambda: _grid(24, 207, _walk(24, 5), _walk(207, 23)),
     "0xba890_840":  lambda: _grid(20, 42, _walk(20, 3), _cycfix(42, 18)),
 }
+
+
+# --------------------------------------------------------------------------- #
+# Normal PACTOR-IV LONG symbol order and label-ordered constellations.
+# These generators are independently checked; reader integration is separate.
+# --------------------------------------------------------------------------- #
+P4_POINT_SCALE = 4096
+
+
+@cache
+def p4_symbol_permutation() -> np.ndarray:
+    """Direct field-order gather for all 4968 normal-LONG symbols, immutable intp.
+
+    This is the existing 24-by-207 walk product, not its inverse. Bytes backing
+    prevents a cached caller from restoring write permission.
+    """
+    values = _grid(24, 207, _walk(24, 5), _walk(207, 23)).astype(np.intp)
+    return np.frombuffer(values.tobytes(), dtype=np.intp)
+
+
+def p4_constellation_points(speedlevel) -> np.ndarray:
+    """SL6--10 label-order signed axes: (2**(SL-5), 2), little-endian int16.
+
+    Divide each axis by P4_POINT_SCALE for complex points. Validation precedes
+    caching so equal nonintegral/bool cache keys cannot evade the contract.
+    """
+    if (isinstance(speedlevel, (bool, np.bool_))
+            or not isinstance(speedlevel, Integral) or not 6 <= speedlevel <= 10):
+        raise ValueError("speedlevel must be an integer from 6 through 10")
+    return _p4_constellation_points(int(speedlevel))
+
+
+@cache
+def _p4_constellation_points(speedlevel: int) -> np.ndarray:
+    width = speedlevel - 5
+    rows = []
+    if speedlevel == 10:
+        # Equal inner-grid spacing and distance to the fixed 30-degree outer
+        # point: 14*a**2 - 6*(cos(pi/6)+sin(pi/6))*a + 1 = 0.
+        # The smaller root keeps the inner square inside the unit circle.
+        c, s = math.cos(math.pi / 6), math.sin(math.pi / 6)
+        a = (3 * (c + s) - math.sqrt(9 * (c + s) ** 2 - 14)) / 14
+        primitives = (a, 3 * a, math.sqrt(1 - a * a), c, s)
+        # One uniform three-decimal pre-rounding reproduces the reference.
+        # It is an inferred compatibility rule, not a historical quantizer claim.
+        lo, mid, outer, co, si = (round(round(v, 3) * P4_POINT_SCALE)
+                                  for v in primitives)
+    for label in range(1 << width):
+        bits = [(label >> k) & 1 for k in range(width)]
+        if speedlevel <= 8:
+            gray, phase = label, 0
+            while gray:
+                phase ^= gray
+                gray >>= 1
+            angle = 2 * math.pi * phase / (1 << width)
+            x = round(P4_POINT_SCALE * math.cos(angle))
+            y = round(P4_POINT_SCALE * math.sin(angle))
+        elif speedlevel == 9:
+            quadrant = (label >> 2) ^ ((label >> 2) >> 1)
+            if bits[0] and bits[1]:
+                x = y = round(P4_POINT_SCALE * math.sin(math.pi / 12))
+            else:
+                step = 1 + (-1 if quadrant % 2 else 1) * (bits[0] - bits[1])
+                angle = step * math.pi / 6
+                x = round(P4_POINT_SCALE * math.cos(angle))
+                y = round(P4_POINT_SCALE * math.sin(angle))
+            for _ in range(quadrant):
+                x, y = -y, x
+        else:
+            if bits[2]:
+                x, y = (lo if bits[1] else mid), (lo if bits[0] else mid)
+            else:
+                x, y = (outer, lo) if bits[0] else (co, si)
+                if bits[1]:
+                    x, y = y, x
+            x *= -1 if bits[3] else 1
+            y *= -1 if bits[4] else 1
+        rows.append((x, y))
+    raw = np.asarray(rows, dtype="<i2").tobytes()
+    return np.frombuffer(raw, dtype="<i2").reshape(1 << width, 2)
 
 
 # --------------------------------------------------------------------------- #

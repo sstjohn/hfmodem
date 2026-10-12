@@ -175,8 +175,17 @@ def _load():
 
 
 _GRID480, _IDX1, _USED, _PN = _load()
-_CELLS = [(s, co) for s in range(NCARR) for co in range(NSYM - 1)
-          if co != 0 and _USED[17 * (128 * co + s) + OFF] != 1]
+@cache
+def frame_cells(fk: int = 0) -> tuple:
+    """The data cells of frame ``fk`` of a burst, ``(sub, column)`` in emission
+    order. A later frame reads the used-map ``fk`` columns on, as it reads the
+    grid and the placement: stock's second frames put 13 of their 748 cells
+    where frame 0's map would not, and every one of them on the advanced map."""
+    return tuple((s, co) for s in range(NCARR) for co in range(NSYM - 1)
+                 if co != 0 and _USED[17 * (128 * (co + fk) + s) + OFF] != 1)
+
+
+_CELLS = frame_cells(0)
 _P = _IDX1[OFF::17][:CODED]
 
 
@@ -378,6 +387,10 @@ def detect_bursts(samples: np.ndarray, min_len: int = BURST_MIN) -> list[int]:
 
 
 def _lock_alignment(bb: np.ndarray, ref: np.ndarray, lead: int) -> int:
+    return _lock_scored(bb, ref, lead)[0]
+
+
+def _lock_scored(bb: np.ndarray, ref: np.ndarray, lead: int) -> tuple[int, float]:
     """Sample offset of emission column 0 from the detected burst start, in
     ``[-_ALIGN_EARLY*H, _ALIGN_LATE*H)``: the alignment whose consecutive cells,
     de-rotated by the reference, agree hardest in differential phase under
@@ -420,7 +433,7 @@ def _lock_alignment(bb: np.ndarray, ref: np.ndarray, lead: int) -> int:
         o = int(score.argmax())
         if score[o] > best:
             best, best_offset = float(score[o]), k * H + o
-    return best_offset
+    return best_offset, best
 
 
 def _demod_burst(samples: np.ndarray, start: int):
@@ -448,6 +461,19 @@ def _demod_burst(samples: np.ndarray, start: int):
         cols[sub] = bb[k][c[c < bb.shape[1]]]
         onsets[sub] = onset
     return cols, onsets
+
+
+def lock_score(samples: np.ndarray, start: int) -> float:
+    """How hard a base-level frame's grid locks at ``start``, the weaker of the
+    two sub-bands: ~1 on a clean frame, 0.11-0.16 on band noise, and 0.66-0.78
+    on real overs off 40 and 80 m that faded past decoding  [_lock_alignment]."""
+    lead = min(start, _LEAD)
+    seg = samples[start - lead: start + (NSYM + 8) * H + _PAD]
+    if lead < _LEAD:
+        seg = np.concatenate([np.zeros(_LEAD - lead, seg.dtype), seg])
+    bb = fftconvolve(seg * _MIX[:, :len(seg)], _LP[None, :], "same", axes=-1)
+    return min(_lock_scored(bb[k], _GRID480[grid480_index(sub, NSYM)], _LEAD)[1]
+               for k, (sub, _) in enumerate(SUBBANDS))
 
 
 def _frame_gh(cols, fk: int):
@@ -502,7 +528,7 @@ def _cells_llr(gh, fk: int, c0: int):
     place = _P[(np.arange(CODED) + fk) % CODED]
     try:
         dv = np.array([gh[s][c0 + co] * np.conj(gh[s][c0 + co - 1])
-                       for s, co in _CELLS])
+                       for s, co in frame_cells(fk)])
     except IndexError:
         return -1.0, None
     emit = (dv.real < 0).astype(int)
@@ -607,6 +633,26 @@ def _l3_ref_hits(band: np.ndarray, col: int, level: int = ROBUST_LEVEL) -> int:
     ref, ref_bin = _l3_tables(level)[:2]
     lit = band[col + ref].argmax(1) + INDEX_RECORDS[level].first_bin
     return int((lit == ref_bin).sum())
+
+
+def frame_follows(samples: np.ndarray, frame: FrameResult, refs: int = 2) -> bool | None:
+    """Whether another frame of the index-record burst ``frame`` was read from
+    opens behind it: the first ``refs`` reference columns of the next frame's
+    slot all light the bin they predict. ``None`` until the audio reaches them.
+
+    A sender keys a pair with no gap and no training between its frames, so
+    its second frame's references are there 0.4 s behind the first frame; on
+    an empty band two of them agree by chance once in a few hundred."""
+    r = INDEX_RECORDS[frame.level]
+    order = np.argsort(_l3_tables(frame.level)[0])
+    cols = _l3_tables(frame.level)[0][order][:refs]
+    bins = _l3_tables(frame.level)[1][order][:refs]
+    off, c0 = frame.start + frame.onset[0], frame.c0 + r.ncols
+    ncol = c0 + int(cols[-1]) + 1
+    if off < 0 or off + ncol * r.dw > len(samples):
+        return None
+    lit = _l3_band(samples, off, ncol, frame.level)[c0 + cols].argmax(1) + r.first_bin
+    return bool((lit == bins).all())
 
 
 def _l3_align(samples: np.ndarray, start: int, stop: int | None,

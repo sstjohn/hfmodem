@@ -23,12 +23,13 @@ from __future__ import annotations
 import argparse
 import threading
 import time
+import sys
 from pathlib import Path
 
 from . import protocol as P
 from .modem_core import LoopbackModem
 from .server import HostServer
-from ...core import band, config, levels, rates
+from ...core import band, config, cwid, identification, levels, rates
 from ...core.ptt import arming_refusal
 from ...winlink import CLIENT_SID
 
@@ -37,7 +38,7 @@ RECORD_DIR = Path(__file__).resolve().parents[5] / "logs" / "onair"
 
 
 def parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description="besra ARDOP host server")
+    ap = argparse.ArgumentParser(description="besra ARDOP host server", allow_abbrev=False)
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (default loopback; ardopcf defaults to 0.0.0.0)")
     ap.add_argument("--control-port", type=int, default=P.DEFAULT_CONTROL_PORT,
@@ -102,7 +103,11 @@ def parser() -> argparse.ArgumentParser:
                          "without it a --radio mail run refuses to start. The "
                          "server modes are unaffected — there a host client "
                          "initiates, not this process.")
-    mg.add_argument("--mycall", help="our callsign (required with --call)")
+    mg.add_argument("--mycall", help="our digital callsign (required with --call)")
+    mg.add_argument("--idcall", help="CW station callsign for --call, independent of --mycall; "
+                    "default: IDCALL, [station] idcall, then --mycall")
+    mg.add_argument("--cwid-optional", action="store_true",
+                    help="skip the closing CW ID only when digital and CW callsigns are equal")
     mg.add_argument("--mail-send", action="append", metavar="FILE",
                     help="Winlink mail: a rendered .b2f message, or a body file "
                          "with --mail-to (repeatable)")
@@ -153,6 +158,11 @@ def main() -> int:
     if args.call:
         if not args.mycall:
             ap.error("--call needs --mycall")
+        try:
+            identity = identification.resolve(args.mycall, args.idcall)
+        except ValueError as exc:
+            ap.error(str(exc))
+        identity.announce(optional=args.cwid_optional)
         if not args.mail_send and not args.mail_fetch:
             ap.error("--call: nothing to do — give --mail-send FILE, "
                      "--mail-fetch, or both")
@@ -187,6 +197,9 @@ def main() -> int:
     else:
         modem = LoopbackModem(bandwidth=args.bandwidth)
 
+    identified = False
+    id_owed = (args.call and args.transmit and link is not None
+               and identity.closing_required("ardop", optional=args.cwid_optional))
     try:
         if args.call:
             if not args.radio:
@@ -196,7 +209,11 @@ def main() -> int:
                 # operator carries back as the finding.
                 print(f"  DRY RUN — no radio attached (--modem {args.modem}), "
                       "nothing keyed", flush=True)
-            return _run_mail(args, modem)
+            code = _run_mail(args, modem)
+            identified = True
+            if id_owed:
+                _identify(link, identity.cw_call, args.bandwidth)
+            return code
         server = HostServer(
             modem, host=args.host, control_port=args.control_port,
             data_port=args.data_port, quiet=args.quiet,
@@ -204,11 +221,45 @@ def main() -> int:
         server.serve_forever()
         return 0
     finally:
-        if link is not None:
-            # Where shrike and kestrel say it: with the capture still up, and on
-            # the one path both a mail run and a served session leave by.
-            print(rates.host_report(), flush=True)
-            link.close()
+        unwinding = sys.exc_info()[1]
+        try:
+            if link is not None:
+                # Count the session's threads before teardown, but print only
+                # after the transmitter has come down and the audio is closed.
+                report = None
+                try:
+                    report = rates.host_report()
+                finally:
+                    try:
+                        link.close()
+                    finally:
+                        if report is not None:
+                            print(report, flush=True)
+        except BaseException:
+            if unwinding is not None and not isinstance(unwinding, Exception):
+                raise unwinding
+            raise
+        finally:
+            if not identified and id_owed:
+                cwid.unsent(identity.cw_call, "the attempt ended before its closing ID"
+                            if unwinding is None else repr(unwinding))
+
+
+def _identify(link, mycall: str, bandwidth: int) -> None:
+    """Our callsign in CW once the modem has stopped, whatever ARDOP's frames
+    carried: the tail of our own transmission, so it senses no channel."""
+    from ...core.occupied import occupied_hz
+    from ..phy.demodulator import SAMPLE_RATE
+    with cwid.confirming(mycall):
+        if link.burst_level is None:
+            raise ValueError("no completed data burst for identification level")
+        audio = cwid.audio(mycall.upper(), fs=SAMPLE_RATE,
+                           tone_hz=sum(occupied_hz("ardop", str(bandwidth))) / 2)
+        drive = levels.drive_for_rms(audio, *link.burst_level)
+        before = link.bursts_sent
+        link._transmit(audio, drive, identification=True)
+        if link.bursts_sent == before:
+            raise RuntimeError("the transmitter refused identification")
 
 
 def _mail_observer():
@@ -324,11 +375,17 @@ def _run_mail(args, modem) -> int:
             ok = False               # a message left behind is not a clean run
         return 0 if ok else 1
     finally:
-        modem.stop()
-        print(f"session ended: {ended}", flush=True)
-        print(summarize(session), flush=True)
-        for p in write_inbox(session, args.mail_out):
-            print(f"mail: wrote {p}", flush=True)
+        unwinding = sys.exc_info()[1]
+        try:
+            modem.stop()
+            print(f"session ended: {ended}", flush=True)
+            print(summarize(session), flush=True)
+            for p in write_inbox(session, args.mail_out):
+                print(f"mail: wrote {p}", flush=True)
+        except BaseException:
+            if unwinding is not None and not isinstance(unwinding, Exception):
+                raise unwinding
+            raise
 
 
 def _radio_modem(args):
@@ -416,8 +473,8 @@ def _radio_modem(args):
         # above — which netrigctl legitimately hides — the frequency read
         # passes through the daemon, so "nothing" here means nobody is
         # talking to the radio. Transmitting on an unintended frequency is
-        # the licensee's regulatory problem, not just a wasted attempt, so
-        # this refusal is unconditional: there is no flag past it.
+        # outside the operator's requested placement, so this refusal is
+        # unconditional: there is no flag past it.
         got = rig.qsy(dial)
         if got is None or abs(got - dial) > band.QSY_TOLERANCE_HZ:
             raise SystemExit(

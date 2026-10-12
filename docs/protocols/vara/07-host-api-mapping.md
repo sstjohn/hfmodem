@@ -51,7 +51,7 @@ command). Bandwidth/compression/`MYCALL`/`LISTEN` are settings; `CONNECT`/`DISCO
 | `BUFFER n` | bytes remaining in the TX queue | on enqueue and on each ack-drain |
 | `PENDING` / `CANCELPENDING` | inbound connect detected / aborted (pause scanning) | on CR detect / give-up |
 | `BUSY ON` / `BUSY OFF` | channel busy-detector state | on busy-detector edges |
-| `REGISTERED call` / `LINK REGISTERED` / `LINK UNREGISTERED` | registration status (gates full speed) | at connect |
+| High speed capability (per callsign or link), or speed limited link status | high speed capability status (gates full speed) | at connect |
 | `BITRATE (N) x bps TX` / `… RX` | current speed level of my next over / the frame I decoded | per over |
 | `IAMALIVE` | host-facing keepalive | ~every 60 s while connected |
 | `SN xx` | signal-report (only with `CHAT ON`) | on decode |

@@ -8,17 +8,17 @@ carry its own literals, one pair per protocol, and three of the four were inside
 the emission they described; `core.regulatory.Emission` is per *call* and takes
 the numbers from whoever built it. Neither answered "shrike is about to key here,
 what does that occupy" — which is what the channel sense, the receiver's filter
-and the regulatory gate all need, and all three now read it from here.
+and the emission-profile check all need, and all three now read it from here.
 
-Edges are the -26 dB span of this station's own modulators, which is the measure
-§97.3(a)(8) writes bandwidth in, rounded outward. They were once the outermost
+Edges are the -26 dB span of this station's own modulators, rounded outward
+for the selected profile's placement check. They were once the outermost
 carrier plus its symbol rate, on the reasoning that a tone's main lobe ends there
 and that this was the safe direction. For the FSK waveforms it was: pactor
 measures 436.9-2568.6 against the 380-2620 that rule gives. For VARA it was not —
 its handshake alphabet measures 612.4 Hz at the bottom where the lowest carrier
 sits at 679.7, so the rule ran 68 Hz inside the emission rather than outside it.
 
-The distinction matters because these numbers are what the regulatory gate judges
+The distinction matters because these numbers are what the emission-profile check judges
 a band edge on. A sense band that is too narrow costs a wait; a declared passband
 that is too narrow is a station keying outside the segment it believes it is in.
 
@@ -76,7 +76,25 @@ OCCUPIED_HZ = {
     # A 32-payload sweep per gear measures 147.9..2852.1 Hz at -26 dB;
     # rounded outward with margin. Carrier endpoints alone are insufficient.
     ("sabir", ""): (140.0, 2860.0),
+    # Converted Robust Packet bursts, both levels and limiter settings, 48 cases.
+    ("rpr", ""): (1247.0, 1755.0),
+    # Serial and parallel bateleur waveforms, including 39-tone's pilot.
+    # Welch PSD at 30 Hz resolution bandwidth, -26 dB below its peak;
+    # tests/bateleur/test_phy.py covers short and 30-second payloads.
+    ("bateleur", "3000"): (350.0, 2995.0),
+    # ALE calls and random words, measured by the same Welch procedure.
+    ("ale", ""): (400.0, 2860.0),
+    # HF selcall (CCIR 493-4 land mobile): 1700/1870 Hz FSK at 100 Bd. Calls
+    # of every kind and a dot pattern measure 1533.2..2035.2 Hz at -26 dB.
+    ("selcall", ""): (1530.0, 2040.0),
+    ("bateleur", "3200"): (350.0, 3140.0),
 }
+
+#: Rows wider than `FILTER_HZ`. Each is keyed only by a station that has said
+#: its rig passes it — the setting that selects the row is the rig's top
+#: audio edge — and the occupancy sense, calibrated through `FULL_BAND`, does not
+#: score the part of it above 3000 Hz.
+BEYOND_FILTER = frozenset({("bateleur", "3200")})
 
 
 def occupied_hz(modem: str, bw: str = "") -> tuple[float, float]:

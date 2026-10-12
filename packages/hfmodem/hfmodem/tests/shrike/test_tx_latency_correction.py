@@ -25,6 +25,13 @@ admission check -- the tick, the render and the drain -- is untouched.
 """
 from __future__ import annotations
 
+import ast
+from functools import lru_cache
+from pathlib import Path
+import subprocess
+from types import MethodType
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -61,7 +68,9 @@ class _Stream(onair._LiveInput):
         self._blk = BLK
         self._lat = LAT
         self.tx_latency_n = tx_latency_n
+        self.geometry_n = 0
         self.samples = 100 * BLK
+        self.pos = self.samples
         self.holdback = 660
         # A fixed epoch, so two streams are comparable to the sample.
         self._dac = (0.0, 0)
@@ -73,9 +82,24 @@ class _Stream(onair._LiveInput):
         self.keyed_s = 0.0
         self.keyed_at = None
         self.slept: list[float] = []
+        self.flushes: list[int] = []
 
     def _sleep_until(self, t: float) -> None:
         self.slept.append(t)
+
+    def sample_now(self) -> float:
+        return float(self.samples)
+
+    def take_until(self, index: int) -> np.ndarray:
+        self.pos = max(self.pos, index)
+        return np.zeros(0, np.float32)
+
+    def wait_until(self, index: int) -> None:
+        pass
+
+    def flush_to(self, index: int) -> None:
+        self.flushes.append(index)
+        self.pos = index
 
 
 def _key(stream: _Stream, at: int) -> tuple[int, float]:
@@ -154,3 +178,144 @@ def test_a_replay_takes_neither_term():
     # the deadline there, exactly as it was.
     replay = onair._ReplayInput.__new__(onair._ReplayInput)
     assert onair._prekey_lead(replay, SETTLE_N) == SETTLE_N
+
+
+@lru_cache(maxsize=1)
+def _flight_transmit():
+    shown = subprocess.run([
+        'git', 'show', 'pactor-hears-a-gateway:packages/hfmodem/hfmodem/shrike/onair.py'
+    ], capture_output=True, text=True, cwd=Path(__file__).parent)
+    if shown.returncode:
+        pytest.skip('the flight branch is not in this checkout')
+    source = shown.stdout
+    cls = next(n for n in ast.parse(source).body
+               if isinstance(n, ast.ClassDef) and n.name == '_LiveInput')
+    method = next(n for n in cls.body
+                  if isinstance(n, ast.FunctionDef) and n.name == 'transmit')
+    namespace = dict(vars(onair))
+    exec(compile(ast.Module(body=[method], type_ignores=[]), '<flight-tip>', 'exec'),
+         namespace)
+    return namespace['transmit']
+
+
+@pytest.mark.parametrize('path,old_ms', [
+    ('flown', 20), ('p2-mail', 20), ('p4-bench', 3), ('generic', 0)])
+def test_resolved_plan_preserves_repeated_callback_placement(monkeypatch, path, old_ms):
+    from hfmodem.core.rigs import resolve_tx_timing
+
+    monkeypatch.setattr(onair.time, 'monotonic', lambda: .25)
+    plan = resolve_tx_timing(rig='ft891', command_path=path, environ={})
+    old = _Stream(tx_latency_n=round(old_ms * FS / 1000))
+    old.transmit = MethodType(_flight_transmit(), old)
+    new = _Stream(tx_latency_n=plan.latency_samples)
+    new.geometry_n = plan.geometry_samples
+    audio = np.ones(10080, np.float32)
+    geometry = plan.geometry_samples
+    old_first, old_end = old.transmit(audio, at=None, settle=SETTLE_N / FS)
+    first, end = new.transmit(audio, at=None, settle=SETTLE_N / FS)
+    assert (first, end) == (old_first, old_end)
+    assert (new.corrected_emission_start, new.corrected_emission_end) == (
+        old_first + geometry, old_end + geometry)
+    assert new._tx_at == old._tx_at
+    assert new.slept == old.slept
+    anchor = end - audio.size
+    assert anchor == old_end - audio.size
+    assert new.key_notice == old.key_notice
+    assert onair._prekey_lead(new, SETTLE_N) == onair._prekey_lead(old, SETTLE_N)
+    assert f'logical geometry +{geometry} samples' in onair._clock_line(new, SETTLE_N)
+    for turn in range(1, 5):
+        logical = anchor + turn * round(1.25 * FS)
+        old.slept.clear()
+        new.slept.clear()
+        first, end = old.transmit(audio, at=logical, settle=SETTLE_N / FS)
+        new_first, new_end = new.transmit(audio, at=logical, settle=SETTLE_N / FS)
+        assert new._tx_at == old._tx_at
+        assert new.slept == old.slept
+        assert (new_first, new_end) == (first, end)
+        assert new.corrected_emission_start - new_first == geometry
+        assert new._tx_end_time == old._tx_end_time
+    late = old.samples + old.key_notice - 1
+    for stream in (old, new):
+        with pytest.raises(onair._MissedTxSlot):
+            stream.transmit(audio, at=late, settle=0)
+    for peer_aim in (234567, 294567, 354567):
+        first, end = old.transmit(audio, at=peer_aim, settle=SETTLE_N / FS)
+        new_first, new_end = new.transmit(audio, at=peer_aim, settle=SETTLE_N / FS)
+        assert (new_first, new_end, new._tx_at) == (first, end, old._tx_at)
+
+
+@pytest.mark.parametrize('source', ['operator', 'toml', 'generic'])
+def test_zero_precedence_and_generic_flight_placement(tmp_path, source):
+    from hfmodem.core.rigs import resolve_tx_timing
+
+    station = tmp_path / 'chain.toml'
+    station.write_text('schema=1\n[station]\ncontrol="local"\nregulatory="unregulated"\n'
+                       'because="offline fixture"\n[audio]\ntx_latency_ms=0\n')
+    plan = resolve_tx_timing(0 if source == 'operator' else None, rig='ft891',
+                             station_path=station if source == 'toml' else None,
+                             command_path='generic' if source == 'generic' else 'p4-bench',
+                             environ={})
+    stream = _Stream(tx_latency_n=plan.latency_samples)
+    stream.geometry_n = plan.geometry_samples
+    assert plan.geometry_samples == (960 if source == 'generic' else 0)
+    for logical in [60000, 120000, 180000]:
+        assert _key(stream, logical)[0] == (logical - LAT - plan.latency_samples
+                                             + plan.geometry_samples)
+
+
+@pytest.mark.parametrize('path,old_ms', [
+    ('flown', 20), ('p2-mail', 20), ('p4-bench', 3), ('generic', 0)])
+def test_radio_tx_consumers_keep_flight_coordinates(monkeypatch, tmp_path, path, old_ms):
+    from hfmodem.core.rigs import resolve_tx_timing
+
+    monkeypatch.setattr(onair.time, 'monotonic', lambda: .25)
+    plan = resolve_tx_timing(rig='ft891', command_path=path, environ={})
+    old = _Stream(tx_latency_n=round(old_ms * FS / 1000))
+    old.transmit = MethodType(_flight_transmit(), old)
+    new = _Stream(tx_latency_n=plan.latency_samples)
+    new.geometry_n = plan.geometry_samples
+    rig = SimpleNamespace(ptt=lambda keyed: True, key_failure=lambda: None)
+    radio_old = onair.RadioTx(rig, transmit=True, outdir=tmp_path, settle=.04)
+    radio_new = onair.RadioTx(rig, transmit=True, outdir=tmp_path, settle=.04)
+    radio_old.live, radio_new.live = old, new
+    audio = np.ones(10080, np.float32)
+    anchor = None
+    for turn in range(5):
+        if turn:
+            aim = (anchor + turn * round(1.25 * FS)
+                   if turn < 4 else 321987)
+            radio_old.boundary = radio_new.boundary = aim
+        radio_old._tx(audio, 'timing pin')
+        radio_new._tx(audio, 'timing pin')
+        if anchor is None:
+            anchor = radio_old.tx_end - audio.size
+        assert (new._tx_at, new.slept[-2], radio_new.tx_key_up,
+                radio_new.tx_audio_start, radio_new.tx_end, new.flushes[-1], new.pos,
+                radio_new.keyings[-1]) == (
+                old._tx_at, old.slept[-2], radio_old.tx_key_up,
+                radio_old.tx_audio_start, radio_old.tx_end, old.flushes[-1], old.pos,
+                radio_old.keyings[-1])
+        assert radio_new.corrected_emission_start - radio_new.tx_audio_start == plan.geometry_samples
+        assert radio_new._tx_events.lines() == radio_old._tx_events.lines()
+
+
+@pytest.mark.parametrize('path,old_ms', [
+    ('flown', 20), ('p2-mail', 20), ('p4-bench', 3), ('generic', 0)])
+@pytest.mark.parametrize('source', ['operator', 'toml'])
+def test_explicit_zero_moves_by_flight_delta(monkeypatch, tmp_path, path, old_ms, source):
+    from hfmodem.core.rigs import resolve_tx_timing
+
+    station = tmp_path / 'chain.toml'
+    station.write_text('schema=1\n[station]\ncontrol="local"\nregulatory="unregulated"\n'
+                       'because="offline fixture"\n[audio]\ntx_latency_ms=0\n')
+    plan = resolve_tx_timing(0 if source == 'operator' else None, rig='ft891',
+                             station_path=station, command_path=path, environ={})
+    old = _Stream(tx_latency_n=round(old_ms * FS / 1000))
+    old.transmit = MethodType(_flight_transmit(), old)
+    new = _Stream(tx_latency_n=plan.latency_samples)
+    aim = 60000
+    old.transmit(np.ones(BLK, np.float32), at=aim)
+    new.transmit(np.ones(BLK, np.float32), at=aim)
+    assert plan.latency_source == ('operator' if source == 'operator' else 'station-toml')
+    assert plan.geometry_samples == 0
+    assert new._tx_at - old._tx_at == round(old_ms * FS / 1000)

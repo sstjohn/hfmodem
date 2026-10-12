@@ -1,0 +1,15 @@
+/* Keep the release warning legible independently of each guide's theme. */
+.release-notice {
+  margin:0;
+  padding:1.25rem max(1.25rem,calc((100% - 1100px)/2));
+  border-bottom:4px solid #9c4d0a;
+  background:#fff0cd;
+  color:#30210b;
+  font:1.1rem/1.55 Arial,Helvetica,sans-serif;
+}
+.release-notice p { margin:0; color:inherit; font:inherit; }
+.release-notice a { display:inline; margin:0; color:inherit; font:inherit; text-decoration:underline; }
+.release-notice p + p { margin-top:1rem; }
+@media(prefers-color-scheme:dark) {
+  .release-notice { background:#382b17; color:#fff1d6; border-color:#f2b467; }
+}

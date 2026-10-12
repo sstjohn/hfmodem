@@ -117,6 +117,13 @@ The branch-B frame carries a frame CRC-16. The `Normal` / `Longpath` connect
 frame of §3 has no frame CRC. Both statements hold; they describe different
 frames.
 
+SCS's own packet builder, which reverses the callsign and adds a CRC-16, is
+not a connect frame. It is the PACTOR-1 QRT packet: an ordinary data packet
+whose field is `0x55` + the call, byte-reversed, with status bit 7 set and the
+usual packet CRC. Recorded gateway QRTs match it byte for byte (VE3KPG
+`0f 47 50 4b 33 45 56 55 83`; five decoded from VE3KPG and WS8EOC, all status
+0x83).
+
 ### Branch B's on-air framing  [P+S: 8 recordings, 3 bands, 2 months]
 
 Eleven bytes, 88 symbols at 100 Bd, 0.88 s, one rate throughout, 200 Hz shift,

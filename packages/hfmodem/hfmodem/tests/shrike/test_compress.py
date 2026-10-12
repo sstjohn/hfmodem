@@ -188,6 +188,76 @@ def test_stock_quoted_run_prefix_spans_fields_without_expansion():
     assert supervisor.feed(decoder.feed(b'\x7d\xff\x5cXY', 0)) == b'\x1d\xff\x5cXY'
 
 
+def _huffman(symbols, raw: dict[int, int] = {}) -> bytes:
+    """`symbols` coded on the plain tree, least significant bit first; after
+    the symbol at index `i`, the seven bits of `raw[i]` go in unchanged."""
+    codes = {}
+    def walk(offset, path):
+        for branch in (0, 1):
+            entry = compress.HUFTAB[(offset + 2 * branch) >> 1]
+            if entry > 767:
+                codes[entry & 0xFF] = path + [branch]
+            else:
+                walk(entry, path + [branch])
+    walk(0, [])
+    bits = []
+    for i, symbol in enumerate(symbols):
+        bits += codes[symbol]
+        if i in raw:
+            bits += [(raw[i] >> k) & 1 for k in range(7)]
+    bits += (codes[spec.IDLE] * 8)[:8 + -len(bits) % 8]
+    return bytes(sum(b << k for k, b in enumerate(bits[i:i + 8]))
+                 for i in range(0, len(bits), 8))
+
+
+def test_the_case_swap_comes_before_the_runs():
+    """A swapped field codes the whole character stream inverted, the run's
+    count symbol with it: `C` on the tree is count 3, not 67."""
+    field = _huffman(b"AB\x1d-C")
+    for protocol in (Protocol.PACTOR2, Protocol.PACTOR3):
+        assert compress.decompress(field, DataType.HUFFMAN_SWAPPED,
+                                   protocol) == b"ab---"
+
+
+def test_pactor1_has_no_runs():
+    for data_type, field in ((DataType.ASCII_8BIT, b"A\x1d-c"),
+                             (DataType.HUFFMAN, _huffman(b"A\x1d-c"))):
+        assert compress.decompress(field, data_type,
+                                   Protocol.PACTOR1) == b"A\x1d-c"
+        assert compress.decompress(field, data_type,
+                                   Protocol.PACTOR3) == b"A---"
+
+
+def test_the_escape_is_pactor3s_and_the_umlaut_symbols_everyone_elses():
+    escaped = _huffman(b"m\x7fglich", raw={1: 0x14})
+    assert compress.decompress(escaped, DataType.HUFFMAN,
+                               Protocol.PACTOR3) == b"m\x94glich"
+    assert compress.decompress(escaped, DataType.HUFFMAN,
+                               Protocol.PACTOR2).startswith(b"m\x7f")
+    umlauts = _huffman(b"\x0e\x0f\x10\x11\x14\x15\x16\x17")
+    assert compress.decompress(umlauts, DataType.HUFFMAN_SWAPPED,
+                               Protocol.PACTOR2).decode("cp437") == "äöü\x11ÄÖÜß"
+    assert compress.decompress(umlauts, DataType.HUFFMAN,
+                               Protocol.PACTOR1).decode("cp437") == "äöü\x11ÄÖÜß"
+    assert compress.decompress(umlauts, DataType.HUFFMAN,
+                               Protocol.PACTOR3) == b"\x0e\x0f\x10\x11\x14\x15\x16\x17"
+    assert compress.decompress(b"\x0e", DataType.ASCII_8BIT,
+                               Protocol.PACTOR2) == b"\x0e"
+
+
+def test_the_decoder_keeps_the_protocol_it_was_last_given():
+    decoder = compress.Decoder()
+    decoder.feed(b"", DataType.ASCII_8BIT, Protocol.PACTOR1)
+    assert decoder.feed(b"A\x1d-c", DataType.ASCII_8BIT) == b"A\x1d-c"
+
+
+def test_every_sic_from_0x60_up_is_a_character():
+    """SCS's monitor subtracts 0x60 from any SIC above 0x5F, unclamped."""
+    assert compress.Supervisor().feed(b"\x1c\x60\x1c\x80\x1c\xff A") == \
+        b"\x00\x20\x9f A"
+    assert compress.Supervisor().feed(b"\x1c\x5f1 A") == b"A"
+
+
 def test_a_supervisor_block_spans_the_packet_it_started_in():
     """SB at the end of one field, its function code at the start of the next.
 
@@ -279,6 +349,19 @@ def test_the_data_type_width_follows_the_protocol_not_the_speed_level():
                      protocol=Protocol.PACTOR2)
     assert bytes(io.delivered) == b"moment with a "
     assert b"moment" not in compress.decompress(P2_ENGLISH, (status >> 2) & 0b11)
+
+
+def test_the_monitor_reads_p1_status_width_by_protocol():
+    """`monitor._Text` must split Datenmodus the same width the link layer does:
+    two bits under PACTOR-1, by the packet's own declared protocol, not a fixed
+    three. Read as three, DL6MAA's 200 Bd announcement prints PMC German soup
+    instead of the plaintext `1dl6maa` an independent decoder reads off the
+    same audio."""
+    from hfmodem.shrike import monitor, rxfront
+    ev = rxfront.Event(0.0, "packet", "P1 DATA", protocol="PACTOR-1",
+                       packet=(0, P1_ANNOUNCEMENT_STATUS, P1_ANNOUNCEMENT, True))
+    lines = monitor._Text().lines(ev)
+    assert any("1dl6maa" in line for line in lines), lines
 
 
 def test_the_fixture_message_reads_across_its_packet_boundary():

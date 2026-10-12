@@ -46,7 +46,8 @@ def test_clock_rotates_only_after_accepted_turns(tmp_path):
     tx.aim(grid, 1)
     onair._p3_place_reply(grid, tx, 1)
     first = tx.reply_clock.pulse_epoch
-    assert first == entry+28950  # Initial IRS reversal was not counted twice.
+    assert (first-entry) % CYCLE == 28950  # Initial IRS reversal was not counted twice.
+    grid.cycles += 2  # The stint moves on; its packet is not the next stint's.
     grid.reverse(to_iss=True)
     assert tx.reply_clock.pulse_epoch == first
     grid.turn_accepted = False
@@ -120,3 +121,51 @@ def test_mail_speed_policy_drives_real_counter_mapped_replies(policy):
         host.arq.on_cycle()
         assert seam.words[-1] == arq.CS_ACK
         assert host.arq.rx_progress == 4
+
+
+@pytest.mark.parametrize('flags', [
+    ('--p3-control-waveform', 'current'), ('--p3-control-tail', 'repeat'),
+    ('--p3-control-stagger', 'lead-5'), ('--p3-control-stagger', 'lead-12')])
+def test_mail_profile_accepts_the_control_shape_flags(flags):
+    """The burst's shape is orthogonal to the reply grid the preset pins."""
+    a = _parsed('--p3-mail', *flags)
+    assert a.mail_fetch and a.p3_qrt_confirm and a.no_p3_fallback
+    with pytest.raises(SystemExit):
+        _parsed('--p3-mail', *flags, '--p3-timing-trial', 'B')
+
+
+def test_mail_profile_accepts_the_speed_policy():
+    a = _parsed('--p3-mail', '--p3-speed-policy', 'stock')
+    assert a.p3_speed_policy == 'stock' and a.mail_fetch and a.p3_qrt_confirm
+    assert _parsed('--p3-mail').p3_speed_policy == 'current'
+
+
+def _mail_reply(directory, offset_ms=None):
+    directory.mkdir()
+    s, tx, live, grid = setup(directory, 'B', delay=234)
+    entry = tx.timing_trial.entry_phase
+    tx.timing_trial = None
+    tx.reply_clock = ReplyClock()
+    tx.reply_clock.entry(entry)
+    if offset_ms is not None:
+        tx.p3_irs_reply_offset_n = round(offset_ms * 48)
+    receive(s, tx, live, grid, entry+44400)
+    tx.aim(grid, 1)
+    tx._pending_p3_cs = 0
+    onair._p3_place_reply(grid, tx, 1)
+    key = tx.key_instant(grid, 1)
+    tx.emit_pending_cs()
+    assert not tx.refused
+    pulse = tx.tx_audio_start + min(tx.tx_pulse_offsets)
+    return (pulse-entry) % CYCLE, (key, tx.tx_audio_start, tx.tx_key_up,
+                                   (directory/'tx_02.wav').read_bytes())
+
+
+@pytest.mark.parametrize('offset_ms', [2.5, 5.0, -5.0])
+def test_irs_reply_offset_moves_the_pulse_by_exactly_that_much(tmp_path, offset_ms):
+    at, _ = _mail_reply(tmp_path/'shifted', offset_ms)
+    assert at == 28950 + round(offset_ms * 48)
+
+
+def test_irs_reply_offset_zero_is_the_default_placement(tmp_path):
+    assert _mail_reply(tmp_path/'default') == _mail_reply(tmp_path/'zero', 0.0)

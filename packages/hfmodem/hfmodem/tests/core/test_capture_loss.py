@@ -3,12 +3,17 @@
 
 """Where the capture loses its blocks, on a bench with no sound card in it.
 
+Quiet-machine variants: HFMODEM_REALTIME=1 pytest -m realtime <this module>.
+
 `test_shortfall` establishes the fact off 66 recorded sessions: 871216 samples
 gone, every one of them in a listening cycle, none of the 1381 keyed cycles ever
 short a sample. It cannot say WHY, because the recordings hold no timing. This
 does, and it reproduces both halves -- a listening cycle that loses about one
 percent of itself and a keyed cycle that loses nothing -- out of the readers, a
 tick, and a thread.
+
+The deterministic gates below replay recorded audio with a sample work clock.
+The historical measurements that follow describe the retained real-time bench.
 
 THE DEVICE IS A PIPE AND AN IDLE PROCESS. A thread that sleeps to the block grid
 and stamps its own wake measures the OS timer and the GIL together and cannot
@@ -46,7 +51,10 @@ the stage that was running when it went puts 23552 of 23808 in the blind scan.
 """
 from __future__ import annotations
 
+import os
 import struct
+from pathlib import Path
+from types import SimpleNamespace
 import subprocess
 import sys
 import threading
@@ -174,9 +182,9 @@ class _Session:
     `RollingRx._decode`'s breather and every other reader is not.
     """
 
-    def __init__(self, *, breathe: bool) -> None:
+    def __init__(self, *, breathe: bool, audio=None) -> None:
         self.breathe = breathe
-        self.audio = _cycle_audio(1)
+        self.audio = _cycle_audio(1) if audio is None else audio
         self.short = self.audio[:int(KEYED_S * FS)]
         self.memory = p3rx.FieldMemory()
         self.sync = rxfront.SyncedRx()
@@ -242,7 +250,8 @@ def _per_cycle(lost: int) -> float:
 
 
 @pytest.mark.realtime
-def test_a_listening_cycle_loses_capture_and_a_keyed_cycle_does_not():
+@pytest.mark.skipif(os.environ.get("HFMODEM_REALTIME") != "1", reason="set HFMODEM_REALTIME=1 on a quiet machine")
+def test_a_listening_cycle_loses_capture_and_a_keyed_cycle_does_not_realtime():
     """The record's own shape, off the readers rather than off the recordings.
 
     The floor is 150 samples a cycle against the 1300-2300 this measures and the
@@ -271,7 +280,8 @@ def test_a_listening_cycle_loses_capture_and_a_keyed_cycle_does_not():
 
 
 @pytest.mark.realtime
-def test_breathing_the_whole_receive_path_takes_the_loss_to_zero():
+@pytest.mark.skipif(os.environ.get("HFMODEM_REALTIME") != "1", reason="set HFMODEM_REALTIME=1 on a quiet machine")
+def test_breathing_the_whole_receive_path_takes_the_loss_to_zero_realtime():
     """Not less loss -- none, and a stall bounded by the breather's own period.
 
     Breathing only `RollingRx._decode`, which is what flies, is the arm above:
@@ -295,7 +305,8 @@ def test_breathing_the_whole_receive_path_takes_the_loss_to_zero():
 
 
 @pytest.mark.realtime
-def test_the_reader_in_front_of_the_key_still_fits_its_reserve():
+@pytest.mark.skipif(os.environ.get("HFMODEM_REALTIME") != "1", reason="set HFMODEM_REALTIME=1 on a quiet machine")
+def test_the_reader_in_front_of_the_key_still_fits_its_reserve_realtime():
     """The pre-key scan is the one decode a cycle cannot be late out of.
 
     `onair` gives it the holdback plus `PREKEY_RESERVE_S` -- 43 ms measured on
@@ -319,3 +330,141 @@ def test_the_reader_in_front_of_the_key_still_fits_its_reserve():
     assert breathed < 0.043, (
         f"the pre-key scan takes {1e3 * breathed:.1f} ms breathing, against the "
         f"43 ms it has in front of the key ({1e3 * plain:.1f} ms without)")
+
+
+class SampleCapture:
+    """Replay reader work on a converter clock, without threads or OS scheduling.
+
+    Each Python call in the DSP costs one sample tick. This is a work bound,
+    not a prediction of CPU speed; elapsed-time performance remains opt-in.
+    The actual monitoring hook must yield before the ring overwrites a block.
+    Only DSP calls advance time, so callback accounting cannot charge itself.
+    """
+
+    def __init__(self, monkeypatch, callback=None):
+        self.ticks = 0
+        self.next_block = BLOCK
+        self.adc, self.got = [0.], [0.]
+        self.callback = callback
+        self.overwritten = 0
+        self.worst = 0.
+        self.reader_root = str(Path(live.__file__).parent) + os.sep
+        monkeypatch.setattr(gil, 'time', SimpleNamespace(
+            monotonic=lambda: self.ticks / FS, sleep=self.sleep))
+        self.deliver()
+
+    def sleep(self, seconds):
+        # Callbacks may run throughout a nap; its duration still costs samples.
+        self.deliver()
+        end = self.ticks + round(seconds*FS)
+        while self.next_block <= end:
+            self.ticks = self.next_block
+            self.deliver()
+        self.ticks = end
+
+    def profile(self, frame, event, arg):
+        if event == 'call' and frame.f_code.co_filename.startswith(self.reader_root):
+            self.ticks += 1
+
+    def deliver(self, *_):
+        while self.next_block <= self.ticks:
+            stamp = self.next_block / FS
+            lag = (self.ticks - self.next_block) / FS
+            self.worst = max(self.worst, lag)
+            self.adc.append(stamp)
+            self.got.append(self.ticks / FS)
+            if lag > RING_S:
+                self.overwritten += BLOCK
+            elif self.callback is not None:
+                self.callback(stamp)
+            self.next_block += BLOCK
+
+    def run(self, reader):
+        previous = sys.getprofile()
+        try:
+            sys.setprofile(self.profile)
+            reader()
+        finally:
+            sys.setprofile(previous)
+            self.deliver()
+
+    def lost(self):
+        # Drain a fresh block so trailing loss is visible in the ahead series.
+        self.ticks = self.next_block
+        self.deliver()
+        capture = object.__new__(_Capture)
+        capture.adc, capture.got, capture.base = self.adc, self.got, 0
+        capture.ring_s = RING_S
+        return capture.lost()
+
+
+def recorded_session():
+    from hfmodem.shrike import session
+    path = Path(__file__).resolve().parents[5] / 'captures/onair-0830-1215/stream.wav'
+    if not path.exists():
+        pytest.skip(f'local recording absent: {path}')
+    audio = session.load_wav(str(path), FS)[:round(CYCLE_S*FS)]
+    assert len(audio) == round(CYCLE_S*FS)
+    return _Session(breathe=False, audio=audio)
+
+
+def sample_arm(monkeypatch, *, breathe, keyed=False):
+    reader = recorded_session()
+    reader.breathe = breathe
+    device = SampleCapture(monkeypatch)
+    for _ in range(CYCLES):
+        device.run(reader.keyed if keyed else reader.listening)
+    lost, step, worst = device.lost()
+    return lost, step, worst, device.ticks / FS
+
+
+def test_a_listening_cycle_loses_capture_and_a_keyed_cycle_does_not(monkeypatch):
+    heard, step, worst, _ = sample_arm(monkeypatch, breathe=False)
+    keyed, _, _, _ = sample_arm(monkeypatch, breathe=False, keyed=True)
+    assert _per_cycle(heard) > 150
+    assert step == heard
+    assert worst > 4*gil.PERIOD
+    assert keyed < heard/4
+
+
+def test_breathing_the_whole_receive_path_takes_the_loss_to_zero(monkeypatch):
+    lost, step, worst, busy = sample_arm(monkeypatch, breathe=True)
+    reference, _, _, plain = sample_arm(monkeypatch, breathe=False)
+    assert (lost, step) == (0, 0)
+    assert worst < 5*gil.PERIOD
+    assert reference > 0
+    assert busy < 1.5*plain
+
+
+def test_the_reader_in_front_of_the_key_still_fits_its_reserve(monkeypatch):
+    reader = recorded_session()
+    device = SampleCapture(monkeypatch)
+    with gil.breathing():
+        device.run(lambda: rxfront.decode_expected_p1_packet(reader.audio, None))
+    assert 0 < device.ticks <= round(.043*FS)
+
+
+@pytest.mark.parametrize('regression', ['loss-accounting', 'breather', 'nap-overhead', 'prekey-work'])
+def test_sample_gates_reject_in_memory_regressions(monkeypatch, regression):
+    if regression == 'loss-accounting':
+        monkeypatch.setattr(rates, 'lost_step', lambda *args: 0)
+        gate = test_a_listening_cycle_loses_capture_and_a_keyed_cycle_does_not
+    elif regression == 'breather':
+        monkeypatch.setattr(gil, 'breathing', _Null)
+        gate = test_breathing_the_whole_receive_path_takes_the_loss_to_zero
+    elif regression == 'nap-overhead':
+        monkeypatch.setattr(gil, 'NAP', .010)
+        gate = test_breathing_the_whole_receive_path_takes_the_loss_to_zero
+    else:
+        original = rxfront.decode_expected_p1_packet
+
+        def repeated(*args, **kwargs):
+            # Reintroduce a repeated pre-key scan instead of sharing its work.
+            for _ in range(256):
+                result = original(*args, **kwargs)
+            return result
+
+        monkeypatch.setattr(rxfront, 'decode_expected_p1_packet', repeated)
+        gate = test_the_reader_in_front_of_the_key_still_fits_its_reserve
+    with pytest.raises(AssertionError):
+        gate(monkeypatch)

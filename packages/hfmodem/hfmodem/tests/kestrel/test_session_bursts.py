@@ -112,8 +112,8 @@ def test_responder_answers_the_session_confirm():
     assert any("tx connect-response" in m for m in io_r.sent)
 
 
-def test_the_keepalive_is_answered_never_originated_and_never_a_b():
-    """In the peer's turn the caller keys a keepalive only when asked, and only A.
+def test_the_keepalive_is_answered_never_originated_and_always_b():
+    """In the peer's turn the caller keys a keepalive only when asked, and it is B.
 
     The tape this used to be written from and the bench that replaced it agree
     once the prompts are put back into the reading. The logged VARA-to-VARA
@@ -124,8 +124,12 @@ def test_the_keepalive_is_answered_never_originated_and_never_a_b():
     stock caller alone in the peer's turn keyed nothing for 60 s and then
     disconnected on a silence timer.
 
-    What is left is the invariant: our own clock keys nothing, the peer's poll
-    draws one keepalive-A  [see _took_poll], and keepalive-B is never keyed at all.
+    What is left is the invariant: our own clock keys nothing, and every poll of
+    the peer's draws one keepalive-B  [see _took_poll]. Until 2026-09-28 this
+    asserted one keepalive-A per four polls and never a B; two stock 4.9s that
+    night answered all seven of the callee's polls with keepalive-B (bench-idle500
+    r3a, r3b), and the 2.3 s polls of 2026-09-03 behind the old reading were the
+    same frame, 1080 frame 1, repeated because nothing answered them.
     """
     init, resp, io_i, io_r = _handshake()
     assert init.turn == VA._TURN_PEER and init.state is VA.VaraState.CONNECTED
@@ -138,13 +142,14 @@ def test_the_keepalive_is_answered_never_originated_and_never_a_b():
 
     init._took_poll()
     keyed = [m for m in io_i.sent if m.startswith("tx")]
-    assert len(keyed) == 1 and "session-keepalive-a" in keyed[0], keyed
+    assert len(keyed) == 1 and "session-keepalive-b" in keyed[0], keyed
     assert init.called in keyed[0], "the answer is keyed to the CALLED station"
 
-    for _ in range(VA._POLLS_PER_ANSWER * 2):
+    for _ in range(8):
         init._took_poll()
         init.idle_keepalive()
-    assert not any("keepalive-b" in m for m in io_i.sent), io_i.sent
+    assert not any("keepalive-a" in m for m in io_i.sent), io_i.sent
+    assert sum("keepalive-b" in m for m in io_i.sent) == 9, io_i.sent
 
 
 def test_the_frame_three_gateways_returned_names_this_station():

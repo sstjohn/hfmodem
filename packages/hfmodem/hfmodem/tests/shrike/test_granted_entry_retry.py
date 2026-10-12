@@ -128,20 +128,27 @@ def test_silence_after_grants_does_not_erase_the_recorded_answers():
 
 
 def test_refused_transmissions_do_not_exhaust_entry_budgets():
-    # Six total refusals stay below the separate eight-refusal placement ceiling.
+    # Six counted refusal cycles stay below the eight-cycle placement ceiling.
     # This pins the two air budgets; the permanent-refusal test pins the ceiling.
-    host, _ = granted()
+    # Refused keys consume neither an owned grant nor measured peer silence.
+    # Refuse at the send seam: overwriting _refused_burst after granted() would
+    # mislabel an emitted entry whose late grant still owns a campaign charge.
+    host, keyed = calling_station()
+    keyed.send_packet = lambda *a, **kw: arq.REFUSED
+    host.on_rx_event(grant())
+    host.tick()
     for _ in range(3):
-        host.arq._refused_burst = True  # Previous attempt missed its key slot.
         repeat(host)
         assert host.protocol is Protocol.PACTOR3
         assert host.arq._upgrade_requests == 0
-        assert not host.arq._refused_burst
+        # _on_nak consumes the old refusal; this new refused send sets it again.
+        assert host.arq._refused_burst
     for _ in range(3):
-        host.arq._refused_burst = True
         host.tick()
         assert host.protocol is Protocol.PACTOR3
         assert host.arq._unanswered_upgrade == 0
+    assert not keyed.p3
+    assert not host.arq._upgrade_reply_owed
 
 
 def test_transmit_seam_refusal_then_success_charges_only_keyed_entries():

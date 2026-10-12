@@ -18,18 +18,25 @@ import pytest
 
 from hfmodem.shrike import onair, pactor1, ptc, rxfront, spec
 from hfmodem.shrike.arq import IRS, ISS, State
-from hfmodem.tests.shrike.test_armdefaults import _armed
+from hfmodem.shrike.p4probe import EntryProbe
+from hfmodem.tests.shrike.test_armdefaults import _armed, _parsed
 from hfmodem.tests.shrike.test_p1peer import grid, peer_read
 
 
-def setup(tmp_path, phase="reply", *, p1_only=True):
+def setup(tmp_path, phase="reply", *, p1_only=True, p4=False):
     tx = onair.RadioTx(transmit=False, outdir=tmp_path)
     tx.p1_setup_phase = phase
+    if p4:
+        tx.p4_probe = EntryProbe(2, 20.0, packet="robust", values=(7, 38),
+                                 headers=("A", "A"), trigger_word="P1 ACK")
     emitted = []
     tx._tx = lambda audio, what, **kw: emitted.append((audio, what))
     host = ptc.PtcHost(peer=tx, mycall="W9SSJ")
     tx.attach(host)
     host.stay_in_pactor1 = p1_only
+    if p4:
+        # `--after-connect p1-robust`, the console's --p4-mail arm.
+        host.p1_grant_only = host.p4_after_first_ack = True
     raster = grid()
     tx.aim(raster, 14)
     host.arq.on_host_connect("W9SSJ", "KI0BK")
@@ -65,8 +72,9 @@ def send(s, slot):
     ("reply", True, False), ("call", True, True),
     ("reply", False, True), ("call", False, True),
 ])
-def test_first_emission_phase_and_bytes(tmp_path, phase, opposite, expected):
-    s = setup(tmp_path, phase)
+@pytest.mark.parametrize("p4", [False, True])
+def test_first_emission_phase_and_bytes(tmp_path, phase, opposite, expected, p4):
+    s = setup(tmp_path, phase, p1_only=not p4, p4=p4)
     answer(s, 14, opposite=opposite)
     audio = send(s, 15)
     good = peer_read(audio, shift=int(expected))
@@ -77,8 +85,9 @@ def test_first_emission_phase_and_bytes(tmp_path, phase, opposite, expected):
     assert s.tx.boundary == 15 * 60000
 
 
-def test_cs4_train_and_skipped_slot_keep_call_phase(tmp_path):
-    s = setup(tmp_path, "call")
+@pytest.mark.parametrize("p4", [False, True])
+def test_cs4_train_and_skipped_slot_keep_call_phase(tmp_path, p4):
+    s = setup(tmp_path, "call", p1_only=not p4, p4=p4)
     for answered, keyed in [(14, 15), (15, 16), (17, 18), (18, 19)]:
         answer(s, answered)
         good = peer_read(send(s, keyed), shift=keyed & 1)
@@ -104,6 +113,29 @@ def test_real_first_ack_retires_override(tmp_path):
     answer(s, 16)
     assert s.rx.p1_setup_finished
     assert s.raster.shift(16) is True
+
+
+def test_p4_arm_keeps_call_phase_until_the_ack_that_requests_the_probe(tmp_path):
+    s = setup(tmp_path, "call", p1_only=False, p4=True)
+    answer(s, 14)
+    send(s, 15)
+    assert not s.tx.p4_probe.requested
+    assert s.raster.shift(15) is True
+    answer(s, 15, pactor1.CS_ACK_A)
+    assert s.tx.p4_probe.requested
+    assert s.rx.p1_setup_finished
+    assert s.raster.shift(15) is False
+    assert s.tx.invert is True
+
+
+def test_p4_stall_request_releases_call_phase_without_an_ack(tmp_path):
+    s = setup(tmp_path, "call", p1_only=False, p4=True)
+    answer(s, 14)
+    send(s, 15)
+    s.tx.p4_probe.request(0, b"", 0)
+    answer(s, 15)
+    assert not s.rx.p1_setup_finished
+    assert s.raster.shift(15) is False
 
 
 def test_changeover_retires_override_permanently(tmp_path):
@@ -151,10 +183,46 @@ def test_cli_explicit_experiment_in_p1_arm(flags):
     assert _armed(*flags, "--p1-setup-phase", "call").pactor1_only
 
 
-@pytest.mark.parametrize("flags", [(), ("--p1-grant-only",), ("--pactor3-only",)])
-def test_cli_refuses_experiment_in_upgrade_arm(flags):
-    with pytest.raises(SystemExit, match="requires a PACTOR-1-only arm"):
+@pytest.mark.parametrize("flags,fix", [
+    ((), "add --pactor1-only"),
+    (("--p1-grant-only",), "replace --p1-grant-only with --pactor1-only"),
+    (("--pactor3-only",), "replace --pactor3-only with --pactor1-only"),
+    (("--p3-uninvited", "--mail-fetch"), "replace --p3-uninvited with --pactor1-only"),
+])
+def test_cli_refuses_experiment_in_upgrade_arm(flags, fix):
+    with pytest.raises(SystemExit, match=f"P4-entry arms: {fix}, or enter P4 with --p4-entry"):
         _armed(*flags, "--p1-setup-phase", "call")
+
+
+def _resolved(*argv):
+    args = _parsed(*argv)
+    onair._connect_defaults(args)
+    onair._p4_entry_defaults(args)
+    onair._arm_defaults(args)
+    return args
+
+
+P4_MAIL = ("--p1-grant-only", "--p1-status-bits45", "2", "--p1-robust-stall", "12",
+           "--p4-entry", "--p4-probe-packet", "robust", "--p4-probe-values", "7,38",
+           "--p4-probe-headers", "A,A", "--p4-probe-cadence", "consecutive",
+           "--p4-link", "--p4-ladder", "long", "--p4-data", "body",
+           "--after-connect", "p1-robust")
+
+
+@pytest.mark.parametrize("flags", [P4_MAIL, ("--p4-entry",), ("--p4-mail",)])
+def test_cli_accepts_experiment_on_p4_entry_arm(flags):
+    args = _resolved(*flags, "--p1-setup-phase", "call")
+    assert args.p1_setup_phase == "call" and args.p4_entry and not args.pactor1_only
+
+
+@pytest.mark.parametrize("flags,early", [
+    (("--after-connect", "chirp"), "--after-connect chirp"),
+    (("--connect", "robust", "--after-robust", "p3"), "--after-robust p3"),
+    (("--connect", "robust", "--after-robust", "p4-robust"), "--after-robust p4-robust"),
+])
+def test_cli_refuses_experiment_that_leaves_p1_before_the_ack(flags, early):
+    with pytest.raises(SystemExit, match=f"{early} leaves PACTOR-1 before one: drop {early}"):
+        _resolved(*flags, "--p1-setup-phase", "call")
 
 
 def test_unmeasured_sense_does_not_move_grid(tmp_path):

@@ -321,6 +321,32 @@ def test_set_mode_never_asks_for_the_rigs_default_width(
     assert lines[:2] == [f"M PKTUSB {FILTER_HZ}", "M PKTUSB 2400"], lines
 
 
+@pytest.mark.parametrize("rig_name, passband", [("ft891", FILTER_HZ), ("ftdx10", -1)])
+def test_run_leaves_a_profile_width_to_tune(
+        rig_name, passband, fake_rigctl, tmp_path, monkeypatch) -> None:
+    """2026-10-02, FTDX10: `tune` set DATA width 4000 Hz and the 12 kHz roof by
+    raw CAT and read both back, then the arm's `M PKTUSB 3000` had hamlib rewrite
+    SH and RF and the panel's WIDTH went out. A profile that names its width gets
+    hamlib's no-change passband; the FT-891 still asks for FILTER_HZ."""
+    monkeypatch.setenv("FAKE_RIGCTL_MUTE_F", "1")
+    real_rig = ota.Rig
+    monkeypatch.setattr(ota, "Rig", lambda *a, **kw: real_rig(
+        *a, rigctl_dir=str(fake_rigctl), **kw))
+    monkeypatch.setattr(ota.session, "build_session", lambda *a, **kw: [0.0] * 480)
+    monkeypatch.setattr(ota.session, "write_wav", lambda *a, **kw: None)
+    monkeypatch.setattr(ota, "find_device", lambda name, kind: 0)
+    args = argparse.Namespace(
+        outdir=str(tmp_path / "out"), dxcall="K7ABC", dial=7100000, center=None,
+        band="40m", data=False, message="", sl=2, mycall="W9SSJ", rig=rig_name,
+        dry_run=False, audio_out=None, audio_in=None, serial="/dev/null",
+        baud=0, attempts=1, listen=0.1, gap=0.0, max_key=40.0)
+    with pytest.raises(SystemExit):
+        ota.run(args)
+    modes = [line for line in (tmp_path / "rigctl.log").read_text().splitlines()
+             if line.startswith("M ")]
+    assert modes == [f"M PKTUSB {passband}"], modes
+
+
 # -- fix 3: keying that cannot be confirmed is not keying --------------------
 
 def test_a_key_down_refuses_a_device_that_is_not_there(fake_rigctl) -> None:
@@ -550,8 +576,22 @@ def test_a_path_without_hamlib_refuses_instead_of_raising(tmp_path) -> None:
     assert "HAMLIB_BIN" in said, f"the refusal does not say how to supply it:\n{said}"
 
 
+@pytest.fixture
+def launcher(tmp_path, monkeypatch):
+    # A symlink under a scratch .venv has no pyvenv.cfg and loses editable installs.
+    # Exercise the launcher with its supported explicit interpreter override.
+    monkeypatch.setenv("HFMODEM_PYTHON", sys.executable)
+    library = tmp_path / "tools/lib/ports.sh"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(_PORTS_LIB.read_bytes())
+    interpreter = tmp_path / ".venv/bin/python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.symlink_to(sys.executable)
+    return library
+
+
 @requires_launcher
-def test_the_launcher_puts_hamlib_on_path_for_the_children_it_starts(tmp_path) -> None:
+def test_the_launcher_puts_hamlib_on_path_for_the_children_it_starts(tmp_path, launcher) -> None:
     """The other half, and the reason the fix is not a flag on each consumer:
     shrike, besra and sabir all resolve `rigctl` by name, so the launcher's
     shared environment answers all three at once. A build that is on no machine's
@@ -569,7 +609,7 @@ def test_the_launcher_puts_hamlib_on_path_for_the_children_it_starts(tmp_path) -
     # this pins the launcher against the resolution rather than against PATH's
     # spelling.
     r = subprocess.run(
-        ["/bin/bash", "-c", f'set -euo pipefail; source "{_PORTS_LIB}"; '
+        ["/bin/bash", "-c", f'set -euo pipefail; source "{launcher}"; '
                             f'"{sys.executable}" -c '
                             "'import shutil; print(shutil.which(\"rigctl\"))'"],
         capture_output=True, text=True, timeout=60,
@@ -580,14 +620,14 @@ def test_the_launcher_puts_hamlib_on_path_for_the_children_it_starts(tmp_path) -
 
 
 @requires_launcher
-def test_the_launcher_refuses_a_machine_with_no_hamlib_at_all(tmp_path) -> None:
+def test_the_launcher_refuses_a_machine_with_no_hamlib_at_all(tmp_path, launcher) -> None:
     """And when there is none to put there, the refusal is the launcher's own,
     before a modem is started -- not a Python traceback out of whichever tool
     reached for it first."""
     empty = tmp_path / "bin"
     empty.mkdir()
     r = subprocess.run(
-        ["/bin/bash", "-c", f'source "{_PORTS_LIB}"; require_hamlib'],
+        ["/bin/bash", "-c", f'source "{launcher}"; require_hamlib'],
         capture_output=True, text=True, timeout=60,
         env={**os.environ, "PATH": f"{empty}:/usr/bin:/bin",
              "HAMLIB_BIN": str(tmp_path / "nope")})

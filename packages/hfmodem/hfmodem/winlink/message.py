@@ -165,12 +165,8 @@ def compose(sender: str, to: str | list[str], subject: str, body: bytes | str,
     """A new outbound message in the header order gateways themselves write."""
     if isinstance(body, str):
         body = body.encode("latin-1", "replace")
-    # CRLF THROUGHOUT, AND THE COUNT IS TAKEN AFTER. A body composed from a Unix
-    # file goes out with CRLF headers and bare-LF lines, and on 2026-08-22 a CMS
-    # answered one with "Error check failed on receiving B2 message. [Received
-    # data stream not a correct format]" and disconnected -- after ACKing every
-    # frame, with the EOT checksum and the lzhuf CRC both verifying on the wire.
-    # The two messages this station has received off the air carry no bare LF.
+    # CRLF throughout, counted after: every message received off the air and every
+    # delivery since is CRLF, and no bare-LF body has ever been tried.
     body = body.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
     date = date or datetime.now(timezone.utc)
     headers = [("Mid", mid or new_mid()),

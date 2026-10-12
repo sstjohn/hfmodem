@@ -396,3 +396,39 @@ is packaged as an asset:
 | `acq_window` | Designed — RRC at unit roll-off, 27 taps, peak at 13 of 32 | does not ship; 3/3 real markers at 0.997–0.998, Hann finds none |
 | `acq_lowpass` | Designed — `firwin(96, 400 Hz, Kaiser β 6.5)` | does not ship; first image band 76 dB down |
 | Eight P3 interleavers | Computed — SCS's published recurrence | byte-identical against the archived bytes |
+
+
+<!-- site:omit:start -->
+## PACTOR-4 C2 and higher normal-long geometry
+
+Runtime C2 arrays use an integer square-root column walk plus compact,
+hash-pinned index swaps. Twelve of the thirteen runtime sizes have recovered
+CML generator sessions; the 1160-entry recipe remains unresolved. The replay
+swaps reproduce the exact target and do not claim to be its original swap trace.
+The package retains an offline constructor and verifier, including independent
+upstream checks; see [C2 derivation](pactor/pactor4-c2-derivation.md).
+
+The 4968-symbol direct-gather order is the existing 24-by-207 walk product.
+SL6–8 point labels invert Gray coding on PSK phase. SL9 and SL10 use quadrant
+geometry, with raw signed 16-bit coordinates at scale 4096. SL10's uniform
+three-decimal coordinate rounding is an inferred compatibility rule. Complete
+coordinate and symbol hashes pin label order, axes, dtype, rounding and scaling.
+None of these geometric generators run the stochastic CML construction during
+modem startup.
+
+| Shipped binary | Category | How known |
+|---|---|---|
+| `c2-280.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-348.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-352.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-704.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-1056.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-1160.swaps.z` | Replay swaps | Exact target, original CML seed/session unresolved; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-1408.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-1656.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-4140.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-8280.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-12420.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-16560.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+| `c2-20700.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
+<!-- site:omit:end -->

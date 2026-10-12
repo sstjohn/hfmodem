@@ -97,7 +97,10 @@ def test_cold_capture_establishes_current_crc_then_emits_mail_ack(
     tx.emit_pending_cs()
     assert not tx.refused and len(live.emissions)==2
     pulse = tx.tx_audio_start+min(tx.tx_pulse_offsets)
-    assert (pulse-ENTRY)%60000 == 28950
+    # The reply rides the peer's raster rather than each decode, so the pulse
+    # sits its fixed gap past the comb the two recorded frames seated and not
+    # past the second reading's own 0.94 ms quantum.
+    assert (pulse-ENTRY)%60000 == 28965
     assert tx._pending_p3_cs is None
     sidecar=json.loads((tmp_path/'tx_02.json').read_text())
     assert sidecar['audio_start']+min(sidecar['pulse_offsets'])==pulse
@@ -110,7 +113,9 @@ def test_erased_body_cannot_authorize_ack_from_head_only(recording,tmp_path):
     live.now=live.pos=ORIGIN+len(first)
     onair._scan_frame(s.rx,first,ORIGIN,tracked_only=False)
     assert not s.packets and s.rx._p3_row0 is None and grid._p3_peer is None
-    # A readable CS3 head can yield IRS but supplies no CRC packet clock.
+    # A readable CS3 head yields IRS and seats the reply clock on its own
+    # phase reference, but it is no CRC packet: what it owes is a repeat
+    # request, and that keys rather than waiting on a body that never reads.
     s.rx.control_signal(first,ORIGIN,FIRST_HEAD)
     assert not s.packets
     assert s.host.arq.role == arq.IRS
@@ -120,5 +125,5 @@ def test_erased_body_cannot_authorize_ack_from_head_only(recording,tmp_path):
     s.host.tick()
     assert tx._pending_p3_cs == arq.CS_REQUEST
     tx.emit_pending_cs()
-    assert tx.refused and len(live.emissions)==1
-    assert grid._p3_peer is None
+    assert not tx.refused and len(live.emissions)==2
+    assert abs(grid._p3_peer[0]-FIRST_HEAD) <= 60

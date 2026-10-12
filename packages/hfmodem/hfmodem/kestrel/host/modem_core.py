@@ -68,6 +68,13 @@ class ModemObserver(abc.ABC):
 
     # -- optional / channel-state events (default: no-op) ------------------
 
+    def modem_warning(self, message: str) -> None:
+        """Report a receive-stream fault on the command port."""
+
+    def modem_disconnect_refused(self, message: str) -> None:
+        """A requested close is unsupported; the current link remains connected."""
+        self.modem_warning(message)
+
     def modem_busy(self, on: bool) -> None:
         """Channel busy detector -> ``BUSY ON`` / ``BUSY OFF``."""
 

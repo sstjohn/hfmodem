@@ -113,8 +113,8 @@ def test_the_regulatory_profile_is_consulted_before_the_line_goes_up(fake):
     ptt = FakePtt()
     r = make(fake, ptt=ptt, profile=Part97(licence=Licence.GENERAL),
              control=Control.AUTOMATIC)
-    fake.freq = 14_078_500          # 14.080 centre: outside §97.221(b)
-    with pytest.raises(RigError, match=r"97\.221"):
+    fake.freq = 14_078_500          # 14.080 centre: outside the profile's automatic segments
+    with pytest.raises(RigError, match=r"part97 automatic control"):
         r.key(burst(bw=2300.0), why="wide and unattended", duration_s=1.0)
     assert ptt.line is False, "the line went up before the check"
 
@@ -122,8 +122,8 @@ def test_the_regulatory_profile_is_consulted_before_the_line_goes_up(fake):
 def test_the_check_uses_the_dial_the_radio_reports_not_the_one_we_asked_for(fake):
     """The dial does not stay where you left it."""
     r = make(fake, profile=Part97(licence=Licence.GENERAL), control=Control.AUTOMATIC)
-    fake.freq = 13_000_000          # somewhere it may not transmit at all
-    with pytest.raises(RigError, match=r"97\.301"):
+    fake.freq = 13_000_000          # outside the profile's selected segments
+    with pytest.raises(RigError, match=r"part97 placement"):
         r.key(burst(dial=7_100_000), why="stale dial", duration_s=1.0)
 
 
@@ -465,8 +465,8 @@ def test_proving_the_line_refuses_on_a_retired_rig(fake):
 def test_the_proof_needs_no_callsign_because_it_identifies_nothing(fake):
     """The proof keys a sideband transmitter with no audio, which emits no RF.
     An earlier version required station.mycall on the claim that it sent the
-    callsign and discharged §97.119; nothing was sent, so the requirement
-    enforced an identification that never happened."""
+    callsign; nothing was sent, so requiring a callsign setting did not
+    produce an identification."""
     r, ptt = full(fake, mycall="")
     r.arm(prove_ptt=True)
     assert ptt.line is False and not r.keyed

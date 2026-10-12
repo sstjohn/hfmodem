@@ -45,6 +45,7 @@ from functools import lru_cache
 import numpy as np
 
 from ..coding.crc import crc16_genibus
+from .compression import MODE_BITS, setup_mode, validate_mode
 
 # 6-bit packed callsign: A-Z -> 1..26, 0-9 -> 27..36, 0 terminates  [spec 04 §4.2A].
 _CS6 = {c: i + 1 for i, c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ")}
@@ -99,7 +100,9 @@ def unpack_callsign6(data: bytes) -> str:
 LINK_SETUP_BODY = {"2300": 90, "2750": 90, "500": 44}
 
 
-def link_setup_frame(caller: str, bw: str = "2300", level: int = 4) -> bytes:
+def link_setup_frame(caller: str, bw: str = "2300", level: int = 4,
+                     ask: int = 4, grade: int = 0x80, high_speed: bool = False,
+                     compression: str = "OFF") -> bytes:
     """Caller-ID setup at the negotiated host speed level (1..4).
 
     Eight identity bytes are followed by the short-frame trailer. At levels
@@ -107,6 +110,16 @@ def link_setup_frame(caller: str, bw: str = "2300", level: int = 4) -> bytes:
     has only ten body bytes and ends directly in ``04 8b``. Append the body's
     CRC-16/GENIBUS in both cases. Stock-caller output independently fixes these
     formats (2026-09-20; docs/protocols/vara/30-connect-speed-negotiation.md).
+
+    The short end is a close's: ``ask`` is the host level the called station's
+    greeting is to come at and ``grade`` the top two bits of the field. A stock
+    caller that heard the connect-response at -8, -12, -14 and -16 dB closed
+    ``04 42``, ``03 42``, ``02 42`` and ``01 02``, and the greeting came at that
+    level; ``04 82`` at 22 dB.
+
+    ``high_speed`` is a high speed capable caller's setup: body[7] bit 0 set and
+    the ask at 6, the highest level a session-confirm can start the called
+    station at; the confirm names the actual one  [see link_setup_marks].
     """
     if type(level) is not int or level not in (1, 2, 3, 4):
         raise ValueError("link-setup level must be a host speed level 1..4")
@@ -116,12 +129,13 @@ def link_setup_frame(caller: str, bw: str = "2300", level: int = 4) -> bytes:
     packed = _pack_callsign6(base)
     body[:len(packed)] = packed
     body[5] = ssid                                            # SSID as integer, 0 if bare
-    body[7] = 0x80
+    compression = validate_mode(compression)
+    body[7] = (0x81 | MODE_BITS[compression]) if high_speed else 0x80
     if level > 1:
         body[8] = 0x14
         body[9] = crc16_genibus(caller.upper().encode()) >> 8
-    body[-2] = 0x04
-    body[-1] = 0x8b if level == 1 else 0x82                                            # block/trailer byte
+    body[-2] = 6 if high_speed else ask
+    body[-1] = grade | (0x0b if level == 1 else 0x02)
     return bytes(body) + crc16_genibus(bytes(body)).to_bytes(2, "big")
 
 
@@ -140,9 +154,20 @@ def is_link_setup(frame_bytes: bytes) -> bool:
     levels. Caller identity is still at the same offsets in every format.
     """
     b = frame_bytes
-    return ((len(b) == 12 and b[7] == 0x80 and b[-4:-2] == b"\x04\x8b")
-            or (len(b) >= 25 and b[7] == 0x80 and b[8] == 0x14
-                and b[-4] == 0x04))
+    return len(b) >= 12 and b[7] in (0x80, 0x81, 0x83, 0x85) and (
+        (len(b) == 12 and b[-3] == 0x8b) or (len(b) >= 25 and b[8] == 0x14))
+
+
+def link_setup_compression(frame_bytes: bytes) -> str:
+    """Compression selected by the caller for both directions."""
+    return setup_mode(frame_bytes[7])
+
+
+def link_setup_marks(frame_bytes: bytes) -> tuple[bool, int]:
+    """``(high_speed, ask)`` of a link-setup: a high speed capable VARA caller
+    sets body[7] bit 0 and asks 6 where a speed limited build asks at most 4
+    (docs/protocols/vara/evidence/HIGH-SPEED-MARKER.md)."""
+    return bool(frame_bytes[7] & 1), frame_bytes[-4]
 
 
 # --------------------------------------------------------------------------- #
@@ -310,20 +335,19 @@ CONNECT_RESPONSE = BurstKind(
     "connect-response",
     (62, 67, 55, 66, 59, 72, 68, 55), 15, 289, 511)
 
-# A Trimode responder's connect confirmation: a 16-symbol frame on the
+# The peer's NAK of a link-setup it could not read: a 16-symbol frame on the
 # connect-response's own stream (SEED_OFF 289) at lattice position 1, keyed to
 # the called station — the connect-response is position 17, so PREADV is
-# 1 + 2*15 * 1 = 31. K0SI on 80 m answered our FIRST link-setup with it at +0.12 s
-# on both 2026-09-16 tapes (034218Z at 43.86 s, 034443Z at 23.53 and 79.24 s),
-# 14-15 of 15 payload tones exact, then ignored our retries. Eight link-setup
-# bench runs against a stock 4.9.0 on 2026-09-16 — both wide bandwidths, clean,
-# retried, mismatched and with no link-setup at all — draw it in none, so it
-# never relaxes the connect gate the two-tone ack and turn-request routes hold —
-# it is taken only where a link-setup of ours is outstanding, the same window the
-# turn-request-before-connected route lives in  [see
-# vara_arq._connect_confirmed]. The single-tone preamble is nominal: recognition
-# reads the payload alone [see recognize]. The DATA NACK use measured later is
-# documented below; it does not assign the DATA action to a link-setup reply.
+# 1 + 2*15 * 1 = 31. Stock keys it on a CRC failure  [docs/protocols/vara/26]. It
+# was read as a connect confirmation until 2026-09-23: K0SI on 80 m keyed it
+# behind our level-4 link-setup on four nights from 09-16 to 09-23, KB8AY on
+# 09-17, K7EK-10 on 09-20 and KC9GHZ on 09-23, and neither link it "confirmed"
+# carried a byte. A stock responder behind a good link-setup keys the two-tone
+# connected-ack and nothing else (eight bench runs, 2026-09-16). Read only by
+# `vara_arq._link_setup_nacked`, while CONNECTING at `_I_LINKSETUP_SENT`, and
+# there `_stream_connect_ask` runs ahead of the connect-response search, so the
+# NAK claims the payload and the offer search never sees it. The payload alone
+# is scored.
 #
 # ITS PAYLOAD IS BIT-IDENTICAL TO CONNECT-RESPONSE LATTICE POSITION 1 AT BW2300,
 # because that is exactly what it is drawn from. `for_bw` swaps the alphabet and
@@ -333,31 +357,24 @@ CONNECT_RESPONSE = BurstKind(
 # and nowhere else, and each bandwidth is safe for its own reason:
 #
 #   BW2300  same fifteen tones. `vara_arq._ANSWER_LATTICE_BY_BW["2300"]` does not
-#           carry 1 and must never be widened down to it, or a Trimode station's
-#           connect confirmation reads as a new connection offer.
+#           carry 1 and must never be widened down to it, or the NAK reads as a
+#           new connection offer.
 #   BW2750  different streams, so different tones. Positions 1 and 2 of stream
 #           579 are level-2 and level-3 offers and this frame is not on that stream
 #           at all; both can be named in one session without ambiguity.
-#
-# Route precedence settles the rest: the confirmation is read only by
-# `vara_arq._connect_confirmed`, only while CONNECTING at `_I_LINKSETUP_SENT`,
-# and `_stream_connect_ask` runs ahead of the connect-response search — so at
-# that one step the confirmation claims the payload and the offer search
-# never sees it  [tests/kestrel/test_connect_confirm_stream.py].
 #
 # A GATED 16-SYMBOL BRACKET CARRYING IT would be named `session-confirm` by the
 # bracket reader — the two share a symbol count and `_CANDIDATES` resolves that
 # count to the confirm. This frame is read on the stream only, so nothing in the
 # bracket route is asked to tell them apart today.
-SESSION_CONNECT_CONFIRM = BurstKind(
-    "session-connect-confirm", (62,), 15, 289, 31)
+SESSION_LINK_SETUP_NAK = BurstKind(
+    "session-link-setup-nak", (62,), 15, 289, 31)
 
 # In a pending DATA turnaround this same payload is a NAK. Independently
 # reproduced with stock 4.9.0 by encoding a wrong CRC at BW2300: no host bytes,
 # short 289/31, then 288/63 after each state query. K0SI's 2026-09-19 recording
-# carries all 15/31 payload tones. The DATA action needs its own state gate;
-# the existing link-setup interpretation must not leak into a connected link.
-SESSION_DATA_NAK_SHORT = replace(SESSION_CONNECT_CONFIRM, name="session-data-nak-short")
+# carries all 15/31 payload tones.
+SESSION_DATA_NAK_SHORT = replace(SESSION_LINK_SETUP_NAK, name="session-data-nak-short")
 SESSION_DATA_NAK_QUERY = BurstKind(
     "session-data-nak-query", (74,), 31, 288, 63, 1)
 
@@ -527,337 +544,154 @@ CONNECTED_ACK_PREAMBLE = ((64, 67), (56, 74), (64, 69), (68, 78))
 
 # One captured BW2300 ack, kept whole: its seven state symbols are one reading of
 # one burst on a channel 10 dB above its noise, and the BW500 table below is the
-# clean measurement of what those symbols are for  [spec 04 §4.2C]. Nothing keys
-# it now — see the two measured bursts below, which are what a 4.9.0 reads.
+# clean measurement of what those symbols are for  [spec 04 §4.2C]. The station
+# keys the link's generated burst  [control_bursts]; this copy is what the
+# loopback peer in station.mail and arq.phy's token renderer key.
 CONNECTED_ACK_2300 = (
     (64, 67), (56, 74), (64, 69), (68, 78),
     (52, 86), (83, 87), (46, 82), (59, 77), (56, 58), (69, 75), (52, 66))
 
-# THE TWO CONTROL BURSTS A BW2300 SESSION ACTUALLY CARRIES, off two stock VARA HF
-# 4.9.0 instances over a fake cable on 2026-08-26 — one cable per direction, so
-# which station keyed a burst is a property of the tape and not of a scorer.
+# THE ANSWER BURSTS. Every two-tone burst a station keys in a turnaround — the
+# 11-symbol control burst, the 8-symbol continue, the NAK — is a fixed opening
+# and seven symbols drawn off the payload generator's own VB6 Rnd stream. The
+# stream is seeded as a session frame's is [see _payload_bins_cached], PREADV 1,
+# and each symbol takes two distinct first draws and two second draws onto the
+# bandwidth's alphabet, with the parity of a payload whose symbol 0 is odd:
 #
-# Each station keys ONE burst and keys it at everything: the caller's answers both
-# of the responder's DATA overs in every session, the responder's answers the
-# link-setup over, both of the caller's DATA overs, and the close. Twelve
-# occurrences across three sessions, preamble 4 of 4 at every one, and the seven
-# symbols behind it identical at every one — so they carry no per-over state, no
-# ACK/NAK and no block count, unlike the three BW500 tails below.
+#     Pa = Int(Rnd*n_p): Do: Pb = Int(Rnd*n_p): Loop While Pb = Pa
+#     Da = Int(Rnd*7): Db = Int(Rnd*7)
 #
-# THE TAIL IS READ, and by the peer rather than by us. Same bench, same responder,
-# the same 65-byte block, three arms differing only in the seven symbols this
-# station keys back at the responder's over:
+# Frames follow one another on that stream, so a burst is a callsign, a SEED_OFF
+# and a frame index. The offsets sit two above the session family's 60 / 288 and
+# the turn frames' 850 / 1078:
 #
-#   CONNECTED_ACK_2300's tail   the responder idles at 3.4 s to its own timeout
-#   the RESPONDER's tail        the same
-#   the CALLER's tail           the responder releases the turn, our block is
-#                               delivered byte-exact, and its queued reply comes
-#                               back to our host in the same phase
+#   continue, NAK                               CALLED, 62 caller / 290 responder, frames 0 / 1
+#   continue asking a level step                CALLED, same streams, frames 6 / 4 / 7 / 8 / 5
+#                                                 = +1 / +2 / +3 / +4 / -1
+#   11-symbol control burst                     CALLER, 852 caller / 1080 responder, frame 0
+#                                                 (frame 1 answers a keepalive, and is
+#                                                 the idle poll of a turn held empty)
+#   11-symbol turn grant                        CALLED, 290, frame 13
 #
-# THE SEVEN SYMBOLS ARE KEYED TO THE CALLER. Eight two-VARA sessions on
-# 2026-08-26 — same bench, same shape, same payloads, the callsign assignment the
-# only thing that moves — separate the three candidates outright, with both cables
-# recorded so a burst is attributed by which file holds it:
-#
-#   W9SSJ -> W1AW / W1AX / KI7QQQ   the same two tails, tone for tone
-#   W9SSK -> W1AW                   both tails change, sharing no symbol with these
-#   W1AW  -> W9SSJ                  both change, and neither is either of these
-#   N0XYZ -> KI7QQQ, VE3ABC -> G0XYZ    a distinct pair each
-#
-# Three callees against one caller move nothing and one changed caller moves
-# everything, which is the OPPOSITE key from every other burst in this file
-# [see payload_bins, keyed to the CALLED station]. Role is real as well — the two
-# tails of one link differ in all seven — but role alone does not name a burst,
-# and it was the only thing the three recordings of one pair could distinguish.
-#
-# The pair below is therefore a link W9SSJ CALLED, which is every session this
-# station has put on the air. What is not derivable is the rest: the generator
-# behind these seven symbols is not reversed, so a link somebody else called has
-# no burst here  [see CONTROL_BURSTS_BY_CALLER].
-CONTROL_BURST_CALLER_2300 = (
-    (64, 67), (56, 74), (64, 69), (68, 78),
-    (60, 96), (39, 49), (56, 88), (29, 61), (61, 63), (49, 95), (66, 90))
-CONTROL_BURST_RESPONDER_2300 = (
-    (64, 67), (56, 74), (64, 69), (68, 78),
-    (34, 79), (80, 82), (50, 66), (59, 95), (64, 96), (59, 77), (57, 72))
-
-# Two stock VARA HF4.9.0 sessions, 2026-09-04 continue-2750-{1,2},
-# W9SSJ caller/W1AW responder, separate cables. Four caller final-DATA ACKs
-# followed by responder release; four responder connected/final-DATA ACKs.
-# All seven tail pairs differ from BW2300. The former BW2300 fallback delivers
-# the data but leaves a stock BW2750 sender idling after its empty final block
-# (2026-09-10 clean baseline). Responder's final pair is63/65, confirmed by
-# rectangular FFT: a Hann window's overlapping skirts can falsely suggest62/64.
-CONTROL_BURST_CALLER_2750 = (
-    (64, 67), (56, 74), (64, 69), (68, 78),
-    (53, 89), (32, 42), (49, 95), (22, 68), (61, 71), (68, 102), (63, 71))
-CONTROL_BURST_RESPONDER_2750 = (
-    (64, 67), (56, 74), (64, 69), (68, 78),
-    (27, 87), (90, 104), (43, 73), (66, 102), (71, 103), (66, 84), (63, 65))
-
-# THE BURST THAT ANSWERS AN OVER WITH MORE BEHIND IT. The 11-symbol burst above
-# is not the answer to every over: at every INTERMEDIATE over of a multi-over
-# delivery a station keys this shorter one instead, and only the last over draws
-# the 11-symbol one. Three bench sessions of 2026-08-30, one cable per direction:
-# a 600-byte delivery answered 6 x this + 1, a 200-byte BW500 delivery 4 x this +
-# 1, and a 178-byte delivery each way 2 + 1 in both directions — the responder
-# keys the same shape at the caller's intermediate overs.
-#
-# Two-tone throughout, like the 11-symbol burst, and its FIRST symbol is that
-# burst's own opening pair — in every one of the fourteen copies on these tapes,
-# and no other symbol is shared by all of them. The eight below are one form of
-# it: tone for tone identical at eight of the ten a caller keyed across those
-# sessions, including all six of the 600-byte run. The other two are a second
-# form differing in five symbols, and nothing varied here separates the two — so
-# the seven symbols behind the lead carry something, and this rig has not pinned
-# what. Keyed here for the same reason the 11-symbol burst's tail is: a peer that
-# reads past the lead sees stale state, and one answered with nothing at all has
-# never been measured.
-#
-# READ ONE SYMBOL EARLY UNTIL 2026-09-02, and the correction is mechanical rather
-# than a rereading: `burst_tones` padded 0.06 s ahead of the onset and capped its
-# offset search at 2400 samples, so the true start lay outside the search and the
-# best reachable alignment began a whole symbol in front of the burst. Uncapped,
-# all three BW2300 caller copies land at +0.003 to +0.004 s of the segmenter's own
-# onset and read identically; what the constant used to open with was pre-burst
-# audio, and its true last symbol (52, 70) was missing.
-#
-# Whether the seven are keyed to the caller, as the 11-symbol tail is, is not
-# established — every copy held comes from a link W9SSJ called.
+# Every tail measured on the W1AW, KC9GHZ and K0SI links is reproduced symbol for
+# symbol, and six gateways that were never tabled answered with their generated
+# tails, and the 2026-08-14 ref128 tape reads the generated control bursts.
+# The opening — (64, 67), or the 4-pair preamble on a control burst — lies off
+# every alphabet's lattice and is a constant.
 OVER_CONTINUE_NSYM = 8
-OVER_CONTINUE_CALLER_2300 = (
-    (64, 67), (30, 74), (39, 51), (32, 62), (29, 89), (70, 82), (45, 83), (52, 70))
-
-# THE SAME THREE BURSTS AT BW500, off the stock 4.9.0 pair of 2026-08-30 — a link
-# W9SSJ CALLED, one cable per direction, every keying named by the PTT ledger.
-# Preamble and lead pair are the bandwidth-neutral ones above; only the seven
-# state symbols move, and they move onto the narrow alphabet's carriers.
-#
-# The tails of the AAAA1-called session in CONTROL_TAILS_500 below are the
-# control: same role, same occasion, and the two responders share ONE of seven.
-# A caller and a responder of one link share none. So these are a link's tails
-# and not a bandwidth's state code, which is the key the BW2300 pair was already
-# shown to carry  [spec 04 §4.2C].
-#
-# The caller keys a SECOND 11-symbol tail on its idle cadence, eight times at
-# 12.06 s — `(58,76) (58,70) (52,76) (50,68) (54,64) (52,74) (54,66)`. It is the
-# poll a drained caller owes its peer, and nothing here keys it: `idle_keepalive`
-# sends the MFSK frames, and what the poll draws has not been measured from this
-# end.
-CONTROL_BURST_CALLER_500 = CONNECTED_ACK_PREAMBLE + (
-    (52, 74), (56, 76), (52, 64), (56, 68), (56, 74), (58, 68), (60, 68))
-CONTROL_BURST_RESPONDER_500 = CONNECTED_ACK_PREAMBLE + (
-    (54, 72), (56, 70), (56, 76), (54, 66), (58, 72), (54, 76), (50, 72))
-OVER_CONTINUE_CALLER_500 = (
-    (64, 67), (50, 66), (60, 64), (50, 68), (58, 76), (52, 76), (58, 76), (60, 68))
-
-# THE CONTINUE BURST AT BW2750, off two stock 4.9.0s on the cables, 2026-09-04 —
-# a link W9SSJ CALLED, one recording per direction, each delivery padded past one
-# over so both ends had to answer an intermediate one. Ten copies: the caller
-# keyed this one at all three of its turns in each session, six for six identical,
-# and the responder keyed two further sets of seven behind the same lead. Three of
-# the responder's symbols reach bins 22-23 and 104-105, where no BW2300 burst goes
-# — the wide alphabet is what these are drawn on.
-#
-# The lead pair is the bandwidth-neutral one the other two bandwidths open on, and
-# it is the whole of what the peer is known to read: across all copies at all
-# three bandwidths symbol 0 is the same and no other symbol is shared.
-OVER_CONTINUE_CALLER_2750 = (
-    (64, 67), (37, 81), (36, 58), (29, 81), (36, 96), (31, 77), (76, 80), (43, 59))
-
-# The responder's intermediate-DATA answer, measured on the full W9SSJ ->
-# KC9GHZ BW2750 link. Four native stock replies (two full-mail sessions,
-# 2026-09-11 22:58/23:00 UTC) match all eight pairs; both sessions sent235 and
-# fetched645 bytes exactly. The seven after the lead also match the receiver-
-# muted response in the 2026-09-12 01:04 UTC KC9GHZ tape. This is not a NAK
-# table or a general callsign law. Keep both endpoints in the lookup until
-# independent links establish which endpoint/session fields select this tail.
-# Provenance: tests/kestrel/fixtures/head-cut-continue/provenance.json.
-OVER_CONTINUE_RESPONDER_BY_LINK = {
-    # 2026-09-20 01:36 UTC: full eight-pair K0SI reply, followed by exact
-    # called-keyed 288/1 confirming the same pending DATA (no retransmission).
-    # See fixtures/k0si-data-ack-0920/provenance.json.
-    ("W9SSJ", "K0SI", "2300"): (
-        (64, 67), (58, 92), (77, 91), (48, 64),
-        (65, 71), (38, 92), (81, 85), (58, 98)),
-    # Three stock replies on 2026-09-19 and independent 2026-09-18 RF
-    # sessions agree, including replies whose first symbol the RX mute cut.
-    # See fixtures/data-replies-0919/provenance.json.
-    ("W9SSJ", "KC9GHZ", "2300"): (
-        (64, 67), (32, 82), (37, 81), (54, 66),
-        (49, 81), (64, 84), (63, 79), (66, 96)),
-    ("W9SSJ", "KC9GHZ", "2750"): (
-        (64, 67), (25, 89), (30, 88), (47, 73),
-        (42, 88), (71, 103), (56, 76), (73, 79)),
-    ("W9SSJ", "KC9GHZ", "500"): (
-        (64, 67), (52, 74), (58, 74), (60, 72),
-        (56, 74), (56, 72), (62, 66), (50, 74))}
-
-# Successful explicit descents at all four low records, paired with exact host
-# delivery, qualify this positive answer to the sender's 0x81 next-record field.
-OVER_CONTINUE_RESPONDER_DOWN_BY_LINK = {
-    ("W9SSJ", "KC9GHZ", "2300"): (
-        (64, 67), (44, 96), (33, 53), (56, 68),
-        (45, 93), (68, 94), (81, 93), (50, 98)),
-    ("W9SSJ", "KC9GHZ", "2750"): (
-        (64, 67), (77, 91), (36, 82), (27, 83),
-        (74, 94), (43, 101), (88, 100), (83, 101)),
-    ("W9SSJ", "KC9GHZ", "500"): (
-        (64, 67), (58, 68), (62, 64), (52, 76),
-        (52, 74), (50, 72), (56, 76), (58, 64)),
-}
-
-#: The two bursts of a link, by the callsign that CALLED it and the bandwidth it
-#: came up at — ours when we originated, the peer's when we answered. One caller
-#: is measured and nothing here can generate a second.
-#: The one caller whose bursts are measured — at both bandwidths, and the only
-#: link this station has ever originated.
-CONTROL_BURST_CALLER = "W9SSJ"
-
-CONTROL_BURSTS_BY_CALLER = {
-    (CONTROL_BURST_CALLER, "2300"): (CONTROL_BURST_CALLER_2300,
-                                     CONTROL_BURST_RESPONDER_2300),
-    (CONTROL_BURST_CALLER, "2750"): (CONTROL_BURST_CALLER_2750,
-                                     CONTROL_BURST_RESPONDER_2750),
-    (CONTROL_BURST_CALLER, "500"): (CONTROL_BURST_CALLER_500,
-                                    CONTROL_BURST_RESPONDER_500)}
-
-#: The answer to an over with another behind it, by the same key.
-OVER_CONTINUE_BY_CALLER = {
-    (CONTROL_BURST_CALLER, "2300"): OVER_CONTINUE_CALLER_2300,
-    (CONTROL_BURST_CALLER, "2750"): OVER_CONTINUE_CALLER_2750,
-    (CONTROL_BURST_CALLER, "500"): OVER_CONTINUE_CALLER_500}
-
-# THE NAK, off two stock 4.9.0s on the cables, 2026-09-07 -- a link W9SSJ CALLED,
-# one recording per direction, noise injected into the RECEIVER's input for the
-# body of selected overs so it registered a burst and failed its CRC. The station
-# that failed an over keys this 8-symbol burst in the turnaround, and the sender
-# answers it by dropping a speed level and re-sending the over: over 3 of the
-# give-up probe was rejected and every later over survived, and both reversed and
-# forward deliveries closed byte-exact. It refutes the standing assumption that
-# BW2300 keys nothing in that turnaround  [see vara_arq._undecoded_over].
-#
-# Eight two-tone symbols on the bandwidth-neutral lead pair the continue and
-# control bursts open on, and DISTINCT BY ROLE: the caller's and the responder's
-# share only that lead (1 of 8), the way a link's two control tails do. The
-# receiver that keys it is the caller in RESPONDER, the responder in CALLER --
-# named for the station that CALLED the link, as the rest of the family is. Four
-# copies of each, identical across overs, so it is a fixed NAK and not a state
-# report [spec 04 Sec 4.2C].
-#
-# Whether the seven behind the lead are keyed to the caller's callsign, as the
-# 11-symbol tail is assumed to be, is not established: every copy comes from a
-# link W9SSJ called, and this station always originates as W9SSJ.
-NAK_CALLER_2300 = (
-    (64, 67), (40, 62), (43, 83), (80, 98), (67, 95), (74, 88), (67, 83), (66, 74))
-NAK_RESPONDER_2300 = (
-    (64, 67), (66, 78), (61, 95), (70, 98), (41, 71), (34, 98), (35, 51), (46, 92))
-
-#: ``(ours as caller, ours as responder)`` NAK for a link ``caller`` called at
-#: ``bw``, by the same key as the control bursts. The RECEIVER of a failed over
-#: keys its role's burst; the sender reads the other.
-NAK_BY_CALLER = {
-    (CONTROL_BURST_CALLER, "2300"): (NAK_CALLER_2300, NAK_RESPONDER_2300)}
-
-
-# Native CRC-rejection replies from the 2026-09-19 all-bandwidth campaign.
-# The legacy caller-only NAK table above belongs to a different link. These
-# seven-symbol tails require both endpoints; a shared lead is not an ACK.
-DATA_NAK_RESPONDER_BY_LINK = {
-    ("W9SSJ", "KC9GHZ", "2300"): (
-        (64, 67), (42, 46), (43, 67), (74, 96),
-        (53, 93), (70, 80), (35, 43), (42, 76)),
-    ("W9SSJ", "KC9GHZ", "2750"): (
-        (64, 67), (39, 97), (34, 74), (67, 91),
-        (46, 74), (77, 87), (28, 36), (35, 69)),
-    ("W9SSJ", "KC9GHZ", "500"): (
-        (64, 67), (54, 76), (56, 68), (62, 68),
-        (58, 74), (60, 76), (58, 72), (62, 64)),
-}
-
-
-def nak(caller: str, bw: str) -> tuple | None:
-    """``(caller NAK, responder NAK)`` for a link ``caller`` called at ``bw``, or
-    None when no NAK of that link is measured at that bandwidth. Only BW2300 has
-    one measured, off a W9SSJ-called link  [see NAK_BY_CALLER]."""
-    return NAK_BY_CALLER.get((caller.upper(), str(bw)))
-
-
-def _tail_bw(bw: str) -> str:
-    return str(bw)
-
-
-def control_bursts(caller: str, bw: str) -> tuple | None:
-    """``(ours as caller, ours as responder)`` for a link ``caller`` called at
-    ``bw``, or None when no link of that caller is measured at that bandwidth."""
-    return CONTROL_BURSTS_BY_CALLER.get((caller.upper(), _tail_bw(bw)))
-
-
-def over_continue(caller: str, bw: str) -> tuple | None:
-    """The 8-symbol intermediate-over answer of that link, or None.
-
-    THIS ONE DOES NOT FALL BACK, where the 11-symbol tails above do. Three BW2750
-    fetches on 2026-09-04 keyed BW2300's copy at every changeover: each took the
-    gateway's first over, answered it, and drew the responder's own idle cadence
-    until the timeout, `gateway_rx_bytes` 0 in all three (053431Z, 053613Z,
-    053755Z). A bandwidth whose copy is not measured keys the generated frame
-    instead  [vara_arq._tx_over_response]; BW2750's has been measured since.
-    """
-    return OVER_CONTINUE_BY_CALLER.get((caller.upper(), str(bw)))
-
-
-# THE SEVEN STATE SYMBOLS AT BW500 ARE A REPORT ON THE OVER JUST ANSWERED, and
-# the table below is the only way to key one: they are measured per link and the
-# generator that draws them is unknown.
-#
-# Ninety continues off nine BW500 tapes, both cables of each, every keying
-# attributed by the cable that holds it: the seven symbols behind the lead move
-# with exactly three things — the link's two callsigns, the keying station's
-# role, and the state of the over just answered, where that state is the over's
-# speed level together with whether its per-frame field is 0x81. Nothing else
-# moves them. Not the cumulative over index (three, four and forty-nine
-# identical tails in a row), not bytes acknowledged (43 to 4085), not the
-# field's countdown value (0x99, 0x95, 0x91, 0x8d and 0x89 all draw one tail),
-# not the host's SN reading (11.3 and 0.1 dB drew the same level-1 tail), and
-# not a session nonce (three sessions on two dates agree symbol for symbol).
-# 90 of 90 obey it, and a tail read from one arm predicts the other arm 8/8.
-#
-# The callsign pair is the key. Same caller, same role, same state: W1AW's link
-# and KC9GHZ's share 0 of 7 — which is why OVER_CONTINUE_CALLER_500 above, the
-# W1AW link's mid-level-4 tail, is ignored by a stock station at KC9GHZ, twice
-# per over (stock500-chain, step 4). And no index law regenerates the
-# symbols: every VB6 Rnd draw schedule of the family every single-tone session
-# frame here is built on returns zero of 2**24 states for every tail, seed
-# agnostic (the bw500-continue analysis). So a table it is, for the one
-# link whose caller tails are on tape end to end, and None for every other.
-#
-# Sample offsets, capture hashes and the over each one answered:
-# tests/kestrel/fixtures/bw500-continue/caller-tails.json.
 OVER_CONTINUE_LEAD = (64, 67)
-OVER_CONTINUE_CALLER_TAILS_500 = {
-    ("W9SSJ", "KC9GHZ", 1, False): (
-        (58, 76), (58, 72), (54, 74), (50, 72), (54, 68), (60, 66), (62, 74)),
-    ("W9SSJ", "KC9GHZ", 2, False): (
-        (54, 74), (60, 64), (52, 76), (54, 76), (62, 70), (62, 76), (60, 74)),
-    ("W9SSJ", "KC9GHZ", 4, False): (
-        (62, 68), (58, 66), (50, 70), (52, 66), (52, 64), (60, 66), (56, 74)),
-    ("W9SSJ", "KC9GHZ", 4, True): (
-        (60, 68), (58, 70), (54, 64), (56, 76), (62, 72), (58, 74), (50, 70))}
+
+Pair = tuple[int, int]
+
+_ANSWER_SEED = (62, 290)          # (caller keys, responder keys)
+_CONTROL_SEED = (852, 1080)
+# The frame index is the step the receiver asks the sender's next over to take,
+# on every delivered frame at every bandwidth: 428 of 428 high speed capable frames keyed
+# the level it asked for (docs/protocols/vara/evidence/ACK-LEVEL-REQUEST.md).
+# Frames 4 and 6 are +2 and +1, not a level report or a retried over's answer.
+# A speed limited BW500 caller asks by the over it read: hold at level 4, one
+# down to the record-2 close behind 0x81, two up from level 2, one up from 1.
+_CALLER_500_FRAME = {(4, False): 0, (4, True): 5, (2, False): 4, (1, False): 6}
 
 
-def over_continue_state(caller: str, called: str, level: int,
-                        field: int) -> tuple | None:
-    """The whole 8-symbol BW500 continue a CALLER keys after an over at ``level``
-    carrying ``field``, or None where that link and state are not on tape.
+def answer_tail(callsign: str, seed_off: int, bw: str, idx: int) -> tuple[Pair, ...]:
+    """The seven symbols behind the opening of frame ``idx`` on the answer stream
+    of ``callsign`` at ``seed_off``, each pair sorted."""
+    return _answer_frame(callsign, seed_off, bw, idx)[0]
 
-    Only the caller's side of W9SSJ -> KC9GHZ is populated, and a responder's
-    tails of the same link share none of its seven symbols, so this is not the
-    answer for a station that answered somebody's call
-    [see OVER_CONTINUE_CALLER_TAILS_500].
-    """
-    tail = OVER_CONTINUE_CALLER_TAILS_500.get(
-        (caller.upper(), called.upper(), int(level), field == 0x81))
-    return None if tail is None else (OVER_CONTINUE_LEAD,) + tail
+
+def lead_state(caller: str, responder: bool, bw: str) -> int:
+    """Where a station's lead draws start in a session: its own control-burst
+    stream, keyed to the caller, past control frames 0 and 1. A station's
+    every DATA over draws its lead from here on, each delivery's first one
+    draw further, the caller's link-setup at this state itself
+    (docs/protocols/vara/evidence/LEAD-GENERATORS.md)."""
+    return _answer_frame(caller, _CONTROL_SEED[responder], bw, 1)[1]
+
+
+@lru_cache(maxsize=1024)
+def _answer_frame(callsign: str, seed_off: int, bw: str,
+                  idx: int) -> tuple[tuple[Pair, ...], int]:
+    cs = normalize_callsign(callsign)
+    alpha = ALPHABETS[str(bw)]
+    crc = crc16_genibus(cs.encode("ascii"))
+    s = _lcg_advance(_start((crc + seed_off) & 0x7FFF),
+                     _g_hash(cs) + ((crc + 50) >> 15) + 1)
+
+    def draw(n: int) -> int:
+        nonlocal s
+        s = _lcg(s)
+        return (s * n) >> 24
+
+    for _ in range(idx + 1):
+        tail = []
+        for k in range(7):
+            pa = draw(alpha.n_p)
+            while (pb := draw(alpha.n_p)) == pa:
+                pass
+            da, db = draw(7), draw(7)
+            base = alpha.base + alpha.parity(k, 1)
+            tail.append(tuple(sorted((base + 14 * pa + 2 * da, base + 14 * pb + 2 * db))))
+    return tuple(tail), s
+
+
+def _answers(called: str, bw: str, idx: int) -> tuple:
+    return tuple((OVER_CONTINUE_LEAD,) + answer_tail(called, seed, bw, idx)
+                 for seed in _ANSWER_SEED)
+
+
+def over_continue(called: str, bw: str) -> tuple:
+    """``(caller's, responder's)`` answer to an over with another behind it."""
+    return _answers(called, bw, 0)
+
+
+def over_continue_down(called: str, bw: str) -> tuple:
+    """``(caller's, responder's)`` continue asking the sender's next over one
+    level down, frame 5."""
+    return _answers(called, bw, 5)
+
+
+def over_continue_frames(called: str, bw: str, frames) -> dict[int, tuple]:
+    """``{frame: (caller's, responder's)}`` continues at the given frames."""
+    return {idx: _answers(called, bw, idx) for idx in frames}
+
+
+def nak(called: str, bw: str) -> tuple:
+    """``(caller's, responder's)`` NAK: the receiver of a failed over keys its
+    role's, and the sender drops a level and re-sends."""
+    return _answers(called, bw, 1)
+
+
+def over_poll(called: str, bw: str) -> tuple:
+    """``(caller's, responder's)`` poll behind an over nothing answered, frame
+    12: a stock responder keys its 1.3 s after the over's unkey, and the caller
+    answers with SESSION_OVER_NAK_SHORT (three bench sessions, 2026-09-26)."""
+    return _answers(called, bw, 12)
+
+
+def control_bursts(caller: str, bw: str, frame: int = 0) -> tuple:
+    """``(caller's, responder's)`` 11-symbol control burst of a link ``caller``
+    called at ``bw`` — keyed to the CALLER, where every other answer is keyed to
+    the called station. Frame 0 answers an over; frame 1 is the idle poll of a
+    station holding the turn with nothing queued."""
+    return tuple(CONNECTED_ACK_PREAMBLE + answer_tail(caller, seed, bw, frame)
+                 for seed in _CONTROL_SEED)
+
+
+def turn_grant(called: str, bw: str) -> tuple:
+    """The responder's 11-symbol burst handing the caller the turn: answer-stream
+    frame 13, keyed to the CALLED station. Behind a turn-request of the caller's,
+    and unasked behind the caller's answer to the last over of a delivery."""
+    return CONNECTED_ACK_PREAMBLE + answer_tail(called, _ANSWER_SEED[1], bw, 13)
+
+
+def over_continue_state(called: str, level: int, field: int) -> tuple | None:
+    """The BW500 caller's continue after an over at ``level`` carrying ``field``,
+    or None for a state never seen on tape."""
+    idx = _CALLER_500_FRAME.get((int(level), field == 0x81))
+    return None if idx is None else (
+        (OVER_CONTINUE_LEAD,) + answer_tail(called, _ANSWER_SEED[0], "500", idx))
+
 
 # What the seven state symbols say, read off a responder's own transmit path
 # through a whole logged BW500 session — 59 keyings, 478 s, every one of them
@@ -882,6 +716,9 @@ def over_continue_state(caller: str, called: str, level: int,
 # reading it: the tail is reported, and a turn is taken on the answer arriving at
 # all. No recording held reads the same symbols at BW2300 — the one control burst
 # recoverable from either off-air gateway session is the connected-ack.
+#
+# They are that link's answer frames: ACK and POLL are frames 0 and 1 of
+# control_bursts("AAAA1", "500")'s responder stream, TURN frame 13 of BBBB2's 290.
 CONTROL_TAIL_ACK = (
     (58, 64), (52, 72), (54, 74), (56, 68), (58, 72), (54, 68), (58, 68))
 CONTROL_TAIL_POLL = (
@@ -963,7 +800,7 @@ SESSION_OVER_RESPONSE_SHORT = BurstKind(
 # responder DATA frame and its subsequent idle, the caller keys this descriptor
 # on the BW2750 alphabet (all32 symbols match). The responder resends from host
 # level2 and climbs through3/4, with exact host delivery. This is idle recovery,
-# not evidence for an eight-symbol BW2750 NAK in NAK_BY_CALLER.
+# not the eight-symbol NAK  [nak].
 SESSION_OVER_NAK = BurstKind(
     "session-over-nak", (74,), 31, 60, 1117, 1)
 
@@ -978,6 +815,60 @@ SESSION_OVER_NAK = BurstKind(
 # produced 288/1117 rather than the 288/311 a delivered one draws.
 SESSION_OVER_NAK_RESPONDER = BurstKind(
     "session-over-nak-responder", (74,), 31, 288, 1117, 1)
+# Its 16-symbol form, one SEED_OFF up as every short form here is: 289/541 is
+# position 18 on the 30-draw lattice as 288/1117 is on the 62-draw one, the pair
+# 289/31 and 288/63 already are at position 1. VE3WLR answered our first query
+# after a lost over with it both times on 2026-09-23, 15-16 of 16 tones, and
+# answered the second query with 288/1117.
+SESSION_OVER_NAK_RESPONDER_SHORT = BurstKind(
+    "session-over-nak-responder-short", (62,), 15, 289, 541)
+# The caller's 16-symbol form, 61/541 as 289/541 is to 288/1117, keyed to the
+# CALLED station. It is what a stock IRS answers the ISS's poll with: on the
+# 2026-09-26 05:19Z BW2300 ladder (N0CALL -> W9SSJ) the responder's level-10
+# over drew nothing, it polled 0.38 s, the caller keyed this 0.71 s frame,
+# 16 of 16 tones pinning one of 2**24 states, and the responder resent at
+# level 6  [docs/protocols/vara/evidence/GEARSHIFT-OBSERVED.md §3]. Twice more
+# on the cable bench of 2026-09-26 (W9SSJ -> WI9YZA, BW2300, both high speed capable):
+# a corrupted level-10 over drew silence, the responder polled with the
+# 8-symbol answer-responder frame 12 at 1.3 s, the caller keyed this, 16 of 16,
+# and the responder resent at level 7.
+SESSION_OVER_NAK_SHORT = BurstKind(
+    "session-over-nak-short", (62,), 15, 61, 541)
+# The caller's member of the data-NAK family at position 1 of its short stream:
+# 61/31 is to 289/31 (SESSION_DATA_NAK_SHORT) what 61/541 is to 289/541. Keyed
+# to the CALLED station. A stock caller keys it 0.12 s behind a resend that
+# failed too — the first failed over draws the 8-symbol NAK (answer frame 1),
+# the failed resend of it draws this — and the responder resends one level
+# down again. Two sessions on the cable bench of 2026-09-26 (W9SSJ -> WI9YZA,
+# BW2300), 16 of 16 tones each, both behind a level-7 resend of a level-10
+# over that noise had taken.
+SESSION_DATA_NAK_CALLER_SHORT = BurstKind(
+    "session-data-nak-caller-short", (62,), 15, 61, 31)
+# The responder's over-idle in its 16-symbol form: 289/361 is position 13 on
+# the short lattice, where 288/745 (SESSION_RESPONDER_OVER_IDLE) sits on the
+# long one — the same pairing as 289/391 with 288/807 and 289/541 with 288/1117.
+# Keyed to the CALLED station. KC9GHZ keyed it once, 3.2 s behind our 8-symbol
+# NAK of its level-6 over on 2026-09-26 20:11Z (arm16, BW2300, high speed capable),
+# 16 of 16 tones off the air pinning one state, on the over-idle cadence; it
+# keyed no retry and went on to the 32-symbol over-idle. At BW2300 a corrupted
+# responder over drew the 8-symbol answer frame 12 instead. At BW500 the cable
+# bench of 2026-09-27 (W9SSJ -> WI9YZA, high speed capable) drew it 2.2 s behind a
+# level-5 resend the caller could not hear, 16 of 16, three sessions; the stock
+# caller answered it 0.1 s later with SESSION_OVER_NAK and the responder resent
+# at level 3.
+SESSION_RESPONDER_OVER_IDLE_SHORT = BurstKind(
+    "session-responder-over-idle-short", (62,), 15, 289, 361)
+# SESSION_RESPONDER_IDLE's 16-symbol form: 289/331 is position 12 on the short
+# lattice as 288/683 is on the long one, one position before the pair above.
+# Keyed to the CALLED station. K5FIT keyed it twice on 2026-09-27 04:13Z (BW500,
+# high speed capable), 16 of 16 each, 2.5-2.7 s behind a level-6 and a level-5 over we did
+# not read, then 288/683. The cable bench of 2026-09-27 (W9SSJ -> WI9YZA,
+# high speed capable BW500) drew it twice, 16 of 16: the responder's level-7 over and
+# its 8-symbol answer frame 11 went unheard, it keyed this 3.7 s after the
+# over, and the stock caller answered 0.1 s later with SESSION_OVER_NAK, at
+# which the responder resent at level 5.
+SESSION_RESPONDER_IDLE_SHORT = BurstKind(
+    "session-responder-idle-short", (62,), 15, 289, 331)
 
 # The turn frames, and the only two in the family keyed to the CALLER — to the
 # station that transmits them rather than to its peer. That is what makes the
@@ -1024,6 +915,18 @@ SESSION_INTERMEDIATE_ANSWER_QUERIES = (
     replace(SESSION_FINAL_ANSWER_QUERY, name="session-intermediate-answer-query-a"),
     replace(SESSION_FINAL_ANSWER_QUERY, name="session-intermediate-answer-query-b", preadv=745),
 )
+# Their 16-symbol forms on the caller's short stream, 61 to 60 as 289 is to 288,
+# at the same lattice positions (1 + 30*11, 1 + 30*12). A stock BW500 caller
+# whose over went unanswered keys one 1.2 s after it, then the 32-symbol form of
+# the same phase every 3.14 s: 61/331 then 60/683 x17 behind the first over of a
+# delivery, 61/361 then 60/745 x17 behind the second, and the disconnect 60 s
+# after it last heard its peer [cable bench 2026-09-27, W9SSJ -> WI9YZA,
+# high speed capable, levels 6 and 9, 16 of 16 and 32 of 32 each]. A responder that had
+# read the over answered 61/331 with SESSION_TURN_REQUEST_RESPONDER, twice.
+SESSION_ANSWER_QUERIES_SHORT = (
+    BurstKind("session-answer-query-short-a", (62,), 15, 61, 331),
+    BurstKind("session-answer-query-short-b", (62,), 15, 61, 361),
+)
 
 # Stock BW2750 intermediate-ACK erasure, 2026-09-12: this called-keyed
 # reply to SESSION_FINAL_ANSWER_QUERY retired exactly one host-delivered 89-byte
@@ -1038,6 +941,10 @@ SESSION_INTERMEDIATE_QUERY_ANSWER = BurstKind(
 # retry and returns the short remainder to base. All31 payload tones match.
 SESSION_RETRY_QUERY_ANSWER = BurstKind(
     "session-retry-query-answer", (74,), 31, 288, 249, 1)
+# The same answer at frame 6, 288/1+62*6: VE3WLR's to the query behind the
+# retry it had continued at frame 6, 2026-09-23, 32/32 tones.
+SESSION_RETRY_QUERY_ANSWER_B = BurstKind(
+    "session-retry-query-answer-b", (74,), 31, 288, 373, 1)
 
 # The responder's turn-request: what an answering station keys to become the
 # sender, and the frame this tree spent eleven unanswered askings a session not
@@ -1296,6 +1203,13 @@ SESSION_TURN_RELEASE = BurstKind(
 SESSION_DISCONNECT_REQ = BurstKind(
     "session-disconnect-request", (74,), 31, 60, 125, 1)
 
+# The callee's close, at the same lattice position on the responder's SEED_OFF.
+# Two stock 4.9s on the Wine bench, 2026-09-28 (r3a, r3b, BW500): the callee held
+# the turn with nothing queued, polled seven times and then keyed this, 32/32
+# payload tones keyed to the called station, immediately ahead of its CW ident.
+SESSION_DISCONNECT_REQ_RESPONDER = BurstKind(
+    "session-disconnect-request-responder", (74,), 31, 288, 125, 1)
+
 # The 16-symbol burst that same loopback close was read as ending on. Nothing
 # answered the close above — on the 2026-08-26 bench, or against a stock 4.9.0 on
 # 2026-09-02, where four re-keyed closes drew no key-up at all from the responder —
@@ -1333,7 +1247,7 @@ BURSTS = {b.name: b for b in (CR, CR500, CR2750, CONNECT_RESPONSE,
                               SESSION_RESPONDER_OVER_IDLE,
                               SESSION_RESPONDER_OVER_ANSWER,
                               SESSION_OVER_NAK_RESPONDER,
-                              SESSION_CONNECT_CONFIRM,
+                              SESSION_LINK_SETUP_NAK,
                               SESSION_DATA_NAK_SHORT, SESSION_DATA_NAK_QUERY)}
 
 

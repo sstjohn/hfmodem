@@ -110,6 +110,9 @@ def test_refused_turn_restores_bytes_and_attempts_only_owed_ack(refuse_ack):
     a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
                    protocol=spec.Protocol.PACTOR3)
     assert a._breakin_armed and not io.events
+    # This current CRC-valid repeat establishes presence before any local key.
+    # Refusing its ACK cannot turn the received packet back into peer silence.
+    assert a._silent_cycles == 0 and a._dark_windows == 0
     seq, accepted = a._next_seq, a._rx_accepted
     a.on_cycle()
     assert [e[0] for e in io.events] == ["packet", "cs"]
@@ -121,17 +124,15 @@ def test_refused_turn_restores_bytes_and_attempts_only_owed_ack(refuse_ack):
     assert io.delivered == [b"RMS"] and a._rx_accepted == accepted
     assert not a._breakin_armed and not a._rx_this_cycle
     assert not a._refused_burst
-    # A fallback the seam also refused put nothing on the air, so it cannot
-    # forgive the cycle it was owed for.
-    assert a._silent_cycles == (4 if refuse_ack else 0)
+    assert a._silent_cycles == 0
     a.on_cycle()
     # ...and the quiet cycle behind it is charged to the peer only if its own
     # repeat request reached the air. A seam that refused it left the far end
     # nothing to answer.
-    assert a._silent_cycles == (4 if refuse_ack else 1)
+    assert a._silent_cycles == (0 if refuse_ack else 1)
     io.refuse_ack = False
     a.on_cycle()
-    assert a._silent_cycles == (5 if refuse_ack else 2)
+    assert a._silent_cycles == (1 if refuse_ack else 2)
 
 
 def test_refused_fallback_ack_is_not_accounted_as_emitted():
@@ -245,3 +246,76 @@ def test_a_fallback_that_reaches_the_air_keeps_the_link_up():
         a.on_cycle()
         assert io.events[-1] == ("cs", arq.CS_ACK)
         assert a.state == arq.State.CONNECTED and a.role == arq.IRS, cycle
+
+
+def _capture_keyed_controls(io, monkeypatch):
+    # This in-memory seam distinguishes attempts from admitted controls. It
+    # records no RF claim; a REFUSED return must never enter the keyed list.
+    send = io.send_cs
+    keyed = []
+
+    def traced(index):
+        result = send(index)
+        if result != arq.REFUSED:
+            keyed.append(index)
+        return result
+
+    monkeypatch.setattr(io, 'send_cs', traced)
+    return keyed
+
+
+@pytest.mark.parametrize('crc_ok', [False, True], ids=['bad-crc', 'valid-crc'])
+@pytest.mark.parametrize('refuse_ack', [False, True], ids=['control-admitted', 'control-refused'])
+def test_valid_crc_resets_receive_counters_before_any_ack_key(
+        monkeypatch, crc_ok, refuse_ack):
+    a, io = receiving()
+    io.refuse_ack = refuse_ack
+    keyed = _capture_keyed_controls(io, monkeypatch)
+    a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks = 4, 2, 3
+    previous = a._next_seq, a._rx_accepted, a.rx_seq
+    a.on_rx_packet(1, b'RMS', 0, crc_ok, True, protocol=spec.Protocol.PACTOR3)
+    assert (a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks) == (
+        (0, 0, 0) if crc_ok else (4, 2, 3))
+    if crc_ok:
+        # Reset was already caused by receive evidence, with no local key or
+        # even a control attempt. Refusal of the owed ACK cannot undo it.
+        assert a._breakin_armed and not io.events and not keyed
+        emitted = []
+        monkeypatch.setattr(a, 'on_cs_emitted', emitted.append)
+        a.on_cycle()
+        assert [e[0] for e in io.events] == ['packet', 'cs']
+        assert io.events[-1] == ('cs', arq.CS_ACK)
+        assert keyed == ([] if refuse_ack else [arq.CS_ACK])
+        assert emitted == ([] if refuse_ack else [arq.CS_ACK])
+        assert (a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks) == (0, 0, 0)
+    else:
+        # An unread packet requests a repeat without gaining CRC credit; even
+        # an admitted request cannot substitute for the received valid frame.
+        assert not a._breakin_armed and io.events == [('cs', arq.CS_REQUEST)]
+        assert keyed == ([] if refuse_ack else [arq.CS_REQUEST])
+    assert a.role == arq.IRS and a.state == arq.State.CONNECTED
+    assert a._inflight is None and (a._next_seq, a._rx_accepted, a.rx_seq) == previous
+    assert bytes(a._outbuf) == b'ABCDEF' and a._buffer_raw == 6
+    assert io.delivered == [b'RMS']
+
+
+@pytest.mark.parametrize('refuse_request', [False, True])
+def test_no_received_packet_cannot_forgive_silence_or_release_queued_bytes(
+        monkeypatch, refuse_request):
+    a, io = receiving()
+    io.refuse_ack = refuse_request
+    keyed = _capture_keyed_controls(io, monkeypatch)
+    a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks = 4, 2, 3
+    previous = a._next_seq, a._rx_accepted, a.rx_seq
+    # No current receive callback: one quiet cycle may be charged only if
+    # its request was admitted. Neither outcome forgives the previous silence.
+    a.on_cycle()
+    assert io.events == [('cs', arq.CS_REQUEST)]
+    assert keyed == ([] if refuse_request else [arq.CS_REQUEST])
+    assert a._silent_cycles == (4 if refuse_request else 5)
+    assert (a._dark_windows, a._p3_crc_wait_ticks) == (2, 3)
+    assert a.role == arq.IRS and a.state == arq.State.CONNECTED
+    assert not a._breakin_armed and a._inflight is None
+    assert (a._next_seq, a._rx_accepted, a.rx_seq) == previous
+    assert bytes(a._outbuf) == b'ABCDEF' and a._buffer_raw == 6
+    assert io.delivered == [b'RMS']

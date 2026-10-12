@@ -1,0 +1,398 @@
+{
+  "PACTOR-2:0:1": {
+    "bandwidth_hz": 0,
+    "carrier_count": 2,
+    "family": "Two-carrier",
+    "level": 1,
+    "modulation": "DBPSK",
+    "protocol": "PACTOR-2",
+    "symbol_rate": 100
+  },
+  "PACTOR-2:0:2": {
+    "bandwidth_hz": 0,
+    "carrier_count": 2,
+    "family": "Two-carrier",
+    "level": 2,
+    "modulation": "DQPSK",
+    "protocol": "PACTOR-2",
+    "symbol_rate": 100
+  },
+  "PACTOR-2:0:3": {
+    "bandwidth_hz": 0,
+    "carrier_count": 2,
+    "family": "Two-carrier",
+    "level": 3,
+    "modulation": "8-DPSK",
+    "protocol": "PACTOR-2",
+    "symbol_rate": 100
+  },
+  "PACTOR-2:0:4": {
+    "bandwidth_hz": 0,
+    "carrier_count": 2,
+    "family": "Two-carrier",
+    "level": 4,
+    "modulation": "16-DPSK",
+    "protocol": "PACTOR-2",
+    "symbol_rate": 100
+  },
+  "PACTOR-3:0:1": {
+    "bandwidth_hz": 0,
+    "carrier_count": 2,
+    "family": "Multicarrier",
+    "level": 1,
+    "modulation": "DBPSK",
+    "protocol": "PACTOR-3",
+    "symbol_rate": 100
+  },
+  "PACTOR-3:0:2": {
+    "bandwidth_hz": 0,
+    "carrier_count": 6,
+    "family": "Multicarrier",
+    "level": 2,
+    "modulation": "DBPSK",
+    "protocol": "PACTOR-3",
+    "symbol_rate": 100
+  },
+  "PACTOR-3:0:3": {
+    "bandwidth_hz": 0,
+    "carrier_count": 14,
+    "family": "Multicarrier",
+    "level": 3,
+    "modulation": "DBPSK",
+    "protocol": "PACTOR-3",
+    "symbol_rate": 100
+  },
+  "PACTOR-3:0:4": {
+    "bandwidth_hz": 0,
+    "carrier_count": 14,
+    "family": "Multicarrier",
+    "level": 4,
+    "modulation": "DQPSK",
+    "protocol": "PACTOR-3",
+    "symbol_rate": 100
+  },
+  "PACTOR-3:0:5": {
+    "bandwidth_hz": 0,
+    "carrier_count": 16,
+    "family": "Multicarrier",
+    "level": 5,
+    "modulation": "DQPSK",
+    "protocol": "PACTOR-3",
+    "symbol_rate": 100
+  },
+  "PACTOR-3:0:6": {
+    "bandwidth_hz": 0,
+    "carrier_count": 18,
+    "family": "Multicarrier",
+    "level": 6,
+    "modulation": "DQPSK",
+    "protocol": "PACTOR-3",
+    "symbol_rate": 100
+  },
+  "VARA:2300:10": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 49,
+    "family": "OFDM",
+    "level": 10,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2300:11": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 49,
+    "family": "OFDM",
+    "level": 11,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2300:12": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 49,
+    "family": "OFDM",
+    "level": 12,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2300:13": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 49,
+    "family": "OFDM",
+    "level": 13,
+    "modulation": "8-DPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2300:14": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 49,
+    "family": "OFDM",
+    "level": 14,
+    "modulation": "8-DPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2300:15": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 49,
+    "family": "OFDM",
+    "level": 15,
+    "modulation": "16-QAM",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2300:16": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 49,
+    "family": "OFDM",
+    "level": 16,
+    "modulation": "32-QAM",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2300:5": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 3,
+    "family": "Multicarrier tones",
+    "level": 5,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2300:6": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 4,
+    "family": "Multicarrier tones",
+    "level": 6,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2300:7": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 6,
+    "family": "Multicarrier tones",
+    "level": 7,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2300:8": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 8,
+    "family": "Multicarrier tones",
+    "level": 8,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2300:9": {
+    "bandwidth_hz": 2300,
+    "carrier_count": 10,
+    "family": "Multicarrier tones",
+    "level": 9,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2750:10": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 13,
+    "family": "Multicarrier tones",
+    "level": 10,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2750:11": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 59,
+    "family": "OFDM",
+    "level": 11,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2750:12": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 59,
+    "family": "OFDM",
+    "level": 12,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2750:13": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 59,
+    "family": "OFDM",
+    "level": 13,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2750:14": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 59,
+    "family": "OFDM",
+    "level": 14,
+    "modulation": "8-DPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2750:15": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 59,
+    "family": "OFDM",
+    "level": 15,
+    "modulation": "8-DPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2750:16": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 59,
+    "family": "OFDM",
+    "level": 16,
+    "modulation": "16-QAM",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2750:17": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 59,
+    "family": "OFDM",
+    "level": 17,
+    "modulation": "32-QAM",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:2750:5": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 3,
+    "family": "Multicarrier tones",
+    "level": 5,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2750:6": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 4,
+    "family": "Multicarrier tones",
+    "level": 6,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2750:7": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 6,
+    "family": "Multicarrier tones",
+    "level": 7,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2750:8": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 8,
+    "family": "Multicarrier tones",
+    "level": 8,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:2750:9": {
+    "bandwidth_hz": 2750,
+    "carrier_count": 10,
+    "family": "Multicarrier tones",
+    "level": 9,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:500:10": {
+    "bandwidth_hz": 500,
+    "carrier_count": 11,
+    "family": "OFDM",
+    "level": 10,
+    "modulation": "8-DPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:500:11": {
+    "bandwidth_hz": 500,
+    "carrier_count": 11,
+    "family": "OFDM",
+    "level": 11,
+    "modulation": "8-DPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:500:12": {
+    "bandwidth_hz": 500,
+    "carrier_count": 11,
+    "family": "OFDM",
+    "level": 12,
+    "modulation": "16-QAM",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:500:13": {
+    "bandwidth_hz": 500,
+    "carrier_count": 11,
+    "family": "OFDM",
+    "level": 13,
+    "modulation": "32-QAM",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:500:5": {
+    "bandwidth_hz": 500,
+    "carrier_count": 2,
+    "family": "Multicarrier tones",
+    "level": 5,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:500:6": {
+    "bandwidth_hz": 500,
+    "carrier_count": 3,
+    "family": "Multicarrier tones",
+    "level": 6,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 93.75
+  },
+  "VARA:500:7": {
+    "bandwidth_hz": 500,
+    "carrier_count": 11,
+    "family": "OFDM",
+    "level": 7,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:500:8": {
+    "bandwidth_hz": 500,
+    "carrier_count": 11,
+    "family": "OFDM",
+    "level": 8,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  },
+  "VARA:500:9": {
+    "bandwidth_hz": 500,
+    "carrier_count": 11,
+    "family": "OFDM",
+    "level": 9,
+    "modulation": "DQPSK",
+    "protocol": "VARA",
+    "symbol_rate": 41.666666666666664
+  }
+}

@@ -1,23 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""The §97.119 reminder every armed tool prints, and the two things it has to
-get right: the clock, and whose rules it is quoting.
+"""The identification reminder's clock and profile selection.
 
-`Rig._id_last` started at the Unix epoch, so on the second key of a session the
-comparison was `time.time() - 0 >= 600` — 1.8 billion seconds past due — and the
-station was told "0 min of transmitting: station identification is due" within
-seconds of its first over, then again on every key thereafter. A reminder that
-arrives whatever the clock says is a reminder an operator learns to read past,
-which is the one failure mode a ten-minute rule cannot afford.
-
-The same line printed at a station whose file declares `regulatory =
-"unregulated"` — a bench, a dummy load, or a regime hfmodem does not model. That
-station is answerable for its emissions under rules that are not Part 97, and a
-US section number is noise to it.
-
-Off air entirely: no rigctld, no serial line, no sound card. The reminder is
-driven through `Rig._note_identification_due` against a clock the test holds.
+`Rig._id_last` once started at the Unix epoch, making the second key immediately
+appear overdue and repeating the reminder on every later key. These tests check
+elapsed time and that the selected `unregulated` profile disables the reminder.
 """
 from __future__ import annotations
 
@@ -36,7 +24,7 @@ sys.path.insert(0, str(_TOOLS))
 
 # `vara_rig_bridge` and the example station files ship from the repo rather than
 # the wheel, so an installed-wheel run reaches neither. Named rather than skipped
-# silently: this is the scheduler that speaks for the licensee.
+# silently: this is the scheduler that sends the station's identification.
 if not (_TOOLS / "vara_rig_bridge.py").exists():
     pytest.skip(f"{_TOOLS}/vara_rig_bridge.py is not in this tree",
                 allow_module_level=True)
@@ -86,7 +74,7 @@ def rig(monkeypatch):
 
 
 def _reminders(r) -> list[str]:
-    return [m for m in r.logged if "97.119" in m]
+    return [m for m in r.logged if "station identification reminder is due" in m]
 
 
 def test_the_reminder_waits_for_the_full_interval(rig, clock):
@@ -118,8 +106,7 @@ def test_the_reminder_does_not_repeat_until_the_next_interval(rig, clock):
 
 
 def test_a_station_that_declared_unregulated_is_not_quoted_part_97(rig, clock):
-    """`regulatory = "unregulated"` is the operator saying Part 97 is not the
-    regime these emissions are made under."""
+    """The selected unregulated profile disables the identification reminder."""
     r = rig(_EXAMPLES / "replay.toml")
     r._note_identification_due()
     for _ in range(4):
@@ -138,7 +125,7 @@ def test_a_part_97_station_is_reminded(rig, clock):
 
 def test_an_unreadable_station_file_says_so_and_keeps_the_reminder(rig, clock,
                                                                   tmp_path):
-    """Not knowing the regime is not a reason to go quiet about the clock."""
+    """Not knowing the selected profile is not a reason to go quiet about the clock."""
     r = rig(tmp_path / "nothing.toml")
     r._note_identification_due()
     clock.now += bridge._ID_INTERVAL_S

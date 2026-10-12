@@ -36,8 +36,8 @@ FAKE_DEV = "/dev/null"
 DIAL = 7_102_000
 CHANNEL = DIAL + 1500
 
-#: A phone segment. No licence class carries data there, so it is what the
-#: regulatory gate refuses when nothing else about the run is wrong.
+#: Outside every data-segment table in the part97 profile, so the selected
+#: placement check refuses when nothing else about the run is wrong.
 PHONE_CHANNEL = 7_200_000
 
 #: The shipped profile rather than a stub, because a gate proved against a stub
@@ -282,7 +282,7 @@ def test_a_beacon_outside_the_licence_never_reaches_the_key(radio_answers, capsy
     can refuse it is the profile."""
     assert onair.main(cli(channel=PHONE_CHANNEL)) == 2
     out = capsys.readouterr().out
-    assert "refused by part97" in out and "97.301" in out
+    assert "refused by part97" in out and "part97 placement" in out
     assert "key" not in radio_answers[0].events
 
 
@@ -303,10 +303,10 @@ def test_the_key_cannot_be_reached_without_an_emission():
 def test_the_check_is_against_the_dial_the_rig_is_on():
     """`key()` re-places the emission on the rig's own dial rather than trusting
     the one it was handed. An emission built for a channel it may use does not
-    become legal on a radio sitting somewhere else."""
+    pass the selected placement check on a radio sitting somewhere else."""
     r = rig()
     r.dial_hz = PHONE_CHANNEL
-    with pytest.raises(regulatory.NotPermitted, match=r"97\.301"):
+    with pytest.raises(regulatory.NotPermitted, match=r"part97 placement"):
         r.key(EMISSION)
     assert not r._keyer.events
 
@@ -357,7 +357,7 @@ def test_a_band_with_a_power_limit_refuses_an_undeclared_emission(
     assert "does not state its power" in capsys.readouterr().out
     assert onair.main(cli("--power", "100", channel=thirty)) == 0
     assert onair.main(cli("--power", "400", channel=thirty)) == 2
-    assert "97.313" in capsys.readouterr().out
+    assert "part97 power" in capsys.readouterr().out
 
 
 # -- the audio devices -------------------------------------------------------

@@ -340,8 +340,9 @@ def test_host_tick_forwards_time_and_pumps_peer_only_once():
 
     fsm, io = linked(role=arq.ISS)
     fsm.cycle_long = True
-    host = object.__new__(PtcHost)
+    host = PtcHost()
     host.arq, host.peer = fsm, Peer()
+    host.protocol = spec.Protocol.PACTOR3
     host.tick(elapsed_ticks=9, cycle_ticks=arq.LONG_TICKS)
     assert len(io.packets) == 1
     assert host.peer.pumped == host.peer.cycled == 1

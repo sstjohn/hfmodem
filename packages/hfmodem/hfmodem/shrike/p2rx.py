@@ -20,8 +20,8 @@ Status of what is proven here:
     walks a 72-symbol frame nearly half a symbol end to end;
   * control-signal hunt -- reuses the shared distance-12 codeword set, and
     `control_signal_at` reads one at the instant a cycle grid predicts, which is
-    the form a live link needs. What it reads is a HYPOTHESIS about how PACTOR-2
-    keys those codewords -- see `pactor2.control_signal`;
+    the form a live link needs. AI4Y's CS1 and entry 6 in the K4MCK robust-call
+    fixture establish their inverse-data alphabet -- see `pactor2.control_signal`;
   * the LONG CYCLE -- `burst_grid` and `decode_bursts` fit the 3.75 s grid and the
     320-pulse frame as of 2026-09-02. Data mode is what a mailbox listing arrives
     in, and until then every long-frame marker was filtered out at acquisition;
@@ -69,7 +69,9 @@ CS_BITS = spec.CS_BITS_PER_TONE         # 20
 
 def _read_wav_mono(path: str) -> tuple[np.ndarray, int]:
     import wave
-    w = wave.open(path)
+
+    from ..core import wav
+    w = wave.open(wav.source(path))
     n, fs, ch = w.getnframes(), w.getframerate(), w.getnchannels()
     x = np.frombuffer(w.readframes(n), dtype=np.int16).reshape(-1, ch)[:, 0].astype(float)
     return x / (np.abs(x).max() + 1e-9), fs
@@ -548,7 +550,7 @@ def burst_window(phasors: np.ndarray, bin_pair: int, t: float, n_symbols: int,
     return [w * a / (med + 1e-30) for w, a in lanes]
 
 
-def decode_burst(wins: list[np.ndarray], path) -> bytes | None:
+def decode_burst(wins: list[np.ndarray], path, *, on_symbols=None) -> bytes | None:
     """A burst's two windows -> its CRC-valid field, or None.
 
     The differential is read in the CONJUGATE sense, which is the sense
@@ -573,6 +575,9 @@ def decode_burst(wins: list[np.ndarray], path) -> bytes | None:
             field = pactor2.decode_frame(
                 pactor2.channel_buffer(lanes, 0, path)[src], path)
             if coding.crc16(field[:-2]) == int.from_bytes(field[-2:], "little"):
+                if on_symbols is not None:
+                    on_symbols([np.conj(w)*np.exp(2j*np.pi*r/(2*m))
+                                for w,r in zip(wins,(r0,r1))])
                 return field
     return None
 
@@ -669,7 +674,7 @@ class BurstMemory:
 
 
 def decode_bursts(audio: np.ndarray, fs: int = FS_DEFAULT, level: int = 2,
-                  long_frame: bool = False) -> list[tuple[float, bytes]]:
+                  long_frame: bool = False, *, on_frame=None) -> list[tuple[float, bytes]]:
     """Every PACTOR-2 data burst a recording carries, as CRC-valid fields.
 
     This is the whole receive path: acquire, put the burst grid and the carrier
@@ -714,13 +719,18 @@ def decode_bursts(audio: np.ndarray, fs: int = FS_DEFAULT, level: int = 2,
                             1 << path.bits_per_cell, swapped=swapped)
         if wins is None:
             continue
-        field = decode_burst(wins, path)
+        points=[]
+        field = decode_burst(wins, path, on_symbols=points.append if on_frame is not None else None)
+        combined=False
         if field is not None:
             memory.clear()
         else:
             field = memory.add(wins, path)
+            combined=field is not None
         if field is not None:
             out.append((t, field))
+            if on_frame is not None:
+                on_frame(t,field,path,points[0] if points else None,bin_pair,swapped,combined)
     return out
 
 
@@ -788,7 +798,7 @@ def decode_expected_burst(audio: np.ndarray, fs: int = FS_DEFAULT,
 
 
 @lru_cache
-def cs_table() -> np.ndarray:
+def cs_table(robust: bool = False) -> np.ndarray:
     """The six codewords as bits, LEAST SIGNIFICANT BIT OF THE WORD FIRST.
 
     One orientation for the whole modem: `rx._cs_bits` reads `spec.CONTROL_SIGNALS`
@@ -801,7 +811,8 @@ def cs_table() -> np.ndarray:
     This module transcribed them most-significant-first until 2026-09-02, which
     reached nothing but `analyze`."""
     return np.array([[(w >> i) & 1 for i in range(CS_BITS)]
-                     for w in spec.CONTROL_SIGNALS], np.uint8)
+                     for w in (spec.ROBUST_CONTROL_SIGNALS if robust
+                               else spec.CONTROL_SIGNALS)], np.uint8)
 
 
 CS_NAMES = ("CS1/ACK", "CS2/req", "CS3/break", "CS4/speedup", "CS5/NAK", "CS6/cyc")
@@ -857,7 +868,10 @@ def cs_softs(phasors: np.ndarray, bin_pair: int, frame: int,
             return None
         y = phasors[idx, b]
         acc += pactor2.soft_bits(np.conj(y[1:] * np.conj(y[:-1])), 1)[:, 0]
-    return acc
+    # Controls use the inverse of the data alphabet: zero at 315 degrees,
+    # one at 135. AI4Y's two controls in k4mck-0925-kiwi-robust-p3.wav
+    # read at zero errors on this alphabet; the data mapping mislabels CS1.
+    return -acc
 
 
 CS_FRAME_LAG = -12
@@ -874,7 +888,8 @@ it."""
 
 def control_signal_at(audio: np.ndarray, at: int, fs: int = FS_DEFAULT, *,
                       bin_pair: int = CENTRE_BIN_PAIR, swapped: bool = False,
-                      max_errors: int = CS_MAX_ERRORS
+                      max_errors: int = CS_MAX_ERRORS,
+                      entries: tuple[int, ...] = tuple(range(6))
                       ) -> tuple[int, int] | None:
     """The codeword whose reference pulse the caller predicts at sample `at`.
 
@@ -892,7 +907,7 @@ def control_signal_at(audio: np.ndarray, at: int, fs: int = FS_DEFAULT, *,
     """
     phasors = bin_phasors(audio, fs)
     frame = int(round(at / fs * ACQ_RATE)) + CS_FRAME_LAG
-    table = cs_table()
+    table = cs_table(True)[list(entries)]
     best: tuple[int, int] | None = None
     for d in range(-CS_SLACK_FRAMES, CS_SLACK_FRAMES + 1):
         soft = cs_softs(phasors, bin_pair, frame + d, swapped)
@@ -902,7 +917,7 @@ def control_signal_at(audio: np.ndarray, at: int, fs: int = FS_DEFAULT, *,
         dist = (table != bits).sum(axis=1)
         j = int(np.argmin(dist))
         if dist[j] <= max_errors and (best is None or dist[j] < best[1]):
-            best = (j, int(dist[j]))
+            best = (entries[j], int(dist[j]))
     return best
 
 

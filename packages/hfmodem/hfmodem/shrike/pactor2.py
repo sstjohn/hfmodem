@@ -498,11 +498,9 @@ def marker_index(level: int, long_frame: bool = False, flag: int = 0) -> int:
 
     A receiver reads the index straight back as the frame descriptor's parameter
     byte and takes `sl = (k >> 1) & 3` and `long = (k >> 3) & 1` off it (section 2).
-    Bit 0 is `flag`: it is transmitted and read back, but what it means is not
-    established -- real frames on the published FEC recording carry both 0 and 1
-    at the same level and length. It is NOT the carrier swap, which was the
-    obvious candidate: across the 30 markers `p2rx.find_markers` arms on in
-    `hb9ak_055246_c1500.wav` both values occur in both arrangements."""
+    Bit 0 follows the packet counter parity. All 30 matched CRC-valid fields
+    in hb9ak_055246_c1500.wav agree, including retransmissions; it is independent
+    of the alternating carrier arrangement."""
     return (flag & 1) | ((level & 3) << 1) | (int(bool(long_frame)) << 3)
 
 
@@ -537,6 +535,7 @@ def frame(bits_lo: np.ndarray, bits_hi: np.ndarray, k: int,
 
 
 def data_burst(field: bytes, path: Path, *, swapped: bool = False,
+               k: int | None = None,
                tones: tuple[float, float] = NOMINAL_TONES_HZ,
                fs: int = FS_DEFAULT) -> np.ndarray:
     """One ARQ cycle's transmission of `field`: marker and staggered data symbols.
@@ -559,13 +558,16 @@ def data_burst(field: bytes, path: Path, *, swapped: bool = False,
     front end: its 16-DPSK cells sit closer together than the analysis kernel's
     residual phase error on this unshaped waveform, so nothing at that level is
     validated. `tests/shrike/test_p2.py`.
+
+    `k` overrides the marker `marker_index` derives from the path and counter.
     """
     channel = np.zeros(path.n_buf, np.uint8)
     channel[channel_of_code(path)] = encode_frame(field, path)
     lanes = [channel.reshape(path.n_symbols, TONES_PER_FRAME,
                              path.bits_per_cell)[:, r, ::-1].ravel()
              for r in range(TONES_PER_FRAME)]
-    k = marker_index(path.level, path.n_symbols == 320)
+    if k is None:
+        k = marker_index(path.level, path.n_symbols == 320, field[-3] & 1)
     return frame(lanes[1], lanes[0], k, path.bits_per_cell,
                  tones[::-1] if swapped else tones, fs)
 
@@ -600,28 +602,15 @@ def cs_slot(path: Path) -> float:
 def control_signal(index: int, swapped: bool = False,
                    tones: tuple[float, float] = NOMINAL_TONES_HZ,
                    fs: int = FS_DEFAULT) -> np.ndarray:
-    """One of the six control signals as audio: DBPSK on both PACTOR-2 carriers.
+    """P2 CS-burst table word, DBPSK on both staggered carriers.
 
-    HYPOTHESIS, not a measurement, and it is the one thing standing between this
-    station and a PACTOR-2 link. What is published ([SCS] s2, Figure 1): six
-    codewords of 40 bits at exactly the Plotkin bound, "All CS are always sent in
-    DBPSK in order to obtain a maximum of robustness", 20 pulses each preceded by
-    a single phase reference pulse, in a 1.25 s cycle whose packet is 0.8 s. What
-    is not published: how the twenty bits map onto the twenty pulses, and where in
-    the cycle they sit.
-
-    What fills those two gaps is PACTOR-3, which carries the SAME six codewords
-    (`spec.CONTROL_SIGNALS`) and whose keying of them is measured on a stranger's
-    tape -- DBPSK, one reference pulse then the twenty bits at 100 Bd, on two
-    carriers at a fixed instant in the same 1.25 s cycle (pactor3.md s7,
-    `placement.control_signal`). Everything there is protocol rather than physical
-    layer, so this is that keying on PACTOR-2's two carriers: the bit order
-    `cs_table` fixes for the whole modem, this waveform's own measured DBPSK
-    alphabet rather than PACTOR-3's on-axis one, and the T/2 stagger the two
-    virtual carriers carry everywhere else in PACTOR-2. `swapped` exchanges the
-    tones for the ARQ cycle's arrangement, as it does for a data burst.
+    AI4Y's CS1 and entry 6 after K4MCK's robust call fix the bit order,
+    alphabet and alternating arrangement (Kiwi 0925 fixture). Ordinary P2
+    ARQ uses entries 0-5; the bridge acts only on independently heard words.
     """
-    steps = cell_steps(1)[cs_table()[index]]
+    # AI4Y's P2 CS1 and entry 6 use 315/135 degrees for zero/one,
+    # the inverse of the data alphabet (k4mck-0925-kiwi-robust-p3.wav).
+    steps = cell_steps(1)[1 - cs_table(True)[index]]
     return _render([steps, steps], tones[::-1] if swapped else tones, fs,
                    _stagger(fs))
 
@@ -659,7 +648,7 @@ def decode_frame(soft: np.ndarray, path: Path) -> bytes:
 
     **The trellis ends are PINNED at zero.** `encode_frame` starts its register
     at zero and the flush returns it there, so unlike PACTOR-3's high speed
-    levels (see `coding.viterbi_decode`) a P2 field grants the decoder both
+    levels (see `coding.conv_code_for`) a P2 field grants the decoder both
     boundary states -- and taking them is worth a real burst: leaving the ends
     free lets an impostor path outscore the true field on the faded bursts of
     `hb9ak_055246_c1500.wav`.

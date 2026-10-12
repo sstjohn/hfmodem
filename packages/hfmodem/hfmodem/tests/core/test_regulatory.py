@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""Regulatory profiles: the mechanism, and the two profiles shipped.
+"""Emission profiles: the mechanism, and the two profiles shipped.
 
-Several of these exist because an independent review of an earlier version found
-the gate permitting emissions it should have refused. Each such case is marked.
+These tests check acceptance and refusal against the selected profile's limits.
 """
 from __future__ import annotations
 
@@ -93,110 +92,90 @@ def test_it_is_not_called_open():
 # --- part97: bandwidth --------------------------------------------------------
 
 def test_hf_data_is_capped_at_2800_hz():
-    """Review finding: the gate had no upper bandwidth limit and permitted a
-    20 kHz HF data emission. §97.307(f)(3)."""
+    """The profile applies its 2800 Hz ceiling to both local and automatic control."""
     EXTRA.check(em(14105, 2750), control=Control.LOCAL)
-    with pytest.raises(NotPermitted, match=r"97\.307"):
+    with pytest.raises(NotPermitted, match=r"part97 bandwidth"):
         EXTRA.check(em(14105, 20_000), control=Control.LOCAL)
-    with pytest.raises(NotPermitted, match=r"97\.307"):
+    with pytest.raises(NotPermitted, match=r"part97 bandwidth"):
         EXTRA.check(em(28155, 60_000), control=Control.AUTOMATIC)
 
 
 def test_2800_exactly_is_permitted_and_2801_is_not():
     EXTRA.check(centred(14_100_000, 2800, drift_hz=0), control=Control.LOCAL)
-    with pytest.raises(NotPermitted, match=r"97\.307"):
+    with pytest.raises(NotPermitted, match=r"part97 bandwidth"):
         EXTRA.check(centred(14_100_000, 2801, drift_hz=0), control=Control.LOCAL)
 
 
-# --- part97: §97.309 is the operator's, not the gate's ------------------------
+# --- part97: technique metadata does not affect these checks ------------------
 
 @pytest.mark.parametrize("technique", ["pactor", "ardop", "sabir", "vara", "something-new"])
 def test_no_technique_is_refused_on_documentation_grounds(technique):
-    """An earlier version refused any technique it could not place among those
-    "documented publicly" under §97.309(a)(4), which would have refused VARA —
-    a mode that has carried Winlink traffic daily for over a decade without
-    enforcement action.
-
-    Whether a technique's characteristics are documented publicly is a judgement
-    about the state of the world, not a computation, and it is the one question
-    in this profile that is not arithmetic. Software imposing a contested reading
-    nobody else applies protects no one.
-
-    There is a resolution rather than a standoff, and it is part of why this
-    project exists: publishing a normative description of a waveform *makes* it
-    documented publicly."""
+    """The profile does not filter technique names or judge their documentation."""
     GENERAL.check(em(14105, 500, technique=technique), control=Control.LOCAL)
 
 
-# --- part97: privileges -------------------------------------------------------
+# --- part97: selected data segments -------------------------------------------
 
 def test_a_technician_has_no_hf_data_below_ten_metres():
-    """§97.307(f)(9), not §97.301 — Technicians do hold 80/40/15 m."""
+    """The technician setting selects only the 10 m data segment."""
     tech = Part97(licence=Licence.TECHNICIAN)
-    with pytest.raises(NotPermitted, match=r"97\.301"):
+    with pytest.raises(NotPermitted, match=r"part97 placement"):
         tech.check(em(14105, 500), control=Control.LOCAL)
     tech.check(em(28125, 500, power_w=100), control=Control.LOCAL)
 
 
 def test_a_general_is_refused_the_extra_only_segment():
-    with pytest.raises(NotPermitted, match=r"97\.301"):
+    with pytest.raises(NotPermitted, match=r"part97 placement"):
         GENERAL.check(em(14010, 500), control=Control.LOCAL)
     EXTRA.check(em(14010, 500), control=Control.LOCAL)
 
 
 def test_one_sixty_metres_is_available():
-    """Review finding: 160 m was missing and a legal emission was refused."""
+    """The general setting includes the 160 m data segment."""
     GENERAL.check(em(1840, 500), control=Control.LOCAL)
 
 
 @pytest.mark.parametrize("licence", list(Licence))
 def test_outside_the_amateur_bands_entirely_is_refused_for_everyone(licence):
-    with pytest.raises(NotPermitted, match=r"97\.301"):
+    with pytest.raises(NotPermitted, match=r"part97 placement"):
         Part97(licence=licence).check(em(13000, 500), control=Control.LOCAL)
 
 
-# --- part97: 60 m, as rewritten effective 13 February 2026 --------------------
+# --- part97: 60 m segment -----------------------------------------------------
 
 def test_the_sixty_metre_band_is_an_ordinary_data_segment():
-    """§97.303(h)(3), rewritten by FCC 25-60 (91 FR 1405): amateur stations may
-    transmit "in the 5351.5-5366.5 kHz band" as well as on four channels. A
-    2.8 kHz data emission there needs no channelisation at all."""
+    """The profile includes 5351.5–5366.5 kHz as a continuous segment at up to 2.8 kHz."""
     GENERAL.check(em(5359, 2800, power_w=9.15), control=Control.LOCAL)
     EXTRA.check(em(5359, 2800, power_w=9.15), control=Control.LOCAL)
 
 
 def test_the_retired_fifth_channel_is_now_inside_the_band():
-    """5358.5 kHz was one of the five discrete channels; the new allocation
-    swallowed it."""
+    """A 2800 Hz emission centred at 5358.5 kHz fits inside the profile's 60 m segment."""
     GENERAL.check(em(5358.5, 2800, power_w=5), control=Control.LOCAL)
 
 
 def test_the_band_edges_hold():
     GENERAL.check(em(5353, 2800, power_w=5), control=Control.LOCAL)
-    with pytest.raises(NotPermitted, match=r"97\.301"):
+    with pytest.raises(NotPermitted, match=r"part97 placement"):
         GENERAL.check(em(5352.9, 2800, power_w=5), control=Control.LOCAL)
     GENERAL.check(em(5365, 2800, power_w=5), control=Control.LOCAL)
-    with pytest.raises(NotPermitted, match=r"97\.301"):
+    with pytest.raises(NotPermitted, match=r"part97 placement"):
         GENERAL.check(em(5365.1, 2800, power_w=5), control=Control.LOCAL)
 
 
 @pytest.mark.parametrize("centre", [5332.0, 5348.0, 5373.0, 5405.0])
 def test_the_four_discrete_channels_are_still_not_offered(centre):
-    """Data on a channel is 2K80J2D with the carrier set 1.5 kHz below the
-    centre — an exact placement, not a range, which a segment table cannot
-    express. Four now, not five."""
-    with pytest.raises(NotPermitted, match=r"97\.301"):
+    """The profile omits these four channel centres. A fixed 2K80J2D passband
+    with the carrier 1.5 kHz below centre needs an exact-placement check;
+    a segment table only expresses ranges."""
+    with pytest.raises(NotPermitted, match=r"part97 placement"):
         GENERAL.check(em(centre, 2800, power_w=100), control=Control.LOCAL)
 
 
 def test_the_sixty_metre_band_is_capped_at_nine_point_one_five_watts():
-    """§97.313(i) — 9.15 W ERP in the band against 100 W ERP on the channels.
-    ERP is PEP times gain over a dipole, and a dipole is presumed 0 dBd, so this
-    is the limit for the antenna the rule presumes; a gain antenna must come
-    down further, and the profile cannot know the gain.
-
-    The refusal must say all of that itself: this test once pinned "9.15 W PEP",
-    and pinning the wrong unit is exactly how it survived."""
+    """The profile compares power_w to 9.15, modelling ERP with a 0 dBd dipole.
+    ERP is PEP times linear gain over a dipole; antenna gain is unknown here.
+    The refusal must explain that assumption and retain the ERP unit."""
     with pytest.raises(NotPermitted, match=r"9\.15 W ERP.*presumed 0 dBd dipole"):
         GENERAL.check(em(5359, 2800, power_w=100), control=Control.LOCAL)
     with pytest.raises(NotPermitted, match="does not state its power"):
@@ -204,21 +183,18 @@ def test_the_sixty_metre_band_is_capped_at_nine_point_one_five_watts():
 
 
 def test_automatic_control_is_still_out_of_the_whole_of_sixty_metres():
-    """§97.221(c) excepts "channels specified in §97.303(h)", which since
-    13 February 2026 specifies a band as well as four channels. Whether the
-    exception reaches the band is unsettled on the text, so it stays excluded —
-    including the narrow-response route, which is the one that would otherwise
-    have opened."""
-    with pytest.raises(NotPermitted, match=r"97\.221"):
+    """The profile excludes automatic control on its whole 60 m segment,
+    including the narrow-response route."""
+    with pytest.raises(NotPermitted, match=r"part97 automatic control"):
         GENERAL.check(em(5359, 2800, power_w=5), control=Control.AUTOMATIC)
-    with pytest.raises(NotPermitted, match=r"97\.221"):
+    with pytest.raises(NotPermitted, match=r"part97 automatic control"):
         GENERAL.check(em(5359, 500, power_w=5), control=Control.AUTOMATIC,
                       responding=True)
 
 
 def test_a_technician_has_no_sixty_metres():
-    """Not §97.307(f)(9) this time — §97.301(a) simply does not grant it."""
-    with pytest.raises(NotPermitted, match=r"97\.301"):
+    """The technician setting omits the 60 m segment."""
+    with pytest.raises(NotPermitted, match=r"part97 placement"):
         Part97(licence=Licence.TECHNICIAN).check(
             em(5359, 2800, power_w=5), control=Control.LOCAL)
 
@@ -226,9 +202,9 @@ def test_a_technician_has_no_sixty_metres():
 # --- part97: power ------------------------------------------------------------
 
 def test_thirty_metres_is_capped_at_200_watts():
-    """§97.313(c)(1), and 30 m carries most of this station's traffic."""
+    """The selected profile applies a 200 W ceiling on 30 m."""
     GENERAL.check(em(10145, 500, power_w=100), control=Control.LOCAL)
-    with pytest.raises(NotPermitted, match=r"97\.313"):
+    with pytest.raises(NotPermitted, match=r"part97 power"):
         GENERAL.check(em(10145, 500, power_w=500), control=Control.LOCAL)
 
 
@@ -240,7 +216,7 @@ def test_a_power_limited_band_refuses_an_emission_that_will_not_say():
 def test_a_technician_is_capped_on_the_bands_the_rule_names():
     tech = Part97(licence=Licence.TECHNICIAN)
     tech.check(em(28125, 500, power_w=200), control=Control.LOCAL)
-    with pytest.raises(NotPermitted, match=r"97\.313"):
+    with pytest.raises(NotPermitted, match=r"part97 power"):
         tech.check(em(28125, 500, power_w=1000), control=Control.LOCAL)
 
 
@@ -251,23 +227,23 @@ def test_local_control_is_not_confined_to_the_automatic_sub_bands():
 
 
 def test_automatic_control_is_confined():
-    with pytest.raises(NotPermitted, match=r"97\.221"):
+    with pytest.raises(NotPermitted, match=r"part97 automatic control"):
         GENERAL.check(em(14080, 2300), control=Control.AUTOMATIC)
 
 
 def test_the_narrow_sub_bands_are_what_actually_bite():
     """7.100–7.105 and 18.105–18.110 are 5 kHz wide."""
     GENERAL.check(em(7104, 500), control=Control.AUTOMATIC)
-    with pytest.raises(NotPermitted, match=r"97\.221"):
+    with pytest.raises(NotPermitted, match=r"part97 automatic control"):
         GENERAL.check(em(7104, 2300), control=Control.AUTOMATIC)
     for bw in (500, 2300, 2750):
         GENERAL.check(em(14110, bw), control=Control.AUTOMATIC)
 
 
 def test_an_emission_may_not_straddle_the_gap_at_14_100():
-    """§97.221(b) lists 14.0950–14.0995 and 14.1005–14.112 with a deliberate
-    1 kHz gap. Merging them would permit an emission across it."""
-    with pytest.raises(NotPermitted, match=r"97\.221"):
+    """The profile lists 14.0950–14.0995 and 14.1005–14.112 MHz separately.
+    Merging them would lose the 1 kHz gap in its automatic-control check."""
+    with pytest.raises(NotPermitted, match=r"part97 automatic control"):
         GENERAL.check(em(14100, 2300), control=Control.AUTOMATIC)
 
 
@@ -278,19 +254,19 @@ def test_responding_narrow_is_allowed_outside_the_sub_bands():
 
 
 def test_the_profile_name_is_not_caller_settable():
-    """It is what a log says the rules were. It should not be an argument."""
+    """It is what a log says the selected profile was. It should not be an argument."""
     with pytest.raises(TypeError):
         Part97(licence=Licence.GENERAL, name="part97-audited")
 
 
 def test_a_capped_band_is_reachable_once_the_station_states_its_power():
-    """30 m is 200 W PEP for everyone, and the gate rightly refuses an emission
+    """The profile selects 200 W PEP on 30 m and refuses an emission
     that does not say what it runs — the alternative is an unknown amount into a
     limited band.
 
     But there was no way to say it. No configuration key, nothing passing one, so
-    every protocol was refused on 30 m and no setting could fix it: a correct rule
-    with no way to satisfy it, which reads to an operator as a broken radio.
+    every protocol was refused on 30 m and no setting could fix it: a profile limit
+    with no way to supply the required value, which reads to an operator as a broken radio.
     """
     import tomllib
     from pathlib import Path
@@ -309,9 +285,9 @@ def test_a_capped_band_is_reachable_once_the_station_states_its_power():
         p.check(stated, control=Control.AUTOMATIC, responding=False)
 
         silent = cls.waveform.emission(dial)
-        with pytest.raises(NotPermitted, match="97.313"):
+        with pytest.raises(NotPermitted, match="part97 power"):
             p.check(silent, control=Control.AUTOMATIC, responding=False)
 
-        with pytest.raises(NotPermitted, match="97.313"):
+        with pytest.raises(NotPermitted, match="part97 power"):
             p.check(cls.waveform.emission(dial, power_w=500.0),
                     control=Control.AUTOMATIC, responding=False)

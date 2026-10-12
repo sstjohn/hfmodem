@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from hfmodem.shrike import arq, onair
+from hfmodem.shrike import arq, onair, spec
 from hfmodem.tests.shrike.archive import P3_FIXTURES, requires_ws8eoc_p3
 from hfmodem.tests.shrike.test_entry_answer import _Session
 from hfmodem.tests.shrike.test_p3_gateway_acquisition import audio
@@ -71,16 +71,17 @@ def test_short_heads_without_a_crc_body_do_not_seed_a_data_clock():
 
 @pytest.mark.parametrize("reader", ["scan", "anchored"])
 @requires_ws8eoc_p3
-def test_changeover_preserves_measured_long_clock_and_is_delivered_once(reader):
+def test_changeover_seeds_the_negotiated_cycle_and_is_delivered_once(reader):
     s = _Session(entry_pending=True)
     samples = audio("ws8eoc-0909-p3-rms.wav")
-    s.rx._p3_cycle_n = 180000
     s.rx._p3_span = 160000
     if reader == "scan":
         onair._scan_frame(s.rx, samples, 100000)
     else:
         s.rx.control_signal(samples, 100000, 103840)
-    assert s.rx._p3_cycle_n == 180000
+    expected = round((spec.CYCLE_LONG_S if s.host.arq.cycle_long
+                       else spec.CYCLE_SHORT_S) * onair.FS)
+    assert s.rx._p3_cycle_n == expected
     assert s.rx._p3_span == 160000
     count = s.rx.count
     s.rx.new_cycle()

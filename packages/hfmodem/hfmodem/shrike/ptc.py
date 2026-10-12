@@ -45,9 +45,10 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
-from . import hostmode, pactor1, placement, spec
-from .arq import (CS_ACK, CS_BREAKIN, CS_REQUEST, IRS, ISS, LADDERS,
-                  P1_SPEED_LEVEL, ArqIO, PactorArq, State)
+from . import compress, hostmode, p1rx, pactor1, placement, spec
+from .arq import (CS_ACK, CS_BREAKIN, CS_REQUEST, CS_SPEED_UP, IRS, ISS, LADDERS,
+                  P1_SPEED_LEVEL, P3_CS6_HOLD_REPEATS, REFUSED, ArqIO, PactorArq, State)
+from .p4host import P4LateFrame
 from .spec import Protocol
 
 FIRMWARE = "4.1"
@@ -156,9 +157,8 @@ so it is the one packet a receiver that has been tracking a PACTOR-1 raster can
 acquire, and that is what both references key: `p3rx.levels_present` scores the
 first PACTOR-3 segment of `rf-corpus/regress/fixtures/pos_pactor1_local.wav` and
 of `rf-corpus/PIII_Complete_1.wav` at level 1, channels 5 and 12 lit and the
-PACTOR-1 FSK pair dark. The level the traffic then runs at is `ArqConfig.traffic_sl`,
-taken once the entry packet has been acknowledged -- which is the point at which
-the peer has demonstrably acquired the waveform.
+PACTOR-1 FSK pair dark. Traffic retains that acquired level unless the peer
+commands a change or `ArqConfig.traffic_sl` explicitly overrides it.
 
 An UNINVITED upgrade still opens at `entry_sl`, because there is nobody known to
 be listening for the entry packet and level 3 is the level an independent monitor
@@ -240,12 +240,45 @@ class PtcHost(ArqIO):
         # The announcement's callsign case. Both completions on tape send it
         # lowercase (`1dl6maa`, `1w4dna`); every arm of ours sent it upper.
         self.announce_lower = True
+        # The announcement's leading digit: "maximal verfuegbare
+        # Software-Levelnummer". 1 is what every caller on today's air sends.
+        self.level_digit = 1
+        # Function blocks (`compress.supervisor_block` text), one queued every
+        # `supervisor_every` acknowledgements, each behind the announcement.
+        self.supervisor_schedule: tuple[str, ...] = ()
+        self.supervisor_every = 3
+        # `--after-connect p1-robust`: the peer's ACK of our first P1 data
+        # packet starts the P4 probe, as N9VC's caller keyed its robust shorts.
+        self.p4_after_first_ack = False
+        # ...or, that many repeat requests of it first: KB5LZK and VE3KPG
+        # asked for packet 1 every cycle, and left P1 for P4 on their own once
+        # we fell silent. 0 never gives up on the packet.
+        self.p1_robust_stall = 0
+        self.p1_stall_goodbye = False
+        self.p1_stalled = 0
+        self._first_packet_requests = 0
+        # ...or, with `--p1-robust-stall-then shorts`, a CS1 whose shift phase
+        # repeats the cycle before: a Trimode gateway that decoded our bit-5
+        # packet 1 answers that way and waits for our P4 short (KY2D->N9VC).
+        self.p1_stall_shorts = False
+        self.p1_jump_accepted = False
+        self._p1_last_sense: tuple[float, bool] | None = None
+        self._p1_phase_jump = False
+        # Function `B` in every Nth idle packet, "so that third parties
+        # listening can identify the station"; 0 keeps idle packets idle.
+        self.idle_id_every = 0
+        self._idle_packets = 0
+        self._idle_field: tuple[object, bytes] | None = None
         self.hostmode = False
         self.listening = False
         self.autostatus = False
         self.arq = PactorArq(self)
         self.settings["CONTYPE"] = str(self.arq.cfg.contype)
         self.settings["CONINTEGRITY"] = str(self.arq.cfg.conintegrity)
+        # The call this station last answered: the caller's tone offset, and the
+        # end of its frame, which the called side's cycle runs from.
+        self.called_by: Optional[p1rx.Connect] = None
+        self.called_at: Optional[float] = None
         # Which bit rate this PACTOR-1 link runs at, decided by the codeword the
         # called station answers with and NOT by us. CS1 means it read our 200 Bd
         # redundancy section cleanly and the link starts at 200; CS4 means it did
@@ -288,6 +321,14 @@ class PtcHost(ArqIO):
         # 100 with nothing acknowledged since is asking for that block again.
         self._p1_speedup_armed = True
         self._hispeed_tries = 0
+        self.robust_bridge_active = False
+        self.robust_entry_from_bridge = False
+        self.robust_entry_exhausted = False
+        self.pactor2_only = False
+        self._p2_setup_acked = False
+        self.p2_announcement_end: int | None = None
+        # MYLevel-2 policy: P1 setup/fallback, experimental 0x6A9 -> P2,
+        # and no P3 grants, unsolicited upgrades, or follows.
         self.stay_in_pactor1 = False
         """Hold the link in PACTOR-1, whatever it could be upgraded to.
 
@@ -423,6 +464,12 @@ class PtcHost(ArqIO):
         # a link has one reader, and a station speaking its own mail has no
         # hostmode client polling the channel.
         self.app = None
+        self.p3_mail_active = False
+        # Hostmode bytes are opaque: an external mail client has no attached
+        # application/session for ARQ to inspect. Keep the byte-retention policy
+        # armed for this contact even if the host leaves hostmode afterwards.
+        self.p3_host_data_active = False
+        self._p4_sf8_admit = None
         self._modem = hostmode.Modem(self._dispatch)
         self._line = bytearray()
         self._channels: dict[int, _Channel] = {}
@@ -450,6 +497,7 @@ class PtcHost(ArqIO):
         self.rcvd_total = 0
         self._laststatus: Optional[bytes] = None
         self._link_up = False
+        self._caller_line: Optional[bytearray] = None
         self._disconnect_asked = False
         # Per-channel MYCALL [10.4.5]; channel 0's is the one a channel falls
         # back to when its link ends. BPQ32's SCS driver sets one per stream.
@@ -589,7 +637,11 @@ class PtcHost(ArqIO):
             return False
         granted, self._grant_pending = self._grant_pending, False
         if not granted:
-            if self.p1_grant_only:
+            if self.pactor2_only:
+                # An ordinary ACK accepts the setup in P1. Let a P1-only
+                # peer get its turn rather than waiting forever for 0x6A9.
+                self._p2_setup_acked = True
+            if self.p1_grant_only or self.pactor2_only:
                 return False
             if not payload_waiting and not self.stay_in_pactor3:
                 return False
@@ -604,8 +656,21 @@ class PtcHost(ArqIO):
                 why = "on the peer's grant" if granted else "uninvited"
                 self.log(f"link upgraded to {target} at "
                          f"SL{self.arq.speed_level} {why}")
+                if target is Protocol.PACTOR3:
+                    self._announce_p3_speed_policy()
                 return True
         return False
+
+    def _announce_p3_speed_policy(self) -> None:
+        policy = self.arq.cfg.p3_speed_policy
+        rules = ("CS4 climbs only on a queue above the field and always "
+                 "acknowledges, "
+                 f"MAXTry 1, a repeated CS6 is held {P3_CS6_HOLD_REPEATS} "
+                 "times"
+                 if policy == "stock" else
+                 f"CS4 climbs, MAXTry {self.arq.cfg.p3_max_try}, "
+                 "the repeated-CS6 hold is unbounded")
+        self.log(f"P3 speed policy {policy}: {rules}")
 
     def _upgrade_targets(self) -> tuple[Protocol, ...]:
         """`UPGRADE_TARGETS`, with the PACTOR-2 rung appended where it is armed.
@@ -614,11 +679,18 @@ class PtcHost(ArqIO):
         PACTOR-1, and that contradiction is what makes the second rung worth
         keying at all. `offer_pactor2` is where the null this stands on is
         written down."""
+        if self.pactor2_only:
+            return (Protocol.PACTOR2,)
         return UPGRADE_TARGETS + ((Protocol.PACTOR2,) if self.offer_pactor2
                                   else ())
 
-    def _entry_answered(self) -> None:
-        """The peer read the entry packet: run the traffic at `traffic_sl`.
+    def _entry_answered(self, *, keep_speed: bool = False) -> None:
+        """Finish entry, retaining its speed unless explicitly overridden.
+
+        A CS4 answer finishes entry before ARQ applies the command. In that
+        case `keep_speed` bypasses the experimental traffic preset, so the
+        increase is relative to the entry actually sent. Completing entry
+        later, from `upgrade` during the ACK, used to overwrite that increase.
 
         The entry packet asks one question -- can you acquire this waveform? --
         and until something comes back the link holds `GRANT_ENTRY_SL`, which is
@@ -658,8 +730,12 @@ class PtcHost(ArqIO):
             return
         self._uninvited_entry = False
         self.arq.entry_pending = False
-        self.arq.speed_level = self.arq.traffic_level
-        self.log(f"the peer answered the entry packet -> SL{self.arq.speed_level}")
+        if self.protocol is Protocol.PACTOR3:
+            self.arq._p3_entry_confirmed = True
+        if not keep_speed:
+            self.arq.speed_level = self.arq.traffic_level
+        suffix = " (peer speed command follows)" if keep_speed else ""
+        self.log(f"the peer answered the entry packet -> SL{self.arq.speed_level}{suffix}")
 
     def fall_back(self, why: str, *, rule_out: bool = True) -> bool | None:
         """The upgrade window ran out: go back to what was carrying data.
@@ -696,6 +772,38 @@ class PtcHost(ArqIO):
         if self.protocol is not Protocol.PACTOR1:
             return self._fall_back_to_pactor1(why, rule_out=rule_out)
 
+    def prepare_p1_entry_goodbye(self) -> bool:
+        """Select P1 only for terminal QRT after a current owned entry grant."""
+        a = self.arq
+        if (not self.no_p3_fallback or self.protocol is not Protocol.PACTOR3
+                or a.state != State.CONNECTED or a.role != ISS
+                or not (a.entry_pending or self._uninvited_entry)
+                or not a.upgrade_unanswered or not a._entry_p1_current
+                or a._p3_entry_confirmed):
+            return False
+        a.retain_unconfirmed('P3 entry unconfirmed; current P1 peer; terminal QRT only')
+        # Remove traffic from the active seam only after preserving it. No
+        # fallback data or new entry may consume these bytes during the close.
+        a._outbuf.clear()
+        if a._inflight is not None:
+            # Entry consumed a local counter, not a peer acknowledgement.
+            # The P1 QRT must replace it under the still-unacknowledged counter.
+            a._next_seq = a._inflight.seq
+        a._inflight = None
+        a.entry_pending = self._uninvited_entry = False
+        a._unanswered_upgrade = None
+        a._upgrade_granted = a._upgrade_asked = False
+        a._upgrade_reply_owed = a._upgrade_owned_grant = False
+        a._entry_p1_current = False
+        a._entry_p1_close = True
+        a.cycle_long = False
+        self.protocol = Protocol.PACTOR1
+        self._grant_pending = False
+        self._phase_power(Protocol.PACTOR1, 'unconfirmed entry terminal QRT')
+        self.log('current P1 grant after never-confirmed P3 entry -> P1 QRT only; '
+                 'transfer unconfirmed, bytes retained')
+        return True
+
     def _fall_back_to_pactor1(self, why: str, *, rule_out: bool = True) -> bool | None:
         """Run the link in PACTOR-1 again, and stop offering what it was in.
 
@@ -716,6 +824,10 @@ class PtcHost(ArqIO):
         as unable to follow, and leaves the break-in that reads it as taking the
         channel alone.
         """
+        if self.robust_entry_from_bridge and self.arq.entry_pending:
+            self.robust_entry_exhausted = True
+            self.log(f"{why}; robust P3 entry unanswered: listen only")
+            return False
         if self.no_p3_fallback and self.protocol is Protocol.PACTOR3:
             if not self._p3_fallback_reported:
                 self.log(f"{why}; --no-p3-fallback retains PACTOR-3 "
@@ -802,6 +914,8 @@ class PtcHost(ArqIO):
         `on_rx_event`.
         """
         heard = None if protocol is None else Protocol(protocol)
+        if self.pactor2_only and heard not in (None, Protocol.PACTOR1, Protocol.PACTOR2):
+            return
         if heard is None or heard is self.protocol:
             return
         if self.no_p3_fallback and self.protocol is Protocol.PACTOR3:
@@ -829,6 +943,8 @@ class PtcHost(ArqIO):
             self.protocol = heard
             self.arq.speed_level = self.arq.entry_level
             self.log(f"peer is transmitting {heard} -> link follows")
+            if heard is Protocol.PACTOR3:
+                self._announce_p3_speed_policy()
         else:
             self.log(f"peer is transmitting {heard}, which shrike cannot "
                      f"transmit -- answering in {self.protocol}")
@@ -886,10 +1002,10 @@ class PtcHost(ArqIO):
         ONLY IN PACTOR-1, ONLY AS THE CALLER, ONLY ONCE. Every measured grant is
         a called station commanding the caller that announced the capability; a
         link already in PACTOR-3 has nothing left to grant, and a station that
-        answered a call has no transmit anchor of its own to key a new waveform
-        from (`onair.RadioTx.answered_refusal`). Once, because a peer waiting for
-        the entry packet repeats the word every cycle -- and because two readers
-        find the same burst, the anchored one and the sweep.
+        answered a call is the one that grants, not the one granted. Once,
+        because a peer waiting for the entry packet repeats the word every
+        cycle -- and because two readers find the same burst, the anchored one
+        and the sweep.
 
         AND A GRANT THAT ARRIVES IN A TEARDOWN IS REFUSED OUT LOUD. Only
         `CONNECTED` can take one. The entry packet is the first burst of a link
@@ -910,7 +1026,7 @@ class PtcHost(ArqIO):
         wrong. The line says that, because it is the only place the session gets
         told where to look.
         """
-        experimental = self.p1_6a9
+        experimental = self.p1_6a9 or self.pactor2_only
         expected = pactor1.CS_6A9 if experimental else pactor1.CS_59A
         if not self.p1_act_on_grant or ev.spare != expected:
             return
@@ -942,7 +1058,10 @@ class PtcHost(ArqIO):
         # which is the better evidence -- so an uninvited attempt that failed
         # first may not be what closes the door on an invitation that came after.
         self._ruled_out.clear()
-        if experimental:
+        if self.pactor2_only:
+            self.log("0x6A9 experimental entry response -> PACTOR-2 SL1 "
+                     "in the next transmit slot")
+        elif experimental:
             self.log("0x6A9 experimental entry response -> selected entry waveform")
         else:
             self.log("0x59A grant -> PACTOR-3 entry packet in the next transmit slot")
@@ -950,8 +1069,63 @@ class PtcHost(ArqIO):
         # and the cycle keys it on the next boundary, so this is the last
         # instant with a whole turnaround in front of the carrier the new level
         # is for.
-        self._phase_power(Protocol.PACTOR3, f"the peer's {trigger}")
+        self._phase_power(Protocol.PACTOR2 if self.pactor2_only else Protocol.PACTOR3,
+                          f"the peer's {trigger}")
         self.arq.on_rx_grant()
+
+    def take_robust_answer(self) -> None:
+        """Take the answer to our Robust Connect as a grant: PACTOR-3 entry next.
+
+        The same entry the grant path keys, status 0x1a with the template for a
+        field: K4MCK's after AI4Y answered its Robust Connect (Kiwi 7101.5 kHz,
+        2026-09-25 22:28Z), and AI4Y acknowledged it with CS4. The answer is the
+        100 Bd FSK form of CS1, and the entry's own answer comes back as an
+        ordinary P3 control signal.
+        """
+        if self._grant_taken or self.stay_in_pactor1 or self.arq.robust_answer is None:
+            return
+        self._grant_taken = self._grant_pending = True
+        self._ruled_out.clear()
+        self._phase_power(Protocol.PACTOR3, "the robust answer")
+        self.arq.take_entry(seq=2)
+        self.log(f"robust answer -> PACTOR-3 entry packet at counter {self.arq.tx_seq}")
+
+    def enter_robust_bridge(self) -> bool:
+        """Own the P2 setup exchange without imposing a P2 protocol ceiling."""
+        if (self.arq.terminal_pending or self.arq.robust_answer is None
+                or self.protocol is not Protocol.PACTOR1):
+            return False
+        self.protocol = Protocol.PACTOR2
+        self._phase_power(Protocol.PACTOR2, "the robust bridge")
+        self.pactor2_only = False
+        self.arq.speed_level = 2
+        self.arq._next_seq = 1
+        self.robust_bridge_active = True
+        self.log("robust answer -> PACTOR-2 bridge at counter 1")
+        return True
+
+    def take_bridge_grant(self, *, forced: bool = False) -> bool:
+        """Commit the confirmed P2 grant as a P3 SL1 entry, once."""
+        if self.arq.terminal_pending:
+            self._grant_pending = False
+            self.log("entry 6 ignored: disconnect pending")
+            return False
+        if not self.robust_bridge_active or self.protocol is not Protocol.PACTOR2:
+            self.log("bridge grant ignored: bridge inactive")
+            return False
+        self.protocol = Protocol.PACTOR3
+        self.arq.speed_level = GRANT_ENTRY_SL
+        self.arq.entry_pending = True
+        self._uninvited_entry = self._grant_pending = False
+        self._ruled_out.clear()
+        why = "FORCED P3 ENTRY (no entry 6)" if forced else "the bridge's entry 6"
+        self._phase_power(Protocol.PACTOR3, why)
+        self.robust_entry_from_bridge = True
+        self.arq.take_entry(seq=2, upgraded=True)
+        self._grant_taken = True
+        self.robust_bridge_active = False
+        self.log(f"{why}: PACTOR-2 -> PACTOR-3 entry packet at counter 2")
+        return True
 
     # -- identity ---------------------------------------------------------
     @property
@@ -1027,6 +1201,16 @@ class PtcHost(ArqIO):
         """
         if self.wait_until is not None and time.monotonic() >= self.wait_until:
             self.release_wait()
+        if self.protocol == Protocol.PACTOR3 and self.arq.state in (State.CONNECTED, State.DISCONNECTING):
+            if not self.arq.settle_peer_presence(elapsed_ticks=elapsed_ticks):
+                return
+            from ..winlink import MailClient
+            if isinstance(self.app, MailClient) and self.app.progress is None:
+                from .p3progress import MailProgress
+                self.app.progress = MailProgress(self.app, self.arq)
+            progress = getattr(self.app, 'progress', None)
+            if progress is not None:
+                progress.poll(qualified=self.arq.peer_qualified)
         self.arq.on_cycle(elapsed_ticks=elapsed_ticks, cycle_ticks=cycle_ticks)
         if self.peer is not None:
             self.peer.pump()
@@ -1057,16 +1241,50 @@ class PtcHost(ArqIO):
             from scipy.signal import resample_poly
             g = gcd(int(fs), rxfront.FS)
             audio = resample_poly(audio, rxfront.FS // g, int(fs) // g)
-        for ev in rxfront.decode_events(audio):
+        listening = self.arq.state == State.LISTENING
+        for ev in rxfront.decode_events(
+                audio, mycall=self.mycall if listening else None,
+                strict=self.arq.cfg.conintegrity == 1):
             self.on_rx_event(ev)
 
     def on_rx_event(self, ev) -> None:
         """Drive the FSM from one decoded rxfront event. Shared by feed_audio (a
         whole buffer at once) and the streaming sound-card loop in shrike.live, so a
         live session and a replayed WAV take the identical path into PactorArq."""
+        if self.arq._mail_cs4_wait is not None:
+            if ev.kind == "cs" and ev.protocol == Protocol.PACTOR3:
+                self.arq.on_rx_cs(self._counter_logical_cs(ev))
+            return
+        if self.robust_bridge_active and not self.arq.terminal_pending:
+            return
+        if getattr(ev, "p4", None) is not None:
+            if self.arq._entry_p1_close:
+                return
+            self.arq._entry_p1_current = False
+            self.arq.on_rx_p4(ev.p4)
+            return
+        if (self.arq._entry_p1_close and ev.kind in ('cs', 'packet', 'unassigned')
+                and ev.protocol != Protocol.PACTOR1):
+            return  # Only a P1 answer can settle the terminal P1 exchange.
+        if (self.protocol is Protocol.PACTOR3
+                and self.arq.state in (State.CONNECTED, State.DISCONNECTING)):
+            # Only the next owned, selected P1 grant can restore close evidence.
+            self.arq._entry_p1_current = False
+            if (ev.protocol == Protocol.PACTOR3
+                    and (ev.kind == 'cs' and ev.cs is not None
+                         or ev.kind == 'packet' and ev.packet is not None and ev.packet[3])):
+                # A genuine higher-mode reply forbids this close exception for
+                # the whole contact, even if it only asks to repeat entry.
+                self.arq._p3_entry_confirmed = True
         # Anything the front end reports is a signal on the channel that is not
         # noise, which is what the status byte's Channel-Busy means [6.90].
         self.busy_until = time.monotonic() + BUSY_HOLD_S
+        if (self.pactor2_only and ev.kind in ("cs", "packet")
+                and ev.protocol not in (Protocol.PACTOR1, Protocol.PACTOR2)):
+            # A higher-mode frame must not acknowledge bytes, change roles,
+            # extend retries, or select a renderer in a level-2 session.
+            self.log(f"{ev.protocol} ignored: local maximum is PACTOR-2")
+            return
         if ev.kind in ("cs", "packet") and self.arq.state == State.CONNECTING \
                 and ev.protocol != Protocol.PACTOR1:
             # NOT AN ANSWER TO OUR CALL, whatever it decoded to. Every PACTOR-2
@@ -1120,6 +1338,9 @@ class PtcHost(ArqIO):
         if ev.kind == "connect":
             called = ev.connect.callsign.upper()
             if called == self.mycall:                # the burst names the called party
+                if self.arq.state == State.LISTENING:
+                    self.called_by = ev.connect
+                    self.called_at = ev.t
                 self.arq.on_rx_connect("", called, ev.connect.variant)
         elif ev.kind == "p1reply":
             # PRESENCE ONLY -- and presence does not bring a link up.
@@ -1139,6 +1360,8 @@ class PtcHost(ArqIO):
             if self.arq.state == State.CONNECTING:
                 self.log("peer burst heard (not decoded) -- still calling")
         elif ev.kind == "cs":
+            self._p1_phase_jump = (self._p1_phase_repeats(ev)
+                                   and ev.cs == pactor1.CS_ACK_A)
             if self.arq.state == State.CONNECTING:
                 # WHILE WE ARE CALLING, THE PHASE DECIDES THIS AND NOT `protocol`.
                 # A call is a PACTOR-1 connect, its answer is a PACTOR-1 codeword,
@@ -1219,6 +1442,10 @@ class PtcHost(ArqIO):
                     self._follow_peer(ev.protocol,
                                       breakin=ev.cs == pactor1.CS_CHANGEOVER)
                 cs = self._logical_cs(ev)
+                if (cs == CS_SPEED_UP and self.protocol is Protocol.PACTOR3
+                        and self.arq.state == State.CONNECTED and self.arq.role == ISS
+                        and self.arq.tx_seq is not None and not self.arq.terminal_pending):
+                    self._entry_answered(keep_speed=True)
                 if cs == CS_BREAKIN:
                     self._entry_answered()
                     if ev.protocol == Protocol.PACTOR3 and self.arq.unconfirmed_breakin:
@@ -1227,6 +1454,8 @@ class PtcHost(ArqIO):
                         # a CRC-valid body/phase or a real ACK settles the turn.
                         self.arq.on_unconfirmed_breakin_head()
                         return
+                if cs == CS_REQUEST:
+                    self._first_packet_request()
                 self.arq.on_rx_cs(cs)
         elif ev.kind == "packet":
             sl, status, payload, ok = ev.packet
@@ -1281,12 +1510,15 @@ class PtcHost(ArqIO):
             previous_role = self.arq.role
             repeated_stint = False
             if ok and ev.breakin and ev.protocol == Protocol.PACTOR3 \
-                    and self.arq.unconfirmed_breakin:
+                    and self.arq.unconfirmed_breakin \
+                    and not self.arq.qrt_peer_acked(sl, payload, status):
                 recover = getattr(self.peer, "recover_p3_turn", None)
                 if recover is not None:
                     repeated_stint = bool(recover(ev))
             self._p3_changeover_answer = (ev.breakin
                                           and ev.protocol == Protocol.PACTOR3)
+            if ok and ev.baud:
+                self._follow_peer_rate(ev.baud, breakin=ev.breakin)
             try:
                 self.arq.on_rx_packet(sl, payload, status, ok,
                                       breakin=ev.breakin, protocol=ev.protocol,
@@ -1311,8 +1543,10 @@ class PtcHost(ArqIO):
                 # for as long as it is waiting for the entry packet, so a copy
                 # arriving after we have keyed one is the far end saying it did
                 # not read what we sent.
-                if ev.spare == pactor1.CS_59A:
-                    self.arq.note_upgrade_unread()
+                selected = (pactor1.CS_6A9 if self.p1_6a9 or self.pactor2_only
+                            else pactor1.CS_59A)
+                if ev.spare == selected:
+                    self.arq.note_upgrade_unread(p1=ev.protocol == Protocol.PACTOR1)
                 self._take_grant(ev)
                 # AND IT IS THE PEER BEING THE IRS. Twelve bits at zero errors
                 # in the slot the receiving station owes us is that station
@@ -1516,13 +1750,22 @@ class PtcHost(ArqIO):
         # reporting the PACTOR-3 entry level it was no longer running at.
         sl = (P1_SPEED_LEVEL if self.protocol is Protocol.PACTOR1
               else self.arq.speed_level - 1)
-        # Byte 4 is the receive frequency offset, and 128 is the manual's "no
-        # estimate yet" [10.6]. A zero here is a claim to be dead on frequency,
-        # which no part of this modem has measured.
         return bytes((0x80 | mode << 4 | direction | status,
                       level,
                       sl if connected else 0,
-                      128))
+                      self._df()))
+
+    def _df(self) -> int:
+        """Byte 4, the receive offset from 1500 Hz as SCS's modem reports it:
+        int8(f - 1500) across 1373..1627 Hz and -128 outside it.
+        -128 is also the manual's "no estimate yet" [10.6], which is what a
+        receiver that has measured nothing reports."""
+        f = getattr(getattr(self.peer, "sessrx", None), "receive_centre_hz", None)
+        if f is None and self.arq.answering and self.called_by is not None:
+            f = spec.CENTER_FREQ_HZ + self.called_by.offset_hz
+        if f is None or not 1373 <= f <= 1627:
+            return 0x80
+        return int(f - spec.CENTER_FREQ_HZ) & 0xFF
 
     def _other(self, pkt: hostmode.Packet) -> bytes:
         """Any channel that is not the PACTOR one: idle Packet-Radio channels."""
@@ -1549,6 +1792,7 @@ class PtcHost(ArqIO):
     def _pactor(self, pkt: hostmode.Packet) -> bytes:
         ch = pkt.channel
         if not pkt.is_command:
+            self.p3_host_data_active = bool(pkt.data) or self.p3_host_data_active
             self.arq.on_host_data(pkt.data)
             return hostmode.reply(ch, hostmode.OK)
 
@@ -1812,9 +2056,16 @@ class PtcHost(ArqIO):
         that draws a grant keeps bit 6 down from the grant until the peer has
         read the entry.
         """
-        return (self.protocol is Protocol.PACTOR1 and self.p1_grant_only
+        return (self.protocol is Protocol.PACTOR1
+                and (self.p1_grant_only or self.p2_announcement_pending)
                 and self.p1_act_on_grant and not self.stay_in_pactor1
                 and not self._grant_taken)
+
+    @property
+    def p2_announcement_pending(self) -> bool:
+        """Declare P2 during setup, not over ordinary P1 fallback traffic."""
+        return (self.pactor2_only and not self._p2_setup_acked
+                and not self._grant_taken and Protocol.PACTOR2 not in self._ruled_out)
 
     def send_packet(self, sl: int, payload: bytes, status: int,
                     breakin: bool = False) -> Optional[int]:
@@ -1849,9 +2100,17 @@ class PtcHost(ArqIO):
         report a truncation that never happened. `arq.PactorArq._sent` reads
         whatever the seam says, and a seam that says nothing is unmeasured.
         """
+        if self.robust_entry_exhausted:
+            return REFUSED
         if self.peer is None:
             return None
         p1 = self.protocol is Protocol.PACTOR1
+        if (p1 and status & spec.STATUS_QRT and not breakin
+                and hasattr(self.peer, "send_p1_packet")):
+            called = self.arq.mycall if self.arq.answering else self.arq.dxcall
+            payload = pactor1.qrt_field(called, self.p1_baud)
+        elif p1 and not payload and not breakin and self.idle_id_every:
+            payload, status = self._idle_id(status)
         if self.protocol is Protocol.PACTOR2 \
                 and hasattr(self.peer, "send_p2_packet"):
             # NO BREAK-IN ARM. PACTOR-2's changeover is the bare CS3 of the
@@ -1873,6 +2132,10 @@ class PtcHost(ArqIO):
                     acquire=self.arq.entry_variant == "burst")
         if breakin and p1 and hasattr(self.peer, "send_p1_breakin"):
             self._p1_header_inverted = True
+            # On trial like any 200 Bd packet: the peer's CS2 is the only
+            # answer an unread changeover draws (`_request_at_speed`).
+            if self.p1_baud == 200 and not self._hispeed_tries:
+                self._hispeed_tries = 1
             return self.peer.send_p1_breakin(
                 payload, self.p1_baud, status & spec.STATUS_SEQ,
                 qrt=bool(status & spec.STATUS_QRT))
@@ -1896,6 +2159,22 @@ class PtcHost(ArqIO):
                 and hasattr(self.peer, "send_long_packet"):
             return self.peer.send_long_packet(sl, payload, status)
         return self.peer.send_packet(sl, payload, status, breakin=breakin)
+
+    def _idle_id(self, status: int) -> tuple[bytes, int]:
+        """The field an idle PACTOR-1 packet carries under `idle_id_every`.
+
+        Chosen once per packet and kept for its repeats, which memory ARQ sums.
+        A callsign too long for the field is not sent: a cut block would leave
+        its tail in the next packet as text."""
+        packet = self.arq._inflight
+        if self._idle_field is None or self._idle_field[0] is not packet:
+            self._idle_packets += 1
+            ident = compress.supervisor_block("B" + self.mycall)
+            due = (self._idle_packets % self.idle_id_every == 0
+                   and len(ident) <= pactor1.DATA_FIELD[self.p1_baud])
+            self._idle_field = (packet, ident if due else b"")
+        field = self._idle_field[1]
+        return field, (status & ~(7 << 2) if field else status)
 
     def send_p3_terminal(self, header_bit: int = 1):
         """Render the opt-in terminal marker without queuing host bytes."""
@@ -1931,6 +2210,9 @@ class PtcHost(ArqIO):
         burst's are allowed to differ, and `_p3_changeover_answer` is the cycle
         it is allowed in.
         """
+        if (self.protocol == Protocol.PACTOR3 and self.arq.p3_receive_only
+                and not getattr(self.peer, 'defer_p3_cs', False)):
+            return REFUSED
         if self.peer is None:
             return
         if not hasattr(self.peer, "send_p1_cs"):
@@ -2004,9 +2286,12 @@ class PtcHost(ArqIO):
             # Level 1: that is what shrike speaks, and every link starts at the
             # lowest level anyway ("daher wird jede Verbindung zunaechst auf dem
             # kleinsten Level (1) gestartet").
-            call = self.mycall.lower() if self.announce_lower else self.mycall
-            self._setup_bytes = f"1{call}\r".encode("ascii")
+            self._setup_bytes = self.p1_setup_payload()
             self.arq.on_host_data(self._setup_bytes)
+
+    def p1_setup_payload(self) -> bytes:
+        call = self.mycall.lower() if self.announce_lower else self.mycall
+        return f"{self.level_digit}{call}\r".encode("ascii")
 
     def _logical_cs(self, ev) -> int:
         """A decoded control signal as the FSM's logical event.
@@ -2230,6 +2515,13 @@ class PtcHost(ArqIO):
         which is "still on that one", and a changeover restarts both the counter
         and the alternation with it.
 
+        A CS6 or CS4 in the acknowledgement slot moves nothing either. Across 488
+        advances in the corpus none followed an off-parity CS1/CS2; VE3KPG-80
+        0924-0010 and VE1YZ-40 0921-0539 took CS2 for counter 3 at the first try
+        behind our CS6 on 2. Moving the phase on our CS6 (1653d8a8) answered
+        WS8EOC-80 0924-0249's repeated counter 2 with CS2 thirty-six times, a
+        repeat request on 2's parity, until the gateway hung up.
+
         SO A REPEAT REQUEST IS THE HELD ACKNOWLEDGEMENT, exactly as in PACTOR-1:
         the codeword is a function of what has been accepted, and a cycle that
         accepted nothing leaves it where it was. There is no separate "again"
@@ -2271,7 +2563,12 @@ class PtcHost(ArqIO):
         disarms it. It never reaches a cycle nothing was read in: those are
         `arq._on_nak`'s, where the answer-band sign-off and `max_retries` live.
         """
-        if self._hispeed_tries:
+        # A P4 announcement can be accepted by a shift jump while the word
+        # stays CS1 (0929-2208). Only the peer's CS4 may lower its rate.
+        if self.p4_after_first_ack and not self.arq.acked:
+            return CS_REQUEST
+        if self._hispeed_tries and not (self.p1_jump_accepted
+                                        or self._jump_accepts_first_packet()):
             self._hispeed_tries += 1
             if self._hispeed_tries > P1_HISPEED_RETRIES:
                 self._fall_back_to_100("no 200 Bd packet acknowledged")
@@ -2301,6 +2598,24 @@ class PtcHost(ArqIO):
         # duplicate.
         self.arq.rechunk_inflight()
         self.log(f"link falls back to 100 Bd ({why})")
+
+    def _follow_peer_rate(self, baud: int, *, breakin: bool) -> None:
+        """A decoded PACTOR-1 data packet names the rate its sender is on.
+
+        The receiving half of this link never learned the rate any other way:
+        `_command_100` keys the CS4 and leaves the rate alone, because a peer
+        may not obey. KB5LZK-30 on 2026-09-23 did obey -- its next packets at
+        100 Bd -- and our changeover packet went out at 200 thirty times to a
+        station holding CS2 for it. So the packet sets the rate our next
+        turn keys at, in both directions.
+        """
+        if (baud == self.p1_baud or self.protocol is not Protocol.PACTOR1
+                or self.arq.state != State.CONNECTED
+                or not (breakin or self.arq.role == IRS)):
+            return
+        self.p1_baud = baud
+        self._p1_field(baud)
+        self.log(f"peer packet at {baud} Bd -> link at {baud} Bd")
 
     def _command_100(self, why: str) -> int:
         """CS4 as the receiving station's REJECT: send that again at 100 Bd.
@@ -2419,6 +2734,15 @@ class PtcHost(ArqIO):
         return self._counter_cs_for(cs_index)
 
     def connected(self, mycall: str, dxcall: str) -> None:
+        # A connect burst names only the called station. SCS's firmware names
+        # the caller off the first line it sends -- the announcement, `1W9SSJ`
+        # -- and reports the link once it has.
+        if self.arq.answering:
+            self._caller_line = bytearray()
+        else:
+            self._link_established(dxcall)
+
+    def _link_established(self, dxcall: str) -> None:
         self._link_up = True
         self.channel(self.ptchn).link.append(f"({self.ptchn}) CONNECTED to {dxcall}")
         if self.app is not None:
@@ -2447,6 +2771,8 @@ class PtcHost(ArqIO):
         # already in flight and falls only as the peer acknowledges them.
         if (self.app is None or self.arq.state != State.CONNECTED
                 or (self.app.done and self._txbuf == 0)):
+            return
+        if getattr(getattr(self.app, 'progress', None), 'expired', False):
             return
         if self.arq.role == ISS and self._txbuf == 0:
             self.arq.on_host_over()
@@ -2478,6 +2804,12 @@ class PtcHost(ArqIO):
             self._setup_bytes = b""
             self.log(f"the application has an answer -> {len(setup)} unsent "
                      f"link-setup bytes dropped ahead of it")
+
+    def cancel_peer_transmissions(self) -> None:
+        cancel = (getattr(self.peer, 'cancel_peer_transmissions', None)
+                  or getattr(self.peer, 'cancel_pending_cs', None))
+        if cancel is not None:
+            cancel()
 
     def defer_rx_close(self) -> bool:
         return (self.protocol == Protocol.PACTOR3
@@ -2512,8 +2844,24 @@ class PtcHost(ArqIO):
         peer = self.arq.dxcall or "?"
         # A call that never came up did not disconnect, it failed, and that is
         # the distinction a client's retry logic reads [10.4.10].
-        event = ("DISCONNECTED fm" if self._link_up else "LINK FAILURE with")
-        self.channel(self.ptchn).link.append(f"({self.ptchn}) {event} {peer}")
+        if self.arq.transfer_unconfirmed is not None:
+            retained = self.arq.transfer_unconfirmed
+            # One terminal event carries both the client's failure discriminator
+            # and the reason. A normal disconnect first can make a client stop
+            # polling before it sees a separate unconfirmed notice.
+            self.channel(self.ptchn).link.append(
+                f"({self.ptchn}) LINK FAILURE with {peer}: transfer unconfirmed; "
+                f"counter {retained['counter']}, field {len(retained['field'])}B "
+                f"and suffix {len(retained['suffix'])}B retained in modem history; "
+                "not queued for retry")
+        else:
+            event = ("DISCONNECTED fm" if self._link_up else "LINK FAILURE with")
+            self.channel(self.ptchn).link.append(f"({self.ptchn}) {event} {peer}")
+        progress = getattr(self.app, "progress", None)
+        if progress is not None:
+            progress.link_down()
+        # This retires the active contact's accounting, not retained bytes or a
+        # peer acknowledgement. Do not call buffer(0), which counts as sent.
         self._txbuf = 0
         self._end_link()
 
@@ -2539,6 +2887,10 @@ class PtcHost(ArqIO):
         cancel = getattr(self.peer, "cancel_pending_cs", None)
         if cancel is not None:
             cancel()
+        self.p3_mail_active = False
+        self.p3_host_data_active = False
+        self.robust_bridge_active = False
+        self.robust_entry_from_bridge = self.robust_entry_exhausted = False
         self._ruled_out.clear()
         self.p1_baud = 100
         self.protocol = Protocol.PACTOR1
@@ -2547,6 +2899,8 @@ class PtcHost(ArqIO):
         # A grant is spent once per contact, not once per modem process.
         # Hostmode clients reuse this object when calling the next gateway.
         self._grant_taken = self._grant_pending = False
+        self._p2_setup_acked = False
+        self.p2_announcement_end = None
         self._uninvited_entry = False
         self._hispeed_tries = 0
         self._p1_header_inverted = False
@@ -2554,8 +2908,11 @@ class PtcHost(ArqIO):
         self._p1_first_block = False
         self._p1_speedup_armed = True
         self._setup_bytes = b""
+        self._idle_packets, self._idle_field = 0, None
         self._last_rx_cs = self._prev_rx_cs = None
+        self._p1_last_sense, self._p1_phase_jump = None, False
         self._link_up = False
+        self._caller_line = None
         self._disconnect_asked = False
         # "The value is reset at the end of each connection" [10.4.35 %T]. It is
         # the host's register that restarts, not the counter itself: `sent_total`
@@ -2567,8 +2924,86 @@ class PtcHost(ArqIO):
         # The channel goes back to channel 0's callsign after a disconnect [10.4.5].
         self._callsigns.pop(self.ptchn, None)
 
+    def supervisor(self, code: str, params: bytes) -> None:
+        if self._p4_sf8_admit is not None and not self._p4_sf8_admit():
+            raise P4LateFrame
+        super().supervisor(code, params)
+        if code == "B":
+            self.log(f"<<ID: {params.decode('cp437')}>>")
+
+    def _p1_phase_repeats(self, ev) -> bool:
+        """Does this PACTOR-1 codeword keep the shift of the one a cycle before?
+
+        The peer inverts its shift every cycle, so a repeat is a phase jump.
+        Read off the peer's own codewords, not our grid, which a setup-phase
+        experiment may hold apart from them.
+        """
+        if ev.protocol != Protocol.PACTOR1 or ev.sense is None:
+            return False
+        last, self._p1_last_sense = self._p1_last_sense, (ev.t, bool(ev.sense))
+        return (last is not None and last[1] == bool(ev.sense)
+                and round((ev.t - last[0]) / spec.CYCLE_SHORT_S) == 1)
+
+    def _jump_accepts_first_packet(self) -> bool:
+        return (self.p1_stall_shorts and self._p1_phase_jump
+                and not self.p1_stalled and not self.arq.acked and self.protocol is Protocol.PACTOR1
+                and getattr(self.peer, "_p1_bits45_keyed", False))
+
+    def _first_packet_request(self) -> None:
+        if (not self.p1_robust_stall or self.p1_stalled or self.p1_jump_accepted
+                or self.arq.acked or self.protocol is not Protocol.PACTOR1):
+            return
+        self._first_packet_requests += 1
+        if self._jump_accepts_first_packet():
+            self.p1_jump_accepted = True
+            self.log(f"first P1 packet: CS1 in the shift phase of the cycle before "
+                     f"(request {self._first_packet_requests}) -- the peer's "
+                     "acceptance of the announcement -> keying the P4 shorts")
+            probe = getattr(self.peer, "p4_probe", None)
+            if probe is not None:
+                probe.trigger_word = "P1 phase-jump acceptance"
+            # Before the ARQ's callback, so the repeat of packet 1 never airs.
+            self.peer.send_p4_entry_packet(b"", 0)
+            return
+        if self._first_packet_requests < self.p1_robust_stall:
+            self.log(f"first P1 packet repeat request {self._first_packet_requests}/"
+                     f"{self.p1_robust_stall} before the stall path")
+            return
+        self.p1_stalled = self._first_packet_requests
+        self.log(f"first P1 packet unacknowledged after {self._first_packet_requests} "
+                 "repeat requests -> "
+                 + ("the goodbye, then" if self.p1_stall_goodbye else "falling silent")
+                 + " to listen for the peer's P4 words")
+        if not self.p1_stall_goodbye:
+            # The probe's request refuses every other keying from here, so the
+            # retransmission this request asks for never airs.
+            self.peer.send_p4_entry_packet(b"", 0)
+
+    def acknowledged(self, n: int) -> None:
+        if n == 1 and self.p4_after_first_ack:
+            self.peer.send_p4_entry_packet(b"", 0)
+        k, due = divmod(n, self.supervisor_every)
+        if due or not 0 < k <= len(self.supervisor_schedule):
+            return
+        block = compress.supervisor_block(self.supervisor_schedule[k - 1])
+        tx = f"supervisor tx: {chr(block[1])} {block[2:-1].decode()}".rstrip()
+        self.log(f"{tx} (cycle {n})")
+        self.arq.on_host_supervisor(block)
+
     def deliver(self, blob: bytes) -> None:
+        if self._p4_sf8_admit is not None and not self._p4_sf8_admit():
+            raise P4LateFrame
         self.rcvd_total += len(blob)
+        if self._caller_line is not None:
+            if self.protocol is Protocol.PACTOR1:
+                blob = self._take_caller(blob)
+                if not blob:
+                    return
+            else:
+                # A link we followed into a higher level: its announcement
+                # went by before we were listening.
+                self._caller_line = None
+                self._link_established(self.arq.dxcall)
         if self.app is not None:
             self.app.on_link_data(blob)
         else:
@@ -2578,6 +3013,27 @@ class PtcHost(ArqIO):
         # a whole message and the operator never saw a byte of it. The link layer
         # has already decoded the wire coding, so this is the message itself.
         self.log(f"rx data {len(blob)}B: {blob.decode('cp437')!r}")
+
+    def _take_caller(self, blob: bytes) -> bytes:
+        """Read the caller's call off its first line; return what follows it.
+
+        The level digit is dropped, the rest upper-cased and cut to eight
+        characters, and a line with two or fewer ends the link, as in SCS's
+        firmware. The line itself is the modem's and never reaches the host.
+        """
+        line, cr, rest = blob.partition(b"\r")
+        self._caller_line += line
+        if not cr:
+            return b""
+        call = self._caller_line[1:9].decode("latin-1").upper()
+        self._caller_line = None
+        if len(call) < 3:
+            self.log(f"first line names no caller ({call!r}) -> disconnect")
+            self.arq.on_host_disconnect()
+            return b""
+        self.arq.dxcall = call
+        self._link_established(call)
+        return rest
 
     def buffer(self, nbytes: int) -> None:
         if nbytes < self._txbuf:
@@ -2701,7 +3157,7 @@ class _FarIO(ArqIO):
 # --------------------------------------------------------------------------- #
 # Serial front end
 
-def serve(host: PtcHost, device: Optional[str] = None, *, cycle_s: float = 1.25,
+def serve(host: PtcHost, device: Optional[str] = None, *,
           verbose: bool = True) -> None:
     """Run `host` on a pty (or on `device`, an existing serial port) until closed."""
     import os
@@ -2729,7 +3185,7 @@ def serve(host: PtcHost, device: Optional[str] = None, *, cycle_s: float = 1.25,
               f"PTCHN {host.ptchn}")
     os.write(fd, host.open())
 
-    next_tick = time.monotonic() + cycle_s
+    next_tick = time.monotonic() + host.arq.slot_s
     try:
         while True:
             timeout = max(0.0, next_tick - time.monotonic())
@@ -2742,7 +3198,7 @@ def serve(host: PtcHost, device: Optional[str] = None, *, cycle_s: float = 1.25,
                         os.write(fd, out)
             if time.monotonic() >= next_tick:
                 host.tick()
-                next_tick += cycle_s
+                next_tick += host.arq.slot_s
     except KeyboardInterrupt:
         pass
     finally:
@@ -2768,7 +3224,9 @@ def main() -> int:
     from ..winlink import B2FSession
     rms = B2FSession("SHRIKE", role="answering", target=args.mycall)
     peer = SimPeer(reply=rms.feed, greeting=rms.start())
-    serve(PtcHost(peer, mycall=args.mycall), args.device, cycle_s=args.cycle)
+    host = PtcHost(peer, mycall=args.mycall)
+    host.arq.cfg.cycle_s = args.cycle
+    serve(host, args.device)
     return 0
 
 

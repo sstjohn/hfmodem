@@ -138,7 +138,7 @@ def test_fsm_station_id_cadence_and_disc_callsign():
                                     aux=wire.ack_aux(None)))
     ids = [c for c in io.controls if c.type == wire.ID]
     assert ids and ids[0].call == "ALICE"
-    assert fsm.stats["ids"] == [600.0]       # 0 -> 600 s: within §97.119
+    assert fsm.stats["ids"] == [600.0]       # 0 -> 600 s: the configured identification interval
     disc = [c for c in io.controls if c.type == wire.DISC]
     assert disc and disc[0].call == "ALICE"
 

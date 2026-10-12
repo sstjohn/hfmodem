@@ -73,12 +73,12 @@ def test_pending_turn_recovered_slot_prioritizes_control_and_bounds_packet_work(
     assert not tx.live.emissions  # Reading does not grant a turn or key itself.
 
 
-def test_previous_iss_selection_reproduces_nonconverging_regrid(tmp_path, capsys):
+def test_confirmed_iss_also_bounds_recovered_slot_work(tmp_path, capsys):
     slot, tx, grid, receiver = recover(tmp_path, pending=False)
-    assert slot == 69 + onair.REGRID_TRIES
-    assert receiver.calls == ['blind', 'flush'] * onair.REGRID_TRIES
-    assert tx.live.clamp_late(tx.key_instant(grid, slot)) > 240
-    assert 'REGRID GAVE UP' in capsys.readouterr().out
+    assert slot == 70
+    assert receiver.calls == ['control', 'tracked']
+    assert tx.live.clamp_late(tx.key_instant(grid, slot)) == 0
+    assert 'REGRID GAVE UP' not in capsys.readouterr().out
 
 
 def test_bare_ack_does_not_spend_a_packet_search_after_control_delivery(tmp_path):

@@ -4,7 +4,7 @@
 """kestrel<->kestrel ARQ end-to-end over the host API (the integration proof).
 
 Two independent kestrel modems, each behind its own host-API TCP server, share
-one :class:`AudioChannel`. Two oracle clients drive them exactly as VarAC / Pat
+one :class:`AudioChannel`. Two reference host clients drive them exactly as VarAC / Pat
 would:
 
     host-API(A)  ->  ArqFsm(A)  ->  TX synth  ->  audio  ->  RX decode  ->

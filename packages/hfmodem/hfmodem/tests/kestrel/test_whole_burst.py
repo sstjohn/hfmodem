@@ -28,8 +28,7 @@ from hfmodem.tests.kestrel import corpora
 
 FIXTURE = Path(__file__).parent / "fixtures" / "whole-burst-0918"
 BAND = MK.band_for("2750")
-_RESP = VF.CONTROL_BURST_RESPONDER_2750
-_OURS = VF.CONTROL_BURST_CALLER_2750
+_OURS, _RESP = VF.control_bursts("W9SSJ", "2750")
 
 
 def _recorded(name: str) -> np.ndarray:
@@ -91,9 +90,9 @@ def test_a_nak_does_not_become_an_acknowledgement():
     """A frame that says the over was NOT read must never score as one that says
     it was  [vara_frames.nak]."""
     band = MK.band_for("2300")
-    for tones in VF.NAK_BY_CALLER[("W9SSJ", "2300")]:
+    for tones in VF.nak("KC9GHZ", "2300"):
         x = MK.synth_tone_pairs(tones)
-        assert VA._burst_match(x, VF.CONTROL_BURST_RESPONDER_2300, band) < VA._BURST_MATCH
+        assert VA._burst_match(x, VF.control_bursts("W9SSJ", "2300")[1], band) < VA._BURST_MATCH
 
 
 @corpora.requires_regress_fixtures
@@ -112,7 +111,7 @@ def test_nothing_without_a_vara_session_on_it_reaches_the_bar():
         x = x / (np.abs(x).max() + 1e-12)
         worst = max(VA._burst_match(x, tones, band)
                     for tones, band in ((_RESP, BAND),
-                                        (VF.CONTROL_BURST_RESPONDER_2300,
+                                        (VF.control_bursts("W9SSJ", "2300")[1],
                                          MK.band_for("2300"))))
         if worst >= VA._BURST_MATCH:
             held[path.name] = round(worst, 3)

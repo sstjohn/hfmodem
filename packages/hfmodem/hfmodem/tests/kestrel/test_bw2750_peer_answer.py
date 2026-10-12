@@ -5,16 +5,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hfmodem.kestrel.vara import vara_arq as A, vara_frames as VF, vara_mfsk as MK
-from hfmodem.tests.kestrel.test_response_by_stream import _load_48k
+from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.kestrel.test_response_by_stream import _norm, band_limit
 
 MYCALL = "W9SSJ"
-ONAIR = Path(__file__).resolve().parents[5] / "logs" / "onair"
 
 #: Positions a BW2750 answer might sit at, minus the offer's own. Every test that
 #: searches for one searches for all of them, so a candidate that fires on band
@@ -62,16 +61,17 @@ def observe(hs: A.VaraStationHandshake, payload) -> bool:
     track = np.zeros((n, 3), dtype=np.int32)
     track[A._PAY_OFF, 0] = payload
     return hs._peer_answer(track, np.full((n, 2), 20.0),
-                           np.ones(n, dtype=bool), 1, 0)
+                           np.ones(n, dtype=bool), 0)
 
 
-def drive(call: str, path: Path, window: tuple[float, float],
+def drive(call: str, name: str, window: tuple[float, float] | None = None,
           hs: A.VaraStationHandshake | None = None) -> A.VaraStationHandshake:
     """A slice of a recording through the live stream search, as the radio drives it."""
     hs = hs or awaiting(call)
-    x = _load_48k(path)
-    t0, t1 = (int(t * MK.FS) for t in window)
-    x = np.asarray(x[t0:t1], float)
+    x = band_limit(_norm(corpora.c_samples(name, external=True)))
+    if window is not None:
+        t0, t1 = (int(t * MK.FS) for t in window)
+        x = x[t0:t1]
     for i in range(0, len(x), 4800):
         hs.on_rx_stream(x[i:i + 4800])
     return hs
@@ -136,36 +136,28 @@ def test_a_candidate_needs_the_tones_it_asks_for(monkeypatch, position):
 
 
 # --------------------------------------------------------------------------- #
-# The recorded side. Both rows are 2026-09-12 01:04z and 01:08z, 7101.6 kHz,
-# BW2750, 50 W, this station calling — the two tapes of that slot. Windows are the
-# recording's own clock, and both rows say the same thing: searching ten candidate
-# positions over audio nobody claims holds an answer reports nothing.
+# Whole 0930/0920 KC9GHZ taps: no below-offer candidates (0, 1, 2).
+# The 0930 tape does hold a position-3 offer, checked separately below.
 RECORDED_NULL = (
-    ("20260912T010451Z-W9SSJ-KC9GHZ.wav", "KC9GHZ", (20.0, 44.0)),
-    ("20260912T010807Z-W9SSJ-KB5LZK.wav", "KB5LZK", (20.0, 50.0)),
+    ("kc9ghz-0930-whole-no-candidates.flac", "KC9GHZ"),
+    ("kc9ghz-0920-whole-unanswered.flac", "KC9GHZ"),
 )
 
 
-@pytest.mark.parametrize("name,call,window", RECORDED_NULL,
-                         ids=[r[1] for r in RECORDED_NULL])
-def test_no_candidate_fires_on_a_recorded_window(monkeypatch, name, call, window):
-    path = ONAIR / name
-    if not path.exists():
-        pytest.skip(f"the 2026-09-12 BW2750 slot's recording {name} is not kept here")
+@pytest.mark.parametrize("name,call", RECORDED_NULL,
+                         ids=[r[0] for r in RECORDED_NULL])
+def test_no_candidate_fires_on_a_recorded_window(monkeypatch, name, call):
     searching(monkeypatch, *CANDIDATES)
-    hs = drive(call, path, window)
+    hs = drive(call, name)
     assert not hs.answers, [(a.at, a.position, a.tones) for a in hs.answers]
     assert not hs.unattributed
 
 
 def test_a_recorded_offer_still_reaches_the_accept_route(monkeypatch):
-    """The control both readings of that slot agree on: KC9GHZ offered the link on
+    """The 0930 control: KC9GHZ offered the link on
     position 3 and the accept route takes it, candidates in the table or not."""
-    path = ONAIR / "20260912T010451Z-W9SSJ-KC9GHZ.wav"
-    if not path.exists():
-        pytest.skip("the 2026-09-12 KC9GHZ recording is not kept here")
     searching(monkeypatch, *CANDIDATES)
-    hs = drive("KC9GHZ", path, (44.0, 48.0))
+    hs = drive("KC9GHZ", "kc9ghz-0930-whole-no-candidates.flac", (30.0, 35.0))
     assert hs.step == A._I_LINKSETUP_SENT
     assert not hs.answers
     assert any("connect-response for KC9GHZ" in line for line in hs.io.logs), hs.io.logs

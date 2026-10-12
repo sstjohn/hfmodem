@@ -1,0 +1,6 @@
+{
+  "source": "working/p4-oracle/kb5lzk-0926/kb5lzk-breakin-body.txt",
+  "transform": "invert every tracked bit; bit 0 = +1 on training phase",
+  "order": "channel",
+  "symbol_interleaver": "0xba890_840"
+}

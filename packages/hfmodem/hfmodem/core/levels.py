@@ -154,6 +154,28 @@ def at_drive(audio: np.ndarray, drive: float = TX_DRIVE) -> np.ndarray:
     return (a if peak == 0.0 else a * (drive / peak)).astype(np.float32)
 
 
+def sounding_rms(audio: np.ndarray) -> float:
+    """RMS over the samples that sound: Morse's key-up spaces are exact zeros, and
+    averaging them in would put the key-down tone above the level it is matched to."""
+    a = np.asarray(audio, dtype=np.float64)
+    a = a[a != 0.0]
+    return float(np.sqrt(np.mean(a ** 2))) if a.size else 0.0
+
+
+def drive_for_rms(audio: np.ndarray, target: float, ceiling: float) -> float:
+    """The `at_drive` peak at which `audio` sounds at `target` RMS, never above `ceiling`.
+
+    For a burst that must match another's average power rather than its peak: a
+    constant-envelope tone normalised to an OFDM burst's peak runs several dB
+    hotter on average than the burst did. The ceiling is the drive the station
+    is set for, so nothing matched this way out-peaks a data burst.
+    """
+    level = sounding_rms(audio)
+    if level == 0.0 or target == 0.0:
+        return ceiling
+    return min(ceiling, target * float(np.abs(np.asarray(audio)).max()) / level)
+
+
 def peak_dbfs(audio: np.ndarray) -> float:
     """Peak level in dBFS. `-inf` for digital silence, which is a real reading —
     a capture that stalls returns exactly this and it must not look like a

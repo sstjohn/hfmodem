@@ -73,9 +73,17 @@ def _run_captured_turn(monkeypatch, tmp_path, captured_turn, batch_phase, nframe
     tape, rows = captured_turn
     tape = tape[:4800+(nframes-1)*CYCLE+45000]
 
+    from hfmodem.shrike import arq
+    from hfmodem.tests.shrike.test_p3_timing_unbounded import (
+        _trace_p3_lifetime, _assert_p3_lifetime,
+    )
+    peers = []
+    lifetime = _trace_p3_lifetime(monkeypatch, lambda: peers[0] if peers else None)
+
     class CapturedPeer(loop.LatePeer):
         def __init__(self, *args):
             super().__init__(*args)
+            peers.append(self)
             self.audio = np.zeros(280*FS, np.float32)
             self.limit = len(self.audio)
             self.holdback, self.lat_in = 660, 532
@@ -101,6 +109,10 @@ def _run_captured_turn(monkeypatch, tmp_path, captured_turn, batch_phase, nframe
             # 44,252 samples; entry_at is the trimmed DAC start (pulse +666).
             self.p3_phase = entry_at+666+44252
             at = self.p3_phase-4800
+            needed = at + len(tape) + (arq.P3_CRC_WAIT_TICKS + 2) * CYCLE
+            if needed > self.limit:
+                self.audio = np.pad(self.audio, (0, needed - self.limit))
+                self.limit = len(self.audio)
             self.audio[at:] = 0
             self.audio[at:at+len(tape)] = tape
             self.responses.append((at, at+len(tape)))
@@ -130,7 +142,8 @@ def _run_captured_turn(monkeypatch, tmp_path, captured_turn, batch_phase, nframe
 
     monkeypatch.setattr(onair, 'main', timing_main)
     got = loop.run_late(monkeypatch, tmp_path, 1, False)
-    trial = json.loads((tmp_path/'p3-timing-trial.json').read_text())
+    _assert_p3_lifetime(lifetime, got, expect_current=expect_current)
+    trial = json.loads((got['outdir']/'p3-timing-trial.json').read_text())
     assert trial['replies'], got['log']
     # LatePeer independently decodes the actual fake-DAC control waveform.
     emitted = {start: (ci+1, errors) for start, _, ci, errors in got['peer'].controls}

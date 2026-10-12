@@ -1,0 +1,37 @@
+{
+  "n9vc_0": {
+    "source": "working/p4-oracle/kiwi/20260924/7101500/seg-0047.wav",
+    "onset_s": 1001.986,
+    "extraction": "existing longs-k0047.pkl / longs.py",
+    "locked_onset_s": 1001.9770763888891
+  },
+  "n9vc_1": {
+    "source": "working/p4-oracle/kiwi/20260924/7101500/seg-0047.wav",
+    "onset_s": 1005.738,
+    "extraction": "existing longs-k0047.pkl / longs.py",
+    "locked_onset_s": 1005.7359513888895
+  },
+  "ve3kpg_0": {
+    "source": "captures/onair-0929-0121/stream.flac",
+    "fs": 48000,
+    "nominal_onset": 2688057,
+    "origin": 2683257,
+    "end": 2847705,
+    "cfo": 1.54,
+    "count": 373,
+    "first_chip": 4328,
+    "coherence": 0.5923090683870909
+  },
+  "ve3kpg_1": {
+    "source": "captures/onair-0929-0121/stream.flac",
+    "fs": 48000,
+    "nominal_onset": 2868057,
+    "origin": 2863257,
+    "end": 3027705,
+    "cfo": 1.54,
+    "count": 373,
+    "first_chip": 3903,
+    "coherence": 0.39620314354985786
+  },
+  "sha256": "b7d3453fcf88b66fa7eabc1af33758cb5f98895541028f2bc094905ba01b473c"
+}

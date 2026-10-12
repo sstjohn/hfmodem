@@ -375,6 +375,18 @@ def test_a_bracket_holding_two_overs_delivers_both_and_answers_once():
     assert any("2 in this window" in m for m in io.msgs), io.msgs
 
 
+@pytest.mark.parametrize("hz", [-0.142, -0.1, 0.1, 29.0])
+def test_a_bracket_holding_two_overs_delivers_both_off_our_grid(hz):
+    """Two clean frames tie on reference columns and the search takes either:
+    the loopback's peer 0.14 Hz off our grid read only the second of each pair,
+    and the session's mail stopped a block short."""
+    hs, io = _connected()
+    hs._peer_offset = hz * MK.NFFT / MK.FS
+    hs.on_rx_audio(_window(b"A" * 89, b"B" * 89))
+    assert io.host == [b"A" * 89, b"B" * 89], io.msgs
+    assert io.keys == 1, [m for m in io.msgs if m.startswith("tx ")]
+
+
 def test_a_bracket_holding_two_overs_is_answered_by_its_last_one():
     """Which frame the window draws is the LAST over's property: a window that
     ends on a short over ends the delivery."""

@@ -48,7 +48,7 @@ def no_devices(monkeypatch):
     monkeypatch.setitem(sys.modules, "sounddevice", None)
 
 
-def test_the_example_names_a_recording_that_ships():
+def test_the_example_names_a_recording_that_ships(monkeypatch):
     """A path into the tests directory, which the distribution carries.
 
     The capture corpus does not cross into the distribution, so a station file
@@ -56,6 +56,7 @@ def test_the_example_names_a_recording_that_ships():
     failure that reads as "the project is broken" to the one reader who has
     nothing else to run.
     """
+    monkeypatch.chdir(REPO)
     cfg = config.load(EXAMPLE)
     path = recording(cfg.audio)
     assert path is not None, f"{EXAMPLE} no longer replays anything"
@@ -63,7 +64,8 @@ def test_the_example_names_a_recording_that_ships():
     assert not cfg.station.transmit
 
 
-def test_the_station_comes_up_on_the_recording_with_no_device(no_devices):
+def test_the_station_comes_up_on_the_recording_with_no_device(no_devices, monkeypatch):
+    monkeypatch.chdir(REPO)
     cfg = config.load(EXAMPLE)
     station = Station(cfg)
     audio = station.open_audio()

@@ -1,0 +1,14 @@
+{
+  "source": "working/p4-oracle/kiwi/20260924/7101500/seg-0003.wav",
+  "source_start_s": 1539.1470000000002,
+  "rate": 12000,
+  "sha256": "f27a2acf3953fb7488d908fc5267fd250eac6b0a289f54eee4bb1b3a76c5f450",
+  "first_chip": 773,
+  "cfo_hz": 2.911486548571006,
+  "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+  "status": 32,
+  "source_rate": 11998.90779,
+  "frequency_shift_hz": -910,
+  "source_end_s": 1540.1070000000002,
+  "resampling": "upsample 4x; Hilbert frequency shift at round(4*source_rate); resample_poly to 12000 Hz"
+}

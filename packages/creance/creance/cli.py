@@ -527,7 +527,8 @@ def cmd_monitor(args) -> int:
         host, _, port = args.kiwi.partition(":")
         if args.freq is None:
             raise ConfigError("--kiwi needs --freq (dial kHz)")
-        source = KiwiSource(host, args.freq, port=int(port or 8073))
+        source = KiwiSource(host, args.freq, port=int(port or 8073),
+                            mode="usb", span=3000)
     else:
         source = device_source(args.device)
 

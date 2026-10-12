@@ -3,6 +3,8 @@
 """Traffic counters and speed reports describe observations, not ARQ intent."""
 from types import SimpleNamespace
 
+import pytest
+
 from hfmodem.shrike import onair, p3rx, placement, rxfront, traffic
 
 
@@ -140,3 +142,129 @@ def test_refused_speed_request_does_not_announce_a_request(tmp_path, monkeypatch
     tx._send_p3_control(3)
     assert tx.traffic.requested_rx_level == 2
     assert "reply-copy=1 reply-repeat=0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("size", [5, 23, 59])
+def test_operator_1003_a_login_answer_cut_into_packets_is_struck_out_of_the_log(size):
+    sent = b"W9SSJ\r;PR: 12345678\r;FC EM 9\rF> 0\r"
+    log = traffic.TrafficLog()
+    log.withhold(sent)
+    lines = []
+    for start in range(0, len(sent), size):
+        chunk = sent[start:start + size]
+        lines += log.packet("TX", 1, 0, chunk, field=chunk, information=chunk)
+        log.accepted(len(chunk))
+    text = "\n".join(lines)
+    assert "12345678" not in text and "PR: 1" not in text
+    digits = b"12345678"
+    assert not any(digits[i:i + 2].hex() in text for i in range(7))
+    assert text.count("#") == 24
+
+
+def test_operator_1003_onair_mail_send_callback_withholds_before_arq_and_masks_traffic(capsys):
+    host = SimpleNamespace(arq=None)
+    log = traffic.for_host(host)
+    order = []
+    blob = b"\r;PR: 24681357\r"
+
+    class Arq:
+        def on_host_data(self, data):
+            order.append("arq")
+            # The callback must teach the shared log before the ARQ accepts
+            # these exact bytes.
+            assert sum(log._mask) == 8
+            assert data == blob
+            for start in range(0, len(data), 5):
+                chunk = data[start:start + 5]
+                traffic.emit(log.packet("TX", 1, 0, chunk,
+                                        field=chunk, information=chunk))
+                log.accepted(len(chunk))
+
+    host.arq = Arq()
+    original_for_host = traffic.for_host
+
+    class ObservedLog:
+        def withhold(self, data):
+            order.append("withhold")
+            return log.withhold(data)
+
+    def for_host(target):
+        assert target is host
+        return ObservedLog()
+
+    # Exercise the exact callback factory installed on MailClient by onair.run.
+    traffic.for_host = for_host
+    try:
+        onair._mail_send_callback(host)(blob)
+    finally:
+        traffic.for_host = original_for_host
+
+    output = capsys.readouterr().out
+    assert order == ["withhold", "arq"]
+    assert "24681357" not in output
+    assert "PR: 2" not in output
+    assert output.count("#") == 24  # eight bytes in hex and repr columns
+
+
+@pytest.mark.parametrize("size", [
+    pytest.param(5, marks=pytest.mark.xfail(strict=True, reason="Operator decision 2026-10-03: original fragmented login masking expectation replaced by byte-offset masking")),
+    23, 59,
+])
+def test_a_login_answer_cut_into_packets_is_struck_out_of_the_log(size):
+    sent = b"W9SSJ\r;PR: 12345678\r;FC EM 9\rF> 0\r"
+    log = traffic.TrafficLog()
+    log.withhold(sent)
+    lines = []
+    for start in range(0, len(sent), size):
+        chunk = sent[start:start + size]
+        lines += log.packet("TX", 1, 0, chunk, field=chunk, information=chunk)
+    text = "\n".join(lines)
+    assert "12345678" not in text and "PR: 1" not in text
+    digits = b"12345678"
+    assert not any(digits[i:i + 2].hex() in text for i in range(7))
+    assert text.count("#") == 24
+
+
+
+@pytest.mark.xfail(strict=True, reason="Operator decision 2026-10-03: original login masking expectation replaced by byte-offset masking")
+def test_onair_mail_send_callback_withholds_before_arq_and_masks_traffic(capsys):
+    host = SimpleNamespace(arq=None)
+    log = traffic.for_host(host)
+    order = []
+    blob = b"\r;PR: 24681357\r"
+
+    class Arq:
+        def on_host_data(self, data):
+            order.append("arq")
+            # The callback must teach the shared log before the ARQ accepts
+            # these exact bytes.
+            assert "24681357" in log._answers
+            for start in range(0, len(data), 5):
+                chunk = data[start:start + 5]
+                traffic.emit(log.packet("TX", 1, 0, chunk,
+                                        field=chunk, information=chunk))
+
+    host.arq = Arq()
+    original_for_host = traffic.for_host
+
+    class ObservedLog:
+        def withhold(self, data):
+            order.append("withhold")
+            return log.withhold(data)
+
+    def for_host(target):
+        assert target is host
+        return ObservedLog()
+
+    # Exercise the exact callback factory installed on MailClient by onair.run.
+    traffic.for_host = for_host
+    try:
+        onair._mail_send_callback(host)(blob)
+    finally:
+        traffic.for_host = original_for_host
+
+    output = capsys.readouterr().out
+    assert order == ["withhold", "arq"]
+    assert "24681357" not in output
+    assert "PR: 2" not in output
+    assert output.count("#") == 24  # eight bytes in hex and repr columns

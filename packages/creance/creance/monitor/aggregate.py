@@ -24,13 +24,26 @@ import queue
 import sys
 import threading
 import time
-from typing import Iterable
+from collections import deque
+from dataclasses import replace
+from typing import Callable, Iterable
 
 from hfhost.audio import FS, AudioSource, WavReplaySource
 
-from .activity import (STREAM_CLOCK, WALL_CLOCK, ActivityView, Detection,
+from .activity import (STREAM_CLOCK, TRACKER, WALL_CLOCK, ActivityView, Detection,
                        format_detection, render_summary)
+from .channelizer import (CAP, PER_TRACK, SAID, WHOLE_BAND, Channelizer, same_frame,
+                          tracker_spec)
 from .driver import ModemMonitor, MonitorSpec
+
+#: Both dispatches at once: every runner over the whole band, and every track's
+#: instances.
+BOTH = "both"
+DISPATCHES = (WHOLE_BAND, PER_TRACK, BOTH)
+#: How far past a whole-band detection the tracker and every instance must
+#: have decoded before it goes out alone: the same frame from two decoders
+#: sits within 0.8 s.
+HOLD_S = 1.0
 
 _CLOCK_NOTE = {
     WALL_CLOCK: "local wall clock, when the audio arrived",
@@ -42,10 +55,27 @@ def run(source: AudioSource, specs: Iterable[MonitorSpec], *,
         window_s: float = 20.0, summary_every_s: float = 10.0,
         drain_timeout: float = 120.0, backlog_s: float = ModemMonitor.BACKLOG_S,
         live: bool | None = None, stop: threading.Event | None = None,
-        out=sys.stdout) -> ActivityView:
+        out=sys.stdout,
+        sinks: Iterable[Callable[[Detection], None]] | None = None,
+        dispatch: str = WHOLE_BAND, cap: int = CAP) -> ActivityView:
     """Monitor ``source`` with every spec in ``specs`` until the source ends or
-    the operator interrupts, printing a live confidence-graded log and periodic
-    summaries. Returns the final :class:`ActivityView` (handy for tests)."""
+    the operator interrupts, handing every detection to each of ``sinks`` and
+    printing periodic summaries. Without ``sinks`` the detections are the live
+    confidence-graded log on ``out``. Returns the final :class:`ActivityView`
+    (handy for tests).
+
+    ``dispatch`` is ``whole-band``, each spec once over the whole band;
+    ``per-track``, the tracker over the source's window and each track its own
+    instances of ``specs``, at most ``cap`` at once (see
+    :mod:`creance.monitor.channelizer`); or ``both``, where a frame both decode
+    is said once, by the track's instance when it said it (see :class:`_Merge`).
+    Every decoder's detection carries the dispatch that produced it in ``via``."""
+    if dispatch not in DISPATCHES:
+        raise ValueError(f"dispatch is one of {', '.join(DISPATCHES)}, not {dispatch!r}")
+    per_track = dispatch != WHOLE_BAND
+    specs = list(specs)
+    if per_track and specs:
+        specs.append(tracker_spec(specs[0], source.window))
     # A monitor that cannot run and a band with nothing on it produce the same
     # summary, so the set that was asked for and the set that is listening are
     # reported apart. Narrowing this silently is how a pass reports a modem quiet
@@ -56,6 +86,12 @@ def run(source: AudioSource, specs: Iterable[MonitorSpec], *,
             print(f"# {spec.name} is not listening on this pass: {why}",
                   file=sys.stderr, flush=True)
     specs = [s for s, why in asked if not why]
+    if per_track:
+        if not specs or specs[-1].name != TRACKER:
+            print("# the tracker cannot run, and without it no track has a decoder",
+                  file=sys.stderr, flush=True)
+            return ActivityView(window_s=window_s)
+        tracker = specs.pop()
     if not specs:
         print("no modem monitor is available", file=sys.stderr)
         return ActivityView(window_s=window_s)
@@ -67,15 +103,25 @@ def run(source: AudioSource, specs: Iterable[MonitorSpec], *,
         # file was read rather than when the audio happened.
         live = not isinstance(source, WavReplaySource)
     clock = WALL_CLOCK if live else STREAM_CLOCK
+    if sinks is None:
+        sinks = [lambda d: print(format_detection(d, clock=clock), file=out,
+                                 flush=True)]
+    sinks = list(sinks)
 
     detections: "queue.Queue[Detection]" = queue.Queue()
-    monitors = [ModemMonitor(s, detections, backlog_s=backlog_s, lossy=live)
-                for s in specs]
+    whole = [] if dispatch == PER_TRACK else [
+        ModemMonitor(s, _Via(detections), backlog_s=backlog_s, lossy=live) for s in specs]
+    fanout = (Channelizer(source.window, tracker, specs, detections, cap=cap,
+                          backlog_s=backlog_s, lossy=live) if per_track else None)
+    monitors = whole + ([fanout] if fanout else [])
+    merge = _Merge(fanout) if whole and fanout else None
     view = ActivityView(window_s=window_s)
 
     for m in monitors:
         m.start()
     print("# creance monitor  |  " + ", ".join(s.name for s in specs)
+          + {WHOLE_BAND: "", PER_TRACK: f" per track, at most {cap} at once",
+             BOTH: f" over the whole band and per track, at most {cap} at once"}[dispatch]
           + f"  |  window {window_s:g}s  |  position: {_CLOCK_NOTE[clock]}",
           file=out, flush=True)
 
@@ -89,7 +135,7 @@ def run(source: AudioSource, specs: Iterable[MonitorSpec], *,
             stream_t = (t0 + len(pcm) // 2) / FS
             for m in monitors:
                 m.feed(t0, pcm)
-            _drain(detections, view, clock, out)
+            _drain(detections, view, sinks, merge)
             if not warned_dropping and any(m.dropped_samples for m in monitors):
                 warned_dropping = True
                 print("# WARNING: a monitor is behind the stream and is dropping "
@@ -113,26 +159,90 @@ def run(source: AudioSource, specs: Iterable[MonitorSpec], *,
         # rather than for a fixed interval -- especially under --fast, where the
         # backlog is largest and the bulk corpus sweeps run.
         grace = 0.5 if interrupted else drain_timeout
-        short = [m.spec.name for m in monitors if not m.stop(grace)]
-        _drain(detections, view, clock, out)
+        short = [m.spec.name if m is not fanout else "a track's decoder"
+                 for m in monitors if not m.stop(grace)]
+        _drain(detections, view, sinks, merge, final=True)
         if short and not interrupted:
             print(f"# WARNING: {', '.join(short)} still had audio to decode after "
                   f"{grace:g}s and was killed — detections at the end of this "
                   "stream are missing", file=sys.stderr)
         _emit_summary(view, stream_t, out)
-        _report_losses(monitors, stream_t, time.monotonic() - started, live)
+        _report_losses(whole + (fanout.monitors if fanout else []), stream_t,
+                       time.monotonic() - started, live,
+                       _dispatched(fanout) if fanout else [])
     return view
 
 
-def _drain(q: "queue.Queue[Detection]", view: ActivityView, clock: str,
-           out) -> None:
+class _Via:
+    """A whole-band runner's detections, marked as its."""
+
+    def __init__(self, out: "queue.Queue[Detection]") -> None:
+        self.out = out
+
+    def put(self, d: Detection) -> None:
+        self.out.put(replace(d, via=WHOLE_BAND))
+
+
+class _Merge:
+    """Both dispatches, one line a frame.
+
+    A track's instance places what it decodes on a track and a dial, so a frame
+    both dispatches decode is said by the instance. A whole-band detection is
+    held until the tracker and every instance say they have decoded ``HOLD_S``
+    past it (:attr:`Channelizer.decoded_s`), so which of two twins is said
+    turns on what the decoders have finished and never on how fast a loaded
+    machine ran them. It goes out then only if no instance said the same frame,
+    placed on the track it sat in where there was one; a frame the tracker
+    never gave a track, or one no instance could read, is still said.
+    """
+
+    def __init__(self, fanout: Channelizer) -> None:
+        self.fanout = fanout
+        self.held: list[Detection] = []
+        self.said: deque[Detection] = deque(maxlen=SAID)
+
+    def take(self, d: Detection) -> list[Detection]:
+        if d.via == WHOLE_BAND:
+            if not any(same_frame(d, e) for e in self.said):
+                self.held.append(d)
+            return []
+        if d.via == PER_TRACK:
+            if any(same_frame(d, e) for e in self.said):
+                return []
+            self.held = [h for h in self.held if not same_frame(h, d)]
+            self.said.append(d)
+        return [d]
+
+    def release(self, final: bool) -> list[Detection]:
+        upto = float("inf") if final else self.fanout.decoded_s - HOLD_S
+        due = [d for d in self.held if d.t <= upto]
+        self.held = [d for d in self.held if d.t > upto]
+        self.said.extend(due)
+        return [self.fanout.place(d) for d in due]
+
+
+def _dispatched(fanout: Channelizer) -> list[str]:
+    return [f"# per track: {fanout.seen} tracks, {len(fanout.started)} decoders "
+            f"started, {fanout.peak} at most at once (cap {fanout.cap})",
+            *fanout.denied()]
+
+
+def _drain(q: "queue.Queue[Detection]", view: ActivityView,
+           sinks: list[Callable[[Detection], None]], merge: _Merge | None = None,
+           final: bool = False) -> None:
+    out: list[Detection] = []
     while True:
         try:
             d = q.get_nowait()
         except queue.Empty:
-            return
+            break
+        out += merge.take(d) if merge else [d]
+    if merge:
+        out += merge.release(final)
+    for d in out:
         view.add(d)
-        print(format_detection(d, clock=clock), file=out, flush=True)
+        for sink in sinks:
+            sink(d)
 
 
 def _emit_summary(view: ActivityView, t_now: float, out) -> None:
@@ -141,7 +251,7 @@ def _emit_summary(view: ActivityView, t_now: float, out) -> None:
 
 
 def _report_losses(monitors: list[ModemMonitor], audio_s: float, wall_s: float,
-                   live: bool) -> None:
+                   live: bool, dispatched: list[str] = ()) -> None:
     """What this pass did not hear, said out loud.
 
     Audio goes missing in two places and neither used to leave a trace. The
@@ -177,7 +287,8 @@ def _report_losses(monitors: list[ModemMonitor], audio_s: float, wall_s: float,
             lines.append(f"# {m.spec.name}: dropped {lost:.1f} s of audio at a "
                          f"full feed backlog ({share:.1%} of the stream) — it "
                          "was behind and decoded none of it")
-    if lossy:
+    lines += dispatched
+    if lossy or len(dispatched) > 1:
         lines.append("# a quiet result from this pass is quiet on the audio that "
                      "arrived, not on the channel")
     for line in lines:

@@ -214,7 +214,7 @@ def test_analytic_rejects_multichannel_audio():
     analytic(np.zeros(479))
 
 
-def test_wav_read_handles_the_formats_a_far_end_recorder_produces():
+def test_wav_read_handles_the_formats_a_far_end_recorder_produces(tmp_path):
     """The far end of an on-air test records with whatever it has. All of these
     must read and decode, and 8-bit must not carry its unsigned DC pedestal --
     the floor decoder ignores DC but `_snr_estimate` squares it."""
@@ -223,7 +223,7 @@ def test_wav_read_handles_the_formats_a_far_end_recorder_produces():
     from hfmodem.sabir.floor.mfsk import FloorModem
     m = FloorModem()
     blk = wire.Beacon.build(wire.capabilities(range(3, 7 + 1), wire.FASTCTL), "W9SSJ", profile=1).pack()
-    src = "/tmp/_farend_ref.wav"
+    src = str(tmp_path / "farend_ref.wav")
     offair.wav_write(src, offair._lead_silence(offair.to_real(m.transmit(blk))))
     cases = {
         "44.1k stereo s16": ["-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le"],
@@ -231,7 +231,7 @@ def test_wav_read_handles_the_formats_a_far_end_recorder_produces():
         "8k mono u8": ["-ar", "8000", "-ac", "1", "-c:a", "pcm_u8"],
     }
     for name, args in cases.items():
-        out = "/tmp/_farend_case.wav"
+        out = str(tmp_path / "farend_case.wav")
         if subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src,
                            *args, out]).returncode != 0:
             pytest.skip("ffmpeg unavailable")

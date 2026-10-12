@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""K7EK-10 lower-speed offers, plus near-miss rejection at the tone gate."""
+"""KC9GHZ lower-speed offers, plus near-miss rejection at the tone gate.
+
+The 0917 tap's first 63.5 s holds positions 1, 2, 2. Its later position-0
+answer lies outside this below-offer population.
+"""
 import collections
 
 import numpy as np
 
 from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as MK
 from hfmodem.tests.kestrel import corpora
-from hfmodem.tests.kestrel.test_response_by_stream import _IO, _load_48k
+from hfmodem.tests.kestrel.test_response_by_stream import _IO, _norm, band_limit
 
 
 def _awaiting(called="K7EK-10", bw="2750"):
@@ -28,26 +32,27 @@ def test_lattice_has_the_2750_below_offer_positions():
     assert VA._ANSWER_LATTICE_BY_BW["2750"] == (0, 1, 2)
 
 
-@corpora.requires_onair_below_offer_2750
-def test_k7ek_below_offer_answers_are_named_at_positions_one_and_two():
-    hs, io = _awaiting()
-    _drive(hs, _load_48k(corpora.ONAIR_BELOW_OFFER_2750))
+def test_kc9ghz_below_offer_answers_are_named_at_positions_one_and_two():
+    hs, io = _awaiting("KC9GHZ")
+    _drive(hs, band_limit(_norm(corpora.c_samples(
+        "kc9ghz-0917-below-offer-0-635.flac", external=True))))
     assert hs.answers, "the below-offer answers were named nothing"
     positions = collections.Counter(a.position for a in hs.answers)
-    assert set(positions) == {1, 2}
+    assert positions == {1: 1, 2: 2}
     assert all(a.shift == 0 for a in hs.answers)
     assert hs.state == VA.VaraState.CONNECTING       # setup sent, but no confirmation
     assert any("BW2750 connect-response" in m and "level" in m
                for m in io.log_lines)
 
 
-@corpora.requires_onair_below_offer_2750
 def test_every_below_offer_answer_belongs_to_the_dialled_station():
-    hs, _ = _awaiting()
-    _drive(hs, _load_48k(corpora.ONAIR_BELOW_OFFER_2750))
+    hs, _ = _awaiting("KC9GHZ")
+    _drive(hs, band_limit(_norm(corpora.c_samples(
+        "kc9ghz-0917-below-offer-0-635.flac", external=True))))
+    assert len(hs.answers) == 3
     kind = VF.connect_response("2750")
     for a in hs.answers:
-        assert VF.payload_position(a.payload, "K7EK-10", kind) == a.position
+        assert VF.payload_position(a.payload, "KC9GHZ", kind) == a.position
 
 
 def _near_miss_offer(called="K7EK-10", bw="2750", drop=3):

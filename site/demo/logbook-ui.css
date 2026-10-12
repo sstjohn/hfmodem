@@ -1,0 +1,36 @@
+/* Final desktop logbook colours and compact layout, with public evidence only. */
+:root{--bg:#f2f1eb;--panel:#fafaf5;--ink:#242b27;--muted:#5c695d;--line:#d3d8cc;--accent:#176e62;--accent-bg:#e3eee5;--hover:#eaece3;--control-line:#7c887b;--sans:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color-scheme:light}
+:root[data-theme=dark]{--bg:#1c221e;--panel:#252d27;--ink:#edf0e6;--muted:#aebcad;--line:#435046;--accent:#70d8bc;--accent-bg:#303b31;--hover:#303b31;--control-line:#879987;color-scheme:dark}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 var(--sans);min-height:100vh;display:flex;flex-direction:column}
+a{color:var(--accent);text-underline-offset:.2em;overflow-wrap:anywhere}
+button,input,select{font:inherit;background:var(--panel);color:var(--ink);border:1px solid var(--control-line);border-radius:4px;min-height:32px;padding:5px 8px}
+button{cursor:pointer}button:hover{background:var(--hover)}button:disabled{cursor:default}
+:focus-visible{outline:3px solid var(--accent);outline-offset:3px}
+header{padding:12px 16px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:10px 24px;align-items:baseline}
+h1{font-size:15px;margin:0}h1 span{font:12px var(--mono);color:var(--muted);font-weight:normal;margin-left:8px}
+.snapshot-note{color:var(--muted);font-size:11px;margin-left:auto}.counts{display:flex;flex-wrap:wrap;gap:6px 16px;font:12px var(--mono);color:var(--muted)}
+.controls,.extra-filters{padding:10px 16px;display:flex;flex-wrap:wrap;gap:9px 12px;align-items:center;background:var(--panel);border-bottom:1px solid var(--line);font-size:12px}
+.controls label,.extra-filters label{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
+.controls input[type=search]{width:12em;max-width:100%}.controls select{max-width:100%}
+.view-button[aria-pressed=true],.filter-more[aria-expanded=true]{background:var(--accent-bg);color:var(--accent);border-color:var(--accent)}
+main{flex:1;min-width:0}#summary{padding:18px}h2{font-size:18px;margin:0 0 10px}
+.book,.report-table{overflow:auto;background:var(--panel)}.book:focus-visible,.report-table:focus-visible{outline-offset:-4px}
+table{border-collapse:collapse;width:100%;font-size:12px}caption{text-align:left;padding:10px 16px;color:var(--muted);font-size:12px}
+th{text-align:left;font-size:11px;color:var(--muted);font-weight:normal;background:var(--panel);border-bottom:1px solid var(--line);padding:10px 9px;vertical-align:bottom}
+td{padding:9px;border-bottom:1px solid var(--line);vertical-align:top}.row:hover,.row.open{background:var(--hover)}.row.open td:first-child{box-shadow:inset 3px 0 var(--accent)}
+.t,.call{font-family:var(--mono)}.t{white-space:nowrap}.call{font-weight:600}.sort-column{padding:5px 3px;border:0;font:inherit;color:var(--ink);text-align:left}
+th[aria-sort=ascending] .sort-column::after{content:' ↑'}th[aria-sort=descending] .sort-column::after{content:' ↓'}
+.entry-open{color:var(--accent);font:inherit;min-height:32px;padding:5px 7px}.inspect-link{display:inline-block;min-height:32px;padding:5px 2px;white-space:nowrap}
+.details-list{padding:0 16px}.record-detail{margin:14px 0;padding:16px;background:var(--hover);border:1px solid var(--line);border-radius:6px}.record-detail h2{font-size:16px}
+.record-detail dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:0 0 12px}.record-detail dt{color:var(--muted);font-size:12px}.record-detail dd{margin:0;overflow-wrap:anywhere}.record-detail li{margin-block:7px;overflow-wrap:anywhere}
+.record-detail .qualification{font-weight:600}.record-detail summary{min-height:32px;cursor:pointer;padding:4px 0}.record-detail .actions{display:flex;flex-wrap:wrap;gap:10px 18px}
+.report-note{max-width:70rem;color:var(--muted);font-size:12px}.report-cards{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}.report-card{background:var(--panel);border:1px solid var(--line);border-radius:6px;min-width:135px;padding:12px 14px}.report-card b{display:block;font:650 24px var(--mono)}.report-card span{font-size:11px;color:var(--muted)}
+.book-count-note{margin:0;padding:9px 16px;font-size:12px;background:var(--panel);color:var(--muted);border-block:1px solid var(--line)}.book-count-note p{margin:0 0 5px}.empty{padding:20px;color:var(--muted)}.retry{align-self:start;margin:10px 16px}
+.skip-link{position:fixed;top:8px;left:8px;z-index:1000;padding:10px 16px;background:var(--panel);border:2px solid var(--accent);transform:translateY(-180%)}.skip-link:focus{transform:none}
+@media(max-width:750px){.book table{min-width:700px}.snapshot-note{margin-left:0}header,.controls,.extra-filters{padding-inline:10px}.details-list{padding-inline:10px}.record-detail dl{grid-template-columns:minmax(0,1fr)}.record-detail dt{margin-top:6px}.report-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.report-card{min-width:0}#summary{padding:12px}.report-table table{min-width:480px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+@media(forced-colors:active){button[aria-pressed=true],button[aria-expanded=true]{border:2px solid Highlight}.record-detail{border:1px solid CanvasText}}
+
+/* The enclosing desk already displays the same warning above the iframe. */
+:root[data-desk-embed=true] .release-notice{display:none}

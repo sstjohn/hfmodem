@@ -346,10 +346,17 @@ CS_N = round(spec.P1_CS_S * FS)
 D_MAX_N = round((1.25 - 0.04 - spec.P1_PACKET_S - spec.P1_CS_S) * FS)
 
 
-def _grid(anchor: int = 0, cycle: float = 1.25) -> "onair._MasterGrid":
-    return onair._MasterGrid(anchor, round(cycle * FS),
-                             round(onair.TX_OFFSET_S * FS),
-                             packet_n=PACKET_N, cs_n=CS_N, d_max_n=D_MAX_N)
+#: `--call-hush 4,6`, the cadence every arm flew until 2026-09-23.
+CALLS, HUSH = 4, 6
+
+
+def _grid(anchor: int = 0, cycle: float = 1.25,
+          call_hush=None) -> "onair._MasterGrid":
+    g = onair._MasterGrid(anchor, round(cycle * FS),
+                          round(onair.TX_OFFSET_S * FS),
+                          packet_n=PACKET_N, cs_n=CS_N, d_max_n=D_MAX_N)
+    g.call_hush = call_hush
+    return g
 
 
 def the_master_holds_its_own_grid() -> None:
@@ -716,9 +723,7 @@ def _schedule(audio: np.ndarray, anchor: int, cycles: int, *,
     The slot is picked by `onair._keyable_slot` -- the one place the rule
     lives -- not by an arithmetic of this file's own; see `_Tape`.
     """
-    r = _grid(anchor)
-    if not escape:
-        r.BLIND_CYCLES = cycles + 1        # how it behaved before the escape
+    r = _grid(anchor, call_hush=(CALLS, HUSH) if escape else None)
     live, slot = _Tape(anchor + PACKET_N), 1
     dropped = live.pos                     # where our carrier last came down
     out = {"hushed": 0, "heard": 0, "lock_cycle": None, "anchors": [],
@@ -780,12 +785,12 @@ def deadlock_and_escape() -> None:
           f"acquired on cycle {free['lock_cycle']} after {free['hushed']} "
           f"cycles off the air")
     check("...and it did so by listening, not by transmitting differently",
-          0 < free["hushed"] <= onair._MasterGrid.HUSH_CYCLES,
-          f"{free['hushed']} hushed of {onair._MasterGrid.HUSH_CYCLES} allowed")
+          0 < free["hushed"] <= HUSH,
+          f"{free['hushed']} hushed of {HUSH} allowed")
     check("...within a cycle or two of the threshold it is allowed",
-          free["lock_cycle"] <= onair._MasterGrid.BLIND_CYCLES + 5,
+          free["lock_cycle"] <= CALLS + 5,
           f"cycle {free['lock_cycle']}, threshold "
-          f"{onair._MasterGrid.BLIND_CYCLES}")
+          f"{CALLS}")
     # Having placed the grid, the one-slot window is supposed to hold the peer's
     # burst every cycle -- that is what TX_OFFSET_S is for, and it is the claim
     # that makes a one-slot cadence viable at all.
@@ -831,16 +836,16 @@ def the_hush_is_only_for_a_grid_nothing_has_ever_answered() -> None:
     acquired -- including every cycle of the held link.
     """
     print("\nthe hush: armed only while nothing has been heard on this grid")
-    HUSH = onair._MasterGrid.HUSH_CYCLES
-    n = onair._MasterGrid.BLIND_CYCLES + HUSH + 4
+    n = CALLS + HUSH + 4
+    hushing = (CALLS, HUSH)
 
-    cold = _blind_for(_grid(), n)
+    cold = _blind_for(_grid(call_hush=hushing), n)
     check("a grid nothing has ever answered still goes quiet", cold > 0,
           f"{cold} of {n} cycles off the air")
 
     # A LINK IS UP. Same grid, same silence, and the only difference is the one
     # bit the loop reads off the FSM.
-    linked = _grid()
+    linked = _grid(call_hush=hushing)
     check("a session holding a link is never taken off the air",
           _blind_for(linked, n, linked=True) == 0,
           f"hush_left {linked.hush_left} after {n} blind cycles")
@@ -848,7 +853,7 @@ def the_hush_is_only_for_a_grid_nothing_has_ever_answered() -> None:
     # ...AND A TURNAROUND WAS ONCE MEASURED. `d` is released after MAX_MISSES and
     # `locked` goes back to False with it, which is why the latch is a separate
     # fact: the peer having been heard is not undone by losing it again.
-    was = _grid()
+    was = _grid(call_hush=hushing)
     was.update([was.boundary(1) + PACKET_N + round(0.085 * FS)])
     check("...and one that has heard an answer before is not either",
           was.acquired and not _blind_for(was, n),
@@ -868,9 +873,10 @@ def the_hush_is_only_for_a_grid_nothing_has_ever_answered() -> None:
 
     onair._MasterGrid._blind = as_flown
     try:
-        again = _grid()
+        again = _grid(call_hush=hushing)
         again.update([again.boundary(1) + PACKET_N + round(0.085 * FS)])
-        flown = (_blind_for(_grid(), n, linked=True), _blind_for(again, n))
+        flown = (_blind_for(_grid(call_hush=hushing), n, linked=True),
+                 _blind_for(again, n))
     finally:
         onair._MasterGrid._blind = saved
     # AT LEAST A WHOLE HUSH EACH, not exactly one: `update` cancels an

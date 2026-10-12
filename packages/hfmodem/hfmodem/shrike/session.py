@@ -25,6 +25,7 @@ import wave
 import numpy as np
 from scipy.io import wavfile
 
+from ..core import wav
 from . import modem, pactor1, placement, spec
 
 FS = spec.SAMPLE_RATE
@@ -104,7 +105,8 @@ def load_wav(path: str, target_fs: int | None = None) -> np.ndarray:
     files where there are 196, and the corpus's longest run of real PACTOR-1
     packets sat unread the whole time.
     """
-    fs, raw = wavfile.read(path, mmap=True)
+    src = wav.source(path)
+    fs, raw = wavfile.read(src, mmap=isinstance(src, str))
     a = np.asarray(raw)
     if a.ndim > 1:
         a = a[:, 0]

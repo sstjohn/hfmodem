@@ -112,16 +112,16 @@ def test_an_acknowledged_changeover_is_followed_by_an_ordinary_data_packet():
 
     sl, field, status, breakin = peer.last
     assert not breakin, "the changeover is spent; its head must not ride again"
-    assert field == login[CHANGEOVER_FIELD:], "the next chunk of the login"
+    assert field == login[CHANGEOVER_FIELD:CHANGEOVER_FIELD + 5], "first SL1 chunk"
     assert status & 3 == 1, "the counter continues from the changeover's zero"
-    assert sl == host.arq._sl == 3, "the traffic level, not a level of its own"
+    assert sl == host.arq._sl == 1, "a fresh transmit turn starts at SL1"
     assert CHANGEOVER_FIELD < len(field) <= host.arq._payload_bytes(False)
 
 
 def test_the_login_reaches_the_air_once_and_in_order_and_the_turn_follows_it():
     host, peer, login = breaks_in()
     counters, sent = [peer.last[2] & 3], bytearray(peer.last[1])
-    for _ in range(6):
+    for _ in range(len(login) // 5 + 2):
         peer.answer()
         host.app_turns()
         host.tick()
@@ -144,7 +144,7 @@ def test_an_acknowledged_changeover_advances_at_every_traffic_level(sl):
     peer.answer()
     host.tick()
     sl_sent, field, status, breakin = peer.last
-    assert not breakin and sl_sent == sl and status & 3 == 1
+    assert not breakin and sl_sent == 1 and status & 3 == 1
     assert field == login[CHANGEOVER_FIELD:CHANGEOVER_FIELD + len(field)]
 
 
@@ -210,3 +210,68 @@ def test_a_cycle_that_reaches_the_air_clears_the_refusal_count():
     assert host.arq._refused_cycles == 0
     peer.refuse = True
     assert cycles_to_sign_off(host) == host.arq.cfg.max_retries + 2
+
+
+@pytest.mark.parametrize("previous_sl", [2, 3, 6])
+def test_new_turn_repeat_train_stays_at_sl1_until_peer_requests_climb(previous_sl):
+    """VE3KPG 0920: CS1 accepts the turn, then requests counter 1 repeatedly."""
+    host, peer, login = breaks_in(sl=previous_sl)
+    peer.answer()
+    first = peer.last
+    assert first[:2] == (1, login[3:8])
+    assert first[2] & 3 == 1 and not first[3]
+    for _ in range(33):
+        peer.answer(ack=False)
+        assert peer.last == first
+        assert host.arq._inflight.payload + bytes(host.arq._outbuf) == login[3:]
+    host.on_rx_event(rxfront.Event(
+        0.0, "cs", "peer requests climb", protocol=spec.Protocol.PACTOR3, cs=3))
+    sl, field, status, breakin = peer.last
+    assert sl == 2 and status & 3 == 2 and not breakin
+    assert field == login[8:8 + len(field)]
+    assert host.arq._inflight.payload + bytes(host.arq._outbuf) == login[8:]
+
+
+def test_refused_changeover_keeps_speed_until_the_turn_is_taken():
+    host, peer, login = logged_in(sl=3)
+    peer.refuse = True
+    host.arq._breakin_armed = True
+    host.tick()
+    assert host.arq.role == arq.IRS and host.arq.speed_level == 3
+    assert bytes(host.arq._outbuf) == login
+    peer.refuse = False
+    host.arq._breakin_armed = True
+    host.tick()
+    assert host.arq.role == arq.ISS and host.arq.speed_level == 1
+    peer.answer()
+    assert peer.last[:2] == (1, login[3:8])
+
+
+@pytest.mark.parametrize("protocol", [spec.Protocol.PACTOR1, spec.Protocol.PACTOR2])
+def test_turn_speed_reset_is_specific_to_p3(protocol):
+    host, _, _ = logged_in(sl=3)
+    host.protocol = protocol
+    host.arq._take_link()
+    assert host.arq.speed_level == 3
+
+
+def test_turn_speed_reset_respects_explicit_minimum():
+    host, peer, login = logged_in(sl=3)
+    host.arq.cfg.min_sl = 2
+    host.arq._breakin_armed = True
+    host.tick()
+    peer.answer()
+    assert peer.last[0] == host.arq.speed_level == 2
+    assert peer.last[1] == login[3:26]
+
+
+
+def test_repeats_do_not_extend_the_queued_goodbye_budget():
+    host, peer, _ = breaks_in()
+    peer.answer()
+    host.arq.on_host_disconnect()
+    for _ in range(arq.GOODBYE_PLACE_TICKS):
+        peer.answer(ack=False)
+        host.tick()
+    assert host.arq.state is arq.State.DISCONNECTED
+    assert host.arq.goodbye_unplaceable

@@ -76,14 +76,13 @@ def test_other_obligations_disable_the_query_clock(clock, field, value):
     assert hs.intermediate_query_due_in() is None
 
 
-def test_nak_requested_data_gets_a_new_reply_window_without_renewing_budgets(clock):
+def test_nak_requested_data_gets_a_new_reply_window_and_query_budget(clock):
     hs, io = pending()
     clock += 1.81
     assert hs.query_intermediate_answer()
-    attempts = hs._intermediate_query_attempts
     clock += 6.0  # Includes the peer's reply and our DATA playback.
-    hs._took_nak()
-    assert hs._tx_retries == 1 and hs._intermediate_query_attempts == attempts
+    hs._retry_data_over(peer_asked=True)
+    assert hs._tx_retries == 1 and hs._intermediate_query_attempts == 0
     assert hs.intermediate_query_due_in() == pytest.approx(VA._OVER_RETRY_S)
     assert not hs.query_intermediate_answer()
     np.testing.assert_array_equal(io.sent[0], io.sent[-1])

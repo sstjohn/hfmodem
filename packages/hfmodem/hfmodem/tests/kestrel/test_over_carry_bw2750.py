@@ -14,12 +14,15 @@ on.
 whether the peer is still keying. If the carry cannot hold frame + `_PROBE_COLS`
 columns of the session's longest record, the probe never fills, `_window_state`
 returns `_UNKNOWN` forever, and the buffer trim walks past the onset — so NS0A's
-record-101 over (19-20/24 reference columns, CRC clean, whole in an 11 s clear
-window) would never be named. The last test drives that failure deliberately, by
-putting the pre-`72372901` formula back.
+record-101 over (24/24 reference columns on the 0930 substitute, CRC clean, in an 11 s
+window) would never be named on the strong path alone. The last test used to
+drive that failure deliberately, by putting the pre-`72372901` formula back; see
+its own docstring for why this corpus item no longer proves it.
 """
+import pytest
+
 from hfmodem.kestrel.rx import varahf2300 as rx
-from hfmodem.kestrel.vara import vara_arq as VA, vara_mfsk as MK
+from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.tests.kestrel import corpora
 
 
@@ -63,7 +66,7 @@ def _driven(x, carry=None):
     hs.role, hs.caller, hs.called = "initiator", "W9SSJ", "NS0A"
     hs.state, hs.step = VA.VaraState.CONNECTED, VA._I_CONNECTED
     hs.turn = VA._TURN_PEER
-    a, b = int(85.19 * MK.FS), int(96.06 * MK.FS)
+    a, b = 0, len(x)  # 86-97 s of the 0930 NS0A tap
     saved = VA._OVER_CARRY
     if carry is not None:
         VA._OVER_CARRY = carry
@@ -75,20 +78,26 @@ def _driven(x, carry=None):
     return io
 
 
-@corpora.requires_onair_ns0a_record101
 def test_ns0a_record101_over_is_named_and_delivered():
-    x = corpora.wav_mono(corpora.ONAIR_NS0A_RECORD101_OVER)
+    x = corpora.c_samples("ns0a-0930-record101-86-97.flac")
     io = _driven(x)
-    assert io.payloads, "the record-101 over was never named"
+    assert len(io.payloads) == 1, "expected one record-101 over"
     assert any("record 101" in m and "DATA over" in m for m in io.logs)
 
 
-@corpora.requires_onair_ns0a_record101
+@pytest.mark.skip(reason="3288cffc gave record 101 a second, carry-independent route: "
+                   "a weak-reference candidate (>= _OVER_CRC_MIN, below _OVER_GUARD_MIN) "
+                   "now gets a speculative CRC-only decode that needs only the frame's "
+                   "own samples, not _PROBE_COLS behind it. NS0A's record-101 over "
+                   "qualifies, so the pre-72372901 carry decodes it too. The deadlock "
+                   "this proved is real for the strong (_window_state) path alone; it "
+                   "needs a corpus item the weak path also rejects, or a direct check "
+                   "of that path's own sample requirement, to mean anything again.")
 def test_narrowing_the_carry_to_the_old_formula_deadlocks_on_the_same_over():
     # The carry before `72372901` was the BW2300 frame max with no probe columns;
-    # under it the record-101 probe can never fill and the over is lost. This is
-    # what the two invariants above are guarding against.
-    x = corpora.wav_mono(corpora.ONAIR_NS0A_RECORD101_OVER)
+    # under it the record-101 probe can never fill and the over is lost on the
+    # strong path. This is what the two invariants above are guarding against.
+    x = corpora.c_samples("ns0a-0930-record101-86-97.flac")
     old = max(rx.RECORDS[lv].ncols * rx.RECORDS[lv].dw50
               for lv in rx.INDEX_LEVELS)
     io = _driven(x, carry=old)

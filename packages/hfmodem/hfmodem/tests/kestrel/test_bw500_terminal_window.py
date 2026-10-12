@@ -10,7 +10,7 @@ from scipy.io import wavfile
 
 from hfmodem.kestrel.arq import phy
 from hfmodem.kestrel.rx import varahf500 as RX
-from hfmodem.kestrel.vara import vara_arq as VA
+from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as MK
 from hfmodem.winlink import Message, decompress
 
 FIXTURES=Path(__file__).with_name('fixtures')/'bw500-terminal-window'
@@ -100,11 +100,13 @@ def test_identified_incomplete_peer_window_owes_data_not_previous_ack(missing,mo
     assert hs._answer_data_over(np.zeros(100))
     assert hs._owed_block and hs._answer_owed==VA._OWED_OVER
     assert io.payloads==[]
-    assert any('tx NAK' in m for m in io.messages)
-    first=io.sent[-1].copy()
-    assert hs._reack()
-    np.testing.assert_array_equal(io.sent[-1],first)
-    assert hs._owed_block
+    # Stock ignored a NAK token in the turnaround; the ask goes behind its idle.
+    assert io.sent==[] and hs._owed_recovery
+    kind=VF.for_bw(VF.SESSION_OVER_NAK,'500')
+    for _ in range(2):
+        assert hs._reack()
+        assert MK.demod_burst(io.sent[-1],kind,MK.band_for('500'))==VF.handshake_tones(hs.called,kind)
+    assert hs._owed_block and any('tx NAK' in m for m in io.messages)
 
 
 @pytest.mark.parametrize('case',['all_bad','our_echo','no_peer_delivery'])

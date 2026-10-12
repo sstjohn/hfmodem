@@ -1,0 +1,49 @@
+{
+  "source": "captures/onair-0920-1858/stream.wav",
+  "source_sha256": "b47aad10778b0e90529691c3998cab323a5422294d784a319a319b4175e72fe1",
+  "fs": 48000,
+  "offset_hz": -13.1,
+  "files": {
+    "first-long.wav": {
+      "start": 705762,
+      "end": 900000,
+      "sha256": "21834c4116062135e9ef6be124e9e7c858bcbd72359fcc5f7feb90b1ffbbe3e4"
+    },
+    "return-short.wav": {
+      "start": 1781762,
+      "end": 1830000,
+      "sha256": "1a0c37ea190cecabce82ee7b464ebc2db3a14ba8e30f7a77101fae332ae10724"
+    },
+    "repeat-controls.wav": {
+      "sha256": "d3d44be7427d2bd4f3bf42806f36d686552a5b56361dad8e8a984a990f572c9a"
+    },
+    "outbound-cs6.wav": {
+      "source": "captures/onair-0920-1946/stream.wav",
+      "source_sha256": "51fe6cd8485cfe6e1670c8b8ff3acd5dd3338518bf97025d9a610ecb341e97c6",
+      "start": 2535198,
+      "end": 2548798,
+      "sha256": "9ddc7fa9b774e353d0d8cdcaf288d71328f4e17f5bfc9a40f152b1d07bf117aa"
+    }
+  },
+  "controls": [
+    2237730,
+    2297460,
+    2477580,
+    2537460,
+    2657460,
+    2717550,
+    2837610,
+    2897610,
+    3137490,
+    3257460,
+    3317610,
+    3437550,
+    3497640,
+    3617490,
+    3677610,
+    3857490,
+    3917610
+  ],
+  "control_lead": 2400,
+  "control_window": 16800
+}

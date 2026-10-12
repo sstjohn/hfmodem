@@ -713,6 +713,31 @@ no such difference: its data packets have its entry's attack, packet for
 packet."""
 
 
+CREST_LIMIT_DB: float | None = None
+"""Peak-to-average ratio, in dB, every data packet and control burst is held to
+before it is keyed; None keys the modulator's own sum. `--p3-crest-limit`.
+
+The sum of shaped carriers is peak-normalised and nothing bounds its envelope,
+so at a fixed drive a level-3 packet puts its average 12.2 dB under the peak
+against the 3.1 dB SCS's own table lists for the level (`spec.SPEED_LEVELS`), a
+level-6 packet 13.7 against 5.7, a control burst 8.2. `modem.crest_limit` takes
+most of that back: at 6 dB every level lands between 6.5 and 7.6 dB, which is
+4 to 6 dB more average power at the same peak from level 2 up and 1.1 at level
+1; our own reader returns every level byte-exact at 6 and at 5, and the control
+burst's fit against a real SCS CS6 RISES, 0.899 to 0.907 at 6 and 0.911 at 5.
+The changeover packet and the terminal marker are not on this switch, and the
+changeover's lead is bounded from its unlimited head
+(`onair._p3_breakin_lead_bound`).
+
+Off by default because no peer has answered a limited render yet. A module
+value for the reason `PROTOCOL_RISE` is one."""
+
+
+def _limited(audio: np.ndarray) -> np.ndarray:
+    return audio if CREST_LIMIT_DB is None else modem.crest_limit(
+        audio, CREST_LIMIT_DB, sample_rate=spec.SAMPLE_RATE)
+
+
 def protocol_config() -> modem.ModConfig:
     """The modulator every PACTOR-III keying uses, under `PROTOCOL_RISE`."""
     return modem.ModConfig(matched_pulse=PROTOCOL_RISE)
@@ -893,9 +918,10 @@ def link_packet(sl: int, payload: bytes, status: int, *,
         # come out shorter than `n_buf` -- silently, and unreadable.
         if flush is not None and len(flush) != CASE0_CODE.constraint_length - 1:
             flush = None
-        return case0_packet(info, swapped=swapped, acquire=acquire, flush=flush,
-                            long_cycle=long_cycle)
-    return data_packet(info, path, swapped=swapped, acquire=acquire, flush=flush)
+        return _limited(case0_packet(info, swapped=swapped, acquire=acquire,
+                                     flush=flush, long_cycle=long_cycle))
+    return _limited(data_packet(info, path, swapped=swapped, acquire=acquire,
+                                flush=flush))
 
 
 def field_info(payload: bytes, n: int, status: int) -> bytes:
@@ -929,7 +955,6 @@ def pulse_lead(audio: np.ndarray) -> int:
     return int(np.argmax(modem.matched_pulse(spec.SAMPLE_RATE // 100))) - trim
 
 
-@functools.lru_cache(maxsize=48)
 def control_burst(cs_index: int, *, tail: bool,
                   swapped: bool | None) -> np.ndarray:
     """One control codeword on channels 5 and 12, built to a named shape.
@@ -939,8 +964,14 @@ def control_burst(cs_index: int, *, tail: bool,
     +0.4 degrees. `swapped` places the half-symbol carrier stagger: False leads
     with channel 5, True leads with channel 12, and None keys both tones on one
     clock, an arrangement no measured station sends. Neither changes the
-    nominal 1.25/3.75 s cycle.
+    nominal 1.25/3.75 s cycle. Held to `CREST_LIMIT_DB` like a data packet.
     """
+    return _control_burst(cs_index, tail, swapped, CREST_LIMIT_DB)
+
+
+@functools.lru_cache(maxsize=96)
+def _control_burst(cs_index: int, tail: bool, swapped: bool | None,
+                   crest_db: float | None) -> np.ndarray:
     w = spec.CONTROL_SIGNALS[cs_index]
     bits = np.array([(w >> i) & 1 for i in range(spec.CS_BITS_PER_TONE)], np.uint8)
     syms = modem.differential_encode(bits, 1)
@@ -951,14 +982,21 @@ def control_burst(cs_index: int, *, tail: bool,
         modem.ModConfig(sample_rate=spec.SAMPLE_RATE, matched_pulse=True),
         delay=None if swapped is None else
         {5 if swapped else 12: round(CONTROL_STAGGER_S * spec.SAMPLE_RATE)})
+    if crest_db is not None:
+        audio = modem.crest_limit(audio, crest_db, sample_rate=spec.SAMPLE_RATE)
     audio.flags.writeable = False
     return audio
 
 
-@functools.lru_cache(maxsize=48)
 def control_burst_pulse_lead(cs_index: int, *, tail: bool,
                              swapped: bool | None) -> int:
-    return pulse_lead(control_burst(cs_index, tail=tail, swapped=swapped))
+    return _control_burst_pulse_lead(cs_index, tail, swapped, CREST_LIMIT_DB)
+
+
+@functools.lru_cache(maxsize=96)
+def _control_burst_pulse_lead(cs_index: int, tail: bool, swapped: bool | None,
+                              crest_db: float | None) -> int:
+    return pulse_lead(_control_burst(cs_index, tail, swapped, crest_db))
 
 
 def control_signal(cs_index: int, *, swapped: bool = False) -> np.ndarray:

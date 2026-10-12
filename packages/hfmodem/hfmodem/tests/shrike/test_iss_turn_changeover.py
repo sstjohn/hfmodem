@@ -244,9 +244,9 @@ def test_iss_turn_control_acknowledges_the_changeover_and_the_login_follows():
     sl, field, status, breakin = peer.last
     assert len(peer.bursts) == keyed + 1, "one packet, in the cycle it arrived in"
     assert not breakin, "the changeover is spent; its head must not ride again"
-    assert field == login[CHANGEOVER_FIELD:], "the next chunk of the login"
+    assert field == login[CHANGEOVER_FIELD:CHANGEOVER_FIELD + 5], "first SL1 chunk"
     assert status & 3 == 1, "the counter continues from the changeover's zero"
-    assert sl == 3, "the traffic level, not the level the peer answered in"
+    assert sl == 1, "the new transmit turn starts at SL1"
 
 
 def test_iss_turn_control_ack_is_followed_by_a_packet_and_never_a_codeword():
@@ -278,7 +278,7 @@ def test_iss_turn_the_login_reaches_the_air_with_control_acknowledgements():
     sent = bytearray(peer.last[1])
     counters = [peer.last[2] & 3]
     peer.answer()
-    for _ in range(6):
+    for _ in range(len(login) // 5 + 2):
         sent += peer.last[1]
         counters.append(peer.last[2] & 3)
         if peer.last[2] & spec.STATUS_CHANGEOVER:
@@ -367,7 +367,7 @@ def test_iss_turn_standing_request_does_not_acknowledge_changeover(status):
     peer.answer()
     assert not host.arq.unconfirmed_breakin
     assert host.arq._buffer_raw == buffered - CHANGEOVER_FIELD
-    assert peer.last[1] == login[CHANGEOVER_FIELD:]
+    assert peer.last[1] == login[CHANGEOVER_FIELD:CHANGEOVER_FIELD + 5]
     assert peer.last[2] & 3 == 1
 
 
@@ -376,7 +376,7 @@ def test_iss_turn_request_then_control_ack_keeps_every_login_byte():
     cede(host)
     assert host.arq.unconfirmed_breakin
     peer.answer()
-    for _ in range(6):
+    for _ in range(len(login) // 5 + 2):
         if not host.arq._outbuf:
             break
         peer.answer()
@@ -526,16 +526,9 @@ def test_iss_listen_reverted_the_stint_starves_exactly_as_it_flew():
 
 
 @pytest.mark.parametrize("owed", [True, False])
-def test_iss_listen_the_occupied_slot_is_the_station_we_are_answering(owed,
+def test_iss_listen_without_current_qualification_does_not_attribute_the_slot(owed,
                                                                       monkeypatch):
-    """Between keying a changeover and reading its answer, the peer holds the air.
-
-    `_report_answer_band` asked this by ROLE, so at the ISS end -- exactly where
-    the 2320 arm was -- hold 210 printed `ANSWER SLOT OCCUPIED` against the
-    station it was answering. An unconfirmed changeover is the same position the
-    IRS branch describes: the peer is still keying its own packet on its own
-    raster, which is the whole reason the changeover went out.
-    """
+    """Turn expectation alone does not identify current peer evidence."""
     host, peer, login = takes_the_channel()
     if not owed:
         peer.answer()                       # actual control confirms the turn
@@ -545,5 +538,7 @@ def test_iss_listen_the_occupied_slot_is_the_station_we_are_answering(owed,
                         lambda self, *a, **kw: asked.update(kw))
     onair._report_answer_band(onair._AnswerBand(), host, iss_grid(),
                               np.zeros(CYCLE_N, np.float32),
-                              since_tx=CYCLE_N, d_max_n=6240, read=True)
-    assert asked["peer_owes_a_packet"] is owed
+                              since_tx=CYCLE_N, d_max_n=6240, read=True,
+                              seg_start=0)
+    assert not host.arq.peer_qualified
+    assert asked["peer_owes_a_packet"] is False

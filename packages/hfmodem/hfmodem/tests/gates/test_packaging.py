@@ -56,34 +56,52 @@ DISTS = {
 
 # Every subpackage of hfmodem, by equality. Adding one is a deliberate act and has
 # to be recorded here; `host` joins this set when the dialects are extracted.
-TOP = {"core", "station", "besra", "kestrel", "sabir", "shrike", "winlink", "tests"}
+TOP = {"ax25", "brubru", "core", "station", "besra", "kestrel", "lanner", "monitor", "sabir", "shrike",
+       "bateleur", "winlink", "operator", "_operator", "tests"}
 
 # Per protocol, so an explicit-list regression cannot ship a modem's top-level
 # modules with nothing under them.
 SUB = {
-    # shrike has no subpackages at all: `assets` was one until every table it held
-    # became a call into `shrike/tablegen.py`. An empty set is an assertion here,
-    # not a placeholder -- it is what fails if a data directory comes back.
-    "shrike": set(),
+    "ax25": set(),
+    "brubru": {"host"},
+    # Compact permutation recipes and their reproducible generator sources.
+    "shrike": {"assets", "c2proof"},
+    "lanner": set(),
     "kestrel": {"arq", "coding", "host", "rx", "tx", "vara"},
     "besra": {"arq", "dsp", "fec", "frame", "host", "phy", "sim"},
     "sabir": {"arq", "compress", "dsp", "fec", "floor", "frame", "host", "phy", "sim"},
+    # Physical layers are flat; ALE, STANAG 5066 and selcall have subpackages.
+    "bateleur": {"ale", "s5066", "selcall"},
 }
 
-# Every non-`.py` file the hfmodem wheel may contain, by equality. There is one:
-# the BW500 synthesis pulse, a deconvolution of recorded audio. Its generator is
-# not missing -- it re-runs in 3.4 s and returns the shipped bytes -- but the
-# recording it reads does not ship. Everything else that was once package data is
-# now computed at the point of use.
-#
-# By equality because that is the half that was missing. This file asserts module
-# lists by equality and used to assert assets by existence -- "something is under
-# each of these directories" -- and a stale `build/lib/` staging tree rode 6.25 MB
-# of deleted tables into every wheel built here without disturbing that check.
-# The wavs under `tests/besra/fixtures/` are deliberately absent: package-data does
-# not name them, so they reach a reader through the source distribution and not
-# through a wheel.
-WHEEL_DATA = {"hfmodem/kestrel/tx/assets/prototype_pulse.npz"}
+# Every reviewed non-Python wheel resource, by equality. The compact C2 swap
+# recipes travel with the generator and its upstream license notices; the BW500
+# pulse remains a synthesis resource. Private recordings do not ship in wheels.
+WHEEL_DATA = {
+    "hfmodem/kestrel/tx/assets/prototype_pulse.npz",
+    "hfmodem/shrike/c2proof/cml_generate.c",
+    "hfmodem/shrike/c2proof/upstream/srandom.h",
+    "hfmodem/shrike/c2proof/NOTICE.md",
+    "hfmodem/shrike/c2proof/COPYING.LESSER",
+} | {f"hfmodem/shrike/assets/c2-{n}.swaps.z" for n in
+     (280, 348, 352, 704, 1056, 1160, 1408, 1656, 4140, 8280, 12420, 16560, 20700)}
+
+
+# Operator bundle is reviewed by exact path; compare its bytes as well below.
+import tomllib
+_OPERATOR_INVENTORY = tomllib.loads((REPO / 'publish/operator-tools.toml').read_text())['operators']['paths'] if (REPO / 'publish/operator-tools.toml').is_file() else []
+OPERATOR_RUNTIME = [name for name in _OPERATOR_INVENTORY
+                    if not Path(name).name.startswith('test_') and not name.endswith('.md')]
+WHEEL_DATA |= {f'hfmodem/_operator/{name}' for name in OPERATOR_RUNTIME if not name.endswith('.py')}
+
+
+def test_wheel_operator_bundle_is_exact(wheels):
+    wheel = wheels('hfmodem')
+    prefix = 'hfmodem/_operator/'
+    got = {name[len(prefix):] for name in wheel.namelist() if name.startswith(prefix)}
+    assert got == set(OPERATOR_RUNTIME)
+    for name in OPERATOR_RUNTIME:
+        assert wheel.read(prefix + name) == (REPO / name).read_bytes()
 
 
 _built: dict[str, zipfile.ZipFile] = {}
@@ -141,7 +159,7 @@ def test_hfmodem_carries_every_subpackage(wheels):
             f"{proto}: missing {sorted(expected - under)}, unexpected {sorted(under - expected)}")
 
 
-def test_the_hfmodem_wheel_carries_one_data_file_and_no_other(wheels):
+def test_the_hfmodem_wheel_carries_only_reviewed_data(wheels):
     wheel = wheels("hfmodem")
     got = {n for n in wheel.namelist()
            if n.startswith("hfmodem/") and not n.endswith("/")
@@ -194,7 +212,7 @@ def test_hfhost_wheel_is_stdlib_only(wheels):
     import ast
 
     banned = {"numpy", "scipy", "sounddevice", "hfmodem", "creance",
-              "shrike", "kestrel", "besra", "sabir"}
+              "shrike", "kestrel", "besra", "sabir", "lanner"}
     for name in wheel.namelist():
         if not name.endswith(".py"):
             continue

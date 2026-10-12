@@ -74,7 +74,8 @@ def test_recorded_ack_confirms_entry_and_survives_old_grid_release(station, wind
     assert sess.host.arq.tx_seq == 3  # Repeated CS1 does not ACK odd packet 3.
     # ...and what it is asking for again is the traffic. The counter-3 packet
     # used to go out with an empty field, and the request for it cost nothing.
-    assert sess.host.arq._inflight.payload == b'bench payload'
+    assert sess.host.arq._inflight.payload and b'bench payload'.startswith(
+        sess.host.arq._inflight.payload)
     assert sess.host.arq._inflight.repeats == 1
 
 

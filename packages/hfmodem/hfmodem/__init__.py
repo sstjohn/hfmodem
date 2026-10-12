@@ -9,4 +9,15 @@ radio rather than the waveform, and `host` for the dialects an application
 speaks to a modem.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
+
+
+from .bateleur.config import (validate as _validate_bateleur_config,
+                              validate_ale as _validate_ale_config,
+                              validate_selcall as _validate_selcall_config)
+from .core.config_validation import PROTOCOL_VALIDATORS as _protocol_validators
+
+_protocol_validators["bateleur"] = _validate_bateleur_config
+
+_protocol_validators["ale"] = _validate_ale_config
+_protocol_validators["selcall"] = _validate_selcall_config

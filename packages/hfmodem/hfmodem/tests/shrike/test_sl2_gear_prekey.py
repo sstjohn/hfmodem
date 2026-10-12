@@ -43,6 +43,7 @@ def receiver(row):
     s.host.arq.cfg.long_cycle = False
     s.host.arq._rx_seen = True
     s.host.arq._expected_seq = 3 if row['file'].startswith('k0nts') else 0
+    s.host.arq._p3_rx_sl = 1
     return s
 
 
@@ -54,7 +55,7 @@ def test_recorded_first_sl2_is_decoded_before_reply(row, monkeypatch):
     old = rxfront.SyncedRx()
     old.packet_level, old.packet_at = 1, row['row0'] - row['start']
     assert old.packet(p3acquire.compensate(audio, row['offset_hz']), preferred_only=True) is None
-    s.rx.note_p3_speedup_emitted()
+    s.rx.note_p3_speedup_emitted(1, 2)
     original = s.rx._read_p3_packet
     monkeypatch.setattr(s.rx, '_read_p3_packet', lambda *a, **k: pytest.fail('late/general fallback'))
     expected = s.host.arq._expected_seq
@@ -73,7 +74,7 @@ def test_recorded_first_sl2_is_decoded_before_reply(row, monkeypatch):
 @pytest.mark.parametrize('row', ROWS, ids=lambda r: r['file'])
 def test_recorded_sl2_crc_tick_and_key_fit_original_reply_slot(row, tmp_path, monkeypatch):
     s = receiver(row)
-    s.rx.note_p3_speedup_emitted()
+    s.rx.note_p3_speedup_emitted(1, 2)
     tx = onair.RadioTx(_Rig(), transmit=True, outdir=tmp_path, settle=.04)
     tx.attach(s.host)
     s.host.peer, tx.sessrx = tx, s.rx
@@ -143,7 +144,7 @@ def test_failed_sl2_trial_does_not_create_lock():
     assert (sync.packet_level, sync.packet_at, sync.rotation) == (1, 9000, .1)
 
 
-def test_sl2_expectation_expires_and_only_emitted_cs4_arms_it(tmp_path, monkeypatch):
+def test_sl2_expectation_waits_for_a_frame_and_only_emitted_cs4_arms_it(tmp_path, monkeypatch):
     s = receiver(ROWS[0])
     tx = onair.RadioTx(transmit=False, outdir=tmp_path)
     tx.attach(s.host)
@@ -154,9 +155,13 @@ def test_sl2_expectation_expires_and_only_emitted_cs4_arms_it(tmp_path, monkeypa
         tx.n += not refuse
     monkeypatch.setattr(tx, '_tx', send)
     tx._send_p3_control(3)
-    assert not s.rx.sl2_prekey_expected(s.rx._p3_row0 + 60000)
+    assert not s.rx.sl2_prekey_expected()
     refuse = False
     tx._send_p3_control(3)
     assert s.rx.sync.packet_level == 1  # Request is not a validated lock.
-    assert s.rx.sl2_prekey_expected(s.rx._p3_row0 + 60000)
-    assert not s.rx.sl2_prekey_expected(s.rx._p3_row0 + 240000)
+    assert s.rx._p3_expected_levels == (1, 2)
+    for _ in range(4):
+        s.rx.new_cycle()
+    assert s.rx.sl2_prekey_expected()
+    onair._scan_frame(s.rx, recorded(ROWS[0]), ROWS[0]['start'], tracked_only=True)
+    assert len(s.packets) == 1 and not s.rx._p3_expected_levels

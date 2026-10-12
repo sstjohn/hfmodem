@@ -9,9 +9,8 @@ the rejected frame had the intended body and deliberately incorrect CRC.
 
 ## Measured replies and actions
 
-Measurements use W9SSJ calling KC9GHZ, plus an independent N0XYZ peer absent
-from the captured reply tables, on fixed BlackHole virtual audio.
-The two stock installations are unregistered, so **nothing above host level 4
+Measurements use W9SSJ calling KC9GHZ, plus an independent N0XYZ peer, on fixed BlackHole virtual audio.
+The two stock installations are speed limited, so **nothing above host level 4
 is qualified by this campaign**. ARQ record numbers differ from host levels:
 
 | Bandwidth | Host levels 4, 3, 2, 1: ARQ records | Full body bytes |
@@ -38,20 +37,21 @@ The long form is accepted in a fresh direct-DATA window or a solicited query
 window; an abandoned query cannot reuse the direct window. When a direct
 CRC-rejection reply is erased, the called-keyed query answer is also `288/63`.
 
-The three complete eight-symbol negative tails are recorded in
-`DATA_NAK_RESPONDER_BY_LINK`. These are measured **full-link** vectors, not a
-general callsign generator. Complete clear matches authorize a retry only in
+The eight-symbol negative is frame 1 of the called station's answer stream
+([04 §4.2C](04-frame-block-formats.md), answer tails), which reproduces all three
+measured tails. Complete clear matches authorize a retry only in
 the pending full-DATA window. Near matches veto an ACK but do not authorize a
 retry. Native fixtures retain source hashes and sample boundaries in
 `tests/kestrel/fixtures/data-nak-pairs-0919/manifest.json`.
 
-Positive hold and next-lower-record replies have different full tails, now
-recorded separately and covered by the native `data-ack-pairs-0919` fixtures.
-A different callsign or unfamiliar tail must obtain called-keyed positive query
-confirmation before retiring bytes. A positively confirmed tail can be learned
-for that connection only; the observation is bound to the exact pending frame
-and its transmit timestamp, and the cache clears on reconnect. A NACK never
-teaches a positive tail.
+Positive hold and next-lower-record replies are frames 0 and 5 of the same
+stream, covered by the native `data-ack-pairs-0919` fixtures. Any other
+eight-symbol reply must obtain called-keyed positive query confirmation before
+retiring bytes. A short final over, a session's only over among them, is its
+own delivery boundary and takes the same one-step descent
+([28](28-short-final-nak-retry.md) geometry; not yet qualified for CRC
+rejection). Outside the reply window, or after a query, the burst authorizes
+no DATA and recovery stays with the query.
 
 ## Evidence and scope
 
@@ -118,7 +118,7 @@ receive mute extends into its opening, and several interior two-tone symbols
 have insufficient separation from competing peaks. Several peaks fall at
 third-order intermodulation frequencies (for example, bin 63 beside 77/91);
 the capture does not establish whether transmitter or receiver caused this.
-At the time of this QSO, the table had no qualified W9SSJ/K0SI ACK template. This evidence does not
+At the time of this QSO, no W9SSJ/K0SI ACK tail was known. This evidence does not
 justify accepting the short shape as an ACK: the query remains necessary for
 this capture, and its first complete answer should resolve the pending frame.
 
@@ -132,9 +132,8 @@ retransmission between the short reply and this confirmation. The pending 89
 bytes are then retired, the remaining 55 sent, and the mail exchange completes.
 
 The short reply's eight pairs are `(64,67) (58,92) (77,91) (48,64) (65,71)
-(38,92) (81,85) (58,98)`. They now qualify the W9SSJ → K0SI BW2300 entry;
-no other callsign or bandwidth inherits this measurement. Native fixtures,
+(38,92) (81,85) (58,98)`. They are K0SI's generated continue tail. Native fixtures,
 cursors and hashes are in `fixtures/k0si-data-ack-0920/provenance.json`.
 The intact reply advances exactly once without a query with 512, 4096, 4800
 and 8192-sample callbacks. The earlier distorted reply still cannot meet the
-existing tone checks, even with the known template, and remains a query case.
+existing tone checks, even with the known tail, and remains a query case.

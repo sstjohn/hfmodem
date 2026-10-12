@@ -55,7 +55,7 @@ class ModemObserver(abc.ABC):
         """Link telemetry -> LinkStats."""
 
     def modem_id_sent(self, station_id: str, t: float) -> None:
-        """A §97.119 identification went out -> IdSent."""
+        """A callsign-bearing transmission went out -> IdSent."""
 
     def modem_send_progress(self, msg_id: int, delivered: bool) -> None:
         """A tracked message's bytes were all peer-ACKed -> SendProgress."""

@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 from scipy.signal import butter, resample_poly, sosfiltfilt
 
+from hfmodem.tests.evidence import require_input
 from hfmodem.tests.kestrel import corpora
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
@@ -93,6 +94,7 @@ class _IO:
     def tx(self, samples): ...
     def pending(self): ...
     def connected(self, *a): ...
+    def data(self, payload): ...
     def log(self, msg): self.log_lines.append(msg)
 
 
@@ -362,6 +364,8 @@ def _load_48k(path) -> np.ndarray:
     the 83 ppm that is not 12000 is far below anything the tone lattice resolves."""
     from scipy.io import wavfile
 
+    if path.parent in (corpora.A1_FIXTURES, corpora.A1_EXTERNAL):
+        return band_limit(_norm(corpora.a1_samples(path)))
     sr, a = wavfile.read(str(path))
     a = np.asarray(a, float)
     if a.ndim > 1:
@@ -456,6 +460,11 @@ def test_the_real_recordings_accept_only_the_answers_addressed_to_us():
     recording is dialled to the station on it and to two that are not — the panel
     is swept exhaustively above, where it costs one tone track rather than eight.
     """
+    for path in (corpora.ONAIR_CONNECT_ATTEMPT,
+                 corpora.OFFAIR / "NS0A_2300" / "rig_rx.wav",
+                 corpora.OFFAIR / "KC9GHZ_2300" / "rig_rx.wav",
+                 corpora.CLEAR_CHANNEL):
+        require_input(path)
     seen = {}
     for label, path, own in _corpus()[:4]:            # the declared off-air captures
         x = _load_48k(path)
@@ -465,12 +474,13 @@ def test_the_real_recordings_accept_only_the_answers_addressed_to_us():
                 seen[(label, call)] = at
         del x
         gc.collect()
-    # KB9MMT and NS0A each answered twice; the KC9GHZ session was recorded from
-    # inside an established link and holds no connect at all.
-    assert set(seen) == {("2026-07-26 call to KB9MMT", "KB9MMT"), ("NS0A session", "NS0A")}, \
-        seen
+    # Each gateway answered twice. KC9GHZ's recording opens on its connect: a
+    # level-2 offer at lattice frame 15, 15/15 tones and then 10/10 on the repeat.
+    assert set(seen) == {("2026-07-26 call to KB9MMT", "KB9MMT"),
+                         ("NS0A session", "NS0A"),
+                         ("KC9GHZ session", "KC9GHZ")}, seen
     assert all(len(v) == 2 for v in seen.values()), (
-        f"both gateways answered twice; found {seen}")
+        f"every gateway answered twice; found {seen}")
 
 
 # --------------------------------------------------------------------------- #
@@ -677,20 +687,15 @@ def test_the_same_night_recordings_with_no_answer_stay_silent():
 #
 # 2026-08-15, calling N0LCR-1 on 7103.5 kHz: seven connect-requests went out and the
 # tool printed "no answer — resending CR" after six of them. One answer is in the
-# recording, at 18.35 s, and it sits one carrier low — -23 Hz, which the search at
+# excerpt, at 10.27 s, and it sits one carrier low — -23 Hz, which the search at
 # zero offset scores at chance rather than badly.
 #
-# The transport's own geometry is in the recording, and the replay below uses it
-# rather than a continuous feed: this is a defect of the live path, so what has to
-# take the answer is the live path. `AudioVaraIO.tx` skips the receive cursor to
-# TX-end + 0.1 s, the connect loop feeds `on_rx_stream` from there and calls
-# `originate` again on the resend cadence, so the search was given the audio between
-# one cursor and the next key-up and nothing else. The figures are the receiver's own
-# mute edges, measured off this file at 10 ms: it goes deaf for 0.07-0.10 s at
-# key-up and for 0.17 s after the last transmitted sample.
+# The KT USB excerpt starts at source 140.13 s and ends at the third key-up.
+# Keep the first two request/listen windows, including the retry before the answer.
+# Reproduce the live cursor skip explicitly: the tap itself has no receiver mute.
 _N0LCR = "N0LCR-1"
-_N0LCR_KEYUP = (8.300, 16.400, 24.520, 32.620, 40.740, 48.840, 56.920)
-_N0LCR_TXEND = (10.140, 18.260, 26.380, 34.480, 42.600, 50.700, 58.780)
+_N0LCR_KEYUP = (0.30, 8.43, 16.54)
+_N0LCR_TXEND = (2.05, 10.18)
 _TX_CURSOR_SKIP = 0.1                      # AudioVaraIO.tx
 
 
@@ -715,7 +720,6 @@ def _replay(hs: VaraStationHandshake, io: _IO, x: np.ndarray, keyup, txend,
     return at
 
 
-@corpora.requires_onair_offset_answer
 def test_the_off_frequency_answer_of_20260815_is_taken_by_the_live_path():
     """The answer N0LCR-1 sent, taken by the path that walked past it on the night.
 
@@ -724,29 +728,28 @@ def test_the_off_frequency_answer_of_20260815_is_taken_by_the_live_path():
     tones at -1 carrier, and the attempt reaches the link-setup instead of running
     its resend ladder out.
     """
-    x = corpora.wav_mono(corpora.ONAIR_OFFSET_ANSWER) / 32768.0
+    x = corpora.a1_samples(corpora.A1_OFFSET_ANSWER) / 32768.0
     io = _IO()
     hs = _awaiting(io, called=_N0LCR)
     at = _replay(hs, io, x, _N0LCR_KEYUP, _N0LCR_TXEND, _N0LCR)
-    assert at, ("the one answer this recording holds is at 18.35 s and the live "
+    assert at, ("the one answer this recording holds is at 10.27 s and the live "
                 "path found nothing at all")
-    assert at[0] < _N0LCR_KEYUP[2], (
-        f"the answer to request #2 was taken at {at[0]:.2f} s, after the third "
-        f"request went out at {_N0LCR_KEYUP[2]:.2f} s")
+    assert _N0LCR_TXEND[1] < at[0] < _N0LCR_KEYUP[2], (
+        f"answer taken at {at[0]:.2f} s outside the second listen window "
+        f"({_N0LCR_TXEND[1]:.2f}, {_N0LCR_KEYUP[2]:.2f}) s")
     assert hs.step == _I_LINKSETUP_SENT, io.log_lines
     assert any("-23 Hz off frequency" in m for m in io.log_lines), io.log_lines
 
 
-@corpora.requires_onair_offset_answer
 def test_that_recording_holds_no_answer_at_all_at_zero_frequency_offset():
     """Why it was walked past, as arithmetic rather than as a story.
 
     A tuning error moves every tone of a burst by the same amount, so a matcher
     comparing bin indices at one offset does not score an off-frequency answer
-    badly — it scores it at chance. Nothing in these sixty seconds reaches even half
+    badly — it scores it at chance. Nothing in these 16.54 seconds reaches even half
     the acceptance at zero offset; one carrier low, the answer is 14 of 15.
     """
-    x = corpora.wav_mono(corpora.ONAIR_OFFSET_ANSWER) / 32768.0
+    x = corpora.a1_samples(corpora.A1_OFFSET_ANSWER) / 32768.0
     track = _tone_track(x, _ACK_GRID)
     tones = np.asarray(VF.handshake_tones(_N0LCR, RESP), dtype=np.int32)[NPRE:]
     off, n = _RESP_OFF[NPRE:], len(track) - _RESP_SPAN
@@ -779,7 +782,9 @@ _KC9GHZ_KEYUP = (8.29, 15.24, 21.89, 29.41, 36.58, 43.97, 51.56, 58.24)
 _KC9GHZ_TXEND = (10.13, 17.09, 23.75, 31.26, 38.43, 45.78, 53.41, 60.09)
 
 
-@corpora.requires_onair_faded_greeting
+@pytest.mark.skipif(
+    not corpora.ONAIR_FADED_GREETING.exists(),
+    reason="needs KC9GHZ 80 m BW2300 connect flight with post-mute rig-rx recording")
 def test_the_gateway_answered_three_of_the_eight_requests_of_20260819():
     """Eight connect-requests went out that night and the log said "no answer"
     after seven of them. Three of the eight were answered.
@@ -844,7 +849,9 @@ def test_the_gateway_answered_three_of_the_eight_requests_of_20260819():
             f"KC9GHZ's answers were accepted as an answer to {wrong}")
 
 
-@corpora.requires_onair_faded_greeting
+@pytest.mark.skipif(
+    not corpora.ONAIR_FADED_GREETING.exists(),
+    reason="needs KC9GHZ 80 m BW2300 connect flight with post-mute rig-rx recording")
 def test_what_those_answers_got_wrong_is_the_receivers_own_mute_release():
     """Which tones missed, and why it is not the gateway getting them wrong.
 
@@ -904,21 +911,13 @@ def test_what_those_answers_got_wrong_is_the_receivers_own_mute_release():
             f"it are no longer scored against the gateway")
 
 
-@corpora.requires_onair_unanswered_call
 def test_the_same_gateway_ninety_minutes_later_answered_nobody():
-    """The control for the three answers above, and the one that matters most.
+    """The whole unanswered KC9GHZ 2026-09-18 call stays silent.
 
-    Same peer, same channel, same receiver, same eight-request cadence, 92 minutes
-    later, and `NOT connected` at the end of it. If the clearance rule were reading
-    the changeover rather than the gateway it would find answers here too, because
-    the changeover is the same: this recording's mute measures 171-189 ms against
-    that one's 167-180.
-
-    It finds none. The best any alignment in the 70 s reaches for KC9GHZ is 5 of
-    15 — ``_MEASURED_WORST``, what a callsign that is not on a recording reaches —
-    so there is no answer in this audio to recover, and neither rule invents one.
+    This tap includes our own TX. It tests false accepts against four callsigns;
+    the lost 2026-08-19 recording's comparison of receiver mute does not carry over.
     """
-    x = corpora.wav_mono(corpora.ONAIR_UNANSWERED_CALL) / 32768.0
+    x = corpora.a1_samples(corpora.A1_UNANSWERED_CALL) / 32768.0
     bins, clear, _resid = _top3_track(x, _ACK_GRID)
     for call in ("KC9GHZ", "K7ABC", MYCALL, "NS0A"):
         h, sw = _score_histogram(bins[:, 0], clear[:, 0], call)
@@ -935,7 +934,9 @@ def test_the_same_gateway_ninety_minutes_later_answered_nobody():
             "connect-response and only VF.recognize refused them")
 
 
-@corpora.requires_onair_faded_greeting
+@pytest.mark.skipif(
+    not corpora.ONAIR_FADED_GREETING.exists(),
+    reason="needs KC9GHZ 80 m BW2300 connect flight with post-mute rig-rx recording")
 def test_the_mute_this_station_answers_into_is_170_ms_and_not_420():
     """How long the receiver is actually deaf after a transmission, read off the
     recording rather than off a comment.

@@ -41,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-from hfmodem.shrike import onair, p1rx, pactor1, ptc
+from hfmodem.shrike import onair, p1rx, pactor1, ptc, rxfront
 
 FS = 48000
 CYCLE_N = 60000                 # 1.25 s at 48 kHz
@@ -246,10 +246,8 @@ def main() -> int:
         host.arq.on_host_connect(mycall, "WS8EOC")
         host.tick()
 
-        class CS4:
-            kind, cs, protocol = "cs", pactor1.CS_SPEED, "PACTOR-1"
-
-        host.on_rx_event(CS4())
+        host.on_rx_event(rxfront.Event(
+            0., "cs", "CS4", protocol="PACTOR-1", cs=pactor1.CS_SPEED))
         host.tick()
     finally:
         pactor1.packet_signal = real
@@ -463,17 +461,15 @@ def main() -> int:
     host = ptc.PtcHost(peer=spy_tx, mycall=mycall)
     host.arq.on_host_connect(mycall, "WS8EOC")
 
-    class Answer:
-        kind, protocol = "cs", "PACTOR-1"
-
-        def __init__(self, cs):
-            self.cs = cs
+    def answer_event(cs):
+        # No shift was measured in these scripted codeword trains.
+        return rxfront.Event(0., "cs", "scripted answer", protocol="PACTOR-1", cs=cs)
 
     for slot, cs in enumerate([pactor1.CS_ACK_A] * 5 + [pactor1.CS_SPEED] * 15,
                               start=1):
         spy_tx.aim(raster, slot)
         sent_per_cycle.append([])
-        host.on_rx_event(Answer(cs))
+        host.on_rx_event(answer_event(cs))
         host.tick()
         baud_at.append(host.p1_baud)
     del sent_per_cycle[0]                      # the call, sent before the grid
@@ -536,7 +532,7 @@ def main() -> int:
         h.stay_in_pactor1 = True     # one variable at a time; see PtcHost
         h.arq.on_host_connect(mycall, "WS8EOC")
         for cs in train:
-            h.on_rx_event(Answer(cs))
+            h.on_rx_event(answer_event(cs))
             h.tick()
         check(f"{label}: counters {want}", spy.p1_seq == want, f"{spy.p1_seq}")
 

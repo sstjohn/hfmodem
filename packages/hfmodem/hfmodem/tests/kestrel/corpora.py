@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from hfmodem.tests import evidence
+from hfmodem.tests import monitor_evidence
 
 PKG_ROOT = Path(__file__).resolve().parents[3]
 
@@ -244,7 +245,7 @@ CARRIER_ONLY_CHANNEL = (evidence.WORKING / "rx-20260814-114505-6800000"
 #   W9SEM-10 and KD9OSV, named by the Winlink RMS feed and on channel. The gate's
 #   peak test handed `classify` nothing at all across both segments.
 #   7096.5 kHz, 16:34 UTC: the VARA 500 exchange whose two callsigns and mode a
-#   second source names and whose spectrum measures 600 Hz wide on the registered
+#   second source names and whose spectrum measures 600 Hz wide on the high speed capable
 #   channel. Also nothing from the peak test.
 #   7103.5 kHz, 16:14 UTC: the ten minutes the feed and every classifier agree
 #   were empty — no session on the channel after 16:11:41, zero deep detections.
@@ -441,6 +442,45 @@ ONAIR_PEER_ANSWERS = (
 ONAIR_UNANSWERED_ARMS = (
     (evidence.LOGS / "onair" / "20260829T021824Z-W9SSJ-KE8LVA.wav", "KE8LVA"),
     (evidence.LOGS / "onair" / "20260829T023146Z-W9SSJ-N5WAJ.wav", "N5WAJ"))
+
+# A1 replacements for lost rig-rx recordings. Small positive excerpts live here;
+# longer sequences and whole-session negatives resolve through the evidence root.
+A1_FIXTURES = Path(__file__).with_name("fixtures") / "a1-answers-0930"
+A1_EXTERNAL = evidence.CAPTURES / "test-evidence" / "a1-answers-0930"
+A1_MANIFEST = A1_FIXTURES / "external.json"
+A1_PEER_ANSWERS = (
+    (A1_FIXTURES / "kb3ac-0825-2017.flac", "KB3AC-10", 3, {16: 1, 15: 2}),
+    (A1_EXTERNAL / "kb3ac-0825-2021.flac", "KB3AC-10", 6, {14: 5, 16: 1}),
+    (A1_FIXTURES / "kb8ay-0918.flac", "KB8AY", 2, {16: 1, 14: 1}),
+    (A1_EXTERNAL / "kb8ay-0927.flac", "KB8AY", 2, {16: 2}),
+)
+A1_UNANSWERED_ARMS = (
+    (A1_EXTERNAL / "ke8lva-0828-unanswered.flac", "KE8LVA"),
+    (A1_EXTERNAL / "n5waj-0828-unanswered.flac", "N5WAJ"),
+)
+A1_UNANSWERED_CALL = A1_EXTERNAL / "kc9ghz-0918-unanswered.flac"
+A1_OFFSET_ANSWER = A1_FIXTURES / "n0lcr-0815-offset.flac"
+A1_BW500_ANSWER = A1_EXTERNAL / "k5fit-0828-bw500.flac"
+
+
+def a1_samples(path: Path):
+    """PCM16 amplitudes at 48 kHz, checked by the common evidence loader."""
+    manifest = (A1_MANIFEST if path.parent == A1_EXTERNAL
+                else A1_FIXTURES / "provenance.json")
+    return evidence.checked_samples(path, manifest)
+
+
+# Group C: BW2750/BW500 substitutes for the lost station recordings.
+C_FIXTURES = Path(__file__).with_name("fixtures") / "bw-c-0930"
+C_EXTERNAL = evidence.CAPTURES / "test-evidence" / "bw-c-0930"
+
+
+def c_samples(name: str, *, external: bool = False):
+    """Checked PCM16 amplitudes at 48 kHz; offsets are in the manifests."""
+    directory = C_EXTERNAL if external else C_FIXTURES
+    manifest = C_FIXTURES / ("external.json" if external else "provenance.json")
+    return evidence.checked_samples(directory / name, manifest)
+
 
 # THE UNASKED HANDOVER. Three arms of the 2026-08-29 day slot, two gateways, that
 # each took one greeting over of 89 bytes cut mid-word and then went quiet for
@@ -973,21 +1013,61 @@ VARA_TREE_RECORDINGS = (BW2300_CAPTURE, BW500_CAPTURES, CLEAR_CHANNEL,
 WW2MI_ACCEPTED = evidence.LOGS / "onair" / "20260819T024321Z-besra-7102100.wav"
 WW2MI_REFUSED = evidence.LOGS / "onair" / "20260819T024752Z-besra-7102100.wav"
 
-#: This station's own session records, which are neither of the above: they were
-#: written here by a run rather than curated, and `working/`, `logs/` and
-#: `captures/` are all gitignored, so a clone has none of them and this machine
-#: has all of them. They
-#: were the one body with no gate over them at all -- and `ONAIR_OFFSET_ANSWER` is
-#: the sole evidence for widening the response search, so its silent absence took
-#: that result with it.
-STATION_RECORDS = (CARRIER_ONLY_CHANNEL, *MONITORED_SESSIONS, MONITORED_QUIET,
-                   ONAIR_OFFSET_ANSWER, ONAIR_FADED_GREETING,
-                   ONAIR_UNANSWERED_CALL, ONAIR_REFUSED_ACK, ONAIR_CROWDED_ACK,
-                   ONAIR_GATEWAY_OVERS, ONAIR_NAKED_OVER, ONAIR_STANDING_LINK,
-                   ONAIR_BW500_ANSWER,
-                   *QRN_80M, *SENSE_REFUSED_EMPTY,
-                   WW2MI_ACCEPTED, WW2MI_REFUSED,
-                   *(p for p, _ in ONAIR_UNCONNECTED_LINKSETUPS))
+# Keep every original declaration even when a substitute restores some tests.
+STATION_ORIGINALS = (CARRIER_ONLY_CHANNEL, *MONITORED_SESSIONS, MONITORED_QUIET,
+                    ONAIR_OFFSET_ANSWER, ONAIR_FADED_GREETING,
+                    ONAIR_UNANSWERED_CALL, ONAIR_REFUSED_ACK, ONAIR_CROWDED_ACK,
+                    ONAIR_GATEWAY_OVERS, ONAIR_NAKED_OVER, ONAIR_STANDING_LINK,
+                    ONAIR_BW500_ANSWER, *QRN_80M, *SENSE_REFUSED_EMPTY,
+                    WW2MI_ACCEPTED, WW2MI_REFUSED,
+                    *(p for p, _ in ONAIR_UNCONNECTED_LINKSETUPS))
+STATION_LOST = {
+    ONAIR_OFFSET_ANSWER: "N0LCR-1 40 m BW2300 call with an off-frequency answer; record rig-rx and tap",
+    ONAIR_FADED_GREETING: "KC9GHZ 40 m BW2300 greeting under selective fading; record rig-rx and tap",
+    ONAIR_UNANSWERED_CALL: "KC9GHZ 40 m BW2300 unanswered call; record the whole rig-rx and tap",
+    ONAIR_REFUSED_ACK: "W8MW 80 m BW2300 connect with occupied lower ack carriers; record rig-rx and tap",
+    ONAIR_CROWDED_ACK: "KD0PYG 40 m BW2300 connect with a crowded ack carrier; record rig-rx and tap",
+    ONAIR_GATEWAY_OVERS: "KC9GHZ 40 m BW2300 greeting with three clean overs; record rig-rx and tap",
+    ONAIR_NAKED_OVER: "KC9GHZ 40 m BW2300 greeting with a NAK and full retry tail; record rig-rx and tap",
+    ONAIR_STANDING_LINK: "KC9GHZ 40 m BW2300 greeting through the standing-link tail; record rig-rx and tap",
+    ONAIR_BW500_ANSWER: "K5FIT 40 m BW500 call through connect and first over; record rig-rx and tap",
+    **{p: "80 m receive-only listen with QRN after transmit mute; record rig-rx and tap"
+       for p in QRN_80M},
+    **{p: "80 m PACTOR-band receive-only sense on an empty noisy channel; record rig-rx and gate verdict"
+       for p in SENSE_REFUSED_EMPTY},
+    WW2MI_ACCEPTED: "WW2MI ARDOP authenticated mail arm; keep rig-rx, tap and CMS verdict",
+    WW2MI_REFUSED: "WW2MI ARDOP naturally refused login arm; keep rig-rx, tap and CMS verdict",
+    **{p: "BW2300 call to " + p.stem.split("-W9SSJ-")[-1]
+       + " with unanswered link-setups; record the whole rig-rx and tap"
+       for p, _ in ONAIR_UNCONNECTED_LINKSETUPS[3:]
+       if p not in (ONAIR_REFUSED_ACK, ONAIR_CROWDED_ACK)},
+}
+_STATION_FIXTURES = Path(__file__).with_name("fixtures")
+_SHARED_FIXTURES = Path(__file__).parents[1] / "fixtures"
+_P4_FIXTURES = Path(__file__).parents[1] / "shrike" / "fixtures"
+STATION_MANIFESTS = (
+    *((_STATION_FIXTURES / group / name,
+       evidence.CAPTURES / "test-evidence" / group if name == "external.json"
+       else _STATION_FIXTURES / group)
+      for group in ("a1-answers-0930", "greetings-a2-0930", "turns-b-0930", "bw-c-0930")
+      for name in ("provenance.json", "external.json")),
+    *((_SHARED_FIXTURES / "receive-d-0930" / name,
+       evidence.CAPTURES / "test-evidence" / "receive-d-0930" if name == "external.json"
+       else _SHARED_FIXTURES / "receive-d-0930")
+      for name in ("provenance.json", "external.json", "logs.json")),
+    (monitor_evidence.MANIFEST, monitor_evidence.DIRECTORY),
+    *((_P4_FIXTURES / name, _P4_FIXTURES)
+      for name in ("n9vc-0802-robust-shorts.json", "n9vc-0802-chirps.json")),
+)
+# Omitted groups can collect in a distribution. The gate checks source manifests.
+STATION_CHECKED = tuple(
+    (directory / row["file"], manifest)
+    for manifest, directory in STATION_MANIFESTS if manifest.is_file()
+    for row in evidence.manifest_rows(manifest)
+    if "sample_rate" in row or "rate" in row
+)
+STATION_RECORDS = (*(p for p in STATION_ORIGINALS if p not in STATION_LOST),
+                   *(p for p, _ in STATION_CHECKED))
 
 #: Every stretch a false-accept floor here is measured over, as
 #: ``(recording, from, to, callsigns a burst in it may name)``. The callsigns are
@@ -1174,7 +1254,7 @@ requires_onair_below_offer_2750 = _requires(
     what="the 2026-09-16 K7EK-10 BW2750 tape answered below the offer gate")
 requires_onair_seed289_confirm = _requires(
     *ONAIR_SEED289_CONFIRM,
-    what="the two 2026-09-16 K0SI 80 m tapes whose first link-setup was confirmed")
+    what="the two 2026-09-16 K0SI 80 m tapes whose first link-setup drew the NAK")
 requires_onair_drained_handover_2300 = _requires(
     ONAIR_DRAINED_HANDOVER_2300,
     what="the 2026-09-16 K0SI 40 m tape whose drained-responder handed the turn over")
@@ -1273,11 +1353,13 @@ def stop_tool(proc: subprocess.Popen, grace: float = STOP_GRACE_S) -> str:
 
 
 def wav_mono(path: Path | str):
-    """A captured WAV as float samples, first channel."""
+    """A captured WAV or FLAC as float samples in PCM units, first channel."""
     import numpy as np
     from scipy.io import wavfile
 
-    a = np.asarray(wavfile.read(str(path))[1], float)
+    from hfmodem.core.wav import source
+
+    a = np.asarray(wavfile.read(source(path))[1], float)
     return a[:, 0] if a.ndim > 1 else a
 
 

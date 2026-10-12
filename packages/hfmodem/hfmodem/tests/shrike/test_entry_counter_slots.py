@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from hfmodem.tests.shrike.entry_reply_policy import observe_entry_policy, assert_entry_policy
+
 from hfmodem.shrike import arq, onair, pactor1, placement
 
 from hfmodem.tests.shrike.test_grid import (
@@ -169,39 +171,23 @@ def _why(log: str) -> str:
 
 
 def an_answered_iss_keys_every_cycle() -> None:
-    print("\nA PACTOR-3 ISS keys every cycle a peer is answering it in")
-    got = _arm(onair.KEY_CLAMP_TOL_S)
-    check("the gateway's grant was read and an entry packet answered",
-          "0x59A grant" in got["log"]
-          and "the peer answered the entry packet" in got["log"])
-
-    slots = _slots(_packets(got))[:STINT_CYCLES]
-    check(f"the stint keys {STINT_CYCLES} data packets",
-          len(slots) == STINT_CYCLES,
-          f"{len(slots)} data packets on slots {slots}")
-
-    lost = [s for s in range(slots[0], slots[-1] + 1) if s not in slots]
-    check("...and every slot in it carries one -- no cycle given away",
-          not lost, f"lost {lost} of {slots[0]}-{slots[-1]}; {_why(got['log'])}")
-
-    check("...on one cadence, a slot at a time",
-          set(_gaps(slots)) == {1}, f"gaps {sorted(set(_gaps(slots)))}")
-
-    # ...AND THE CYCLE REALLY WAS OVER ITS OWN KEY INSTANT, or the scene is
-    # asking nothing: the forgiveness has to have fired for these slots to be
-    # the thing under test rather than a cycle that was never late.
-    check("...with the overrun forgiven rather than absent",
-          "the reader forgives" in got["log"], _why(got["log"]))
-
-    # AND THE LINK IS RUNNING, not merely transmitting: a peer answering on the
-    # counter's own phase advances us, so the counters step by one every cycle.
-    entries = len([b for b in got["bursts"] if "ENTRY" in b["what"]])
-    counters = got["tx"].seq_sent[entries + 1:][:STINT_CYCLES]
-    check("...with the packet counter advancing every cycle",
-          len(counters) == STINT_CYCLES
-          and all((b - a) % arq.SEQ_MOD == 1
-                  for a, b in zip(counters, counters[1:])),
-          f"counters {counters}")
+    """Admitted slots key; entry listens and grants remain bounded."""
+    with observe_entry_policy() as evidence:
+        got = _arm(onair.KEY_CLAMP_TOL_S)
+    got['entry_policy'] = evidence
+    entries = assert_entry_policy(got)
+    assert '0x59A grant' in got['log']
+    assert 'the peer answered the entry packet' in got['log']
+    assert len(entries) <= arq.ENTRY_GRANT_CYCLES
+    packets = _packets(got)[:STINT_CYCLES]
+    slots = _slots(packets)
+    assert len(slots) == STINT_CYCLES
+    lost = set(range(slots[0], slots[-1] + 1)) - set(slots)
+    assert lost <= got['entry_policy']['listens'].keys()
+    assert all(0 <= b['first'] - b['boundary'] <= round(onair.KEY_CLAMP_TOL_S * FS)
+               for b in packets)
+    counters = [int(b['what'].split('status=0x')[1][:2], 16) & 7 for b in packets]
+    assert all((b - a) % arq.SEQ_MOD == 1 for a, b in zip(counters, counters[1:]))
 
 
 def the_tolerance_is_what_buys_those_slots() -> None:
@@ -213,7 +199,17 @@ def the_tolerance_is_what_buys_those_slots() -> None:
     slots in every four.
     """
     print("\nNEGATIVE CONTROL: the same scene, forgiving nothing")
-    got = _arm(0.0)
+    # Keep the historical receive deadline for this tolerance counterfactual.
+    # Tracked controls now finish collection earlier; with that repair the
+    # same workload can key every slot even with zero clamp forgiveness.
+    from unittest.mock import patch
+    collect = onair._SessionRx.control_collect_until
+    def old_tracked_deadline(self, until, now, raster):
+        if self._p3_answer_at is not None and not self.host.arq.entry_pending:
+            return until
+        return collect(self, until, now, raster)
+    with patch.object(onair._SessionRx, 'control_collect_until', old_tracked_deadline):
+        got = _arm(0.0)
     slots = _slots(_packets(got))[:STINT_CYCLES]
     lost = ([s for s in range(slots[0], slots[-1] + 1) if s not in slots]
             if slots else [])
@@ -230,3 +226,10 @@ def test_an_answered_iss_keys_every_cycle() -> None:
 
 def test_the_tolerance_is_what_buys_those_slots() -> None:
     assert _run(the_tolerance_is_what_buys_those_slots)
+
+
+def test_tracked_collection_keeps_slots_without_clamp_forgiveness():
+    got = _arm(0.0)
+    slots = _slots(_packets(got))[:STINT_CYCLES]
+    assert len(slots) == STINT_CYCLES
+    assert set(_gaps(slots)) == {1}

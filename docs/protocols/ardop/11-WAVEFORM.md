@@ -5,7 +5,7 @@ Compiled from public documents only: the **ARDOP Specification, Rev 2.0, 2017‑
 worksheets are the numeric backbone here) and two open reference implementations —
 **ardopcf** (git `a7c9228`, MIT, © 2014‑2024 Muething/Wiseman/LaRue) and the
 **M0LTE.Ardop** managed port (AGPL‑3.0‑or‑later, itself a cited port of ardopcf).
-No reverse‑engineering of captured signals was performed; every fact below is read
+Every fact below is read
 directly from the spec PDF or the published source. Provenance is marked per fact as
 `[spec-pdf]` or `[code]` with a `file:line` citation. **Where spec and code disagree,
 the code is the operative wire format** and both values are recorded. This record is

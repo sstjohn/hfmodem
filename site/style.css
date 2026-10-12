@@ -346,6 +346,9 @@ h2 {
   grid-template-columns:minmax(0,1fr) 270px;
   gap:48px;
 }
+#run .workbench > div > p {
+  margin:1.5rem 0 0;
+}
 .code-head {
   display:flex;
   align-items:center;
@@ -387,6 +390,11 @@ aside p {
   font-size:12px;
   color:var(--muted);
   margin:24px 0 0;
+}
+aside p a {
+  display:inline;
+  margin:0;
+  font:inherit;
 }
 footer {
   display:flex;

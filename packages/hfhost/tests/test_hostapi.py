@@ -259,6 +259,139 @@ def test_config_is_replayed_on_reattach(modem):
     c.close()
 
 
+def _configured_reattachable(modem):
+    c = _client(modem)
+    c.attach()
+    c.set_identity("K7CRE")
+    c.set_profile(hostapi.PF_AMATEUR)
+    c.subscribe_events([hostapi.LINK_STATS], stats_period=1.0)
+    c.set_listen(True)
+    _until(lambda: c.state == hostapi.ST_LISTENING)
+    return c
+
+
+def _assert_reattached_exchange(c, modem):
+    assert c.attached
+    assert modem.identity == "K7CRE"
+    assert modem.profile == hostapi.PF_AMATEUR
+    assert modem.subscribed == [hostapi.LINK_STATS]
+    assert modem.listening
+    assert c.state == hostapi.ST_LISTENING
+    modem.echo = True
+    c.send_data(b"the replacement attachment")
+    assert c.read_data(timeout=2.0) == b"the replacement attachment"
+
+
+def _attach_and_observe_replayed_listen(c, modem):
+    states = c.subscribe(STATE_CHANGED)
+    accepted, seen = modem.accepted, len(modem.log)
+    try:
+        c.attach()
+        # c.state intentionally survives close. Consume an actual replacement
+        # event rather than using that old field as the reader progress barrier.
+        state = states.get(timeout=5)
+        assert state["state"] == hostapi.ST_LISTENING
+        assert modem.accepted > accepted
+        kinds = [msg["m"] for msg in modem.log[seen:]]
+        assert all(kind in kinds for kind in (HELLO, SET_IDENTITY,
+                                             hostapi.SET_PROFILE, hostapi.SUBSCRIBE, LISTEN))
+    finally:
+        c.unsubscribe(states)
+
+
+def test_late_reader_eof_cannot_retire_a_reattached_session(modem, monkeypatch):
+    c = _configured_reattachable(modem)
+    old_reader = c._reader
+    reached, release = threading.Event(), threading.Event()
+    teardown = c._teardown
+
+    def delayed_teardown(*args, **kwargs):
+        if threading.current_thread() is old_reader:
+            reached.set()
+            if not release.wait(5):
+                raise RuntimeError("old reader cleanup was not released")
+        return teardown(*args, **kwargs)
+
+    monkeypatch.setattr(c, "_teardown", delayed_teardown)
+    try:
+        c.close()
+        assert reached.wait(5), "old reader did not reach EOF cleanup"
+        _attach_and_observe_replayed_listen(c, modem)
+        release.set()
+        old_reader.join(5)
+        assert not old_reader.is_alive()
+        _assert_reattached_exchange(c, modem)
+    finally:
+        release.set()
+        c.close()
+        old_reader.join(5)
+
+
+@pytest.mark.parametrize("frame", [
+    pytest.param(pack({"m": hostapi.DATA_RECEIVED, "data": b"old session"}), id="data"),
+    pytest.param(pack({"m": STATE_CHANGED, "state": ST_CONNECTED, "peer_id": "OLD"}),
+                 id="state"),
+    pytest.param(b"\0\0\0\3\xff\xff\xff", id="malformed"),
+    pytest.param((hostapi.MAX_FRAME + 1).to_bytes(4, "big"), id="oversize"),
+])
+def test_old_reader_frames_cannot_mutate_a_reattached_session(modem, monkeypatch, frame):
+    armed, reached, release = threading.Event(), threading.Event(), threading.Event()
+    connect = hostapi.socket.create_connection
+    first = True
+
+    class HeldRead:
+        def __init__(self, sock):
+            self.sock = sock
+
+        def __getattr__(self, name):
+            return getattr(self.sock, name)
+
+        def recv(self, count):
+            data = self.sock.recv(count)
+            if data and armed.is_set():
+                armed.clear()
+                reached.set()
+                if not release.wait(5):
+                    raise RuntimeError("old received frame was not released")
+            return data
+
+    def hold_first_connection(*args, **kwargs):
+        nonlocal first
+        sock = connect(*args, **kwargs)
+        if first:
+            first = False
+            return HeldRead(sock)
+        return sock
+
+    monkeypatch.setattr(hostapi.socket, "create_connection", hold_first_connection)
+    c = _configured_reattachable(modem)
+    old_reader = c._reader
+    try:
+        armed.set()
+        # These are already received bytes from the old attachment, held at
+        # the recv boundary until the replacement Hello/configuration completes.
+        if len(frame) > 4:
+            modem.emit_raw(frame[4:])
+        else:
+            modem._write(frame)
+        assert reached.wait(5), "old reader did not receive the staged frame"
+        c.close()
+        _attach_and_observe_replayed_listen(c, modem)
+        notices = c.subscribe()
+        errors = list(c.errors)
+        release.set()
+        old_reader.join(5)
+        assert not old_reader.is_alive()
+        assert c.read_data(timeout=.05) == b""
+        assert notices.empty(), "the old reader published a replacement-session event"
+        assert c.errors == errors
+        _assert_reattached_exchange(c, modem)
+    finally:
+        release.set()
+        c.close()
+        old_reader.join(5)
+
+
 def test_identity_required_is_surfaced():
     m = FakeHostApiModem(require_identity=True)
     try:

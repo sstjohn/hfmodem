@@ -1,0 +1,31 @@
+{
+  "file": "ve3kpg-0926-1218-answers.wav",
+  "source": "captures/onair-0926-1218/stream.flac",
+  "source_start_s": 24.0,
+  "samples": 124800,
+  "rate": 12000,
+  "sha256": "5dd1cd738996f3089c623d70d3cce6574d8bff1b486263e7a19b86e83d9d7fc9",
+  "link": "VE3KPG on 7091.0 kHz, 2026-09-26 17:18Z, answering our two robust shorts (v7 and v38 on header A, keyed at 28.806 and 30.056 s) after --after-connect p1-robust: X27 in its slot after the first, Y27 after the second and in every cycle after we stopped keying, 2-7 dB over the floor; the P1 link's own cycles run before",
+  "words": [
+    {
+      "at_s": 5.75,
+      "word": "X27"
+    },
+    {
+      "at_s": 7.0,
+      "word": "Y27"
+    },
+    {
+      "at_s": 8.25,
+      "word": "Y27"
+    },
+    {
+      "at_s": 9.5,
+      "word": "Y27"
+    }
+  ],
+  "noise": [
+    0.0,
+    4.5
+  ]
+}

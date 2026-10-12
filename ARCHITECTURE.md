@@ -35,9 +35,12 @@ Not shared, each for its own reason:
 - **No shared ARQ core.** Four state machines and four gearshift rules, the
   smallest around 600 lines and the largest past 1400. The pattern is
   documented; the code is not hoisted.
-- **No shared CRC implementation.** Seven parameterisations on demodulator hot
-  paths, and besra's is not a standard CRC. A `CRCSpec` record and a generic
-  reference used as a test oracle — share the oracle, not the implementation.
+- **Shared coding primitives have explicit parameters.** `core.fec` holds
+  convolutional encoding, soft Viterbi and puncturing; protocols select
+  generators, puncture masks and boundary states. `core.crc` shares the
+  CRC-16/0x1021 variants used by shrike and brubru. Other CRCs keep their
+  protocol implementations. hfhost retains its independent stdlib CRC;
+  common known-answer vectors check agreement without a modem dependency.
 - **No unified virtual air.** besra's `StepAir` is a synchronous test substrate;
   sabir's `LiveAir` is a threaded realtime backend creance drives over TCP. They
   share a channel-function signature and a sample-rate contract, nothing else.

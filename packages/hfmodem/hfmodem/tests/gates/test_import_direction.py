@@ -32,9 +32,9 @@ the exception here is the point: an unnamed exception is indistinguishable from 
 rule nobody enforces.
 
 One piece of debt the carve-out currently covers, recorded so it is not mistaken
-for a design: `kestrel_runner.py` reads its burst segmenter out of
-`tools/vara_monitor.py`, so it needs a source tree and cannot run from an
-installed wheel. The segmenter belongs in the package.
+for a design: `p4_runner.py` reads its PACTOR-4 chirp acquisition out of
+`tools/corpuslib/detector.py`, so it needs a source tree and cannot run from an
+installed wheel. The acquisition belongs in the package.
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[5]
 PACKAGES = REPO / "packages"
 
-PROTOCOLS = {"shrike", "kestrel", "besra", "sabir"}
+PROTOCOLS = {"brubru", "shrike", "kestrel", "besra", "sabir", "lanner", "bateleur"}
 
 # creance/monitor/runners/ — decode adapters, not the grading path.
 CREANCE_MODEM_CARVE_OUT = "creance/monitor/runners"
@@ -148,11 +148,37 @@ def test_core_imports_no_protocol():
     assert not offences, "\n  ".join(offences)
 
 
+def _capture_output_component(rel, node, parents):
+    if rel != 'hfmodem/core/capture_identity.py' or node.value != 'working':
+        return False
+    parent = parents.get(node)
+    if not (isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Div)
+            and parent.right is node and isinstance(parent.left, ast.Name)
+            and parent.left.id == 'repo'):
+        return False
+    while parent is not None and not isinstance(parent, ast.FunctionDef):
+        parent = parents.get(parent)
+    return parent is not None and parent.name == 'allocate_arm'
+
+
+@pytest.mark.parametrize('expression, accepted', [
+    ('repo / "working" / basename', True),
+    ('Path("working")', False), ('sys.path.insert(0, "working")', False),
+    ('repo / "tools" / basename', False),
+])
+def test_capture_output_exception_cannot_hide_private_inputs(expression, accepted):
+    tree = ast.parse('def allocate_arm(repo):\n    return ' + expression)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    node = next(n for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str))
+    assert _capture_output_component('hfmodem/core/capture_identity.py', node, parents) is accepted
+    assert not _capture_output_component('hfmodem/core/other.py', node, parents)
+
+
 @pytest.mark.parametrize("dist", ["hfmodem", "hfhost", "creance"])
 def test_shipping_code_never_reaches_outside_its_distribution(dist):
-    """`working/` is the archive and `tools/` are station instruments; neither is
-    in any wheel. Tests may read fixtures from the archive — that is what it is
-    for — so this covers the package, not the suite."""
+    """Private archive paths must never be runtime dependencies. The installed
+    operator bootstrap resolves its reviewed tools bundle, checked byte-for-byte
+    by the wheel gate. Tests may use optional archive fixtures."""
     pkg = PACKAGES / dist / dist
     offences = []
     for f in _sources(pkg):
@@ -160,6 +186,7 @@ def test_shipping_code_never_reaches_outside_its_distribution(dist):
         if "tests" in f.relative_to(pkg).parts or rel.startswith(CREANCE_MODEM_CARVE_OUT):
             continue
         tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
         for node in ast.walk(tree):
             # Any string literal naming either tree, not the quoted form of the
             # word: an audit inserted `sys.path.insert(0, "/…/hfmodem/working/vara")`
@@ -167,7 +194,11 @@ def test_shipping_code_never_reaches_outside_its_distribution(dist):
             # `working` but not `"working"`.
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 parts = node.value.replace("\\", "/").split("/")
-                if "working" in parts or "tools" in parts:
+                # The installed console includes these exact reviewed resources;
+                # packaging gates compare every bundled path and byte to its source.
+                operator_resource = (rel == 'hfmodem/operator/bootstrap.py'
+                                     and node.value in ('tools', 'tools/console.py'))
+                if ("working" in parts or "tools" in parts) and not operator_resource and not _capture_output_component(rel, node, parents):
                     offences.append(f"{f.relative_to(REPO)} names {node.value!r}")
             # And a bare import of either, which needs no sys.path line at all.
             elif isinstance(node, ast.Import):
@@ -178,7 +209,7 @@ def test_shipping_code_never_reaches_outside_its_distribution(dist):
                 if node.module.split(".")[0] in ("working", "tools"):
                     offences.append(f"{f.relative_to(REPO)} imports {node.module}")
     assert not offences, (
-        "neither tree is in any wheel, so this ships a distribution that installs "
+        "an unbundled path ships a distribution that installs "
         "and then fails on first use:\n  " + "\n  ".join(sorted(set(offences))))
 
 
@@ -221,3 +252,46 @@ def test_nothing_shipping_points_at_the_repositories_this_was_merged_from():
     assert not offences, (
         "the merged-from repositories are archives, not dependencies:\n  "
         + "\n  ".join(sorted(set(offences))))
+
+
+def test_ax25_imports_no_protocol_or_station():
+    from importlib.util import resolve_name
+
+    root = PACKAGES / "hfmodem" / "hfmodem"
+    banned = PROTOCOLS | {"station"}
+    offences = []
+    for path in _sources(root / "ax25"):
+        package = "hfmodem." + ".".join(path.relative_to(root).parts[:-1])
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                targets = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                name = "." * node.level + (node.module or "")
+                target = resolve_name(name, package) if node.level else name
+                targets = [target, *(target + "." + a.name for a in node.names)]
+            else:
+                continue
+            for target in targets:
+                parts = target.split(".")
+                if len(parts) > 1 and parts[0] == "hfmodem" and parts[1] in banned:
+                    offences.append(f"{path.relative_to(root)} imports {target}")
+    assert not offences, "\n".join(offences)
+
+
+def test_brubru_does_not_import_station():
+    from importlib.util import resolve_name
+
+    root = PACKAGES / 'hfmodem' / 'hfmodem'
+    for path in _sources(root / 'brubru'):
+        package = 'hfmodem.' + '.'.join(path.relative_to(root).parts[:-1])
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                targets = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                target = (resolve_name('.' * node.level + (node.module or ''), package)
+                          if node.level else node.module or '')
+                targets = [target, *(target + '.' + a.name for a in node.names)]
+            else:
+                continue
+            assert not any(t == 'hfmodem.station' or t.startswith('hfmodem.station.')
+                           for t in targets), str(path)

@@ -1,7 +1,8 @@
 # PACTOR-III: waveform, coding and framing
 
-Outbound mail delivery over PACTOR-3 through WS8EOC is confirmed by the operator
-for message `9WQNVWBDLVOY`. See [implementation evidence](../../STATUS.md#pactor).
+Winlink mail has been sent and received through WS8EOC over hfmodem’s
+PACTOR-3. Outbound delivery of message `9WQNVWBDLVOY` was confirmed earlier
+by the operator. See [implementation evidence](../../STATUS.md#pactor).
 Dated experiments below describe the observations available at the time.
 
 The PACTOR-III waveform is published as ITU-R Recommendation M.1798, and facts this

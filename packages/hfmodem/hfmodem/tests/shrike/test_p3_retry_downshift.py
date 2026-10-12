@@ -13,9 +13,14 @@ from hfmodem.tests.shrike.test_tx_gear_hold import BODY, control, sender
 FIXTURE = Path(__file__).with_name('fixtures') / 'ws8eoc-speed-0920'
 
 
-def at_sl3():
+def at_sl3(established=2):
     host, seam = sender(enabled=False)
-    control(host, 4)  # Changeover accepted; first ordinary packet at SL2.
+    if established == 2:
+        host.arq.speed_level = 2
+        host.arq._inflight.sl = 2
+        control(host, 1)
+    else:
+        control(host, 4)
     control(host, 4)  # SL2 accepted; next packet at SL3, counter 2.
     return host, seam
 
@@ -43,9 +48,9 @@ def test_recorded_ws8eoc_controls_bound_trial_then_hold_established_speed():
         host.on_rx_event(ev)
         if i >= 1:
             assert_pending(host)
-    assert [sl for sl, _, _ in seam.frames] == [2, 3, 3, 2, 2, 2, 2, 2]
+    assert [sl for sl, _, _ in seam.frames] == [2, 3, 3, 1, 1, 1, 1, 1]
     assert [status & 3 for _, status, _ in seam.frames] == [1] + [2]*7
-    assert [len(data) for _, _, data in seam.frames] == [23, 59, 59, 23, 23, 23, 23, 23]
+    assert [len(data) for _, _, data in seam.frames] == [23, 59, 59, 5, 5, 5, 5, 5]
     assert host.arq.state == arq.State.CONNECTED
 
 
@@ -120,27 +125,28 @@ def test_real_renderer_downshift_preserves_clock_counter_and_queued_suffix(long_
     assert a._buffer_raw == len(PAYLOAD) - accepted
     row('trial-fallback', host, tx, PAYLOAD[accepted:])
     assert len(a._inflight.payload) == (36 if long_cycle else 5)
+    assert f"pkt {len(a._inflight.payload)}B" in tx.frames[-1][0]
 
 
 @pytest.mark.parametrize('minimum', [1, 2])
 def test_repeated_requests_respect_configured_minimum(minimum):
-    host, seam = at_sl3()
+    host, seam = at_sl3(established=1)
     host.arq.cfg.min_sl = minimum
     for _ in range(26):
         control(host, 2)
-    assert host.arq.speed_level == 2
-    assert min(sl for sl, _, _ in seam.frames) == 2
+    assert host.arq.speed_level == minimum
+    assert min(sl for sl, _, _ in seam.frames) == minimum
     assert_pending(host)
 
 
-@pytest.mark.parametrize('excluded', ['p2', 'entry', 'breakin', 'idle'])
-def test_policy_only_changes_ordinary_loaded_p3_packets(excluded):
+@pytest.mark.parametrize('excluded', ['p2', 'entry', 'breakin', 'qrt'])
+def test_policy_only_changes_ordinary_p3_trials(excluded):
     host, _ = at_sl3()
     a = host.arq
     if excluded == 'p2':
         host.protocol = spec.Protocol.PACTOR2
-    elif excluded == 'idle':
-        a._inflight.payload = b''
+    elif excluded == 'qrt':
+        a._inflight.status |= spec.STATUS_QRT
     else:
         setattr(a._inflight, excluded, True)
     for _ in range(6):
@@ -149,17 +155,18 @@ def test_policy_only_changes_ordinary_loaded_p3_packets(excluded):
 
 
 @pytest.mark.parametrize('attempts', [1, 2, 9])
-def test_maxtry_counts_total_keyed_attempts(attempts):
-    host, seam = at_sl3()
+@pytest.mark.parametrize('established', [1, 2])
+def test_maxtry_counts_total_keyed_attempts(attempts, established):
+    host, seam = at_sl3(established)
     host.arq.cfg.p3_max_try = attempts
     for _ in range(attempts - 1):
         control(host, 2)
     assert [sl for sl, _, _ in seam.frames] == [2] + [3]*attempts
     control(host, 2)
-    assert host.arq.speed_level == 2
+    assert host.arq.speed_level == established
     for _ in range(10):
         control(host, 2)
-    assert host.arq.speed_level == 2 and host.arq._inflight.trial_from is None
+    assert host.arq.speed_level == established and host.arq._inflight.trial_from is None
     assert_pending(host)
 
 
@@ -190,5 +197,5 @@ def test_refused_first_trial_packet_has_not_spent_an_attempt():
     control(host, 2)
     assert host.arq.speed_level == 3 and host.arq._inflight.sent_at_level == 2
     control(host, 2)
-    assert host.arq.speed_level == 2
+    assert host.arq.speed_level == 1
     assert_pending(host)

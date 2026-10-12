@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
+import json
 import time
 
 from creance.monitor.activity import (ACTIVE_CONFIRMED, ACTIVE_TENTATIVE,
-                                      CONFIRMED, QUIET, STREAM_CLOCK, TENTATIVE,
-                                      UNKNOWN, WALL_CLOCK, ActivityView,
-                                      Detection, format_detection,
+                                      CONFIRMED, OURS, QUIET, STREAM_CLOCK,
+                                      TENTATIVE, TRACKER, UNKNOWN, WALL_CLOCK,
+                                      ActivityView, Detection, format_detection,
                                       render_summary)
 
 
@@ -109,3 +110,43 @@ def test_quiet_channel_advises_nothing_heard():
     s = ActivityView().summary(100.0)
     assert s["overall"] == QUIET
     assert "nothing heard" in render_summary(s)
+
+
+def test_a_measured_place_survives_the_runner_contract():
+    full = Detection(t=3.2, modem="kestrel", protocol="VARA", kind="CR",
+                     grade=CONFIRMED, station="K0SI", role="called",
+                     centre_hz=1488.3, rf_hz=7101488.3, bw_hz=2310.0,
+                     offset_hz=-11.7, level_dbfs=-41.5, cadence_s=1.25, track=3,
+                     text="WS8EOC")
+    assert Detection.from_json(json.loads(json.dumps(full.to_json()))) == full
+
+
+def test_an_unmeasured_place_is_none_and_left_off_the_wire():
+    bare = Detection.from_json({"t": 1.0, "modem": "shrike", "grade": "confirmed",
+                                "offset_hz": None})
+    assert bare.offset_hz is None and bare.centre_hz is None and bare.track is None
+    assert set(bare.to_json()) == {"t", "modem", "protocol", "kind", "grade",
+                                   "station", "role", "detail", "wall"}
+
+
+def test_a_role_is_one_the_record_names():
+    for role in ("called", "caller", "answering", "sender", "gateway"):
+        assert Detection.from_json({"t": 0, "modem": "x", "role": role}).role == role
+    assert Detection.from_json({"t": 0, "modem": "x", "role": "boss"}).role == ""
+
+
+def test_a_track_is_energy_and_names_no_protocol_or_station():
+    view = ActivityView(window_s=20)
+    view.add(Detection(t=1.0, modem=TRACKER, protocol="FSK-shaped", kind="track",
+                       grade=TENTATIVE, station="W1AW", centre_hz=1615.0, track=3))
+    s = view.summary(2.0)
+    assert s["protocols"] == {} and s["unidentified_energy"]
+    assert s["overall"] == ACTIVE_TENTATIVE
+
+
+def test_our_own_keying_is_not_the_channel():
+    view = ActivityView(window_s=20)
+    view.add(Detection(t=1.0, modem=TRACKER, protocol=UNKNOWN, kind=OURS,
+                       grade=CONFIRMED))
+    s = view.summary(2.0)
+    assert s["overall"] == QUIET and not s["unidentified_energy"]

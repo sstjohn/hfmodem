@@ -237,17 +237,48 @@ def test_command_epoch_is_only_recorded_after_actual_emission(tmp_path):
     assert not s.host.arq.cycle_command_emitted and g._p3_command_slot is None
     tx.listening = False
     tx.send_cs(arq.CS_CYCLE_TOG)
+    # Queuing the control is not emitting it: the epoch waits on the actual
+    # dry-PCM burst below.
+    assert not s.host.arq.cycle_command_emitted and g._p3_command_slot is None
+    assert tx._pending_p3_cs == arq.CS_CYCLE_TOG and not tx.slots_used
     tx.emit_pending_cs()  # dry PCM output models emission without hardware
-    assert s.host.arq.cycle_command_emitted
     # This emission uses the non-duplex dry path, which requires the full
-    # 40 ms settle. The 32 ms notice PCM clock leaves only 38.1 ms here,
-    # so its backstop must move to the next same-shift slot. Record the
-    # actual command epoch, not the abandoned first probe.
+    # 40 ms settle. The 32 ms notice PCM clock leaves only 38.1 ms against the
+    # old 890 ms reply; at the compensated 910 ms this slot carries 58.1 ms of
+    # margin, so the control keys here rather than waiting a cycle. Record
+    # the actual command epoch, not the refusal.
     assert slot == 1
-    assert g._p3_command_slot == tx.slot == 3
-    assert abs(g._p3_command_row0 - 187200) <= 480
+    assert s.host.arq.cycle_command_emitted
+    assert g._p3_command_slot == tx.slot == 1
+    assert tx._pending_p3_cs is None
+    assert abs(g._p3_command_row0 - (187200 - 120000)) <= 480
     assert len(tx.slots_used) == 1
     assert list(tmp_path.glob('tx_*.wav'))
+    # Nothing newly pending: a further call must not record a second epoch.
+    tx.aim(g, slot + 1)
+    tx.emit_pending_cs()
+    assert g._p3_command_slot == 1 and len(tx.slots_used) == 1
+
+
+def _boundary_transmitter(clock, calls, *, after_wait=None):
+    """Finite duplex double: admission and key occur after charged input wait."""
+    def transmit(audio, *, at, settle, key, max_key, admit=None):
+        assert not clock.clamp_late(at)
+        clock.take_until(max(clock.samples, at - round(settle * FS)))
+        if after_wait is not None:
+            after_wait()
+        if admit is not None:
+            admit()
+        if key is not None and key(True) is False:
+            key(False)
+            raise onair.PttError("fixture key veto")
+        calls.append((at, len(audio)))
+        clock.keyed_at = at - round(settle * FS)
+        clock.keyed_s = settle + len(audio) / FS
+        if key is not None:
+            key(False)
+        return at, at + len(audio)
+    return transmit
 
 
 @pytest.mark.parametrize('missed', [0, 2])
@@ -262,12 +293,7 @@ def test_recorded_reply_reaches_one_duplex_emission_with_pulse_timing(tmp_path, 
     clock.samples += round(.006 * FS)
     assert not clock.clamp_late(tx.key_instant(g, slot))
     calls = []
-    def transmit(audio, *, at, settle, key, max_key):
-        assert not clock.clamp_late(at)
-        calls.append((at, len(audio)))
-        clock.keyed_at = at - round(settle*FS)
-        clock.keyed_s = settle + len(audio)/FS
-        return at, at + len(audio)
+    transmit = _boundary_transmitter(clock, calls)
     clock.transmit = transmit
     def flush_to(end):
         clock.pos = clock.samples = clock.end = end
@@ -359,3 +385,85 @@ def test_crc_before_transition_helper_regears_recovery_past_long_body(tmp_path):
     # slot6. Slot4 would lie inside the now-confirmed next long packet.
     clock.pos = clock.samples = g.boundary(3) + 1
     assert onair._keyable_slot(clock, g, 3, 1920, listen=False) == 6
+
+
+def test_duplex_double_admits_after_wait_before_key():
+    due = PCMClock.key_notice + 1024
+    key_at = due - round(0.002 * FS)
+    clock = PCMClock(np.zeros(due + 32))
+    calls, stages = [], []
+    result = _boundary_transmitter(clock, calls)(
+        np.zeros(32), at=due, settle=0.002, max_key=1,
+        admit=lambda: stages.append(("admit", clock.sample_now())),
+        key=lambda up: stages.append(("key-up" if up else "key-down", clock.sample_now())),
+    )
+    assert stages == [("admit", key_at), ("key-up", key_at), ("key-down", key_at)]
+    assert result == (due, due + 32) and calls == [(due, 32)]
+
+
+def test_duplex_double_veto_after_wait_has_no_key_or_emission():
+    due = PCMClock.key_notice + 1024
+    key_at = due - round(0.002 * FS)
+    clock = PCMClock(np.zeros(due + 32))
+    calls, keys, stages = [], [], []
+    def refuse():
+        stages.append(clock.sample_now())
+        raise onair._P3TxCancelled("fixture veto")
+    with pytest.raises(onair._P3TxCancelled):
+        _boundary_transmitter(clock, calls)(
+            np.zeros(32), at=due, settle=0.002, max_key=1,
+            admit=refuse, key=keys.append,
+        )
+    assert stages == [key_at] and clock.sample_now() == key_at
+    assert not calls and not keys and not hasattr(clock, "keyed_at")
+
+
+@requires_recorded
+def test_pending_cs_abort_during_wait_has_no_key_history_or_credit(tmp_path):
+    missed = 0
+    s, tx, g, clock = _arm(tmp_path, np.pad(recorded(ROWS[0]), (missed*60000, 0)))
+    slot, _, _ = _window(s, tx, g, clock)
+    clock.samples += round(0.040 * FS)
+    calls, keys, admissions = [], [], []
+    raw_transmit = _boundary_transmitter(clock, calls, after_wait=s.host.arq.on_host_abort)
+    def transmit(audio, *, at, settle, key, max_key, admit=None):
+        def checked():
+            admissions.append(clock.sample_now())
+            assert admit is not None
+            admit()
+        return raw_transmit(audio, at=at, settle=settle, key=key, max_key=max_key, admit=checked)
+    clock.transmit = transmit
+    def flush_to(end):
+        clock.pos = clock.samples = clock.end = end
+    clock.flush_to = flush_to
+    tx.rig = SimpleNamespace(ptt=keys.append, key_failure=lambda: None)
+    tx.transmit = True
+    s.host.tick(elapsed_ticks=1, cycle_ticks=g.ticks)
+    acked, received = s.host.arq.tx_acked_bytes, s.host.rcvd_total
+    owner = s.host.arq.p3_tx_owner
+    result = tx.emit_pending_cs()
+    assert admissions and not calls and not any(keys)
+    assert not tx.keyed and not tx.slots_used
+    assert tx._p3_emitted_cs is None
+    assert s.host.arq.tx_acked_bytes == acked and s.host.rcvd_total == received
+    assert not s.host.arq.cycle_command_emitted
+    assert s.host.arq.state is arq.State.LISTENING
+    assert s.host.arq.p3_tx_owner != owner
+    assert result is None or result == onair.REFUSED
+
+
+def test_duplex_double_key_veto_has_no_accepted_emission():
+    due = PCMClock.key_notice + 1024
+    clock = PCMClock(np.zeros(due + 32))
+    calls, attempted_keys, admissions = [], [], []
+    def veto(up):
+        attempted_keys.append(up)
+        return False
+    with pytest.raises(onair.PttError):
+        _boundary_transmitter(clock, calls)(
+            np.zeros(32), at=due, settle=0.002, max_key=1,
+            admit=lambda: admissions.append(clock.sample_now()), key=veto,
+        )
+    assert admissions == [due - round(0.002 * FS)]
+    assert attempted_keys == [True, False] and not calls
+    assert not hasattr(clock, "keyed_at")

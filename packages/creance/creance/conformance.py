@@ -424,11 +424,14 @@ def probe_disconnect_flush_order(ctx: ProbeContext) -> Finding:
                        detail="no session; cannot probe disconnect flush order")
     q = ctx.client.subscribe()
     try:
-        ctx.client.send_data(_payload(ctx.payload_n), label="disconnect_flush")
-        _reply(ctx, "DISCONNECT")
+        # Local sendall on the data socket does not acknowledge modem enqueue.
+        # Observe that enqueue on the command socket before requesting a flush.
+        # Both phases share the original drain budget; no extra settle or retry.
         seen: list[str] = []
         disconnected = False
+        enqueued = False
         deadline = time.monotonic() + ctx.drain_timeout_s
+        ctx.client.send_data(_payload(ctx.payload_n), label="disconnect_flush")
         while time.monotonic() < deadline and not disconnected:
             try:
                 item = q.get(timeout=max(deadline - time.monotonic(), 0.01))
@@ -437,10 +440,16 @@ def probe_disconnect_flush_order(ctx: ProbeContext) -> Finding:
             if isinstance(item, Line) and item.name in ("BUFFER", "DISCONNECTED"):
                 seen.append(item.raw.strip())
                 disconnected = item.name == "DISCONNECTED"
+                if not enqueued and item.name == "BUFFER" and item.fields["n"] > 0:
+                    enqueued = True
+                    _reply(ctx, "DISCONNECT")
     finally:
         ctx.client.unsubscribe(q)
         _teardown(ctx)
     evidence = (" -> ".join(seen),) if seen else ()
+    if not enqueued:
+        return Finding("disconnect_flush_order", FAIL, evidence,
+                       "no BUFFER enqueue observed for the flush payload")
     pre_disc = seen[:seen.index("DISCONNECTED")] if disconnected else seen
     buffers = [int(s.split()[1]) for s in pre_disc if s.startswith("BUFFER")]
     if not disconnected:

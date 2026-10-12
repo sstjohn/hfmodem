@@ -28,6 +28,7 @@ per-carrier block's own CRC/RS — a clean capture admits exactly one alignment.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import numpy as np
 
@@ -154,12 +155,18 @@ class DecodedFrame:
     caller: str | None = None
     target: str | None = None
     grid: str | None = None
+    #: The sender's tuning error in Hz, as the frame was read: the leader's own
+    #: estimate where the body decoded on it, else the retry shift that did.
+    cfo_hz: float | None = None
     #: Memory-ARQ readings of this decode attempt's carriers — the validated
     #: payload of each that decoded, the soft reading of each that did not. They
     #: ride here rather than straight into :class:`besra.phy.memory.BlockMemory`
     #: because acquisition decodes bodies speculatively and only one attempt
     #: becomes the frame; see :meth:`besra.phy.memory.BlockMemory.keep`.
     soft: dict = field(default_factory=dict, compare=False, repr=False)
+
+    symbol_rows: list = field(default_factory=list, compare=False, repr=False)
+    combined: bool = False
 
     @property
     def unverified(self) -> bool:
@@ -386,6 +393,55 @@ def _slipped_session(col: np.ndarray, ftype: int, session: int,
     return expected if int(np.argsort(-col[:, j])[1]) == want[j] else None
 
 
+@lru_cache(maxsize=4)
+def _session_headers(session: int) -> tuple[np.ndarray, np.ndarray]:
+    types = list(F.FRAMES)
+    return np.array(types), np.array([
+        F.header_symbols(t, 0xFF if F.FRAMES[t].forces_session else session)
+        for t in types])
+
+
+def _nearest_control(col: np.ndarray, expected: int | None) -> tuple[int, float] | None:
+    """The bare control of this session one tone away from the hard reading of the
+    header columns ``col``, with its soft score, for a header whose hard reading
+    fails parity or names another session.
+
+    KE8LVA, 2026-09-24 13:58z: it answered three of our five confirming ConAcks
+    with a DATAACK and we read none of them, so the ConAck went out five times.
+    Each reply read 0.91-0.99 on its first eight tones and soft on the last two,
+    which fall where the gateway keys down; one of those went to another tone, so
+    the hard read failed parity or named a foreign session, and a bare control has
+    nothing else to be read by. The same soft tail cost the ACK to our first data
+    frame of that session and one ConAck reply from W6IDS at 13:54z. ardopcf reads
+    the header by `MinimalDistanceFrameType`, the valid type nearest the tone
+    magnitudes, and one soft tone costs it nothing.
+
+    One tone and no more, and only in the half that carries the session: the type
+    and its parity, the first five tones, must read exactly. That is ardopcf's
+    first distance, taken as a codeword of its own, and it is what keeps a
+    confident wrong tone out. Allowed anywhere in the ten, the one tone minted a
+    DATANAK twice on the 3.8 s repeat of our own ConReq to N0DAJ on 2026-09-24
+    01:25z, by overruling a first tone read at 0.98. Every type is a candidate, a forced-id
+    one under 0xFF, so a data header or a ConReq with one tone slipped stays what
+    it is and yields nothing here. The floor is the expected-session control
+    floor, on the score of the corrected reading."""
+    if expected is None:
+        return None
+    types, heads = _session_headers(expected)
+    slipped = heads != col.argmax(0)
+    near = np.flatnonzero(slipped.sum(1) == 1)
+    if not near.size:
+        return None
+    p = col / np.maximum(col.sum(0), 1)
+    scores = p[heads[near], np.arange(_HEADER_SYMS)].sum(1)
+    best = near[int(np.argmax(scores))]
+    ftype = int(types[best])
+    if (F.FRAMES[ftype].name not in _SHORT_CONTROL or slipped[best, :5].any()
+            or scores.max() < _EXPECTED_CONTROL_CRISP_FLOOR):
+        return None
+    return ftype, float(scores.max())
+
+
 def _header_candidates(au: np.ndarray, lo: int, hi: int, shift: float,
                        expected: int | None = None,
                        cap: int = 8) -> list[_Candidate]:
@@ -416,11 +472,14 @@ def _header_candidates(au: np.ndarray, lo: int, hi: int, shift: float,
         if any(abs(int(i) + lo - c.offset) < _SYM_50 // 2 for c in out):
             continue
         decoded = F.decode_header([int(s) for s in symbols[i]])
-        if decoded is None or decoded[0] not in F.FRAMES:
-            continue
-        if crisp[i] < _crisp_floor(decoded[0], decoded[1], expected):
-            continue
-        out.append(_Candidate(float(crisp[i]), lo + int(i), decoded[0], decoded[1],
+        score = float(crisp[i])
+        if (decoded is None or decoded[0] not in F.FRAMES
+                or score < _crisp_floor(decoded[0], decoded[1], expected)):
+            nearest = _nearest_control(block[:, i, :], expected)
+            if nearest is None:
+                continue
+            decoded, score = (nearest[0], expected), nearest[1]
+        out.append(_Candidate(score, lo + int(i), decoded[0], decoded[1],
                               _slipped_session(block[:, i, 5:9], decoded[0],
                                                decoded[1], expected)))
     return out
@@ -620,7 +679,8 @@ class Demodulator:
     of it."""
 
     def __init__(self, leader_threshold: float = 0.3, expect_session=None,
-                 rx_epoch=None):
+                 rx_epoch=None, collect_symbols=False):
+        self.collect_symbols = collect_symbols
         self._leader_threshold = leader_threshold
         self._expect_session = expect_session
         self._rx_epoch = rx_epoch
@@ -764,6 +824,8 @@ class Demodulator:
                     continue
                 frame, ls = got
                 last_ls = max(last_ls, ls)
+                if frame is not None:
+                    frame.cfo_hz = cfo if shift == est else shift
                 if frame is not None and frame.ok:
                     return frame
                 if fallback is None and frame is not None:
@@ -1127,6 +1189,7 @@ class Demodulator:
                 ok_all = False
                 got = b""
             payload += got
+        base.combined = recovered
         base.ok = ok_all
         base.payload = bytes(payload)
         # A frame the capture cut short reports nothing arrived, whichever of its
@@ -1189,6 +1252,7 @@ class Demodulator:
                     detect.carrier_bin_series(work, _carrier_freq(car, cc) + shift))
             got = None
             soft = None
+            observed = None
             for delta in (centre, *range(centre - 3, centre + 4)):
                 read = self._psk_block(cbin, off + delta, nsym, fd.mod)
                 if read is None:
@@ -1200,6 +1264,7 @@ class Demodulator:
                     symbols = (dphase, mag)
                 data, err = _rs_accept(block, fd.k, fd.r, ftype)
                 if data is not None:
+                    observed = (dphase, mag, delta)
                     got, errors = data, errors + err
                     self.memory.keep_good(base, car, got)
                     if car == cc - 1:
@@ -1211,6 +1276,7 @@ class Demodulator:
                 fit = _grid_err(dphase, step)
                 if soft is None or fit < soft[0]:
                     soft = (fit, dphase, mag)
+                    observed = (dphase, mag, delta)
             if got is None:
                 # A carrier a previous repeat already validated is finished, and a
                 # frame whose carriers arrive correct on different repeats is
@@ -1228,7 +1294,12 @@ class Demodulator:
             if got is None:
                 ok_all = False
                 got = b""
+            if self.collect_symbols and observed is not None:
+                phase, magnitude, delta = observed
+                base.symbol_rows.append((car, phase, magnitude,
+                    _HEADER_LEN + delta + 120 * np.arange(1, len(phase)+1)))
             payload += got
+        base.combined = recovered
         base.ok = ok_all
         base.payload = bytes(payload)
         if symbols is not None:

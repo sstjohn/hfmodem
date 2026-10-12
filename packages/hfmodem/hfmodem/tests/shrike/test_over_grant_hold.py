@@ -32,7 +32,9 @@ from hfmodem.shrike.ptc import PtcHost
 from hfmodem.shrike.spec import Protocol
 from hfmodem.tests.shrike.test_p3_offer import Keyed, cs_event
 
-QUEUED = b"pending application bytes"
+QUEUED = b"FF\r"
+"""One speed-level-1 field: traffic stays at the level the entry was read at,
+so the first data packet after it is also the one that drains the buffer."""
 
 
 class _Air(Keyed):

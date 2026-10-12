@@ -23,7 +23,7 @@ settled here.
 | Preamble present? (per frame/session)  | Per burst (PTT-keyed); no distinct low-power lead-in; short (~6–10 sym) onset transient at same power |
 | Preamble duration                      | onset transient ~6–10 symbols (~32–53 ms) before steady alternating-tone body; energy ramp ~65–82 ms is keying |
 | Preamble waveform type (chirp/tone/PN) | not specified here; the onset shows a k=−3 tone excursion |
-| Known training symbol pattern          | not specified here |
+| Known training symbol pattern          | the level's lead, drawn from the session lead stream ([`01 §1.1`](01-physical-layer.md)); no receiver needs it |
 | Repetition / count                     | DATA body is period-256 symbols with strict k=±1 tone alternation (a 512-sample super-period) |
 
 ## 2.2 Timing synchronization
@@ -232,9 +232,10 @@ which is how the BW500 NAK was solved and what BW2300 has never had.
 
 `vara_control._TOKENS_2300` is gone, along with the band parameter that dispatched to
 it: BW500 is the only bandwidth with a token vocabulary, so there is nothing to select.
-What used to index it — `vara_arq._send_token("nak")` — no longer runs at BW2300 at all,
-and the reference session now holds the BW500 vocabulary to the same standard, resolving
-none of its thirteen short bursts
+What used to index it — `vara_arq._send_token("nak")` — is gone: stock ignored the
+BW500 NAK token keyed into a turnaround (2026-09-11), and a BW500 caller now asks
+behind the responder's idle instead. The reference session holds the BW500 vocabulary
+to the same standard, resolving none of its thirteen short bursts
 (`test_this_vocabulary_names_nothing_in_a_real_vara_bw2300_session`). The short-burst
 path at BW2300 reads `vara_arq._ack_plateau` instead, in the live receiver and in
 `kestrel/arq/phy.detect_token` alike.
@@ -261,12 +262,16 @@ so a distinct detector/template is required; (2) the same joint CFO+timing searc
 can likely re-use the 1500 Hz centre reference; (3) once synced, the modulation
 riding the control burst (esp. the connect-req/resp, which must carry the
 callsigns + BW request + speed level) must be demodulated — this is the gate on
-reading the ARQ seq/ACK/NAK fields and the negotiated level
-([`05 §5.7`](05-arq-session-state-machine.md), [`06 §6.5`](06-speed-gearshift.md)).
-This also frames the **DATA-burst preamble question**: whether DATA bursts begin
-with a short slice of this same control/acquisition waveform (the ~6–10-symbol
-onset transient in §2.1) or acquire blind — correlating the DATA onset against the
-short ACK burst decides it.
+reading the ARQ seq/ACK/NAK fields ([`05 §5.7`](05-arq-session-state-machine.md)).
+The level a receiver asks for rides the frame index of its answer
+([`04 §4.2C`](04-frame-block-formats.md), *Level requests*).
+
+A DATA over does not open on a slice of the control waveform. Every level opens
+on its own lead, drawn from the session lead stream
+([`01 §1.1`](01-physical-layer.md), *Session lead stream*): the index levels'
+training preamble, the tone family's eight lead symbols, the OFDM family's four or
+five lead symbols. BW2300's leads are read cell for cell off the high speed capable tapes;
+BW500 L4's nine lead columns are counted (18 draws) but their cells are not read.
 
 ## 2.6 Open questions / provisional facts
 
@@ -276,8 +281,9 @@ short ACK burst decides it.
   preamble template is still wanted for fast, robust *acquisition* (esp. the
   CONTROL bursts).
 - **Onset marker**: DATA bursts show a ~6–10-symbol transient (incl. a k=−3 tone
-  excursion) before the steady alternating-tone body; correlating this head across
-  many bursts would expose any fixed SOF/training symbol.
+  excursion) before the steady alternating-tone body. Every DATA over opens on its
+  level's lead, a per-over draw from the session lead stream (§2.5), so no fixed
+  SOF symbol is expected there; whether the transient is that lead is not checked.
 - **CONTROL/ACK burst waveform** is characterised at the envelope level (§2.5):
   responder-sent, centre-carrier-dominated, **no k=±1 alternation** (alt ≈0.2 vs
   DATA ≈0.99), ~0.36 s data-ACK up to ~1.7 s connect-request. **Still open:** its

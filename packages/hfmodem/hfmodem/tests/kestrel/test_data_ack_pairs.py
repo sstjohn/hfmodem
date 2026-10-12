@@ -31,9 +31,8 @@ def test_native_positive_tail_advances_one_pending_frame(row):
     fs, audio = wavfile.read(HERE / row['name'])
     assert fs == MK.FS
     audio = audio.astype(float) / (32768 if audio.dtype == np.int16 else 1)
-    table = (VF.OVER_CONTINUE_RESPONDER_DOWN_BY_LINK if row['kind'] == 'down'
-             else VF.OVER_CONTINUE_RESPONDER_BY_LINK)
-    assert tuple(map(tuple, row['pairs'])) == table[hs.caller, hs.called, hs.bw]
+    tails = VF.over_continue_down if row['kind'] == 'down' else VF.over_continue
+    assert tuple(map(tuple, row['pairs'])) == tails(hs.called, hs.bw)[1]
     assert not hs._peer_data_nak(audio)
     assert hs._peer_over_continue(audio)
     if hs.bw == '500':

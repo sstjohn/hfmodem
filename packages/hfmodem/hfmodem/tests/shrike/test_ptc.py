@@ -582,11 +582,8 @@ def main() -> int:
         def cycle(self):
             pass
 
-    class _CsEv:
-        kind, protocol, t, text = "cs", "PACTOR-1", 0.0, ""
-
-        def __init__(self, cs):
-            self.cs = cs
+    def _CsEv(cs):
+        return _cs(cs)
 
     for label, answer, want in (("CS1", pactor1.CS_ACK_A, 200),
                                 ("CS4", pactor1.CS_SPEED, 100)):

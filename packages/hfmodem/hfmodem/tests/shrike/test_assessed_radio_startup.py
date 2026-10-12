@@ -8,7 +8,7 @@ import subprocess
 import time
 from unittest import mock
 import pytest
-from hfmodem.core import rxreadiness as rx
+from hfmodem.core import rigs, rxreadiness as rx
 from hfmodem.shrike import onair, ota
 from hfmodem.tests.shrike.test_radio_startup_flow import FakeRig
 from hfmodem.tests.shrike.test_armdefaults import _parsed
@@ -26,6 +26,8 @@ def scene(tmp_path, monkeypatch):
                    "--dial", "3595000", "--outdir", str(tmp_path/"child"),
                    "--p1-grant-only", "--tx-drive", "0.5", "--tx-latency-ms", "20")
     onair._arm_defaults(args)
+    args.tx_timing_plan = rigs.resolve_tx_timing(args.tx_latency_ms, rig=args.rig,
+                                                 command_path=args.tx_command_path)
     args.rx_assessment = str(tmp_path/"receipt.json")
     claim = {"device": 1, "inode": 2, "cat": args.serial}
     monkeypatch.setattr(rx, "verify_inherited_claim", lambda *a: claim)

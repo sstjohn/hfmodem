@@ -12,8 +12,8 @@ sessions reported as a silent band.
 
 The policy is short on purpose. No weights, no fairness knobs, no configuration.
 
-1. One request in flight. Priority 0 (a live ARQ turn) beats priority 1 (a beacon
-   or an identification); ties are FIFO.
+1. One request in flight. Priority 0 can wait for ownership; priority 1 takes
+   ownership only when free. The lock provides no ordering across protocols.
 2. **Half-duplex is enforced here, once.** `StationAudio.finish_burst()` advances
    every lane past our own carrier, which is the one place that knows the sample
    index. That replaces besra's `muted` flag and shrike's per-session flush with
@@ -29,18 +29,18 @@ The policy is short on purpose. No weights, no fairness knobs, no configuration.
    would do to it, since a busy station is exactly one that never gets round to
    a low-priority errand.
 
-There is no channel-busy gate. One shipped here for a while and could never
-fire: the window of receive audio it judged was a stub returning no samples, so
-the gate read every channel as clear behind three comments promising otherwise.
-Listening before transmitting is the operator's duty, and `core.busy` serves it
-through the operator's tools — a check the station cannot perform, described as
-one it does, is worse than none.
+Channel assessment belongs to each protocol. An eligibility callback runs after
+ownership is acquired and before audio is armed or PTT is asserted. A false
+result defers the request without an attempt. RPR maintains its own FIFO and
+requires fresh receive evidence before retrying a deferred request.
 """
 from __future__ import annotations
 
 import threading
 import time
 from dataclasses import dataclass, field
+from contextlib import contextmanager
+from typing import Callable
 
 import numpy as np
 
@@ -64,6 +64,48 @@ class Refused(Exception):
     """
 
 
+class RequestState:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._value = "waiting"
+
+    @property
+    def value(self):
+        with self._lock:
+            return self._value
+
+    def cancel(self):
+        with self._lock:
+            if self._value != "waiting":
+                return False
+            self._value = "cancelled"
+            return True
+
+    def commit(self):
+        with self._lock:
+            if self._value != "waiting":
+                return False
+            self._value = "committed"
+            return True
+
+
+@dataclass(frozen=True)
+class TxResult:
+    outcome: str
+    state: str
+    end: int | None = None
+    reason: str = ""
+    displacement: int = 0
+
+
+@dataclass(frozen=True)
+class TransmitHistory:
+    """A coherent receive freshness barrier between transmit requests."""
+
+    sequence: int = 0
+    end: int = 0
+
+
 @dataclass(order=True)
 class TxRequest:
     priority: int
@@ -76,6 +118,10 @@ class TxRequest:
     settle_s: float = field(compare=False, default=0.0)
     #: True when this answers an interrogation from a station under local control.
     responding: bool = field(compare=False, default=False)
+    state: RequestState | None = field(compare=False, default=None)
+    eligible: Callable[[], bool] | None = field(compare=False, default=None)
+    lead_s: float | None = field(compare=False, default=None)
+    expires: float | None = field(compare=False, default=None)
 
     @property
     def duration_s(self) -> float:
@@ -85,9 +131,9 @@ class TxRequest:
 class Identity:
     """When the callsign is next owed, and whether it may be deferred.
 
-    §97.119(a) wants identification at the end of a communication and at least
-    every ten minutes during one. A margin below the limit exists so the last
-    frame in hand can finish rather than being cut off by the deadline.
+    This scheduler requests identification at the end of a communication and at
+    the configured interval during one. The default leaves a margin below ten
+    minutes so the last frame in hand can finish before the next identification.
     """
 
     def __init__(self, mycall: str, *, interval_s: float = 540.0,
@@ -107,9 +153,8 @@ class Identity:
     def end(self) -> None:
         """A communication ended, so an identification is owed now.
 
-        §97.119(a) wants the callsign at the end of a communication as well as
-        every ten minutes during one, so this makes one due rather than merely
-        noting the session closed.
+        The configured schedule includes a callsign at session end, so this
+        makes one due rather than merely noting the session closed.
         """
         self._in_communication = False
         self._last = time.monotonic() - self.interval_s
@@ -144,7 +189,22 @@ class TxArbiter:
         self.sent = 0
         self.dropped_late = 0
         self.refused = 0
+        self.active_protocols = lambda: ()
         self.disabled: set[str] = set()
+        #: Card index each protocol's last burst ended at: ALE counts other
+        #: protocols' traffic on its link as the link's activity.
+        self.last_sent: dict[str, int] = {}
+        self._history = TransmitHistory()
+
+    @contextmanager
+    def try_hold(self):
+        """Hold off transmissions for a retune, only when already idle."""
+        held = self._lock.acquire(blocking=False)
+        try:
+            yield held
+        finally:
+            if held:
+                self._lock.release()
 
     # -- submission --------------------------------------------------------
 
@@ -161,6 +221,8 @@ class TxArbiter:
         errand takes the lock only if it is free, and a live turn is the only thing
         allowed to wait.
         """
+        if req.state is not None or req.eligible is not None or req.lead_s is not None:
+            raise ValueError("stateful requests use submit_result")
         blocking = req.priority == LIVE
         if not self._lock.acquire(blocking=blocking):
             raise Refused(
@@ -171,7 +233,56 @@ class TxArbiter:
         finally:
             self._lock.release()
 
+    def transmit_history(self) -> TransmitHistory:
+        """Snapshot the last keyed interval without waiting for ownership."""
+        return self._history
+
+    def _cancelled(self, req):
+        if req.protocol in self.disabled:
+            req.state.cancel()
+        return req.state.value == "cancelled"
+
+    def submit_result(self, req: TxRequest) -> TxResult:
+        """Submit a cancellable request; all terminal and deferred states are results.
+
+        Eligibility is supplied only on the request and checked under ownership.
+        The synchronous `submit` path retains its end-index/exception contract.
+        """
+        if req.state is None:
+            req.state = RequestState()
+        acquired = False
+        try:
+            while not acquired:
+                if self._cancelled(req):
+                    return TxResult("error", req.state.value, reason="cancelled")
+                if req.expires is not None and time.monotonic() >= req.expires:
+                    raise Refused("request expired")
+                acquired = self._lock.acquire(timeout=0.02)
+            if self._cancelled(req):
+                return TxResult("error", req.state.value, reason="cancelled")
+            if req.expires is not None and time.monotonic() >= req.expires:
+                raise Refused("request expired")
+            if req.eligible is not None and not req.eligible():
+                return TxResult("deferred", req.state.value)
+            if self._cancelled(req):
+                return TxResult("error", req.state.value, reason="cancelled")
+            end = self._send(req)
+            return TxResult("sent", req.state.value, end=end)
+        except Refused as exc:
+            return TxResult("refused", req.state.value, reason=str(exc))
+        except BurstInvalidated as exc:
+            return TxResult("invalidated", req.state.value, reason=str(exc),
+                            displacement=getattr(exc, "displacement", 0))
+        except Exception as exc:
+            return TxResult("error", req.state.value, reason=str(exc))
+        finally:
+            if acquired:
+                self._lock.release()
+
     def _send(self, req: TxRequest) -> int:
+        owners = set(self.active_protocols()) - {req.protocol}
+        if owners and req.protocol != "ident":
+            raise Refused(f"{req.protocol}: station link active on {', '.join(sorted(owners))}")
         if req.protocol in self.disabled:
             raise Refused(f"{req.protocol} is disabled on this station")
 
@@ -185,17 +296,28 @@ class TxArbiter:
         if req.duration_s > self.rig.max_key_s:
             self.refused += 1
             raise Refused(
-                f"{req.protocol}: {req.duration_s:.1f} s of audio exceeds "
-                f"max_key_s {self.rig.max_key_s:.1f}. Refused rather than "
+                f"{req.protocol}: {req.duration_s:.4f} s of audio exceeds "
+                f"max_key_s {self.rig.max_key_s:.4f}. Refused rather than "
                 "truncated — a clipped transmission is the worse artefact.")
 
-        if self.identity is not None and self.identity.due and req.priority == LIVE:
+        if self.identity is not None and self.identity.due and req.protocol != "ident":
             # The station goes quiet rather than transmitting unidentified.
             raise Refused(
                 f"{req.protocol}: identification is due. The station will not "
                 "carry traffic until the callsign has gone out.")
 
         return self._transmit(req)
+
+    def _key(self, req: TxRequest, **kwargs):
+        """Contain a failed key-up when the rig may have raised PTT already."""
+        retired_before = self.rig.retired
+        try:
+            return self.rig.key(req.emission, why=f"{req.protocol} burst",
+                                responding=req.responding, **kwargs)
+        except BaseException:
+            if self.rig.keyed or (self.rig.retired and not retired_before):
+                self.rig.panic_unkey(f"{req.protocol}: key-up failed before a token")
+            raise
 
     def _transmit(self, req: TxRequest) -> int:
         if req.emission is None:
@@ -205,6 +327,9 @@ class TxArbiter:
         alive = getattr(self.audio, "alive", None)
         if alive is not None:
             alive()             # a dead stream and a quiet band look identical
+
+        if req.lead_s is not None:
+            return self._reserved_transmit(req)
 
         # arm_burst clamps to the earliest index it can actually meet and returns
         # it. The lead is the ADC->DAC offset plus a few blocks of notice — not
@@ -230,16 +355,23 @@ class TxArbiter:
             # Wait for the burst's own start before keying, so the lead is not
             # spent as dead carrier, and so a far-future `at` cannot outrun the
             # rig's per-burst watchdog.
-            self.audio.wait_until(at - settle_n)
-            token = self.rig.key(req.emission, why=f"{req.protocol} burst",
-                                 duration_s=req.duration_s, settle_s=req.settle_s,
-                                 responding=req.responding)
+            if req.state is None:
+                self.audio.wait_until(at - settle_n)
+            else:
+                self.audio.wait_until(at - settle_n, cancelled=lambda: self._cancelled(req),
+                                      deadline=time.monotonic() + req.duration_s + 2)
+                if self._cancelled(req) or not req.state.commit():
+                    raise BurstInvalidated("cancelled")
+            token = self._key(req, duration_s=req.duration_s, settle_s=req.settle_s)
         except RigError as exc:
             # Discarded, not finished: a burst the rig refused never went out, and
             # `finish_burst` is what records one as sent.
             self.audio.cancel_burst()
             self.refused += 1
             raise Refused(f"{req.protocol}: {exc}") from None
+        except BaseException:
+            self.audio.cancel_burst()
+            raise
         try:
             self.audio.wait_until(at + len(audio))
         finally:
@@ -254,8 +386,55 @@ class TxArbiter:
                 f"{req.protocol}: the rig retired mid-burst "
                 f"({self.rig.retired_why}) — what went out is not what was composed.")
         self.sent += 1
-        if self.identity is not None and req.priority != LIVE:
+        self.last_sent[req.protocol] = end
+        self._history = TransmitHistory(self._history.sequence + 1, end)
+        if self.identity is not None and req.protocol == "ident":
             self.identity.note_sent()
+        return end
+
+    def _reserved_transmit(self, req):
+        audio = levels.at_drive(resample.for_card(req.audio, req.rate), self.drive)
+        lead = max(req.lead_s, req.settle_s)
+        if round(lead * CARD_RATE_HZ) + len(audio) + round(0.1 * CARD_RATE_HZ) > round(
+                self.rig.max_key_s * CARD_RATE_HZ):
+            raise Refused("complete keyed interval exceeds max_key_s")
+        if req.at is not None:
+            self.audio.wait_until(req.at, deadline=time.monotonic() + req.duration_s + 2,
+                                  cancelled=lambda: self._cancelled(req))
+        if self._cancelled(req) or not req.state.commit():
+            raise BurstInvalidated("cancelled")
+        token = None
+        finished = False
+        try:
+            token = self._key(req, duration_s=len(audio) / CARD_RATE_HZ + 0.1,
+                              settle_s=lead, sample_now=self.audio.sample_now)
+            if token.card_index is None or token.card_deadline is None:
+                raise BurstInvalidated("key did not report its card interval")
+            want = token.card_index + round(lead * CARD_RATE_HZ)
+            at = self.audio.reserve_burst(audio, want, token.card_deadline)
+            deadline = time.monotonic() + lead + len(audio) / CARD_RATE_HZ + 2
+            self.audio.wait_until(at + len(audio), healthy=True, deadline=deadline)
+            end = self.audio.finish_burst()
+            finished = True
+        except RigError as exc:
+            self.audio.cancel_burst()
+            raise Refused(str(exc)) from exc
+        except BaseException:
+            self.audio.cancel_burst()
+            raise
+        finally:
+            if token is not None:
+                try:
+                    self.rig.unkey(token)
+                finally:
+                    if not finished:
+                        self.audio.finish_burst()
+                    self._history = TransmitHistory(
+                        self._history.sequence + 1, int(self.audio.sample_now()))
+        if self.rig.retired:
+            raise BurstInvalidated("rig retired during burst")
+        self.sent += 1
+        self.last_sent[req.protocol] = end
         return end
 
     # -- identification ----------------------------------------------------

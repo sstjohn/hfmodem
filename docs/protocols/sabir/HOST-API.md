@@ -59,8 +59,8 @@ Notation: `u` unsigned integer, `s` text, `b` bytes, `f` float; `?` optional.
 | 11 | SendObject | Object options below | Send a connectionless object |
 
 Listen, Connect, Beacon and SendObject require SetIdentity first. SetProfile
-is a beacon metadata label; it does not enforce bandwidth, identification or
-regulatory policy. The station's radio configuration controls that policy.
+is a beacon metadata label; it does not apply bandwidth or identification
+checks. The station's radio configuration selects those checks.
 Aliases, per-Connect profiles, deadlines, nonzero streams and nonzero priority
 are unsupported and rejected. `stream:0` and `priority:0` have ordinary Send
 semantics. `Subscribe.stats_period` is ignored; telemetry has no periodic timer.

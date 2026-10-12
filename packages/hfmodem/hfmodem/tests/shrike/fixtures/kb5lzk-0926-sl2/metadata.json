@@ -1,0 +1,34 @@
+[
+  {
+    "file": "hold23.wav",
+    "source": "captures/onair-0926-1920/stream.flac",
+    "hold": 23,
+    "fs": 12000,
+    "start": 2385168,
+    "end": 2429092,
+    "row0": 2391889,
+    "sha256": "6dcbd9015f8b18ec72e2a7dbbdf8d3bbb70f04b1a38215bff47a9844c1996b82",
+    "followed_hz": -28.5,
+    "seq": 3,
+    "status": 3,
+    "payload": "1440 daily minutes rema",
+    "swept_hz": [-45.0, 5.0, 2.5],
+    "decodes_hz": [-37.5, -35.0, -17.5, -15.0, -12.5, -10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0]
+  },
+  {
+    "file": "hold31.wav",
+    "source": "captures/onair-0926-1920/stream.flac",
+    "hold": 31,
+    "fs": 12000,
+    "start": 2865168,
+    "end": 2909092,
+    "row0": 2871889,
+    "sha256": "1d211dbc3124488a46940efd55ad6c2922749b6f2fbbf5595e043b347e2634f1",
+    "followed_hz": -28.5,
+    "seq": 3,
+    "status": 3,
+    "payload": "1440 daily minutes rema",
+    "swept_hz": [-45.0, 5.0, 2.5],
+    "decodes_hz": [-45.0, -42.5, -40.0, -37.5, -35.0, -32.5, -30.0, -27.5, -25.0, -22.5, -20.0, -17.5, -15.0, -12.5, -10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0]
+  }
+]

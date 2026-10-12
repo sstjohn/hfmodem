@@ -234,20 +234,36 @@ def test_three_accepted_packets_are_what_the_old_climb_spends():
 
 
 def test_the_silence_budget_already_caps_a_run_keyed_into_an_empty_channel():
-    """No second cap is wired, because this one is already the bound.
-
-    A repeat that decodes is a peer that is there, and the run is only worth
-    ending once the peer stops: `_on_nak` charges `_silent_cycles` for every
-    cycle nothing decoded in and gives up past `max_retries`, which is what
-    ended the stalled arm after its 36th repeat. A `--p3-repeat-cap` counting
-    the repeats themselves would end links a peer is still serving.
-    """
+    """Five unanswered actions end keys; physical empty windows end the link."""
     host, seam = linked(repeat_gear=3)
-    for _ in range(36):
+    for _ in range(4):
+        token = host.arq.begin_receive_opportunity()
         arrives(host)
+        host.arq.finish_receive_opportunity(token)
     assert host.arq.state is arq.State.CONNECTED
-    cycles = 0
-    while host.arq.state is arq.State.CONNECTED and cycles < 40:
-        host.arq.on_cycle()
-        cycles += 1
-    assert host.arq.cfg.max_retries < cycles <= host.arq.cfg.max_retries + 3
+    start_words = len(seam.words)
+    received, sent = host.rcvd_total, host.sent_total
+    acked, counter, sequence = host.arq.tx_acked_bytes, host.arq.rx_seq, host.arq.tx_seq
+    quiet_h = terminal_h = None
+    quiet_words = None
+    for physical_tick in range(1, arq.P3_CRC_WAIT_TICKS + 1):
+        token = host.arq.begin_receive_opportunity()
+        host.tick(elapsed_ticks=1, cycle_ticks=1)
+        host.arq.finish_receive_opportunity(token)
+        assert host.rcvd_total == received and host.sent_total == sent
+        assert host.arq.tx_acked_bytes == acked
+        assert not seam.packets
+        assert not host.arq.said_goodbye
+        if host.arq._p3_receive_only and quiet_h is None:
+            quiet_h, quiet_words = physical_tick, len(seam.words)
+        if quiet_h is not None:
+            assert len(seam.words) == quiet_words
+        if host.arq.state is not arq.State.CONNECTED:
+            terminal_h = physical_tick
+            break
+        assert host.arq.rx_seq == counter and host.arq.tx_seq == sequence
+    assert quiet_h == 6
+    # The last CRC's response precedes four subsequent unanswered responses.
+    assert quiet_words - start_words + 1 == 5
+    assert terminal_h == arq.P3_CRC_WAIT_TICKS == 96
+    assert host.arq.state is arq.State.DISCONNECTED

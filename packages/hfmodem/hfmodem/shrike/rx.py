@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -369,8 +370,11 @@ def demod_case1(audio: np.ndarray, start: int, *, fs: int = FS_DEFAULT,
 # Front end: audio -> timing, per-tone symbols, soft raster
 # ---------------------------------------------------------------------------
 
+@lru_cache(maxsize=8)
 def _pulse(sps: int) -> np.ndarray:
-    return resample_poly(tablegen.symbol_pulse(), sps // 8, 1)
+    pulse = resample_poly(tablegen.symbol_pulse(), sps // 8, 1)
+    pulse.flags.writeable = False
+    return pulse
 
 
 def carrier(cn: int, fs: int, start: int, count: int) -> np.ndarray:

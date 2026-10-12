@@ -44,7 +44,7 @@ import re
 import numpy as np
 import pytest
 
-from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.kestrel import corpora, turns_evidence as E
 from hfmodem.kestrel.arq import phy as _phy
 from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_frames as VF
@@ -388,7 +388,7 @@ def test_an_idle_link_with_nothing_queued_answers_an_over_the_way_a_caller_does(
     hs._tx_over_response(last=True)
     heard = MK.demod_tone_pairs(io.sent[-1], VF.CONNECTED_ACK_NSYM)
     assert ([tuple(sorted(p)) for p in heard]
-            == [tuple(sorted(p)) for p in VF.CONTROL_BURST_CALLER_2300])
+            == [tuple(sorted(p)) for p in VF.control_bursts(_MYCALL, "2300")[0]])
 
     hs._tx_over_response(last=False)
     assert (MK.demod_tones(io.sent[-1], 16)
@@ -399,48 +399,23 @@ def test_an_idle_link_with_nothing_queued_answers_an_over_the_way_a_caller_does(
     assert (MK.demod_tones(io.sent[-1], 32)
             == VF.handshake_tones(_CALLED, VF.SESSION_OVER_RESPONSE))
 
-    hs.over_continue = VA.OVER_CONTINUE_CAPTURED
+    hs.over_continue = VA.OVER_CONTINUE_BURST
     hs._tx_over_response(last=False)
     heard = MK.demod_tone_pairs(io.sent[-1], VF.OVER_CONTINUE_NSYM)
     assert ([tuple(sorted(p)) for p in heard]
-            == [tuple(sorted(p)) for p in VF.OVER_CONTINUE_CALLER_2300])
+            == [tuple(sorted(p)) for p in VF.over_continue(_CALLED, "2300")[0]])
     assert hs.turn == VA._TURN_PEER, "answering an over must not move the turn"
-
-
-def test_a_bandwidth_with_no_continue_frame_of_its_own_keys_the_generated_one(
-        monkeypatch):
-    """The 11-symbol tails travel between bandwidths and this frame does not.
-
-    Three fetches on 2026-09-04 keyed BW2300's copy at BW2750: each took the
-    gateway's first over, answered it, and drew the responder's own idle cadence
-    to the timeout with nothing at its host, `gateway_rx_bytes` 0 in all three.
-    A generated-answer run the same hour closed its delivery on the stale-state
-    11-symbol burst, so that fallback stays; this one goes, and a bandwidth whose
-    copy is not measured keys the frame it can build.
-
-    All three bandwidths hold a copy today — BW2750's was measured off the cables
-    the same week — so the table is emptied for the session's own bandwidth to
-    ask the question the table can no longer pose.
-    """
-    monkeypatch.delitem(VF.OVER_CONTINUE_BY_CALLER, (VF.CONTROL_BURST_CALLER, "2750"))
-    hs, io = _connected(bw="2750")
-    hs.over_continue = VA.OVER_CONTINUE_CAPTURED
-    hs._tx_over_response(last=False)
-    assert (MK.demod_tones(io.sent[-1], 32, band=MK.band_for("2750"))
-            == VF.handshake_tones(_CALLED,
-                                  VF.for_bw(VF.SESSION_OVER_RESPONSE, "2750")))
-    assert hs.turn == VA._TURN_PEER
 
 
 def test_the_2750_session_keys_its_own_continue_frame_and_not_the_wide_ones():
     hs, io = _connected(bw="2750")
-    hs.over_continue = VA.OVER_CONTINUE_CAPTURED
+    hs.over_continue = VA.OVER_CONTINUE_BURST
     hs._tx_over_response(last=False)
     heard = [tuple(sorted(p)) for p in
              MK.demod_tone_pairs(io.sent[-1], VF.OVER_CONTINUE_NSYM,
                                  MK.band_for("2750"))]
-    assert heard == [tuple(sorted(p)) for p in VF.OVER_CONTINUE_CALLER_2750]
-    assert heard != [tuple(sorted(p)) for p in VF.OVER_CONTINUE_CALLER_2300]
+    assert heard == [tuple(sorted(p)) for p in VF.over_continue(_CALLED, "2750")[0]]
+    assert heard != [tuple(sorted(p)) for p in VF.over_continue(_CALLED, "2300")[0]]
 
 
 def test_the_idle_cadence_follows_the_turn():
@@ -757,6 +732,10 @@ def test_the_off_frequency_peers_control_burst_still_answers_our_turn_request():
     and the log says the peer went quiet.
     """
     hs, io = _session_with_an_off_frequency_peer()
+    # Past the confirm's exchange: stock asks in answer to the callee's first
+    # poll and not across its ack of our confirm (bench-idle500 r3a, 2026-09-28;
+    # bench-idlepoll-verify r3c, 2026-09-29)  [see _took_confirm_ack].
+    hs._confirm_acks = None
     hs.send(b"x" * 89)
     assert hs.turn == VA._TURN_ASKED
     io.msgs.clear()
@@ -847,11 +826,20 @@ def test_real_band_audio_is_not_read_as_the_peers_answer():
         assert not bad, f"{path.name} accepted band audio at t = {bad} s"
 
 
-_GRANT_WAV, _GRANT_CALL, _GRANT_WINDOWS = corpora.ONAIR_TURN_GRANTS
+# Same-session witness clock is 10 s later; the mute-dependent negative below
+# cannot be transferred to an unmuted witness.
+_GRANT_WAV, _GRANT_CALL = "kb3ac-0823-whole-witness", "KB3AC-10"
+_GRANT_WINDOWS = (
+    (97.350, 107.845, True), (109.235, 130.125, True),
+    pytest.param(75.370, 85.960, False, marks=pytest.mark.skip(reason=(
+        "Needs new BW2300 KB3AC-10 or KE8LVA 80 m rig-rx flight: turn-request "
+        "answered by release-responder with its head muted; witness grants it, "
+        "so the original negative may also be stale."))),
+    (66.045, 71.055, False),
+)
 
 
 @pytest.mark.parametrize("start,end,granted", _GRANT_WINDOWS)
-@corpora._requires(_GRANT_WAV, what="the 2026-08-23 KB3AC-10 session")
 def test_the_turn_grant_is_found_on_the_stream_the_gate_never_opened_for(
         start, end, granted):
     """The deadlock that cost this station two gateways, off the tape it happened on.
@@ -867,8 +855,8 @@ def test_the_turn_grant_is_found_on_the_stream_the_gate_never_opened_for(
     in the turnaround it was granted in — and is not taken in the turnaround where
     the gateway keyed something else, nor over its greeting over.
     """
-    x = corpora.wav_mono(_GRANT_WAV)
-    x = x / 32768.0 if np.abs(x).max() > 1.5 else x
+    x = E.samples(_GRANT_WAV)
+    x = x / 32768.0
     io = _IO()
     hs = VA.VaraStationHandshake([_MYCALL], io, bw="2300")
     hs.role, hs.called, hs.caller = "initiator", _GRANT_CALL, _MYCALL
@@ -885,10 +873,10 @@ def test_the_turn_grant_is_found_on_the_stream_the_gate_never_opened_for(
         assert any("tx DATA over #1" in m for m in io.msgs), io.msgs
 
 
-_IDLE_WAV, _IDLE_CALL, _IDLE_STARTS = corpora.ONAIR_RESPONDER_IDLE
+_IDLE_WAV, _IDLE_CALL = "ke8lva-0823-whole-witness", "KE8LVA"
+_IDLE_STARTS = tuple(t + 6.765 for t in corpora.ONAIR_RESPONDER_IDLE[2])
 
 
-@corpora._requires(_IDLE_WAV, what="the 2026-08-23 KE8LVA session")
 def test_the_responder_idle_is_found_in_the_recording_it_was_fitted_from():
     """The arbiter for (288, 683): a gateway's own symbols off the air, at every
     one of the thirteen keyings, located by payload the way a bracket is.
@@ -897,7 +885,7 @@ def test_the_responder_idle_is_found_in_the_recording_it_was_fitted_from():
     instead — the reading `keyed_by` rejects — and the other two 2026-08-23 arms
     that reached CONNECTED, neither of whose gateways ever keys it.
     """
-    x = corpora.wav_mono(_IDLE_WAV)
+    x = E.samples(_IDLE_WAV)
     x = x / (np.abs(x).max() or 1.0)
     kind = VF.SESSION_RESPONDER_IDLE
     want = np.asarray(VF.handshake_tones(_IDLE_CALL, kind), dtype=np.int32)
@@ -913,7 +901,6 @@ def test_the_responder_idle_is_found_in_the_recording_it_was_fitted_from():
         assert (heard[1:] == mine[1:]).sum() <= 3
 
 
-@corpora._requires(_IDLE_WAV, what="the 2026-08-23 KE8LVA session")
 def test_the_responder_idle_is_named_and_is_not_progress():
     """A gateway keying every 3.4 s, read and answered but not banked.
 
@@ -931,7 +918,7 @@ def test_the_responder_idle_is_named_and_is_not_progress():
     progress nor charged to the budget, which is what the two assertions above
     still pin.
     """
-    x = corpora.wav_mono(_IDLE_WAV)
+    x = E.samples(_IDLE_WAV)
     x = x / (np.abs(x).max() or 1.0)
     hs, io = _connected()
     hs.called = _IDLE_CALL
@@ -941,7 +928,7 @@ def test_the_responder_idle_is_named_and_is_not_progress():
     for i in range(0, len(window), MK.FS // 10):
         hs.on_rx_stream(window[i:i + MK.FS // 10])
     named = sum("session-responder-idle" in m for m in io.msgs)
-    assert named, io.msgs
+    assert named == 2, io.msgs
     assert hs._since_progress == VA._MAX_WITHOUT_PROGRESS - 1, (
         f"the peer's own idle cadence paid into our budget: {io.msgs}")
     assert io.keys == named, (
@@ -951,11 +938,9 @@ def test_the_responder_idle_is_named_and_is_not_progress():
                for m in io.msgs if m.startswith("tx ")), io.msgs
 
 
-@corpora._requires(_GRANT_WAV, what="the 2026-08-23 KB3AC-10 session")
 def test_the_answer_search_does_not_fire_on_the_session_that_holds_no_answer():
-    """The other side of it: KB3AC-10 keyed a responder-idle never, and 187 s of
-    the band it was calling over does not read as one."""
-    x = corpora.wav_mono(_GRANT_WAV)
+    """No responder-idle anywhere in the whole 199 s KB3AC-10 witness."""
+    x = E.samples(_GRANT_WAV)
     x = x / (np.abs(x).max() or 1.0)
     hs, io = _connected()
     hs.called = _GRANT_CALL
@@ -978,7 +963,8 @@ def test_the_peers_answer_to_an_over_is_taken_off_the_stream_too():
     assert any("tx DATA over #1" in m for m in io.msgs), io.msgs
 
 
-_ANS_WAV, _ANS_CALL, _ANS_REFUSED_AT, _ANS_OVER_AT = corpora.ONAIR_OVER_ANSWERED
+_ANS_WAV, _ANS_CALL = "ke8lva-0826-turns-and-floor", "KE8LVA"
+_ANS_REFUSED_AT, _ANS_OVER_AT = 75.933, 94.490
 
 # KE8LVA's own symbols in the two turnarounds of the 2026-08-26 12:59z session
 # that the live log recorded as silence. Payload only: both frames open in the
@@ -1025,7 +1011,6 @@ def test_each_answer_is_the_only_reading_its_state_admits(kind, tones):
         assert sum(1 for a, b in zip(theirs, tones) if a == b) <= 3
 
 
-@corpora._requires(_ANS_WAV, what="the 2026-08-26 KE8LVA session")
 @pytest.mark.parametrize(
     "kind,at,other",
     [(VF.SESSION_TURN_RELEASE_RESPONDER, _ANS_REFUSED_AT, VF.SESSION_DRAINED_RESPONDER),
@@ -1034,7 +1019,7 @@ def test_each_answer_is_the_only_reading_its_state_admits(kind, tones):
 def test_the_answers_are_found_in_the_recording_they_were_fitted_from(kind, at, other):
     """The arbiter for both: a gateway's own symbols off the air, located by
     payload the way a bracket is, and rejected read as keyed to us."""
-    x = corpora.wav_mono(_ANS_WAV)
+    x = E.samples(_ANS_WAV)
     x = x / (np.abs(x).max() or 1.0)
     seg = x[int((at - 0.3) * MK.FS):int((at + 1.8) * MK.FS)]
     want = np.asarray(VF.handshake_tones(_ANS_CALL, kind), dtype=np.int32)
@@ -1048,16 +1033,15 @@ def test_the_answers_are_found_in_the_recording_they_were_fitted_from(kind, at, 
         f"{at} s reads as {other.name} as well as {kind.name}")
 
 
-@corpora._requires(_ANS_WAV, what="the 2026-08-26 KE8LVA session")
 def test_the_turn_grant_is_not_read_as_a_refusal():
     """The two answers to a turn-request are the same length off the same
     transmitter 12 s apart, and only the tones separate them."""
-    x = corpora.wav_mono(_ANS_WAV)
+    x = E.samples(_ANS_WAV)
     x = x / (np.abs(x).max() or 1.0)
     hs, io = _connected()
     hs.called = _ANS_CALL
     hs.turn = VA._TURN_ASKED
-    grant = x[int(62.3 * MK.FS):int(64.2 * MK.FS)]
+    grant = x[int(87.63 * MK.FS):int(89.53 * MK.FS)]
     assert hs._peer_drained(grant)
     assert not hs._peer_responder_release(grant)
 
@@ -1120,12 +1104,11 @@ def test_a_grant_still_in_the_turnaround_it_was_asked_in_is_taken():
     assert hs.turn == VA._TURN_OURS, io.msgs
 
 
-@corpora._requires(_ANS_WAV, what="the 2026-08-26 KE8LVA session")
 def test_the_over_answer_keeps_the_give_up_budget_off_a_gateway_that_answered():
     """`6 idle bursts and nothing back from KE8LVA` was logged over an answer that
     arrived 0.17 s after our own over ended. Fed the same audio the transport
     feeds, the stream route names it and puts the counter back."""
-    x = corpora.wav_mono(_ANS_WAV)
+    x = E.samples(_ANS_WAV)
     x = x / (np.abs(x).max() or 1.0)
     hs, io = _connected()
     hs.called = _ANS_CALL
@@ -1139,18 +1122,17 @@ def test_the_over_answer_keeps_the_give_up_budget_off_a_gateway_that_answered():
     assert io.keys == 0, "no recording says what an answer to this frame is"
 
 
-@corpora._requires(_ANS_WAV, what="the 2026-08-26 KE8LVA session")
 def test_neither_answer_fires_on_the_stretch_that_holds_no_gateway_at_all():
-    """The 110 s after the over-answer, which the live log read as ten of its
+    """The stretch after the over-answer, which the live log read as ten of its
     twelve undecoded high-speed-level overs and which holds no gateway
-    transmission at all."""
-    x = corpora.wav_mono(_ANS_WAV)
+    transmission at all. The tap clock is 25.33 s later than the rig clock."""
+    x = E.samples(_ANS_WAV)
     x = x / (np.abs(x).max() or 1.0)
     hs, io = _connected()
     hs.called = _ANS_CALL
     for kind, fn in ((VF.SESSION_TURN_RELEASE_RESPONDER, hs._peer_responder_release),
                      (VF.SESSION_RESPONDER_OVER_ANSWER, hs._peer_over_answer)):
-        for t in np.arange(72.0, 178.0, 0.5):
+        for t in np.arange(97.33, 203.33, 0.5):
             seg = x[int(t * MK.FS):int((t + 1.9) * MK.FS)]
             assert not fn(seg), f"{kind.name} accepted band noise at {t:.1f} s"
 
@@ -1283,7 +1265,11 @@ def _control_tails(session: str) -> dict:
 
     One recording per direction, so which station keyed a burst is a property of
     the file. The burst is 0.47 s and opens on the fixed four-symbol preamble,
-    which is what locates it inside a region the envelope bracketed.
+    which is what locates it inside a region the envelope bracketed: the
+    alignment is the one that puts the most of each preamble window's energy on
+    its two carriers, and the tail is read there through a rectangular window. A
+    Hann reader's skirts rank a neighbour second where two carriers sit a bin or
+    two apart.
     """
     pre = [tuple(sorted(p)) for p in VF.CONNECTED_ACK_PREAMBLE]
     out = {}
@@ -1296,17 +1282,23 @@ def _control_tails(session: str) -> dict:
             if not 0.40 <= (end - start) / MK.FS <= 0.55:
                 continue
             seg = a[max(0, start - 2880):end + MK.NFFT]
-            best = (-1, ())
-            for off in range(0, min(3000, max(1, len(seg) - MK.NFFT)), 8):
-                pairs = [tuple(sorted(p)) for p in
-                         MK.demod_tone_pairs(seg[off:], VF.CONNECTED_ACK_NSYM)]
-                hit = sum(1 for x, y in zip(pairs, pre) if x == y)
-                if hit > best[0]:
-                    best = (hit, tuple(pairs[len(pre):]))
-            if best[0] == len(pre):
-                tails.append(best[1])
+            offs = range(0, min(3000, len(seg) - 11 * MK.HOP - MK.STRIDE), 4)
+            if not offs:
+                continue
+            off = max(offs, key=lambda o: sum(
+                _rect_mag(seg[o:], k)[list(p)].sum() / _rect_mag(seg[o:], k).sum()
+                for k, p in enumerate(pre)))
+            mags = [_rect_mag(seg[off:], k) for k in range(VF.CONNECTED_ACK_NSYM)]
+            pairs = [tuple(sorted(int(i) for i in np.argsort(m)[-2:])) for m in mags]
+            if pairs[:len(pre)] == pre:
+                tails.append(tuple(pairs[len(pre):]))
         out[who] = tails
     return out
+
+
+def _rect_mag(x: np.ndarray, k: int) -> np.ndarray:
+    at = k * MK.HOP + MK._WOFF
+    return np.abs(np.fft.rfft(x[at:at + MK.NFFT]))[:120] + 1e-12
 
 
 @corpora.requires_control_burst_key
@@ -1319,10 +1311,6 @@ def test_the_control_burst_tail_is_keyed_to_the_caller_and_not_to_the_role():
     either — which is what the three recordings of a single pair could not
     separate, and what a constant carried on that reading would have got wrong at
     every gateway this station ever answers.
-
-    One symbol per tail is allowed to disagree between sessions with the same
-    caller: its two carriers sit within 1% of each other in the recording and the
-    stronger-second rule ranks them either way.
     """
     seen: dict = {}
     for session, caller, _called in corpora.CONTROL_BURST_CALLER_KEY:
@@ -1336,8 +1324,7 @@ def test_the_control_burst_tail_is_keyed_to_the_caller_and_not_to_the_role():
     for (caller, who), rows in seen.items():
         ref = rows[0][1]
         for session, tail in rows[1:]:
-            differ = sum(1 for x, y in zip(ref, tail) if x != y)
-            assert differ <= 1, f"{caller} {who}: {session} differs in {differ}"
+            assert tail == ref, f"{caller} {who}: {session} differs"
 
     for who in ("caller", "responder"):
         held = {c: rows[0][1] for (c, w), rows in seen.items() if w == who}
@@ -1349,35 +1336,26 @@ def test_the_control_burst_tail_is_keyed_to_the_caller_and_not_to_the_role():
 
 
 @corpora.requires_control_burst_key
-def test_the_pair_this_station_keys_is_the_pair_of_a_link_W9SSJ_called():
-    """The two constants against a recording of the link they belong to.
-
-    One symbol of slack, and the same one: the caller's symbol 4 carries carriers
-    61, 80 and 29 within 1% of each other and the responder's symbol 1 carries 80,
-    97 and 34, so whichever alignment a reader lands on decides which of them
-    ranks second. Everything else is exact.
-    """
-    tails = _control_tails("20260826-214913-pair1ctl")
-    held = VF.control_bursts("W9SSJ", "2300")
-    for who, burst in zip(("caller", "responder"), held):
-        ref = tuple(tuple(sorted(p))
-                    for p in burst[len(VF.CONNECTED_ACK_PREAMBLE):])
-        differ = sum(1 for x, y in zip(ref, tails[who][0]) if x != y)
-        assert differ <= 1, f"{who}: {differ} symbols differ from the recording"
+@pytest.mark.parametrize("session,caller,called", corpora.CONTROL_BURST_CALLER_KEY)
+def test_every_bench_control_burst_is_its_callers_generated_tail(session, caller, called):
+    tails = _control_tails(session)
+    for who, burst in zip(("caller", "responder"), VF.control_bursts(caller, "2300")):
+        assert tails[who] and set(tails[who]) == {burst[len(VF.CONNECTED_ACK_PREAMBLE):]}, who
 
 
-def test_answering_someone_elses_call_says_the_tail_is_another_links():
+def test_answering_someone_elses_call_keys_that_links_tail():
     hs, io = _connected()
     hs.role, hs.caller = "responder", "KE8LVA"
-    hs._tx_control_burst()
-    assert any("another link's tail" in m for m in io.msgs)
+    assert hs._tx_control_burst()
+    heard = MK.demod_tone_pairs(io.sent[-1], VF.CONNECTED_ACK_NSYM)
+    assert ([tuple(sorted(p)) for p in heard]
+            == list(VF.control_bursts("KE8LVA", "2300")[1]))
 
 
 # --------------------------------------------------------------------------- #
 # What the log says a session read, and what it says about the turnaround.
 
 
-@corpora._requires(_IDLE_WAV, what="the 2026-08-23 KE8LVA session")
 def test_one_gateway_burst_is_named_once():
     """Ten keyings on the tape have to reach the log ten times.
 
@@ -1394,7 +1372,7 @@ def test_one_gateway_burst_is_named_once():
     gap is left cannot be read off a frame still on the air  [see
     `_peer_responder_idle`, `_reack`].
     """
-    x = corpora.wav_mono(_IDLE_WAV)
+    x = E.samples(_IDLE_WAV)
     x = x / (np.abs(x).max() or 1.0)
     hs, io = _connected()
     hs.called = _IDLE_CALL

@@ -203,12 +203,20 @@ def test_final_late_key_keeps_calibrated_packet_on_same_physical_parity(
         return send(audio,label,**kwargs)
     tx._tx=overrun
     tx.send_packet(1,b'HELLO',1)
-    assert not tx.refused and tx.slot==FIRST_SLOT+3
+    # Refused rather than keyed on the stale render; the packet is retained
+    # for the next available slot's own carrier order, not a stepped-past one.
+    assert tx.refused and tx.slot==FIRST_SLOT+1 and len(tx.live.emissions)==1
+    tx._tx=send
+    grid.note_peer_codeword(PEER+88800+60000,10080,'ACK','WS8EOC',
+                            protocol=spec.Protocol.PACTOR3)
+    tx.aim(grid,FIRST_SLOT+2)
+    tx.send_packet(1,b'HELLO',1)
+    assert not tx.refused and tx.slot==FIRST_SLOT+2
     meta,audio=emitted(tmp_path,tx)
     sync=rxfront.SyncedRx()
     sync.packet_at=4800+min(meta['pulse_offsets'])+4320
     sync.packet_level=1
     got=sync.packet(audio,preferred_only=True)
     assert got is not None and got.packet[2]==b'HELLO'
-    assert got.carrier_swapped==peer_swapped
-    assert meta['audio_start']+min(meta['pulse_offsets'])==PULSE+3*60000
+    assert got.carrier_swapped==(not peer_swapped)
+    assert meta['audio_start']+min(meta['pulse_offsets'])==PULSE+2*60000

@@ -41,6 +41,23 @@ def test_bcjr_matches_all_short_paths_and_nonzero_prior():
         np.testing.assert_allclose(decoded.extrinsic, expected-systematic-prior, atol=2e-12)
 
 
+def test_bcjr_parity_extrinsic_matches_all_short_paths():
+    systematic = np.array([.4, -1.2, .7, .3])
+    parity = np.array([-.5, .2, 1.1, -.8])
+    prior = np.array([.3, -.1, -.6, .4])
+    sums = np.zeros((4, 2))
+    for start in product((0, 1), repeat=3):
+        for bits in product((0, 1), repeat=4):
+            b = np.array(bits)
+            p = _parity(bits, start)
+            weight = np.exp(.5*np.dot(1-2*b, systematic+prior)
+                            + .5*np.dot(1-2*p, parity))
+            sums[np.arange(4), p] += weight
+    decoded = p4decode.component_decode(systematic, parity, prior, parity_output=True)
+    np.testing.assert_allclose(decoded.parity_extrinsic,
+                               np.log(sums[:, 0]/sums[:, 1])-parity, atol=2e-12)
+
+
 def test_erased_parity_never_amplifies_systematic_information():
     systematic = np.linspace(-3, 3, 41)
     decoded = p4decode.turbo_decode(systematic, np.zeros(41), np.zeros(41),

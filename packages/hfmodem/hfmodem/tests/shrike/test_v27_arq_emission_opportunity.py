@@ -192,7 +192,7 @@ def test_late_crc_precedes_timeout_and_finish_emits_nothing():
     assert io.pending == arq.CS_ACK  # Driver owns when this later ACK emits.
 
 
-def test_current_occupied_window_forgives_once_without_resetting_count():
+def test_current_occupied_window_enters_quiet_without_forgiving_absence():
     a, io, token = threshold_window()
     for _ in range(3):
         a.note_unreadable_answer()
@@ -200,12 +200,17 @@ def test_current_occupied_window_forgives_once_without_resetting_count():
     a.finish_receive_opportunity(token)
     assert a._silent_cycles == a.cfg.max_retries and not a._qrt_pending
     assert not a._burst_at_anchor
-    assert sum("not counting this cycle" in line for line in io.logs) == 1
+    assert a.p3_receive_only and a._dark_windows == 1
+    assert a._p3_crc_wait_ticks == 1
+    assert not any("not counting this cycle" in line for line in io.logs)
+    emitted = list(io.emissions)
     next_token = a.begin_receive_opportunity()
     a.on_cycle()
     io.emit()
     a.finish_receive_opportunity(next_token)
-    assert a._silent_cycles == a.cfg.max_retries + 1 and a._qrt_pending
+    assert a._silent_cycles == a.cfg.max_retries and not a._qrt_pending
+    assert a.p3_receive_only and a._dark_windows == 2
+    assert a._p3_crc_wait_ticks == 2 and io.emissions == emitted
 
 
 @pytest.mark.parametrize("evidence", ["none", "off_anchor", "unpositioned"])
@@ -216,15 +221,16 @@ def test_nonoccupancy_evidence_does_not_hold_threshold(evidence):
     elif evidence == "unpositioned":
         a.note_peer_heard()
     a.finish_receive_opportunity(token)
-    assert a._silent_cycles == a.cfg.max_retries + 1
-    assert a._qrt_pending and io.packets == []
+    assert a._silent_cycles == a.cfg.max_retries
+    assert a.p3_receive_only and not a._qrt_pending and io.packets == []
+    assert a._dark_windows == 1 and a._p3_crc_wait_ticks == 1
 
 
-def test_legacy_callers_still_charge_timeout_immediately():
+def test_legacy_callers_enter_quiet_at_timeout_immediately():
     a, _ = linked()
     a._silent_cycles = a.cfg.max_retries
     a.on_cycle()
-    assert a._qrt_pending
+    assert a.p3_receive_only and not a._qrt_pending
 
 
 def test_begin_drops_weak_evidence_from_previous_window():

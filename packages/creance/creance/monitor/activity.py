@@ -19,7 +19,7 @@ confident "gateway here"; the summary carries the two grades all the way out.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 
 CONFIRMED = "confirmed"    # decoded to certainty: CRC ok / callsign / gateway match
 TENTATIVE = "tentative"    # signal present and classified, identity unproven
@@ -41,19 +41,41 @@ STREAM_CLOCK = "stream"
 WALL_CLOCK = "wall"
 
 
+#: whose callsign ``station`` is. Most decoders here name the CALLED party, so
+#: the role is what keeps a connect request from reading as its sender.
+ROLES = ("called", "caller", "answering", "sender", "gateway")
+
+#: the tracker's own records: emissions whether or not a modem claims them. Their
+#: ``protocol`` is a shape label, never an identification.
+TRACKER = "tracker"
+#: a span this station was keying; nothing heard inside it is anybody else
+OURS = "ours"
+
+
 @dataclass(frozen=True, slots=True)
 class Detection:
     """One normalised event on the common timeline, whatever modem found it."""
     t: float                   # seconds of audio into the stream THIS PROCESS
                                # received — not an offset into any recording
-    modem: str                 # "kestrel" | "shrike" | ...
-    protocol: str              # VARA | PACTOR-1/2/3 | ARDOP | UNKNOWN
+    modem: str                 # "kestrel" | "shrike" | ... | TRACKER
+    protocol: str              # VARA | PACTOR-1/2/3/4 | ARDOP | CW | UNKNOWN
     kind: str                  # the modem's own event label
     grade: str                 # CONFIRMED | TENTATIVE
     station: str = ""          # callsign, if resolved
-    role: str = ""             # "gateway" | "caller" | ""
+    role: str = ""             # one of ROLES, or ""
     detail: str = ""
     wall: float = 0.0          # unix time the audio carrying it arrived
+    centre_hz: float | None = None    # audio position, power-weighted, sub-bin
+    rf_hz: float | None = None        # the same place on the dial
+    bw_hz: float | None = None        # -26 dB width
+    offset_hz: float | None = None    # centre_hz less the protocol's nominal centre
+    level_dbfs: float | None = None
+    over_db: float | None = None      # strongest bin over the tracker's floor in the band
+    cadence_s: float | None = None    # dominant on/off period, where one stands out
+    track: int | None = None          # the tracker's id for the emission
+    t_start: float | None = None      # where that emission began, on ``t``'s clock
+    text: str | None = None           # decoded text (CW)
+    via: str | None = None            # the dispatch that decoded it: whole-band | per-track
 
     @classmethod
     def from_json(cls, obj: dict) -> "Detection":
@@ -63,8 +85,25 @@ class Detection:
             kind=str(obj.get("kind", "")),
             grade=obj["grade"] if obj.get("grade") in GRADES else TENTATIVE,
             station=str(obj.get("station", "")),
-            role=str(obj.get("role", "")), detail=str(obj.get("detail", "")),
-            wall=float(obj.get("wall", 0.0)))
+            role=obj["role"] if obj.get("role") in ROLES else "",
+            detail=str(obj.get("detail", "")),
+            wall=float(obj.get("wall", 0.0)),
+            **{k: _opt(obj.get(k), f) for k, f in _MEASURED.items()})
+
+    def to_json(self) -> dict:
+        """The runner contract's form: what ``from_json`` reads back, unmeasured
+        fields left out."""
+        return {f.name: v for f in fields(self)
+                if (v := getattr(self, f.name)) is not None}
+
+
+_MEASURED = {"centre_hz": float, "rf_hz": float, "bw_hz": float,
+             "offset_hz": float, "level_dbfs": float, "over_db": float, "cadence_s": float,
+             "track": int, "t_start": float, "text": str, "via": str}
+
+
+def _opt(value, kind):
+    return None if value is None else kind(value)
 
 
 def _stamp(d: Detection, clock: str) -> str:
@@ -120,6 +159,12 @@ class ActivityView:
     last_t: float = -1e9
 
     def add(self, d: Detection) -> None:
+        """Fold one detection in. Our own keying is not the channel, and a track
+        is energy with a shape: it counts as something here and names nothing."""
+        if d.kind == OURS:
+            return
+        if d.modem == TRACKER:
+            d = replace(d, protocol=UNKNOWN, station="")
         self.last_t = max(self.last_t, d.t)
         cur = self._proto.get(d.protocol)
         if cur is None or _stronger(d.grade, d.t, cur.grade, cur.last_t):

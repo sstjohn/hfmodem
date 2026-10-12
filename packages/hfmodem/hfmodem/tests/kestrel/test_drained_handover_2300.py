@@ -10,12 +10,17 @@ re-keyed. The same state test and freshness bound apply at every session
 bandwidth now, and so does the stream route: at 2300/2750 the energy gate that
 feeds `on_rx_audio` is what missed both handovers, so `_stream_answer` carries
 its own arm for them.
+
+That recording is lost. Verified K0SI 09-20 01:35Z excerpts now pin the same
+route and state at source 64.615 and 84.769 s (31/32 and 31/31 tones).
+The replay stops 4 s after the handover. Its absence checks therefore cannot
+cover the original failure's ladder rung at +8.6 s or turn request at +20.6 s.
 """
 import numpy as np
 import pytest
 
 from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as MK
-from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.kestrel import turns_evidence as E
 
 
 class IO:
@@ -76,10 +81,12 @@ def test_a_foreign_drained_frame_is_not_the_handover():
     assert not hs._drained_hands_over(burst)
 
 
-@corpora.requires_onair_drained_handover_2300
-@pytest.mark.parametrize("start", [67.334, 76.734])
-def test_k0si_40m_drained_hands_over_and_takes_the_turn(start):
-    x = corpora.wav_mono(corpora.ONAIR_DRAINED_HANDOVER_2300)
+@pytest.mark.parametrize("name,start", [
+    ("k0si-0920-drained-first", 0.615),
+    ("k0si-0920-drained-second", 0.569),
+])
+def test_k0si_40m_drained_hands_over_and_takes_the_turn(name, start):
+    x = E.samples(name, tracked=True)
     kind = VF.for_bw(VF.SESSION_DRAINED_RESPONDER, "2300")
     span = VA._span(kind)
     a = int((start - 0.334) * MK.FS)
@@ -93,12 +100,9 @@ def test_k0si_40m_drained_hands_over_and_takes_the_turn(start):
                for m in io.log_lines)
 
 
-#: Where the tape's first handover sits. Our final acknowledgement's last sample
-#: is at 67.24 s and K0SI keys the 32-symbol handover 0.09 s behind it, so that
-#: unkey is both the instant the release falls due and the first sample the
-#: receive path delivers  [working/onair-0915-2131].
-_ACK_UNKEY = 67.24
-_HANDOVER = 67.334
+#: Verified 09-20 substitute: source 64.521 and 64.615 s, minus clip start 64 s.
+_ACK_UNKEY = 0.521
+_HANDOVER = 0.615
 
 
 def _drive(hs, io, x, t0, t1, block=0.125):
@@ -109,21 +113,23 @@ def _drive(hs, io, x, t0, t1, block=0.125):
         hs.on_rx_stream(x[a:a + n])
 
 
-@corpora.requires_onair_drained_handover_2300
 def test_the_stream_route_reads_the_handover_the_energy_gate_missed():
     """The route, not just the recogniser. `_drained_hands_over` returns True on
     this audio and reached nothing live: the bracket route is the only thing that
     ran it, and the gate a gateway's short burst cannot open never bracketed one.
 
-    What the live run did instead is on the tape — a ladder rung at 75.95 s and a
-    turn-request at 87.98 s, with the handover keyed at 67.334 and again at
-    76.734  [working/onair-0915-2131].
+    The historical failure was a ladder rung and a turn-request instead of DATA
+    [working/onair-0915-2131]. The 09-20 substitute preserves the incoming
+    handover. The replay stops 4 s after the handover, so the later successful
+    exchange and the original +8.6/+20.6 s absence claims are outside its window.
     """
-    x = corpora.wav_mono(corpora.ONAIR_DRAINED_HANDOVER_2300)
+    x = E.samples("k0si-0920-drained-first", tracked=True)
     last_symbol = _HANDOVER + VA._span(
         VF.for_bw(VF.SESSION_DRAINED_RESPONDER, "2300")) / MK.FS
     hs, io = _handover()
-    _drive(hs, io, x, _ACK_UNKEY, 80.0)
+    # The substitute actually sent DATA and got an answer. Stop before that
+    # later exchange: unlike the lost failed arm, it legitimately keys again.
+    _drive(hs, io, x, _ACK_UNKEY, _HANDOVER + 4.0)
 
     assert hs.turn == VA._TURN_OURS, "the handover reached nothing on the stream"
     assert any("drained-responder" in m and "taking the turn" in m

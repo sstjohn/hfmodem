@@ -24,8 +24,8 @@ The three arms that are not the session:
 
   * THE GRID. Where a PACTOR-2 burst keys and where its answer is read, against
     the same `_MasterGrid` PACTOR-3 flies on. A shaped burst opens with the
-    leading tail of its own first pulse, so it goes out `pactor2.pulse_lead`
-    early or its whole comb is two symbols late.
+    leading tail of its own first pulse, so it goes out by the retained pulse
+    lead early, accounting for the transmit trim.
   * THE CONTROL. A PACTOR-1 link that never hears a PACTOR-2 key, with its
     numbers pinned: nothing above may change what the one protocol every PACTOR
     station has does.
@@ -38,6 +38,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from hfmodem.shrike import onair, p2rx, pactor2, placement, rxfront, spec
 from hfmodem.shrike.arq import IRS, ISS, LONG_TICKS, P2_LADDER, State
@@ -319,14 +320,49 @@ class _Rendered(_Placed):
         self.audio.append(audio)
 
 
+def _trimmed_lead(audio):
+    return pactor2.pulse_lead() - int(np.flatnonzero(
+        abs(audio) > .02 * max(abs(audio)))[0])
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+@pytest.mark.parametrize("kind", ["short", "long", "control"])
+def test_p2_phase_reference_survives_production_transmit_trim(
+        tmp_path, monkeypatch, swapped, kind):
+    """Exercise real RadioTx._tx, which the older placement spy bypassed."""
+    written = []
+    monkeypatch.setattr(onair.session, "write_wav",
+                        lambda path, audio: written.append(audio.copy()))
+    tx = onair.RadioTx(None, transmit=False, outdir=tmp_path)
+    grid = _grid(long=kind == "long")
+    tx.aim(grid, 4)
+    tx.invert = swapped
+    epoch = grid.boundary(4)
+    status = spec.status_byte(1)
+    if kind == "control":
+        raw = pactor2.control_signal(0, swapped=swapped)
+        tx.send_p2_cs(0)
+    else:
+        path = (pactor2.PATHS_LONG if kind == "long" else pactor2.PATHS)[0]
+        raw = pactor2.data_burst(pactor2.build_field(
+            placement.field_info(b"", path.crc_bytes - 3, status), path),
+            path, swapped=swapped)
+        send = tx.send_p2_long_packet if kind == "long" else tx.send_p2_packet
+        send(1, b"", status)
+    raw = onair.levels.at_drive(raw, tx.drive)
+    first = int(np.flatnonzero(abs(raw) > .02 * max(abs(raw)))[0])
+    assert first > 0  # the old full-lead placement fails this nonzero trim
+    np.testing.assert_array_equal(written[0], onair._trim_silence(raw))
+    assert tx.boundary + pactor2.pulse_lead() - first == epoch
+
+
 def test_a_pactor2_burst_keys_its_pulse_lead_early() -> None:
     """A shaped burst does not start at its own phase reference.
 
     `pactor2.tx_pulse` spans nearly four symbols, so the first pulse's leading
-    tail is on the air 18.75 ms before the instant Figure 1's raster is written
-    in. Keyed ON the boundary the whole comb is that late -- nearly two symbols
-    at 100 Bd -- and the peer's answer window, which counts from the phase
-    reference, is aimed 18.75 ms wrong for the rest of the link.
+    tail begins 18.75 ms before its phase reference in the raw render. The
+    transmit trim removes part of that tail; only the retained lead should
+    precede the boundary, keeping the reference on the grid.
     """
     lead = pactor2.pulse_lead()
     assert lead == 900 == round(0.01875 * FS)
@@ -338,16 +374,18 @@ def test_a_pactor2_burst_keys_its_pulse_lead_early() -> None:
     n = tx.send_p2_packet(1, b"", spec.status_byte(1))
     what, at, slot = tx.at[-1]
     assert n == P2_LADDER.payload(1, False) == 5
-    assert (slot, at) == (4, raster.boundary(4) - lead)
+    trimmed_lead = _trimmed_lead(tx.audio[-1])
+    assert (slot, at) == (4, raster.boundary(4) - trimmed_lead)
     assert "SL1-short" in what, what
 
-    # The long frame keys on the comb three slots on, the same lead early.
+    # The long frame keys three slots on, accounting for its own trim.
     assert raster.regear(True)
     tx.send_p2_long_packet(3, bytes(156), spec.status_byte(2))
     what, at, slot = tx.at[-1]
     assert "SL3-long" in what and "156B" in what, what
-    assert (slot, at) == (4 + LONG_TICKS,
-                          raster.boundary(4 + LONG_TICKS) - lead)
+    assert (slot, at) == (
+        4 + LONG_TICKS,
+        raster.boundary(4 + LONG_TICKS) - _trimmed_lead(tx.audio[-1]))
 
     # A codeword takes the same lead, and it takes the CYCLE's arrangement --
     # the one the packet it answers went out in. A fresh flip here would put our
@@ -357,7 +395,7 @@ def test_a_pactor2_burst_keys_its_pulse_lead_early() -> None:
     tx.aim(raster, slot)
     tx.send_p2_cs(0)
     what, at, _slot = tx.at[-1]
-    assert at == raster.boundary(slot) - lead
+    assert at == raster.boundary(slot) - _trimmed_lead(tx.audio[-1])
     assert np.array_equal(
         tx.audio[-1],
         pactor2.control_signal(0, swapped=bool(raster.shift(slot))))
@@ -435,7 +473,8 @@ def test_a_pactor1_link_decodes_exactly_as_it_did() -> None:
     assert link.b_io.sent == ["P1 CS1"] + ["P1 CS1", "P1 CS2"] * 5, \
         link.b_io.sent
     assert not [w for w in link.a_io.sent + link.b_io.sent if "P2" in w]
-    assert rx_of(link.b) == b"1w9ssj\r" + out
+    assert link.b.arq.dxcall == "W9SSJ"
+    assert rx_of(link.b) == out
 
 
 # --------------------------------------------------------------------------- #

@@ -48,6 +48,7 @@ import pytest
 
 from hfmodem.core.resample import from_card
 from hfmodem.tests.kestrel import corpora
+from hfmodem.tests import d_evidence as E
 
 R = corpora.harness("rehear")
 K = corpora.harness("rehear.kestrel")
@@ -56,6 +57,12 @@ K = corpora.harness("rehear.kestrel")
 #: station has connected to on other days, which is the harder negative: their
 #: tone sets are ones the corpus really carries, somewhere else.
 NOT_ON_AIR = ("KB9MMT", "NS0A", "W1AW")
+
+
+@pytest.fixture(autouse=True)
+def station(monkeypatch):
+    """The corpus was recorded at W9SSJ; an off-air session's caller is the configured one."""
+    monkeypatch.setenv("MYCALL", "W9SSJ")
 
 
 @corpora.requires_onair_connect_attempt
@@ -113,25 +120,36 @@ def test_our_transmissions_are_found_by_what_they_say_and_agree_with_the_mute():
         assert abs(b - n) / K.FS < 0.25, f"resume disagrees: {b / K.FS} vs {n / K.FS}"
 
 
-@corpora.requires_onair_unanswered_call
 def test_the_suppression_model_still_finds_eight_transmissions_without_a_mute():
-    """The recording that retired the energy model: the rig's transmit monitor
-    reaches the codec at band level, so nothing on it is 15 dB under the median
-    for a second, and the eight requests are found by their tones instead."""
-    x = K._load(corpora.ONAIR_UNANSWERED_CALL)
+    """The replacement Sep 20 tap holds ten CRs and no mute spans.
+
+    The lost Aug 19 capture held eight. Both require finding our transmissions
+    by their tones when an energy model finds none.
+    """
+    x = K._load(E.checked_path(E.UNANSWERED))
     ours = [at for at, res in K._scanned(x, ["KC9GHZ", "W9SSJ"])
             if res.kind == "CR" and res.gateway == "KC9GHZ"]
-    assert len(ours) == 8
-    assert len(K._our_overs(x, ours)) == 8
+    assert len(ours) == 10
+    assert len(K._our_overs(x, ours)) == 10
+    assert K._muted(x) == []
 
 
 @pytest.mark.parametrize("name", ("ONAIR_GATEWAY_ANSWER", "ONAIR_FADED_GREETING",
                                   "ONAIR_OFFSET_ANSWER"))
-def test_the_live_arm_claims_no_answer_the_ungated_arm_cannot_reproduce(name):
-    path = getattr(corpora, name)
-    if not path.exists():
-        pytest.skip(f"{name} is not in this tree")
+def test_the_live_arm_claims_no_answer_the_ungated_arm_cannot_reproduce(name, tmp_path):
+    replacements = {
+        "ONAIR_FADED_GREETING": (E.ANSWERED, "20260918T043807Z-W9SSJ-KC9GHZ.flac"),
+        "ONAIR_OFFSET_ANSWER": (E.OFFSET, "20260815T020203Z-W9SSJ-N0LCR-1.flac"),
+    }
+    if name in replacements:
+        clip, alias = replacements[name]
+        path = E.replay_path(clip, tmp_path, alias)
+    else:
+        path = getattr(corpora, name)
+        if not path.exists():
+            pytest.skip(f"{name} is not in this tree")
     r = K.rehear(path)
+    assert r.live, r.note
     assert not r.only_live(), (
         f"{path.name}: the gated arm accepts {r.only_live()} and the ungated arm, "
         f"shown strictly more audio by the same search, does not — the replay has "
@@ -164,22 +182,27 @@ def test_every_adapter_says_where_its_zero_is_and_where_the_recorder_sits():
 B = corpora.harness("rehear.besra")
 S = corpora.harness("rehear.shrike")
 
-_BESRA = corpora.evidence.LOGS / "onair" / "20260803T151721Z-besra-7102000.wav"
+@pytest.fixture(scope="module")
+def besra_replay(tmp_path_factory):
+    # Both timebase and log-agreement pins use the same 310-second replay.
+    path = E.replay_path(E.REPLAY, tmp_path_factory.mktemp("d-w6ids"),
+                         "20260829T185417Z-besra-7060000.flac")
+    return R.rehear(path, [E.log("ardop-day-03-w6ids-third.log")])
 
 
-@pytest.mark.skipif(not _BESRA.exists(), reason="the 2026-08-03 KE8LVA session is not here")
-def test_the_besra_replay_puts_its_frames_where_the_recording_does():
+def test_the_besra_replay_puts_its_frames_where_the_recording_does(besra_replay):
     """The timebase trap, which is the whole of whether besra's arms can be compared.
 
     ``RollingDecoder`` counts only the samples it was pushed, so a live frame's
     position indexes audio-delivered-to-the-decoder and runs earlier than the
-    recording by every withheld block — eleven of them here, 25.0 s. Unadjusted,
+    recording by every withheld block — 64 intervals here, 62.9 s. Unadjusted,
     every frame after the first transmission lands seconds early and reads as one
     the mute destroyed.
     """
-    r = B.rehear(_BESRA)
+    r = besra_replay
     assert r.recorder == R.UPSTREAM
-    assert "11 intervals, 25.0 s" in r.note, r.note
+    assert "64 intervals, 62.9 s" in r.note, r.note
+    assert r.live and r.ungated, r.note
     assert not r.only_live(), (
         f"a besra frame the live arm reads and the ungated arm does not: "
         f"{r.only_live()} — the position has not been put back on the recording")
@@ -202,7 +225,6 @@ def test_a_shrike_capture_says_it_cannot_witness_a_dropped_sample():
     assert "sample drops of every kind" in r.uncovered
 
 
-@corpora.requires_onair_offset_answer
 def test_the_gateway_opens_its_answer_before_the_cursor_comes_back():
     """Where the cursor lands, against where the answer starts.
 
@@ -226,7 +248,7 @@ def test_the_gateway_opens_its_answer_before_the_cursor_comes_back():
     most recent recordings none is measurable at all. The rig stopped being the
     binding constraint and the constant took over.
     """
-    x = K._load(corpora.ONAIR_OFFSET_ANSWER)
+    x = K._load(E.checked_path(E.OFFSET))
     found = K._scanned(x, ["N0LCR-1", "W9SSJ"])
     ours = [at for at, r in found if r.kind == "CR" and r.gateway == "N0LCR-1"]
     answers = [at for at, r in found
@@ -243,66 +265,97 @@ def test_the_gateway_opens_its_answer_before_the_cursor_comes_back():
         f"and the numbers in it are stale")
 
 
+def test_an_off_air_session_is_dialled_as_the_configured_station(tmp_path, monkeypatch, capsys):
+    """The directory names the peer only; the caller is whoever runs the rehearing."""
+    session = tmp_path / "KC9GHZ_2300" / "rig_rx.wav"
+    monkeypatch.setenv("MYCALL", "k1abc")
+    assert K._dialled(session) == ("K1ABC", "KC9GHZ")
+    monkeypatch.delenv("MYCALL")
+    monkeypatch.delenv("HFMODEM_STATION", raising=False)
+    assert K._dialled(session) is None
+    assert "no callsign configured" in capsys.readouterr().err
+
+
+def test_kestrel_reads_its_search_bandwidth_off_the_arms_own_log(tmp_path):
+    """NS0A's 2026-09-23 18:45 arm connected at BW2750 and a search fixed at
+    BW2300 -- the old default -- reported no answer at all:
+    `VaraStationHandshake` recognises a connect-response only in the alphabet
+    its own ``bw`` names, so the wrong one is silence rather than a miss.
+
+    The log line below is the arm's own, unstamped like every line
+    `kestrel_connect.py:1749` prints; the name of the log that carried it is
+    also this arm's own, which is where the third source below is read from.
+    """
+    log_path = tmp_path / "vara-current-ns0a-40m-7102000-2750-force-20260923T234526Z.log"
+    log_path.write_text(
+        "== VARA mail W9SSJ <-> NS0A, centre 7102000 (dial 7100500), BW2750\n"
+        "originating: W9SSJ -> NS0A (BW2750) — up to 10 requests of 1.75 s, "
+        "3.0 s apart\n"
+        "PTT ON -> line\n"
+        "PTT OFF -> line (reads low)\n")
+    log = R.sessionlog.read(log_path)
+    assert log.bw == "2750"
+
+    wav_path = tmp_path / "20260923T234555Z-W9SSJ-NS0A.wav"
+    assert K._bw(wav_path, log, None) == "2750", "the log's own line wins"
+    assert K._bw(wav_path, log, "500") == "2750", "over an explicit override"
+    assert K._bw(wav_path, None, "500") == "500", "the override, with no log"
+    assert K._bw(wav_path, None, None) == "2300", "the old default, with neither"
+    assert K._bw(log_path, None, None) == "2750", (
+        "falls back to the log's own name where the recording's does not say")
+
+
 # -- against the station's own log -------------------------------------------
 
 _W6IDS = corpora.BESRA_LOGGED_SESSION
 _W6IDS_LOG = corpora.BESRA_SESSION_LOG
-_W4UC = corpora.BESRA_REGULAR_CALL
-_W4UC_LOG = corpora.BESRA_REGULAR_CALL_LOG
+_REGULAR_LOG = "ardop-day-02-w6ids-retry.log"
+_REGULAR_OFFSET = 1.132
+_REGULAR_MUTED = ((0.90, 2.88), (4.13, 6.11), (7.88, 9.84),
+                  (11.72, 13.71), (15.48, 17.45), (19.33, 21.31))
 
 
-@corpora.requires_besra_logged_session
 def test_the_session_log_holds_what_the_recording_cannot():
     """The three things a replay of one of our own sessions cannot read off audio,
-    read off the log instead. Cheap — no decoding — and it pins the figures the
-    heavier test below rests on."""
-    log = B.sessionlog.read(_W6IDS_LOG)
+    read off the log instead. These original Aug 26 figures need no audio; the
+    heavier replay below uses the surviving Aug 29 tap and its separate log."""
+    path = E.log("ardop-day-08-w6ids.log")
+    log = B.sessionlog.read(path)
     assert log.session == 0x0D, "the session id the live decoder was polling"
     assert len(log.frames) == 51 and sum(f.header_only for f in log.frames) == 6
+    assert [f.name for f in log.frames if f.header_only and f.session != 0x0D] \
+        == ["16QAM.500.100.O"]
     assert len(log.keyed) == 56
     assert sum(b - a for a, b in log.keyed) == pytest.approx(50.58, abs=0.02), (
         "the mute the station actually set, `TX` line to `PTT OFF` line")
     assert len(log.epochs) == 4, "three turns to IRS and the teardown"
-    assert B.sessionlog.find(_W6IDS, [_W6IDS_LOG]) is not None, (
+    assert B.sessionlog.find(_W6IDS, [path]) is not None, (
         "the log names its own recording and the search no longer finds it")
 
 
-@corpora.requires_besra_logged_session
-def test_the_besra_replay_hears_what_the_station_heard():
+def test_the_besra_replay_hears_what_the_station_heard(besra_replay):
     """The acceptance test for the whole instrument, through the shipped entry point.
 
-    W9SSJ worked W6IDS on 7061.5 kHz on 2026-08-26 and the live path reported 51
-    frames. A replay built the way this project had been building them — no session
-    hint, the mute grown off the capture's silence brackets — reproduces 28 of them:
-    it loses the ConAck that opened the session, the END that closed it, eight
-    DATAACKs, three BREAKs and ten data frames. The hint alone brings it to 48; the
-    log's own `TX`/`PTT OFF` edges bring the last three.
-
-    Not exact in the other direction, and the numbers here say only what was
-    measured: all 45 frames the session decoded come back in order, 0.28-6.46 s
-    ahead of where the live path reported them, and each of the six header-only
-    sightings has a same-type sighting in the replay placed within 10.3 s.
-
-    50 of the 51, not 51, and the missing one is the point of the difference: the
-    `16QAM.500.100.O sess=0x00` this session logged at 08:41:05 is a frame nobody
-    sent, and `demodulator._addressed` no longer reports it. A replay of the
-    station's log reproduces what the station heard; it does not owe the log a
-    frame the receiver has since stopped claiming.
+    The replacement Aug 29 W6IDS tap reproduces 49 of its log's 50 frames with
+    the session hint and log-aligned TX/PTT-OFF edges, and discards nothing. The
+    lost Aug 26 receiver capture reproduced 50/51 and missed a foreign 16QAM
+    phantom. This log has no such foreign header-only frame: that particular
+    miss is not established by this substitute. The demod robustness tests keep
+    the separate same-event phantom-rejection pins.
     """
-    r = R.rehear(_W6IDS, [_W6IDS_LOG])
+    r = besra_replay
     assert r.deaf == "", r.deaf
     assert "the log's own TX/PTT-OFF edges" in r.note, r.note
     assert "session 0x0D" in r.note, r.note
-    assert r.against_log == (50, 51), (
+    assert r.against_log == (49, 50), (
         f"{r.against_log} — this replay no longer reproduces the session it is a "
         f"replay of; {r.note}")
-    assert [f.name for f in B.sessionlog.read(_W6IDS_LOG).frames
-            if f.header_only and f.session != 0x0D] == ["16QAM.500.100.O"], (
-        "the one logged frame this replay is allowed to miss")
     assert not r.discarded(), r.discarded()
 
 
-@corpora.requires_besra_logged_session
+@pytest.mark.skipif(not _W6IDS.exists(), reason=(
+    "Needs ARDOP W6IDS 40 m, 7060.0 kHz BW500 mail-fetch flight with besra rig RX: "
+    "tap substitutes do not reproduce the shallow-mute bracket overshoot"))
 def test_the_mute_read_off_the_log_is_the_one_the_station_set():
     """14.1 s of difference, which is not a rounding. The brackets are grown over the
     quiet a key leaves in the capture and overshoot every interval they find; they
@@ -330,31 +383,27 @@ def test_the_mute_read_off_the_log_is_the_one_the_station_set():
         "do, this test has done its job and the numbers in it are stale")
 
 
-@corpora.requires_besra_regular_call
 def test_the_alignment_cannot_be_settled_by_the_key_ups():
-    """2026-08-29 15:15z, W4UC: six identical 1.99 s ConReqs on a 3.85 s cadence and
-    nothing back.
+    """W6IDS at 18:52Z replaces the lost W4UC call: six regular unanswered CRs.
 
     A transmission leaves two runs of silence in the capture, the settle at the key
     and the tail at the unkey, and the alignment is a vote over every offset that
     pairs one of them with a `TX` line the log holds. On a regular cadence the
-    key-ups pair as often as the key-downs — five each here — and the tie used to go
-    to the lower offset. That put this session at -4.058 s against a truth of
-    +1.681, and rehear then withheld the *gaps*: it reported `live 6, ungated 5`
-    with a `19.82 DATAACK sess 0xEA bare`, and every one of those six frames was one
-    of our own ConReqs read back off our own muted receiver.
+    key-ups pair as often as the key-downs — five each here — and the tie used to
+    go to the lower offset, withholding gaps instead of transmissions.
 
     The capture settles it without reference to the vote. The rig mutes its receiver
     while we transmit, so the level drops for the length of each keying and comes
-    back between them, and the six troughs are the six intervals `+1.681` implies.
+    back between them. This KT USB tap corroborates all six keyings at +1.132 s.
     """
-    log = B.sessionlog.read(_W4UC_LOG)
-    au = from_card(B._capture(_W4UC), B.SAMPLE_RATE)
+    path = E.log(_REGULAR_LOG)
+    log = B.sessionlog.read(path)
+    au = from_card(E.card(E.REGULAR), B.SAMPLE_RATE)
     edges, quiet, level = B._key_edges(au)
     where = B.sessionlog.align(log, [a for a, _ in edges],
                                B._quieter(level, log.keyed))
     assert where is not None, "the alignment this session's own key-downs support"
-    assert where.offset == pytest.approx(corpora.BESRA_REGULAR_CALL_OFFSET, abs=0.01), (
+    assert where.offset == pytest.approx(_REGULAR_OFFSET, abs=0.01), (
         f"{where.offset:+.3f} s — the key-up comb is one transmission out and its "
         f"offset is negative; {where}")
     assert where.corroborated == 6, (
@@ -364,12 +413,12 @@ def test_the_alignment_cannot_be_settled_by_the_key_ups():
     # log that produced them. `PTT ON` to `PTT OFF`, which trails the `TX` line the
     # alignment anchors on by the rig's settle.
     muted = [(a, b) for a, b in
-             ((a - where.offset, b - where.offset) for a, b in _ptt(_W4UC_LOG))]
-    for (a, b), (want_a, want_b) in zip(muted, corpora.BESRA_REGULAR_CALL_MUTED):
+             ((a - where.offset, b - where.offset) for a, b in _ptt(path))]
+    assert len(muted) == len(_REGULAR_MUTED) == 6
+    for (a, b), (want_a, want_b) in zip(muted, _REGULAR_MUTED):
         assert (a, b) == pytest.approx((want_a, want_b), abs=0.02), muted
 
 
-@corpora.requires_besra_regular_call
 def test_an_alignment_the_capture_cannot_settle_is_refused():
     """The other half: an instrument that inverts its own sign in silence is worse
     than one that declines.
@@ -379,16 +428,15 @@ def test_an_alignment_the_capture_cannot_settle_is_refused():
     separates the key-down comb from the key-up comb and `align` raises instead of
     returning the lower of the two.
     """
-    log = B.sessionlog.read(_W4UC_LOG)
-    au = from_card(B._capture(_W4UC), B.SAMPLE_RATE)
+    log = B.sessionlog.read(E.log(_REGULAR_LOG))
+    au = from_card(E.card(E.REGULAR), B.SAMPLE_RATE)
     edges, _quiet, _level = B._key_edges(au)
     with pytest.raises(B.sessionlog.Ambiguous) as raised:
         B.sessionlog.align(log, [a for a, _ in edges], lambda _offset: 0)
     assert "Refusing rather than picking" in str(raised.value), str(raised.value)
 
 
-@corpora.requires_besra_regular_call
-def test_the_clocks_settle_what_a_level_capture_cannot():
+def test_the_clocks_settle_what_a_level_capture_cannot(tmp_path):
     """And the third reading, which is the one the corpus is mostly made of.
 
     Declining costs a session. Eight of the thirty-four ARDOP calls of 2026-08-29
@@ -401,15 +449,17 @@ def test_the_clocks_settle_what_a_level_capture_cannot():
     second where the combs are a whole transmission apart. Told what the sidecar
     says, the same level-blind call that raises above returns the truth.
     """
-    log = B.sessionlog.read(_W4UC_LOG)
-    au = from_card(B._capture(_W4UC), B.SAMPLE_RATE)
+    path = E.replay_path(E.REGULAR, tmp_path, "20260829T185256Z-besra-7060000.flac")
+    log = B.sessionlog.read(E.log(_REGULAR_LOG))
+    au = from_card(B._capture(path), B.SAMPLE_RATE)
     edges, _quiet, _level = B._key_edges(au)
-    predicted = log.predicted(B._started(_W4UC))
+    predicted = log.predicted(B._started(path))
+    assert predicted == pytest.approx(0.989, abs=0.001)
     where = B.sessionlog.align(log, [a for a, _ in edges], lambda _offset: 0, predicted)
     assert where is not None, (
         f"the clocks put the capture's first sample at {predicted:+.3f} s and one of "
         f"the tied offsets is there")
-    assert where.offset == pytest.approx(corpora.BESRA_REGULAR_CALL_OFFSET, abs=0.01), (
+    assert where.offset == pytest.approx(_REGULAR_OFFSET, abs=0.01), (
         f"{where.offset:+.3f} s — the key-up comb is one transmission out and the "
         f"clocks do not reach it")
 

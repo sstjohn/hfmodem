@@ -310,7 +310,7 @@ def test_onair_dry_run_attaches_mail_and_reports_its_stage(tmp_path):
         [sys.executable, "-m", "hfmodem.shrike.onair",
          "--mycall", "W9SSJ", "--dxcall", "K7ABC", "--center", "3598500",
          "--mail-fetch", "--max-cycles", "1",
-         "--mail-out", str(tmp_path / "mail"), "--outdir", str(tmp_path)],
+         "--mail-out", str(tmp_path / "mail"), "--outdir", str(tmp_path / "out")],
         capture_output=True, text=True, timeout=120, cwd=tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "mail: stage awaiting greeting" in r.stdout

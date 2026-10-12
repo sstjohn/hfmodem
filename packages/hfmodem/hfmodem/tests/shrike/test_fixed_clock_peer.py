@@ -69,7 +69,8 @@ def run_peer(monkeypatch, turnaround, *, broken=False):
 
         monkeypatch.setattr(onair._MasterGrid, "update", forget_link)
     return bench._session(cycles=16, hold=7, charge=0, peer=False,
-                          seconds=200, d=turnaround)
+                          seconds=200, d=turnaround,
+                          extra_argv=("--call-hush", "4,6"))
 
 
 @pytest.mark.parametrize("turnaround", [.075, .116125])

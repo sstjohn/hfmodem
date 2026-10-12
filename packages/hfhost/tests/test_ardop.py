@@ -79,9 +79,10 @@ class FakeTnc:
         for s in (self._cmd_srv, self._data_srv, self._cmd_conn, self._data_conn):
             if s is not None:
                 try:
-                    s.close()
+                    s.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
+                s.close()
 
     # -- command socket ----------------------------------------------------
 

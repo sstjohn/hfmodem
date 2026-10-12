@@ -25,7 +25,7 @@ import numpy as np
 import scipy.fft as sfft
 
 from . import spec, tablegen
-from scipy.signal import fftconvolve
+from scipy.signal import fftconvolve, firwin
 
 
 DEFAULT_SAMPLE_RATE = spec.SAMPLE_RATE
@@ -215,6 +215,72 @@ def modulate_tones(tone_symbols: dict[int, np.ndarray],
     if peak > 0:
         signal = signal / peak * cfg.amplitude
     return signal
+
+
+def crest_limit(signal: np.ndarray, target_db: float, *,
+                sample_rate: int = DEFAULT_SAMPLE_RATE, passes: int = 4) -> np.ndarray:
+    """Hold the envelope to `target_db` above the RMS, and keep the result in band.
+
+    Clip-and-filter. Each pass scales the analytic envelope down wherever it
+    stands above the limit, then filters what is left back to the tone band --
+    half a spacing outside the lowest and highest channels -- so the clip's
+    residue lands between our own tones rather than beside them. The filter
+    regrows the peaks a little, which is what the further passes are for: four
+    take a level-3 packet from 12.2 to 7.2 dB at a 6 dB target and a control
+    burst from 8.2 to 6.5 at 5. The limit is fixed from the INPUT's RMS, so the
+    target is a peak-to-average ratio and not a level, and the result comes back
+    at the input's peak: a peak-normalised drive is where the gain is collected,
+    the average power rising by the whole of the PAPR taken off.
+
+    The band filter is a 2049-tap window design at 48 kHz, applied as a
+    zero-phase mask on the transform the envelope already comes from. Residue
+    outside the band measures 40-50 dB under the unlimited sum's own. Ahead of
+    the burst the filter's 21 ms support spreads a level-6 packet's residue to
+    -25 dB of peak where the pulse skirt sits at -34, so the 2 % trim a keying
+    starts at moves 3-4 ms earlier -- still inside the 16-18 ms of attack the
+    reference emitter keys ahead of its symbol 0.
+    """
+    x = np.asarray(signal, dtype=np.float64)
+    peak = float(np.abs(x).max()) if x.size else 0.0
+    if peak == 0.0:
+        return x
+    n = x.size
+    limit = np.sqrt(np.mean(x ** 2)) * 10 ** (target_db / 20)
+    taps = 2 * (1024 * sample_rate // DEFAULT_SAMPLE_RATE) + 1
+    n_fft = sfft.next_fast_len(n + taps)
+    mask = _band_mask(sample_rate, taps, n_fft)
+    spectrum = sfft.rfft(x, n_fft)
+    for _ in range(passes):
+        analytic = _analytic(spectrum, n_fft)[:n]
+        gain = np.minimum(1.0, limit / np.maximum(np.abs(analytic), 1e-12))
+        spectrum = sfft.rfft(analytic.real * gain, n_fft) * mask
+    y = sfft.irfft(spectrum, n_fft)[:n]
+    return y * (peak / np.abs(y).max())
+
+
+def _analytic(spectrum: np.ndarray, n_fft: int) -> np.ndarray:
+    full = np.zeros(n_fft, complex)
+    full[:spectrum.size] = spectrum
+    full[1:(n_fft + 1) // 2] *= 2
+    return sfft.ifft(full)
+
+
+_BAND_MASK: dict[tuple, np.ndarray] = {}
+
+
+def _band_mask(sample_rate: int, taps: int, n_fft: int) -> np.ndarray:
+    key = (sample_rate, taps, n_fft)
+    mask = _BAND_MASK.get(key)
+    if mask is None:
+        half = spec.TONE_SPACING_HZ / 2
+        h = firwin(taps, [spec.TONE0_HZ - half,
+                          spec.channel_freq_hz(spec.N_CHANNELS - 1) + half],
+                   pass_zero=False, fs=sample_rate)
+        kernel = np.zeros(n_fft)
+        kernel[:taps // 2 + 1] = h[taps // 2:]
+        kernel[-(taps // 2):] = h[:taps // 2]
+        mask = _BAND_MASK[key] = sfft.rfft(kernel).real
+    return mask
 
 
 def _transform_length(cfg: ModConfig, n_out: int) -> int | None:

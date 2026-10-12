@@ -30,8 +30,9 @@ from hfmodem.tests.shrike.test_no_p3_fallback import acknowledge, entered
 from hfmodem.tests.shrike.test_p3_offer import cs_event
 
 QUEUED = b"the application bytes the entry packet was keyed for, " * 3
-"""More than one speed-level-3 field, so the train has a first loaded packet
-with traffic behind it and a last one that empties the buffer."""
+"""Many fields at the speed level a grant's entry was read at, so the train has
+a first loaded packet with traffic behind it and a last one that empties the
+buffer."""
 
 
 def loaded(tx, mark):
@@ -69,7 +70,7 @@ def test_an_idle_packet_does_not():
     0x19/0x1a and our own entry 0x1a, all four with the bit clear."""
     host, tx, mark = entered(payload=QUEUED)
     acknowledge(host)
-    for _ in range(20):
+    for _ in range(len(QUEUED)):
         if not host.arq._outbuf and host.arq._inflight is None:
             break
         acknowledge(host)
@@ -87,7 +88,7 @@ def test_the_bit_drops_on_the_packet_that_empties_the_buffer():
     down."""
     host, tx, mark = entered(payload=QUEUED)
     acknowledge(host)
-    for _ in range(20):
+    for _ in range(len(QUEUED)):
         if not host.arq._outbuf and host.arq._inflight is None:
             break
         acknowledge(host)

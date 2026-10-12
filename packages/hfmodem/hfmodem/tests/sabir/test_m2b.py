@@ -123,7 +123,7 @@ def test_dual_waveform_gate_polar_disturbed():
 def test_floor_occupied_bandwidth_and_papr():
     tx = FloorModem().transmit(BLOCK)
     lo, hi = occupied_bw(tx)
-    assert hi - lo <= 500.0                          # ACDS-legal control tier
+    assert hi - lo <= 500.0                          # control tier fits the profile's 500 Hz response ceiling
     body = tx[np.abs(tx) > 0]
     p = np.abs(body) ** 2
     assert 10 * np.log10(p.max() / p.mean()) < 0.5   # constant envelope

@@ -3,13 +3,13 @@
 
 """Evaluate an emission against the station's configured profile.
 
-An Emission carries its measured audio passband, its bandwidth measure and
-session context. Carrier span, 99-percent power bandwidth and the -26 dB span
-are distinct quantities. Profiles choose the applicable measure; core.occupied
-calculates the measured spans. Drift allowance expands the checked interval.
+An Emission carries its supplied audio passband and session context. Carrier
+span, 99-percent power bandwidth and the -26 dB span are distinct quantities.
+Callers supply the applicable edges; core.occupied holds the measured spans used
+by the station. Drift allowance expands the checked interval.
 
-These checks implement configured limits. They do not determine whether an
-operator is authorised to transmit.
+These profiles apply the limits the operator chose; the operator remains
+responsible for their station.
 """
 from __future__ import annotations
 
@@ -25,13 +25,12 @@ DEFAULT_DRIFT_HZ = 100
 
 
 class Control(StrEnum):
-    """Who is answerable for the transmission at the moment it is made.
+    """Whether an operator is at the control point when a transmission is made.
 
     `LOCAL` means an operator is at the control point — which covers remote
     control too, since a human is still deciding. `AUTOMATIC` means the station
-    is answering on its own, which is what `listen = true` amounts to. Several
-    regimes treat the two very differently and none treats automatic as the
-    easier case.
+    is answering on its own, which is what `listen = true` amounts to. A profile
+    can apply different limits to these two settings.
     """
 
     LOCAL = "local"
@@ -39,31 +38,28 @@ class Control(StrEnum):
 
 
 class NotPermitted(Exception):
-    """The emission was refused. The message names the rule and the numbers."""
+    """The selected profile refused the emission; the message names its limit and values."""
 
 
 @dataclass(frozen=True, slots=True)
 class Emission:
-    """The physical facts about a transmission, in the terms rules ask about.
+    """The physical facts about a transmission used by an emission profile.
 
     `audio_lo_hz`/`audio_hi_hz` are the passband the modulator occupies above the
     suppressed carrier — the modem knows these; nothing else does. `power_w`,
     `designator`, `technique` and `symbol_rate_bd` are optional because not every
-    regime asks, and a profile that needs one refuses when it is absent rather
-    than guessing.
+    profile uses them, and a profile that needs one refuses when it is absent
+    rather than guessing.
     """
 
     dial_hz: int
     audio_lo_hz: float
     audio_hi_hz: float
-    #: Transmitter PEP. Several regimes cap it per band; §97.313(c) caps 30 m at
-    #: 200 W for everyone and several bands at 200 W for Technicians.
+    #: Transmitter PEP in watts, checked against the selected profile's ceilings.
     power_w: float | None = None
-    #: ITU emission designator, e.g. "2K20J2D". Most non-amateur authorisations
-    #: are written entirely in these.
+    #: ITU emission designator, e.g. "2K20J2D", for profiles that use it.
     designator: str | None = None
-    #: Which protocol this is. §97.309 permits only specified digital codes, or a
-    #: technique "whose technical characteristics have been documented publicly".
+    #: Protocol name, for profiles that use it.
     technique: str | None = None
     symbol_rate_bd: float | None = None
     #: Charged against the emission on both sides. See DEFAULT_DRIFT_HZ.
@@ -71,8 +67,7 @@ class Emission:
 
     @property
     def bandwidth_hz(self) -> float:
-        """The passband width. Not any regulator's definition of bandwidth —
-        profiles derive theirs from the passband itself."""
+        """The supplied passband width, before any drift allowance."""
         return self.audio_hi_hz - self.audio_lo_hz
 
     @property
@@ -100,13 +95,13 @@ def centred(dial_hz: int, bandwidth_hz: float, *, centre_hz: float = 1500.0,
 
 @runtime_checkable
 class Profile(Protocol):
-    """A regulatory regime, as far as software can check one."""
+    """A set of operator-selected emission checks."""
 
     name: str
 
     def check(self, emission: Emission, *, control: Control,
               responding: bool = False) -> None:
-        """Return None if permitted; raise `NotPermitted` naming the rule.
+        """Return None if the profile accepts; raise `NotPermitted` naming its limit.
 
         `responding` says this transmission answers an interrogation from a
         station whose own transmissions are under local or remote control. The
@@ -119,18 +114,10 @@ class Profile(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Unregulated:
-    """No constraint modelled. The operator is answerable for every emission.
+    """No emission limits are applied; the operator remains responsible for the station.
 
-    Honest for a dummy load, a receive-only installation, an experimental
-    authorisation, or any regulator hfmodem does not encode. It is deliberately
-    *not* called "open" — in a project built on open protocols that word reads as
-    a virtue and would be doing unearned work for what is, in effect, the
-    override flag.
-
-    Because it is the override flag, it costs something to select: a stated
-    reason, which is recorded and surfaced. A station running unchecked should
-    not look, in its config and its logs, like a station that made a considered
-    regulatory choice.
+    Selecting this profile requires a stated reason, which is recorded and
+    surfaced so a station running unchecked says so in its config and logs.
     """
 
     because: str
@@ -141,7 +128,7 @@ class Unregulated:
             raise ValueError(
                 "the unregulated profile requires a stated reason, e.g. "
                 'because = "dummy load, no antenna connected" or '
-                'because = "operating under a licence hfmodem does not model". '
+                'because = "limits applied outside hfmodem". '
                 "It is recorded and shown in status output.")
 
     def check(self, emission: Emission, *, control: Control,
@@ -158,7 +145,6 @@ def profile(name: str, **kwargs) -> Profile:
         return Part97(**kwargs)
     raise ValueError(
         f"unknown regulatory profile {name!r}. "
-        "Shipped: 'part97' (47 CFR Part 97, US amateur — needs licence=), "
-        "'unregulated' (no constraint modelled, operator answerable — needs "
-        "because=). There is no default: a station that has not said which rules "
-        "it operates under has not said enough.")
+        "Shipped: 'part97' (configured emission limits — needs licence=), "
+        "'unregulated' (no emission limits applied — needs because=). "
+        "There is no default: select the limits to apply.")

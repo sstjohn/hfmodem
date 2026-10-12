@@ -1,42 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""Serving each protocol's host dialect on its own port.
+"""Loopback host ports for the station's protocol lanes.
 
-The four modems present four different control surfaces, and that is deliberate:
-an application that drives VARA expects VARA's two-socket ASCII, and one that
-drives an SCS controller expects WA8DED hostmode inside CRC framing. Normalising
-them would mean no existing application could talk to this station at all.
-
-So the dialects stay four, and what unifies them is *where they run* — one
-process, one radio underneath, each on the port its callers already use. That is
-what makes a station with four modems enabled indistinguishable, from an
-application's point of view, from four stations.
-
-The servers also disagree about how they are named into life — one offers
-`start_background()`, another a `start()` — and a station should not have to know
-which. What they may not disagree about is that binding happens before the call
-returns and that there is a way to stop them again: a port this station could not
-take, or a lane it could not put down afterwards, has to be visible here rather
-than in a warning on a run that otherwise looks well.
-
-A dialect that will not start is not fatal. Its protocol keeps receiving, the
-other three keep serving, and the failure is reported rather than taking the
-station down with it — the containment property four separate processes gave away
-for free.
-
-What a lane may NOT do is look like a radio it has not got. Two of these servers
-default to a loopback modem — a link fabricated to itself, so an application
-attaches, is told CONNECTED, and reads back its own bytes with nothing keyed —
-and an application cannot tell that from a station on the air, because from the
-socket it is not different. So `Served.keys` records whether an attached
-application can reach a transmitter, every lane says which it is on the line it
-comes up on, and a dialect with no server here is named as absent rather than
-disappearing into a `continue`.
+Binding completes before a host is reported as served. A failed host is
+reported while its lane continues receiving. ``Served.keys`` distinguishes
+ports attached to a radio lane from standalone loopback modems.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
 
 
 @dataclass
@@ -108,6 +82,16 @@ def build(cfg, *, station=None, log=print) -> dict[str, Served]:
 
 
 def _build_one(name: str, p, station=None) -> Served:
+    if name == "rpr":
+        if p.host != "kiss":
+            raise NotImplementedError("rpr mail host is not implemented")
+        from hfmodem.brubru.host.server import KissServer
+        link = station.lanes.get("rpr") if station is not None else None
+        if link is None:
+            raise ValueError("rpr KISS needs a station receive lane")
+        server = KissServer(link, port=p.port)
+        return Served(name, server, ("port",),
+                      keys=station.rig is not None and station.arbiter is not None)
     if name == "vara":
         # LOOPBACK. `VaraServer` takes a `modem_factory` and there is nothing to
         # hand it: kestrel's real core has no constructor that binds it to this
@@ -139,6 +123,28 @@ def _build_one(name: str, p, station=None) -> Served:
         from hfmodem.sabir.host.hostlink import HostLinkServer
         s = HostLinkServer(_factory, port=p.port)
         return Served(name, s, ("port",), keys=air is not None)
+    if name in ("bateleur", "ale", "selcall"):
+        link = station.lanes.get(name) if station else None
+        if link is None:
+            raise RuntimeError(f"{name} needs its lane: the modem runs there")
+        keys = getattr(station, "arbiter", None) is not None
+        ports = ("port",)
+        if name == "bateleur" and p.host == "s5066":
+            from hfmodem.bateleur.s5066.server import NodeService
+            from hfmodem.bateleur.config import DEFAULT_MODE
+            server = NodeService(link.modem, p.addresses[0], p.mode or DEFAULT_MODE,
+                                 port=p.port, log=lambda m: print(m, file=sys.stderr))
+        elif name == "bateleur":
+            from hfmodem.bateleur.host import BateleurHost
+            server = BateleurHost(link.modem, cmd_port=p.cmd_port, data_port=p.data_port)
+            ports = ("cmd_port", "data_port")
+        elif name == "ale":
+            from hfmodem.bateleur.ale.host import AleHost
+            server = AleHost(link.modem, port=p.port)
+        else:
+            from hfmodem.bateleur.selcall.host import SelcallHost
+            server = SelcallHost(link.modem, port=p.port, emergency=p.emergency)
+        return Served(name, server, ports, keys=keys)
     if name == "pactor":
         # An SCS controller is a serial device, so this one is a pty rather than a
         # socket: the application opens it exactly as it would open a PTC-IIIusb.

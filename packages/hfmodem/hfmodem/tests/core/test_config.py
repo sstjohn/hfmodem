@@ -46,6 +46,15 @@ def test_the_example_names_no_real_station():
     assert cfg.profile.licence.value == "technician"
 
 
+def test_the_receive_filter_defaults_to_an_ssb_passband_and_can_be_named():
+    assert config.load(EXAMPLE).rig.filter_hz == (300, 2900)
+    raw = base(); raw["rig"]["filter_hz"] = [200, 3100]
+    assert config.parse(raw).rig.filter_hz == (200, 3100)
+    raw["rig"]["filter_hz"] = [3100, 200]
+    with pytest.raises(ConfigError, match="filter_hz"):
+        config.parse(raw)
+
+
 # --- typos are errors ---------------------------------------------------------
 
 def test_an_unknown_key_is_an_error_not_a_shrug():
@@ -114,7 +123,7 @@ def test_an_unset_output_device_with_a_protocol_enabled_is_an_error():
         config.parse(raw)
 
 
-# --- the regime must be declared ----------------------------------------------
+# --- the emission profile must be declared ----------------------------------------------
 
 def test_control_mode_is_required():
     raw = base(); del raw["station"]["control"]
@@ -135,7 +144,7 @@ def test_an_unknown_regime_is_refused_rather_than_defaulted():
 
 
 def test_the_unregulated_profile_is_selectable_and_costs_a_reason():
-    """The honest choice for any regime hfmodem does not encode — and it is the
+    """The choice for any limits hfmodem does not encode — and it is the
     override flag, so it is not free."""
     raw = base()
     raw["station"]["regulatory"] = "unregulated"

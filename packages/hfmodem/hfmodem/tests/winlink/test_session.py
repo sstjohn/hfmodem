@@ -114,7 +114,7 @@ def test_a_real_greeting_is_answered(banner, gateway, challenge):
     assert s.challenge == challenge
     lines = out.decode().split("\r")
     assert lines[0] == ";FW: W9SSJ"
-    assert lines[1] == "[HFM-0.1-B2FHM$]"
+    assert lines[1] == "[HFM-0.2-B2FHM$]"
     assert lines[2] == f"; {gateway} DE W9SSJ (EN63)"
     assert lines[3] == "FF"                     # empty outbox: nothing to offer
     assert not s.done and not s.failure
@@ -199,15 +199,68 @@ def _ww2mi_refused() -> B2FSession:
 
 
 def test_one_connect_spends_one_login_attempt():
-    """The account's challenge allowance is finite, so how much of it a session
-    spent is a number the record has to carry. A prompt is a station talking
-    once the handshake is answered, and only the handshake answers a `;PQ:`:
-    the gateway's second `CMS via WW2MI >` draws no second `;PR:`, and nothing
-    at all goes back on the air."""
+    """A refused login ends this session without spending another attempt."""
     s = _ww2mi_refused()
     assert s.sent_text.count(";PR: ########") == 1
     assert s.feed(WW2MI_REFUSAL) == b""
     assert s.sent_text.count(";PR: ########") == 1
+    assert s.done and s.stage == "failed"
+    assert s.remote_refusal == WW2MI_REFUSAL.decode().split("\r")[-2]
+    assert s.failure == f"remote reported: {s.remote_refusal}"
+    assert s.feed(WW2MI_CHALLENGE) == b""
+    assert s.sent_text.count(";PR: ########") == 1
+
+
+WS8EOC_REFUSAL_PARTS = (
+    b"Login", b" [862", b"]:\rCM", b"S via WS8EOC >\rInvalid ",
+    b"login challenge respons", b"e -- 2 attempts remaini",
+    b"ng (H for Help)\r")
+
+
+@pytest.mark.parametrize("proposing", (False, True))
+@pytest.mark.parametrize("chunked", (False, True))
+def test_ws8eoc_1132_login_refusal_ends_the_exchange(proposing, chunked):
+    """Received fields from onair-1002-1132/*163245Z.log; login omitted."""
+    msg = compose("W9SSJ", "WS8EOC", "refusal", "test\r\n", mid="REFUSED1132")
+    s = B2FSession("W9SSJ", target="WS8EOC", outbox=[msg] if proposing else [])
+    s.feed(b"[WL2K-5.0-B2FWIHJM$]\rCMS via WS8EOC >\r")
+    sent = s.sent_text[:]
+    parts = WS8EOC_REFUSAL_PARTS if chunked else [b"".join(WS8EOC_REFUSAL_PARTS)]
+    for i, part in enumerate(parts):
+        assert s.feed(part) == b""
+        if i < len(parts) - 1:
+            assert not s.done
+    assert s.done and s.stage == "failed"
+    assert s.remote_refusal == (
+        "Invalid login challenge response -- 2 attempts remaining (H for Help)")
+    assert s.failure == f"remote reported: {s.remote_refusal}"
+    assert not s.our_fq and not s.sent_mids
+    assert s.feed(b"FS Y\rFF\r") == b""
+    assert s.sent_text == sent
+
+
+@pytest.mark.parametrize("proposing", (False, True))
+@pytest.mark.parametrize("line", (
+    "Invalid login challenge response", "2 attempts remaining (H for Help)",
+    "Login failed", "LOGIN FAILED"))
+def test_unprefixed_login_verdict_is_a_refusal(line, proposing):
+    msg = compose("W9SSJ", "WS8EOC", "refusal", "test\r\n", mid="REFUSED1132")
+    s = B2FSession("W9SSJ", outbox=[msg] if proposing else [])
+    s.feed(b"[WL2K-5.0-B2FWIHJM$]\rCMS >\r")
+    assert s.feed((line + "\r").encode()) == b""
+    assert s.done and s.remote_refusal == line
+    assert s.failure == f"remote reported: {line}"
+
+
+def test_ws8eoc_1137_proposal_answer_and_ff_still_complete():
+    msg = compose("W9SSJ", "WS8EOC", "accepted", "test\r\n", mid="ACCEPTED1137")
+    s = B2FSession("W9SSJ", target="WS8EOC", outbox=[msg])
+    s.feed(b"[WL2K-5.0-B2FWIHJM$]\rCMS via WS8EOC >\r")
+    assert s.feed(b"FS ") == b""
+    assert s.feed(b"Y\r").startswith(bytes((SOH,)))
+    assert s.sent_mids == [msg.mid] and not s.failure
+    assert s.feed(b"FF\r") == b"FQ\r"
+    assert s.done and s.our_fq and s.remote_ff and not s.failure
 
 
 def test_what_we_transmitted_is_in_the_record_beside_what_they_said():
@@ -216,7 +269,7 @@ def test_what_we_transmitted_is_in_the_record_beside_what_they_said():
     back out of the receive capture, frame by frame — four 4FSK.200.50S of
     sixteen bytes each, and these four lines are what they carried."""
     s = _ww2mi_refused()
-    assert s.sent_text == [";FW: W9SSJ", "[HFM-0.1-B2FHM$]", ";PR: ########",
+    assert s.sent_text == [";FW: W9SSJ", "[HFM-0.2-B2FHM$]", ";PR: ########",
                            "; WW2MI DE W9SSJ"]
 
 
@@ -226,7 +279,7 @@ def test_the_transcript_keeps_both_sides_in_the_order_they_spoke():
         (False, ";PQ: 90189792"),
         (False, "CMS via WW2MI >"),
         (True, ";FW: W9SSJ"),
-        (True, "[HFM-0.1-B2FHM$]"),
+        (True, "[HFM-0.2-B2FHM$]"),
         (True, ";PR: ########"),
         (True, "; WW2MI DE W9SSJ")]
 
@@ -295,7 +348,7 @@ def test_the_ky4ry_greeting_is_answered():
     assert s.remote_sid == "[WL2K-5.0-B2FWIHJM$]"
     assert s.challenge == "99446591"
     lines = out.decode().split("\r")
-    assert lines[:4] == [";FW: W9SSJ", "[HFM-0.1-B2FHM$]",
+    assert lines[:4] == [";FW: W9SSJ", "[HFM-0.2-B2FHM$]",
                          "; KY4RY DE W9SSJ", "FF"]
     assert s.stage == "their turn" and not s.done
     assert ("banner: RMS Trimode 1.4.2.0 Welcome to KY4RY Hybrid RMS - "

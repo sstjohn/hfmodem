@@ -62,10 +62,16 @@ ANSWERS = ((5, 98), (13, 100), (25, 99))
 SEARCHED = 13
 
 
-def _grid() -> onair._MasterGrid:
-    return onair._MasterGrid(0, SLOT_N, round(0.185 * FS),
-                             packet_n=round(spec.P1_PACKET_S * FS),
-                             cs_n=round(spec.P1_CS_S * FS), d_max_n=D_MAX_N)
+#: `--call-hush 4,6`, the cadence every arm flew until 2026-09-23.
+CALLS, HUSH = 4, 6
+
+
+def _grid(call_hush=None) -> onair._MasterGrid:
+    g = onair._MasterGrid(0, SLOT_N, round(0.185 * FS),
+                          packet_n=round(spec.P1_PACKET_S * FS),
+                          cs_n=round(spec.P1_CS_S * FS), d_max_n=D_MAX_N)
+    g.call_hush = call_hush
+    return g
 
 
 def _windows():
@@ -103,7 +109,8 @@ def _replay(ev: onair._ConnectEvidence, tail: float = onair.ACQUIRE_TAIL_S):
             continue
         d = t0 + got[1]
         found.append((cycle, round(d * 1e3), got[0]))
-        if ev.offer(cycle, d) and at is None:
+        level = onair._candidate_excess(seg, d)
+        if level >= onair.ANSWER_CODEWORD_X and ev.offer(cycle, d, level) and at is None:
             at = cycle
     return found, at
 
@@ -121,7 +128,7 @@ def test_the_gateway_that_answered_is_recognised() -> None:
         f"the session's own answers are not where the arm reported them: {found}"
     assert {cs for _, _, cs in found} == {spec.CS_NAMES.index("SPEED-UP")}, \
         f"the answers are not the CS4 the arm read: {found}"
-    assert at == 25, f"WS8EOC's three answers did not corroborate: {ev.report()}"
+    assert at == 13, f"WS8EOC's second answer did not corroborate: {ev.report()}"
     assert "none corroborated" not in ev.report(), ev.report()
 
 
@@ -129,8 +136,8 @@ def test_the_gateway_that_answered_is_recognised() -> None:
 def test_the_answers_span_more_than_eight_searches() -> None:
     """The counterexample, in the terms the bound is written in.
 
-    This is the whole of why the span moved, so it is measured off the recording
-    rather than asserted: eight searches cannot hold this peer and twelve can.
+    The old three-answer rule needed twelve searches. The first pair fits
+    inside eight, so the strong-pair rule can identify this peer sooner.
     """
     ev = onair._ConnectEvidence()
     _replay(ev)
@@ -138,7 +145,7 @@ def test_the_answers_span_more_than_eight_searches() -> None:
     assert draws == [5, 7, 13], f"the answers were drawn at {draws}"
     assert draws[-1] - draws[0] >= 8, \
         "the answers fit inside eight searches after all -- the span was not why"
-    assert draws[-1] - draws[0] < onair._ConnectEvidence.SPAN
+    assert draws[1] - draws[0] < onair._ConnectEvidence.SPAN
 
 
 # -- the ceiling, which was the capture's end and not the peer's -------------
@@ -191,7 +198,8 @@ def _ceiling_replay(tail: float):
             continue
         d = t0 + got[1]
         found.append((cycle, round(d * 1e3, 2), got[0]))
-        if ev.offer(cycle, d) and at is None:
+        level = onair._candidate_excess(seg, d)
+        if level >= onair.ANSWER_CODEWORD_X and ev.offer(cycle, d, level) and at is None:
             at = cycle
     return found, at
 
@@ -212,7 +220,7 @@ def test_connect_ceiling_was_the_end_of_the_capture() -> None:
     found, at = _ceiling_replay(onair.ACQUIRE_TAIL_S)
     assert [(c, ms) for c, ms, _ in found] == list(CLIPPED), \
         f"the call did not read what the arm read: {found}"
-    assert at == 24, f"the fourth codeword is what corroborated, not {at}"
+    assert at == 16, f"the second agreeing codeword corroborates, not {at}"
 
 
 def test_connect_ceiling_clears_the_peers_turnaround() -> None:
@@ -228,45 +236,48 @@ def test_connect_ceiling_clears_the_peers_turnaround() -> None:
     answers = [ms for _, ms, _ in found if ms != 55.0]
     assert min(answers) >= 96 and max(answers) <= 107, \
         f"an accept landed outside the peer's own turnaround: {answers}"
-    assert at == 9, f"VE3KPG was corroborated in cycle {at}, not 9"
+    assert at == 7, f"VE3KPG was corroborated in cycle {at}, not 7"
     assert len(found) > len(CLIPPED) and at < 24, \
         "the wider band read no more of this call than the clipped one did"
 
 
-def _closes(accepts, windows: int) -> int | None:
-    """The window `_ConnectEvidence` closes in, driven as the hold loop drives it."""
-    ev, at = onair._ConnectEvidence(), dict((k, d) for k, d in accepts)
+def _closes(accepts, windows: int, *, gate: float = 1.4) -> int | None:
+    """Drive the shipped rule with (search, offset, measured level) rows."""
+    ev = onair._ConnectEvidence()
+    at = {k: (d, level) for k, d, level in accepts}
     for k in range(windows):
         ev.searched += 1
-        if k in at and ev.offer(k, at[k]):
-            return k
+        if k in at:
+            d, level = at[k]
+            if level >= gate and ev.offer(k, d, level):
+                return k
     return None
 
 
-def test_connect_ceiling_costs_no_extra_false_link() -> None:
-    """The negative control, and the whole reason nothing was re-priced.
-
-    `connect-ceiling-negatives.json` is one draw of the search per keyed cycle
-    over every recording in rf-corpus and this station's ARDOP captures -- real
-    off-air energy addressed to nobody. The wider band accepts in half again as
-    many windows, and `_ConnectEvidence` closes on the SAME single recording
-    either way, which is what says `N`, `SPAN` and `TOL_S` did not have to move.
-    """
+def test_connect_ceiling_shipped_rule_prices_the_full_negative_population() -> None:
+    """Keep every possible pair, including recordings with only two accepts."""
     sweep = json.loads(_fixture(FIXTURES / "connect-ceiling-negatives.json").read_text())
-    assert sweep["rule"] == {"N": onair._ConnectEvidence.N,
-                             "SPAN": onair._ConnectEvidence.SPAN,
-                             "TOL_S": onair._ConnectEvidence.TOL_S}, \
-        f"the rule moved since the sweep was taken: {sweep['rule']}"
-    assert (sweep["bands"]["slot"]["tail_s"], sweep["bands"]["read"]["tail_s"]) \
-        == (round(onair.ACQUIRE_TAIL_S, 6), round(onair.ACQUIRE_READ_TAIL_S, 6))
-
-    fired = {}
-    for band in ("slot", "read"):
-        fired[band] = [c["recording"] for c in sweep["candidates"]
-                       if _closes(c[band], c["windows"]) is not None]
-    assert len(fired["slot"]) == sweep["bands"]["slot"]["fires"] == 1, fired
-    assert fired["read"] == fired["slot"], \
-        f"the wider band invented a link the narrow one did not: {fired}"
+    rule = onair._ConnectEvidence
+    assert sweep["rule"] == dict(N=rule.N, SPAN=rule.SPAN, TOL_S=rule.TOL_S,
+                                PAIR_N=rule.PAIR_N, PAIR_SPAN=rule.PAIR_SPAN,
+                                PAIR_X=rule.PAIR_X, LEVEL_X=onair.ANSWER_CODEWORD_X)
+    assert sweep["population"] == {"recordings": 1012, "windows": 32239}
+    assert len(sweep["candidates"]) == sweep["recordings_with_two_or_more"] == 221
+    assert all(max(len(c[b]) for b in ("slot", "read")) >= 2
+               for c in sweep["candidates"])
+    for band, tail, raw_pairs in (("slot", onair.ACQUIRE_TAIL_S, 38),
+                                  ("read", onair.ACQUIRE_READ_TAIL_S, 55)):
+        assert sweep["bands"][band]["tail_s"] == round(tail, 6)
+        rows = [(c, [(k, d, x) for k, d, _cs, _sense, x in c[band]])
+                for c in sweep["candidates"]]
+        assert sum(_closes(acc, c["windows"], gate=0) is not None
+                   for c, acc in rows) == 1
+        assert not any(_closes(acc, c["windows"], gate=onair.ANSWER_CODEWORD_X)
+                       is not None for c, acc in rows)
+        # Independent price of the superseded, level-blind 2/8 proposal.
+        assert sum(any(b[0] - a[0] < 8 and abs(b[1] - a[1]) <= .010
+                       for i, a in enumerate(acc) for b in acc[i + 1:])
+                   for _, acc in rows) == raw_pairs
 
 
 # -- a cycle we did not key still has an answer band -------------------------
@@ -306,8 +317,8 @@ def test_connect_ceiling_hush_codeword_cancels_the_hush() -> None:
     A hush that outlives the answer it was waiting for is a hush that has to be
     sat through, and `onair-0912-2329` sat through four decodable CS4s.
     """
-    grid = _grid()
-    for _ in range(onair._MasterGrid.BLIND_CYCLES + 1):
+    grid = _grid((CALLS, HUSH))
+    for _ in range(CALLS + 1):
         grid.update([], hushed=False, since_tx=0)
     assert grid.hush_left, "the grid never went quiet"
     line = grid.update([], hushed=True, since_tx=SLOT_N, answered=(3, 0.09625))
@@ -433,14 +444,14 @@ def test_a_decoded_answer_keeps_the_station_on_the_air() -> None:
     hiding it. Six cycles off the air after the peer answers is six cycles it
     answers nothing, which is how three answers came to be twenty cycles apart.
     """
-    deaf = _grid()
-    for _ in range(onair._MasterGrid.BLIND_CYCLES):
+    deaf = _grid((CALLS, HUSH))
+    for _ in range(CALLS):
         line = deaf.update([], hushed=False, since_tx=0)
-    assert deaf.hush_left == onair._MasterGrid.HUSH_CYCLES, line
+    assert deaf.hush_left == HUSH, line
     assert "OFF THE AIR" in line, line
 
-    heard = _grid()
-    for _ in range(onair._MasterGrid.BLIND_CYCLES - 1):
+    heard = _grid((CALLS, HUSH))
+    for _ in range(CALLS - 1):
         heard.update([], hushed=False, since_tx=0)
     line = heard.update([], hushed=False, since_tx=0, answered=(3, 0.098))
     assert heard.hush_left == 0, line
@@ -449,8 +460,8 @@ def test_a_decoded_answer_keeps_the_station_on_the_air() -> None:
 
     # ...and an answer arriving with the hush already running drains it, the way
     # a link coming up does. WS8EOC's first answer landed in exactly that cycle.
-    draining = _grid()
-    for _ in range(onair._MasterGrid.BLIND_CYCLES + 1):
+    draining = _grid((CALLS, HUSH))
+    for _ in range(CALLS + 1):
         draining.update([], hushed=True, since_tx=0)
     assert draining.hush_left
     line = draining.update([], hushed=True, since_tx=0, answered=(3, 0.098))
@@ -597,7 +608,8 @@ def _events_replay(gate):
             continue
         d = t0 + got[1] + (since / FS if since < 0 else 0.0)
         found.append((c, round(d * 1e3, 2), got[0]))
-        if ev.offer(c, d):
+        level = onair._candidate_excess(seg, t0 + got[1])
+        if level >= onair.ANSWER_CODEWORD_X and ev.offer(c, d, level):
             at = c
             break                       # the call is over; the link is coming up
     return ev, found, searched_in, at
@@ -605,9 +617,9 @@ def _events_replay(gate):
 
 def _closing_group(ev: onair._ConnectEvidence) -> list:
     """The offsets in ms the rule closed on, read back off the live candidates."""
-    n, tol = onair._ConnectEvidence.N, onair._ConnectEvidence.TOL_S
+    n, tol = onair._ConnectEvidence.PAIR_N, onair._ConnectEvidence.TOL_S
     live = sorted(d for _, d, w in ev.candidates
-                  if ev.searched - w < onair._ConnectEvidence.SPAN)
+                  if ev.searched - w < onair._ConnectEvidence.PAIR_SPAN)
     for i in range(len(live) - n + 1):
         if live[i + n - 1] - live[i] <= tol:
             return [round(d * 1e3, 2) for d in live[i:i + n]]
@@ -638,47 +650,35 @@ def test_connect_events_shape_lines_are_the_only_ones_here() -> None:
             f"cycle {cycle}'s shape line consumes the search anyway"
 
 
-def test_connect_events_the_old_gate_spent_six_cycles() -> None:
-    """The defect, reproduced: three windows skipped, and the link up in cycle 30.
+def test_connect_events_old_gate_delays_the_second_answer() -> None:
+    """Even with two-answer corroboration, skipping shapes delays the link.
 
-    WS8EOC was on the air from cycle 6 at a turnaround repeatable to 0.12 ms.
-    Cycles 13 and 20 hold clean reads of it and cycle 16 holds a burst; all three
-    raised a `p1reply`, all three were skipped, and the rule closed fourteen
-    searches later on a group 6.25 ms wide.
+    The old shape gate skips cycles 13 and 20's clean reads and cycle 16's
+    burst. The next agreeing pair arrives at cycles 24 and 27.
     """
     ev, found, searched_in, at = _events_replay(_raw_count_gate)
     assert not [c for c in SHAPE_ONLY if c in searched_in], \
         f"the old gate searched a shape cycle: {searched_in}"
     assert [(c, ms) for c, ms, _ in found] == \
-        [(c, ms) for c, ms in ACCEPTS if c not in SHAPE_ONLY], \
+        [(c, ms) for c, ms in ACCEPTS if c not in SHAPE_ONLY and c <= 27], \
         f"the replay does not read the call the way the arm did: {found}"
     assert {cs for _, _, cs in found} == {spec.CS_NAMES.index("SPEED-UP")}, \
         f"the accepts are not the CS4 the arm read: {found}"
-    assert at == 30, f"the arm's link came up in cycle 30, not {at}"
-    assert _closing_group(ev) == [96.25, 97.5, 102.5], _closing_group(ev)
+    assert at == 27, f"the second agreeing answer is at cycle 27, not {at}"
+    assert _closing_group(ev) == [96.25, 97.5], _closing_group(ev)
 
 
-def test_connect_events_the_new_gate_closes_six_cycles_earlier() -> None:
-    """...and with the shape lines no longer consuming it, cycle 24.
-
-    The two reads the old gate skipped are the tightest the call holds: 95.00 and
-    96.25 ms against cycle 24's 97.50, a group 2.5 ms wide where the old gate
-    needed 6.25 and four more cycles of calling to find it.
-    """
+def test_connect_events_shape_search_closes_on_the_second_answer() -> None:
+    """The 1.34x cycle 6 accept cannot support a pair; cycles 13 and 20 can."""
     ev, found, searched_in, at = _events_replay(_decoded_gate)
-    assert set(SHAPE_ONLY) <= set(searched_in), \
-        f"a shape cycle was skipped anyway: {searched_in}"
+    assert {c for c in SHAPE_ONLY if c <= 20} <= set(searched_in)
     assert searched_in == sorted(c for c in
                                  {c for c, _ in ACCEPTS} | set(SHAPE_ONLY)
-                                 if c <= 24), \
-        f"the new gate did not search the call as it ran: {searched_in}"
-    assert [(c, ms) for c, ms, _ in found] == \
-        [(c, ms) for c, ms in ACCEPTS if c <= 24], \
-        f"the searched shape cycles do not read what the sweep found: {found}"
-    assert at == 24, f"the call closed in cycle {at}, not 24"
-    group = _closing_group(ev)
-    assert group == [95.0, 96.25, 97.5], group
-    assert group[-1] - group[0] <= 2.5, group
+                                 if c <= 20)
+    assert [(c, ms) for c, ms, _ in found] == [
+        (c, ms) for c, ms in ACCEPTS if c <= 20]
+    assert at == 20
+    assert _closing_group(ev) == [95.0, 96.25]
 
 
 def test_connect_events_a_read_word_still_consumes_the_search() -> None:
@@ -709,7 +709,7 @@ def test_connect_events_a_read_word_still_consumes_the_search() -> None:
 
 
 def test_connect_events_cost_no_extra_false_link() -> None:
-    """The negative control: searching every window buys no phantom station.
+    """Historical three-answer sweep: searching every window added no false link.
 
     `connect-events-negatives.json` is every zero-error alignment in every window
     of the same population `connect-ceiling-negatives.json` was priced on -- 1012
@@ -723,10 +723,8 @@ def test_connect_events_cost_no_extra_false_link() -> None:
     covers both, and it fires on six of these recordings.
     """
     sweep = json.loads(_fixture(FIXTURES / "connect-events-negatives.json").read_text())
-    assert sweep["rule"] == {"N": onair._ConnectEvidence.N,
-                             "SPAN": onair._ConnectEvidence.SPAN,
-                             "TOL_S": onair._ConnectEvidence.TOL_S}, \
-        f"the rule moved since the sweep was taken: {sweep['rule']}"
+    # This all-alignments snapshot retains the historical three-answer rule.
+    assert sweep["rule"] == {"N": 3, "SPAN": 12, "TOL_S": 0.010}
     assert sweep["tail_s"] == round(onair.ACQUIRE_READ_TAIL_S, 6), \
         "the sweep was taken over a band the search no longer reads"
 
@@ -735,12 +733,17 @@ def test_connect_events_cost_no_extra_false_link() -> None:
         one["bands"]["read"]["accepts"], \
         "the two sweeps did not see the same accepting windows"
     assert sweep["rules"]["first/tol10"]["fires"] == \
-        one["bands"]["read"]["fires"] == 1, sweep["rules"]
+        one["bands"]["read"]["ungated_fires"] == 1, sweep["rules"]
     assert sweep["rules"]["best/tol10"]["on"] == \
         sweep["rules"]["first/tol10"]["on"], \
         f"taking every accept in a window invented a link: {sweep['rules']}"
     assert sweep["rules"]["best/tol15"]["fires"] == 6 > \
         sweep["rules"]["best/tol10"]["fires"], sweep["rules"]
+    # Price the current one-accept-per-search rule on the complete population,
+    # in addition to retaining the historical all-alignments comparison above.
+    assert not any(_closes([(k, d, x) for k, d, _cs, _sense, x in c["read"]],
+                           c["windows"], gate=onair.ANSWER_CODEWORD_X) is not None
+                   for c in one["candidates"])
 
 
 if __name__ == "__main__":

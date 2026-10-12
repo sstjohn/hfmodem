@@ -25,6 +25,7 @@ import pytest
 from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.evidence import require_input
 
 _ROOT = Path(__file__).resolve().parents[5]
 _TOOLS = _ROOT / "tools"
@@ -92,13 +93,13 @@ def test_the_connect_tool_unkeys_on_termination_signals(monkeypatch):
     assert panics == ["SIGTERM", "SIGHUP", "SIGINT"]
 
 
-def test_transmitting_tools_require_an_explicit_arm():
-    """Every tool that can key must not do so by default."""
-    for name in ("kestrel_connect.py", "vara_rig_bridge.py", "onair_session.py",
-                 "ptt_tail_check.py"):
-        text = (_TOOLS / name).read_text()
-        assert '"--arm"' in text, f"{name} has no --arm gate"
-        assert 'action="store_true"' in text, f"{name}'s --arm is not opt-in"
+@pytest.mark.parametrize("name", ["kestrel_connect.py", "vara_rig_bridge.py",
+                                 "onair_session.py", "ptt_tail_check.py"])
+def test_transmitting_tools_require_an_explicit_arm(name):
+    """Every available tool that can key must not do so by default."""
+    text = require_input(_TOOLS / name).read_text()
+    assert '"--arm"' in text, f"{name} has no --arm gate"
+    assert 'action="store_true"' in text, f"{name}'s --arm is not opt-in"
 
 
 def test_the_connect_tool_offers_only_the_bandwidth_it_speaks():
@@ -320,6 +321,9 @@ def test_the_late_busy_status_reaches_the_shell(monkeypatch):
     stopped = []
 
     class Io:
+        bursts_sent = 0
+        burst_level = None
+
         def __init__(self, *_a, **_kw):
             pass
 

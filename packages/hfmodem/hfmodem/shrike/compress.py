@@ -17,8 +17,8 @@ the low byte. `REFTAB[c]` is the offset of the context tree to use after
 emitting `c`, or zero for the 112 characters that fall back to plain Huffman.
 Bits are consumed least-significant first within each byte.
 
-DECODE SIDE ONLY for the compressors: shrike transmits ASCII_8BIT
-(`spec.DataType`), so no coding tree is walked forwards here -- but a receiver
+Traffic transmits ASCII_8BIT (`spec.DataType`); `pmc` encodes the robust
+bridge callsign in PMC English. A receiver
 reads what the peer's status byte declares, and a real station declares all of
 it: the DL6MAA recording in the regression corpus carries PMC German, PMC
 English and case-swapped fields in one transfer. The supervisor layer above the
@@ -39,7 +39,10 @@ Three facts the printed skeletons do not state, each measured on that recording
     same bit stream, least significant first, and the character is 0x80 plus
     their value. Read as a character instead, every umlaut in the German text
     opens a desynchronised stretch that runs until the tree walk happens to
-    realign.
+    realign. That recording is PACTOR-3, and PACTOR-3 is the only level SCS's
+    monitor reads the escape on: below it, symbols 0x0E..0x17 carry the
+    umlauts (`_UMLAUTS`), which is why the German context trees give 0x0F,
+    0x10 and 0x17 codes as short as five bits.
   * THE HIGH HALF IS CODEPAGE 437 -- the PTC's own terminal charset. "verf" +
     0x81 + "gbar", 0x94 in "m*glich", 0x84 in "sch*dliche", byte for byte.
     `decompress` returns the 8-bit stream; render it with `.decode("cp437")`.
@@ -52,6 +55,8 @@ opens a supervisor block. The SCS reference decoder also expands raw 0x1D runs
 in uncompressed P3 fields (2026-09-20 saved mail transfers); `transparent` quotes all three.
 """
 from __future__ import annotations
+
+from functools import lru_cache
 
 from . import spec
 
@@ -69,8 +74,10 @@ SB = 0x1C
 Systemebene umlenkt". The byte after it is the supervisor function code."""
 
 SIC_CONTROL = 0x60
-"""SIC `a`..<DEL> minus the control character it carries, 0x01 to 0x1F --
-"ermoeglicht volle Datentransparenz", and the only transparency PACTOR-1 has."""
+"""Any SIC from 0x60 up, less this, is the character it carries: `a`..<DEL>
+give 0x01 to 0x1F, "ermoeglicht volle Datentransparenz", and the only
+transparency PACTOR-1 has. SCS's monitor subtracts without bounds, so 0x60
+gives 0x00 and 0x80..0xFF give 0x20..0x9F; a SIC below 0x60 opens a block."""
 
 SI_END = 0x20
 """<SPACE> closes a supervisor block that carries parameters rather than a
@@ -87,8 +94,8 @@ def transparent(data: bytes) -> bytes:
     MEASURED against SCS's own monitor, 2026-09-01, at 200 Bd: the field
     `41 1c 7e 20 42 1c 7c 20 43 ...` reads back `A`, 0x1E, <SPACE>, `B`, 0x1C,
     <SPACE>, `C` -- so the SIC carries the character on its own and the space
-    after it is ordinary text, not a terminator. A block whose SIC is outside
-    `a`..<DEL> IS terminated by a space and yields nothing: `1c 1d 1e 1f 20`
+    after it is ordinary text, not a terminator. A block whose SIC is below
+    0x60 IS terminated by a space and yields nothing: `1c 1d 1e 1f 20`
     inside a run of 0x00-0xFF took all five bytes off the stream. Both rules
     hold across a packet boundary -- `1c` ending one field and `7e` opening the
     next still delivered one 0x1E."""
@@ -99,6 +106,24 @@ def transparent(data: bytes) -> bytes:
         else:
             out.append(byte)
     return bytes(out)
+
+
+def supervisor_block(text: str) -> bytes:
+    """`text`, a function code and its parameters (`A 3`), as the block that
+    carries them: SB, the code, the parameters, <SPACE>.
+
+    Not through `transparent`, which is the whole point: this is the channel
+    the escape borrows. The parameters may not hold the <SPACE> that ends them.
+    A code from 0x60 up is a transparency pair on the peer's side, not a block:
+    `1c 62` delivers 0x02 and the rest arrives as text."""
+    code, params = text[:1], text[1:].lstrip(" ")
+    if not 0x21 <= ord(code or " ") < SIC_CONTROL:
+        raise ValueError(f"{code!r} is not a function code: one printable "
+                         f"character from `!` to `_`")
+    if not all(0x21 <= ord(c) <= 0x7E for c in params):
+        raise ValueError(f"parameters {params!r} must be printable, with no "
+                         f"<SPACE> -- it ends the block")
+    return bytes((SB,)) + (code + params).encode("ascii") + bytes((SI_END,))
 
 
 def bit_stream(data_type: int) -> bool:
@@ -137,6 +162,9 @@ class Supervisor:
 
     def __init__(self):
         self._state = _TEXT
+        self._block = bytearray()
+        self.blocks: list[tuple[str, bytes]] = []
+        """Function blocks read and not yet taken: code, parameters."""
 
     def feed(self, chars: bytes) -> bytes:
         out = bytearray()
@@ -144,14 +172,18 @@ class Supervisor:
             if c == spec.IDLE:
                 continue
             if self._state == _SIC:
-                if SIC_CONTROL < c <= SIC_CONTROL + 0x1F:
+                if c >= SIC_CONTROL:
                     out.append(c - SIC_CONTROL)
                     self._state = _TEXT
                 else:
+                    self._block[:] = bytes((c,))
                     self._state = _PARAMETERS
             elif self._state == _PARAMETERS:
                 if c == SI_END:
+                    self.blocks.append((chr(self._block[0]), bytes(self._block[1:])))
                     self._state = _TEXT
+                else:
+                    self._block.append(c)
             elif c == SB:
                 self._state = _SIC
             else:
@@ -198,6 +230,12 @@ class Decoder:
     reserved value passes through untouched. A pure idle fill, what an ISS with an empty buffer
     transmits, decodes to b"".
 
+    The protocol decides three things, in SCS's monitor's order after the tree
+    walk and the case swap: the 0x7F escape is PACTOR-3's, the umlaut symbols
+    are every other level's, and PACTOR-1 has no runs at all. A field fed
+    without one is read at the protocol of the field before it -- PACTOR-3 on
+    a fresh decoder.
+
     What comes out is still the wire's CHARACTER stream, not the host's bytes:
     `Supervisor` is the layer above this one and the peer's 0x1C blocks are
     still in here.
@@ -205,32 +243,81 @@ class Decoder:
 
     def __init__(self):
         self._pending: list[int] = []
+        self.protocol = spec.Protocol.PACTOR3
 
-    def feed(self, data: bytes, data_type: int) -> bytes:
+    def feed(self, data: bytes, data_type: int,
+             protocol: str | None = None) -> bytes:
+        if protocol is not None:
+            self.protocol = spec.Protocol(protocol)
+        p3 = self.protocol is spec.Protocol.PACTOR3
         part = _PARTS.get(data_type)
         if data_type == spec.DataType.ASCII_8BIT:
-            # The SCS reference decoder expands 1D FF 5C to 92 FF bytes in a type-0 P3 field.
-            # Preserve a partial run across packets, just as for coded modes.
-            symbols = self._pending + [s for s in data if s != spec.IDLE]
-            expanded, self._pending = _expand_runs(symbols)
-            return bytes(expanded)
-        if part is None:
+            symbols = bytes(s for s in data if s != spec.IDLE)
+        elif part is None:
             self._pending.clear()
             return data
-        pmc, english, swapped = part
-        symbols = self._pending + [s for s in _symbols(data, pmc, english)
-                                   if s != spec.IDLE]
-        expanded, self._pending = _expand_runs(symbols)
-        out = bytes(expanded)
-        return out.translate(_SWAP) if swapped else out
+        else:
+            pmc, english, swapped = part
+            symbols = bytes(s for s in _symbols(data, pmc, english, p3)
+                            if s != spec.IDLE)
+            if swapped:
+                symbols = symbols.translate(_SWAP)
+            if not p3:
+                symbols = symbols.translate(_UMLAUTS)
+        if self.protocol is spec.Protocol.PACTOR1:
+            return symbols
+        expanded, self._pending = _expand_runs(self._pending + list(symbols))
+        return bytes(expanded)
 
 
-def decompress(data: bytes, data_type: int) -> bytes:
+def decompress(data: bytes, data_type: int, protocol: str | None = None) -> bytes:
     """One field on its own; a stream of them wants a `Decoder`."""
-    return Decoder().feed(data, data_type)
+    return Decoder().feed(data, data_type, protocol)
 
 
-def _symbols(data: bytes, pmc: bool, english: bool):
+@lru_cache(maxsize=33)
+def _codes(table_offset: int) -> dict[int, tuple[int, ...]]:
+    """Invert one of the published decoding trees."""
+    codes = {}
+
+    def walk(offset, path):
+        for bit in (0, 1):
+            entry = HUFTAB[(table_offset + offset + 2 * bit) >> 1]
+            if entry > 767:
+                codes[entry & 255] = path + (bit,)
+            else:
+                walk(entry, path + (bit,))
+
+    walk(0, ())
+    return codes
+
+
+def pmc(text: str, *, field_bytes: int | None = None) -> bytes:
+    """Encode an ASCII callsign line as type-6 PMC English.
+
+    Each field starts with fresh context and an IDLE symbol, as measured on
+    K4MCK's P2 announcement. Finish a partial byte with the next IDLE code;
+    `field_bytes` continues that IDLE bitstream to the field boundary. This
+    intentionally encodes ASCII text only, not arbitrary binary host data.
+    """
+    chars = transparent(text.encode("ascii"))
+    bits, context = [], 0
+    for symbol in bytes((spec.IDLE,)) + chars:
+        bits.extend(_codes(context)[symbol])
+        ref = REFTAB[symbol]
+        context = ref + ENGLISH_BIAS if ref else 0
+    size = (len(bits)+7)//8 if field_bytes is None else field_bytes
+    if size*8 < len(bits):
+        raise ValueError("PMC text exceeds field capacity")
+    while len(bits) < size*8:
+        bits.extend(_codes(context)[spec.IDLE])
+        context = 0
+    bits = bits[:size*8]
+    return bytes(sum(b << j for j, b in enumerate(bits[i:i + 8]))
+                 for i in range(0, len(bits), 8))
+
+
+def _symbols(data: bytes, pmc: bool, english: bool, escape: bool):
     """Walk the coding trees over `data`, yielding 8-bit characters and IDLE."""
     bit = _bits(data)
     table_offset = 0
@@ -252,7 +339,7 @@ def _symbols(data: bytes, pmc: bool, english: bool):
                 context = REFTAB[symbol]
                 table_offset = (context + ENGLISH_BIAS
                                 if context and english else context)
-            if symbol == ESCAPE:
+            if escape and symbol == ESCAPE:
                 symbol = 0x80
                 for i in range(7):
                     symbol |= next(bit) << i
@@ -296,6 +383,11 @@ _SWAP = bytes(b ^ 0x20 if 65 <= b <= 90 or 97 <= b <= 122 else b
               for b in range(256))
 """ASCII case swap as a translation table: the swapped modes code text in the
 opposite case (upper-case-heavy traffic compresses better inverted)."""
+
+_UMLAUTS = bytes.maketrans(bytes((0x0E, 0x0F, 0x10, 0x14, 0x15, 0x16, 0x17)),
+                           "äöüÄÖÜß".encode("cp437"))
+"""Below PACTOR-3 the coders carry German umlauts on these control symbols,
+and SCS's monitor turns them into codepage 437."""
 
 
 HUFTAB = (

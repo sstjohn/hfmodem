@@ -518,7 +518,7 @@ class _FakeSD:
     """Enough of sounddevice to build the transport. No device is opened and
     nothing is played, which is what makes this safe to run at the station."""
 
-    def query_devices(self, name): return {"max_output_channels": 2}
+    def query_devices(self, name, kind=None): return {"max_output_channels": 2}
     def InputStream(self, **kw): return _FakeStream(**kw)
     def OutputStream(self, **kw): return _FakeOutput()
 

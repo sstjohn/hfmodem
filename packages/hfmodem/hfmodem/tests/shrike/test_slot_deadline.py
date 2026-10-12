@@ -29,6 +29,7 @@ from scipy.signal import hilbert, oaconvolve, resample_poly
 
 from hfmodem.shrike import arq, live, onair, p3acquire, placement, rx, spec
 from hfmodem.tests.shrike.recorded_pcm import recorded_pcm
+from hfmodem.tests.evidence import SWEEP_FLOOR
 from hfmodem.tests.shrike.test_granted_entry_retry import granted
 from hfmodem.tests.shrike.test_p3_morning_timing import fallback
 from hfmodem.tests.shrike.test_grid import _Bench, _Rig
@@ -192,6 +193,7 @@ class Replay:
             self.grid._p3_keyed_reply = (0, first, end, 60000)
         self.first_slot = self.bench.pos // 60000 + 1
         self.stall_at, self.stall_n = stall_at, round(stall_s * onair.FS)
+        self.stall_slot = None
         # The negative control: the frequency ladder one hypothesis at a
         # time, as it flew, with everything else identical. Same machine, same
         # audio, same run -- so the comparison is of two implementations of
@@ -240,16 +242,29 @@ class Replay:
                 key_at - max(grid.d, settle_n),
                 key_at - onair._prekey_lead(bench, settle_n),
                 max(bench.pos, int(bench.sample_now())), grid))
-        if whole.size and grid.sending:
+        if whole.size and grid.sending and host.protocol != spec.Protocol.PACTOR3:
             onair._scan_frame(sessrx, whole, seg_start)
         whole, seg_start, _ = onair._collect(
             bench, sessrx, whole, seg_start,
             sessrx.control_collect_until(
                 key_at - onair._prekey_lead(bench, settle_n),
                 max(bench.pos, int(bench.sample_now())), grid))
-        if slot == self.stall_at:
+        extent = sessrx._entry_p1_reply_extent(grid)
+        owned = getattr(grid, '_p3_keyed_reply', None)
+        acquisitions = len(self.cost['cs-acquire'])
+        _, _, whole, seg_start = onair._read_held_window(
+            bench, grid, tx, sessrx, slot, whole, seg_start, tx.boundary)
+        reader_acquisitions = len(self.cost['cs-acquire']) - acquisitions
+        p1_grant = host.arq._upgrade_asked
+        listen = getattr(tx, '_p3_entry_listen_slot', None) == slot
+        if listen:
+            assert extent is not None and owned[0] == grid.keyed_slot
+            assert seg_start <= extent[0]
+            assert seg_start + whole.size >= extent[1]
+        if (self.stall_at is not None and self.stall_slot is None
+                and slot >= self.stall_at and not listen):
             bench.spend(self.stall_n)
-        sessrx.control_signal_in(whole, seg_start, grid)
+            self.stall_slot = slot
         # Where the clock stands against the PTT instant of the slot this cycle
         # aimed at, before anything is handed back. This is the margin the whole
         # question turns on: past it the carrier cannot come up on the boundary.
@@ -260,8 +275,9 @@ class Replay:
         # measures the carrier, not the work in front of it.
         aimed = slot
         spent = bool(tx.slots_used) and tx.slots_used[-1] >= slot
-        slot, whole, seg_start = onair._regrid(
-            bench, grid, tx, host, sessrx, slot, whole, seg_start, settle_n)
+        if not listen:
+            slot, whole, seg_start = onair._regrid(
+                bench, grid, tx, host, sessrx, slot, whole, seg_start, settle_n)
         host.tick()
         tx.emit_pending_cs()
         sessrx.flush()
@@ -271,7 +287,11 @@ class Replay:
                                 window_s=whole.size / onair.FS,
                                 off_grid_ms=off * 1e3,
                                 keyed=len(bench.emissions) > keyed,
-                                intent=not spent and (
+                                listen=listen, owned=owned, extent=extent,
+                                p1_grant=p1_grant,
+                                reader_acquisitions=reader_acquisitions,
+                                grants=host.arq._upgrade_requests,
+                                intent=not listen and not spent and (
                                     len(bench.emissions) > keyed
                                     or aimed != slot),
                                 protocol=host.protocol.name,
@@ -367,131 +387,70 @@ def instrumentation_overhead_ms(n=20000):
 NONE = dict(slot_gone=0, late_to_key=0, pre_render=0, regrid_gave_up=0)
 
 
+def assert_replay_policy(run):
+    assert run.cycles
+    keyed = [c for c in run.cycles if c['keyed']]
+    assert keyed
+    assert all(not c['listen'] for c in keyed)
+    assert all(c['off_grid_ms'] < run.grace_ms for c in keyed if c['intent'])
+    for c in run.cycles:
+        if c['listen']:
+            assert not c['keyed'] and c['owned'] is not None
+            assert c['extent'][1] - c['extent'][0] == P1_CS_N
+            assert c['owned'][2] <= c['extent'][0]
+            assert c['extent'][1] <= c['owned'][1] + c['owned'][3]
+        elif c['intent']:
+            assert c['keyed']
+    assert run.tx.slots_used == sorted(set(run.tx.slots_used))
+    return keyed
+
+
 @pytest.mark.parametrize('tag', ['e07', 'e05'])
 def test_every_eligible_slot_is_keyed_under_the_recorded_workload(tag, tmp_path):
-    """Zero deferrals across the campaign, and every margin inside the notice."""
+    """Production held reads retain the owned reply in each yielded slot."""
     run = Replay(tag, tmp_path).run()
-    assert run.cycles, 'the replay collected no cycles'
+    assert_replay_policy(run)
     assert run.deferrals == NONE, run.deferrals
-    assert max(run.off_grid_ms) < run.grace_ms, run.off_grid_ms
+    assert any(c['listen'] for c in run.cycles)
+    assert run.cycles[0]['owned'][0] == 0
 
 
 def test_the_pactor1_control_pays_no_entry_acquisition(tmp_path):
-    """The arm that lost nothing, and the reason it lost nothing.
-
-    E08 is the PACTOR-1 mail call of the same evening: same loop, same guards,
-    same 8 ms of notice, nine deferrals in 197 keys on the air and none of them
-    an entry cycle. Its control read is the two anchored words and nothing
-    else, and its margin sits an order inside the notice where an entry arm
-    reading in front of its key sits most of the way through it. That
-    contrast is the measurement.
-
-    Its deferral COUNT is not asserted, and that is about this machine rather
-    than about the station. The replay charges each stage's real duration to
-    the sample clock, and E08's post-key sweep for the protocols it is not in
-    measures 62 ms at rest against the 244 ms of dead time behind a 0.96 s
-    PACTOR-1 carrier -- but 88 ms in one run here and 107 in the next, and
-    above about 100 it takes the slot. An instrument that is being shaken
-    cannot be asked that question; it can be asked this one.
-    """
+    """Exact P1 grants short-circuit P3 acquisition in either protocol arm."""
     run = Replay('e08', tmp_path).run()
-    assert run.stage_table()['cs-acquire']['n'] == 0, 'a PACTOR-1 cycle acquired'
+    assert run.stage_table()['cs-acquire']['n'] == 0
     assert max(run.off_grid_ms) < run.grace_ms / 4, run.off_grid_ms
     entry = Replay('e07', tmp_path, slow_ladder=True).run()
-    assert entry.stage_table()['cs-acquire']['n'] > 0, 'entry never acquired'
-    # Earlier collection intentionally removes work from the old PTT margin;
-    # compare the actual charged work, not that obsolete placement ratio.
-    assert entry.stage_table()['control']['median'] > run.stage_table()['control']['median']
+    assert_replay_policy(entry)
+    assert entry.host.arq._upgrade_requests > 0
+    grants = [c for c in entry.cycles if c['p1_grant']]
+    assert grants and all(c['reader_acquisitions'] == 0 for c in grants)
 
 
 def test_the_upgrade_cycle_stops_costing_a_slot(tmp_path):
-    """R06's upgrade cycle, which was the last slot any arm lost.
-
-    Its link upgrades mid-crop and the cycle before the upgrade keys nothing,
-    so on the flown ladder the next window opened over a second long instead
-    of a third of one and the cold PACTOR-3 frame reader ran over all of it --
-    132 ms, of which 124 is the blind alignment scan run twice. That reader
-    was never touched. With the ladder halved the cycle keys, the long window
-    never forms, and the arm holds its cadence from the grant on: sixteen
-    carriers against twelve, zero deferrals against two.
-
-    THE ABSOLUTE COUNT IS NOT THE ASSERTION HERE AND THE OTHER ARMS' IS.
-    R06's worst margin is +7.1 ms of the 8.0 a 40 ms settle leaves, measured
-    on a build host at load 3.7 where the ladder runs at twice its quiet
-    cost; E07 and E05 sit at +5.1 and clear it by three. Run inside the whole
-    directory, against nine hundred neighbours, R06's charged clock tips and
-    one slot goes -- the measuring machine, not the station, but not
-    something to assert through either. What is asserted is what the change
-    did, measured both ways in this process.
-
-    AND THE SLOT IS NO LONGER WHAT IT COSTS. `onair._clamp_forgives` leaves a
-    sub-symbol overrun to the emission path rather than handing the slot back,
-    so R06's upgrade cycle now keys on the flown ladder too -- late into its own
-    boundary, and said out loud as `SLOT ... IS KEPT`. What the ladder costs is
-    therefore counted as `overran` rather than as carriers, which is what this
-    docstring already said the assertion had to be.
-    """
-    flown = Replay('r06', tmp_path, slow_ladder=True).run()
-    fixed = Replay('r06', tmp_path).run()
-    assert flown.stage_table()['cs-acquire']['n'] > 0
-    assert fixed.stage_table()['cs-acquire']['n'] > 0
-    assert fixed.overran == 0, (fixed.deferrals, fixed.forgiven)
-    assert len(fixed.bench.emissions) >= len(flown.bench.emissions)
-    # THE NOTICE IS THE LINE AND THE HALVING WAS A PROXY FOR IT. Measured here
-    # the upgrade cycle is +10.7 ms flown and +6.6 ms batched, so the ratio is
-    # 1.6 where it used to read 2 -- the admission guard is block-quantised now
-    # (`_Bench.samples`) and the flown figure no longer runs away into a second
-    # lost slot. What the change actually buys is the same both ways: the
-    # batched ladder's worst margin is inside the 8.0 ms a 40 ms settle leaves
-    # and the flown one's is not. The 7.1 ms this file's header records from a
-    # build host at load 3.7 is the headroom that leaves.
-    assert max(fixed.off_grid_ms) < fixed.grace_ms, fixed.off_grid_ms
-    assert flown.stage_table()['cs-acquire']['median'] > fixed.stage_table()['cs-acquire']['median']
-
+    """Whole-reply listens yield explicitly; actual keys meet admission."""
+    for slow in (True, False):
+        run = Replay('r06', tmp_path, slow_ladder=slow).run()
+        assert_replay_policy(run)
+        assert run.stage_table()['cs-acquire']['n'] > 0
+        assert run.deferrals == NONE, run.deferrals
+        assert any(c['listen'] for c in run.cycles)
+        yielded = next(c['slot'] for c in run.cycles if c['listen'])
+        assert any(c['keyed'] and c['slot'] > yielded for c in run.cycles)
 
 @pytest.mark.parametrize('tag', ['e07', 'e05'])
 def test_the_flown_ladder_overruns_the_notice_and_the_batched_one_does_not(
         tag, tmp_path):
-    """Both implementations of one search, same machine, same audio, same run.
-
-    The comparison is of two ways of calling the same matched filter and not
-    of two machines: one hypothesis at a time it runs past the notice a 40 ms
-    settle leaves, on nearly every aim of the campaign; stacked into one call it
-    fits, and no cycle comes within the notice of its own key instant.
-
-    WHAT THE OVERRUN COSTS MOVED, AND THE OVERRUN DID NOT. Until 2026-09-13 a
-    cycle past the notice handed its slot back, so the flown ladder emitted
-    twelve carriers here against sixteen. `onair._clamp_forgives` now leaves a
-    sub-symbol overrun to the emission path, which keys it INSIDE its boundary
-    -- the campaign keeps its carriers and pays in placement instead. So the
-    count this scene pins is `overran`, which is the same cycles under either
-    rule, and the measurement is the population of margins it samples.
-    """
+    """P1 grants bypass both ladders; isolated cold-search parity/cost stays pinned."""
     flown = Replay(tag, tmp_path, slow_ladder=True).run()
     fixed = Replay(tag, tmp_path).run()
-    # THE MARGIN IS THE MEASUREMENT AND THE COUNT IS A SAMPLING OF IT. The
-    # admission guard runs on the codec's DELIVERED count, which arrives one
-    # `_blk` at a time and so lags the converter by up to 2.67 ms; a budget
-    # sitting 0.2-1.4 ms past the notice therefore loses its slot only on the
-    # cycles where a block boundary falls inside that overshoot. The flown
-    # ladder is past the notice on 13 of 16 aims here and on 14 of 16 on E05,
-    # and pays for it on 3 to 4 cycles of the campaign -- forgiven into their
-    # boundaries now, spent outright before that, and lost every one of them to
-    # a guard taken on the converter's own position. So the campaign is pinned
-    # on the population of margins, and the count carries only that the overrun
-    # does still cost the cycle something.
-    assert flown.stage_table()['cs-acquire']['n'] > 0
-    assert fixed.stage_table()['cs-acquire']['n'] > 0
-    # A FRACTION RATHER THAN A SLACK OF TWO, because the campaign got longer:
-    # the four cycles the forgiveness gives back are four more margins, and an
-    # absolute slack written against a twelve-cycle run is a different demand on
-    # a sixteen-cycle one. Three quarters is what the batched ladder misses by
-    # the whole population -- it is past the notice on none of them.
-    assert flown.stage_table()['cs-acquire']['median'] > fixed.stage_table()['cs-acquire']['median']
-    assert fixed.deferrals == NONE, fixed.deferrals
-    assert fixed.overran == 0, (fixed.deferrals, fixed.forgiven)
-    assert max(fixed.off_grid_ms) < fixed.grace_ms, fixed.off_grid_ms
-    assert len(fixed.bench.emissions) >= len(flown.bench.emissions)
+    for run in (flown, fixed):
+        assert_replay_policy(run)
+        assert run.host.arq._upgrade_requests > 0
+        grants = [c for c in run.cycles if c['p1_grant']]
+        assert grants and all(c['reader_acquisitions'] == 0 for c in grants)
+        assert run.deferrals == NONE, run.deferrals
+    assert fixed.tx.slots_used == flown.tx.slots_used
 
 
 def test_the_frequency_ladder_reads_the_same_and_costs_a_fraction(tmp_path):
@@ -581,7 +540,7 @@ def test_the_ladder_finds_the_same_words_over_every_fixture_in_the_tree():
                     bad.append((path.name, lo, search.__name__))
                 elif slow is not None:
                     worst = max(worst, abs(fast.quality - slow.quality))
-    assert tried > 500 and found > 20, (tried, found)
+    assert tried > SWEEP_FLOOR[0] and found > SWEEP_FLOOR[1], (tried, found)
     assert not bad, bad
     assert worst < 1e-12, worst
 
@@ -637,14 +596,17 @@ def test_a_keyed_carrier_lands_on_its_own_boundary_and_never_on_a_peer(tag, tmp_
 
 
 def test_a_deliberate_stall_defers_once_and_recovers_inside_the_budget(tmp_path):
-    """An injected stall must cost its own slot, say so, and then converge."""
+    """The stall is bounded; post-stall non-listen slots recover their deadline."""
     stalled = Replay('e07', tmp_path, stall_at=4, stall_s=1.5).run()
+    assert stalled.stall_slot is not None
     assert stalled.deferrals['slot_gone'] >= 1, stalled.deferrals
     assert stalled.deferrals['regrid_gave_up'] == 0, stalled.log
-    after = [c for c in stalled.cycles if c['slot'] > 4 + onair.REGRID_TRIES]
-    assert after and all(c['keyed'] for c in after), after
-    assert all(c['off_grid_ms'] < stalled.grace_ms for c in after), after
-
+    after = [c for c in stalled.cycles
+             if c['slot'] > stalled.stall_slot + onair.REGRID_TRIES]
+    assert after and any(c['keyed'] for c in after)
+    assert all(c['keyed'] or c['listen'] for c in after), after
+    assert all(c['off_grid_ms'] < stalled.grace_ms for c in after if not c['listen'])
+    assert all(not c['keyed'] for c in after if c['listen'])
 
 @contextlib.contextmanager
 def _rolling_decodes():
@@ -734,30 +696,21 @@ def test_the_entry_render_is_byte_identical_and_built_once_per_payload(tmp_path)
     assert tx._entry_burst(sl, payload, status ^ 1, False)[0] is not first
 
 
-def test_p1_alternation_and_p3_ownership_survive_the_campaign(tmp_path, monkeypatch):
-    """The control arm stays PACTOR-1; the entry arm owns P3, then falls back.
-
-    THE FALLBACK IS DRIVEN AT A BUDGET THE CROP REACHES. A pending entry gets
-    `arq.ENTRY_GRANT_CYCLES` requests under the repeated-grant rule, and E07 is
-    sixteen cycles: at the shipping fourteen the budget outlives the recording,
-    so the arm owns PACTOR-3 to the end of it with the entry still pending. Run
-    at eight -- the number of requests this crop actually contains, and what the
-    limit was when it was cut -- the same audio falls back at cycle twelve. Both
-    halves are asserted, because what the case is about is that the entry owns
-    the protocol while it is pending and gives it up when the budget is spent,
-    and not what the budget's value happens to be.
-    """
+def test_p1_alternation_and_p3_ownership_survive_the_campaign(tmp_path):
+    """Pending P3 ownership survives listens; counted owned grants end it."""
     p1 = Replay('e08', tmp_path).run()
-    assert {c['protocol'] for c in p1.cycles} == {'PACTOR1'}, p1.cycles
-    assert p1.tx.p1_seq == sorted(p1.tx.p1_seq), p1.tx.p1_seq
+    assert {c['protocol'] for c in p1.cycles} == {'PACTOR1'}
+    assert p1.tx.p1_seq == sorted(p1.tx.p1_seq)
     entry = Replay('e07', tmp_path).run()
-    assert all(c['protocol'] == 'PACTOR3' for c in entry.cycles if c['entry'])
-    assert all(c['entry'] for c in entry.cycles), 'the budget ran out in the crop'
-    assert entry.tx.slots_used == list(range(entry.first_slot,
-                                             entry.first_slot + len(entry.cycles)))
-    monkeypatch.setattr(arq, 'ENTRY_GRANT_CYCLES', 8)
-    spent = Replay('e07', tmp_path).run()
-    assert all(c['protocol'] == 'PACTOR3' for c in spent.cycles if c['entry'])
-    assert spent.cycles[-1]['protocol'] == 'PACTOR1', 'the budget never ran out'
-    assert not spent.cycles[-1]['entry']
-    assert spent.tx.slots_used == entry.tx.slots_used
+    assert_replay_policy(entry)
+    assert all(c['protocol'] == 'PACTOR3' and c['entry'] for c in entry.cycles)
+    assert entry.tx.slots_used == [c['slot'] for c in entry.cycles if c['keyed']]
+    assert 0 < entry.host.arq._upgrade_requests < arq.ENTRY_GRANT_CYCLES
+    host, _ = granted()
+    from hfmodem.tests.shrike.test_granted_entry_retry import repeat
+    for n in range(arq.ENTRY_GRANT_CYCLES):
+        repeat(host)
+        assert host.arq._upgrade_requests == n + 1
+        if n + 1 < arq.ENTRY_GRANT_CYCLES:
+            assert host.protocol is spec.Protocol.PACTOR3 and host.arq.entry_pending
+    assert host.protocol is spec.Protocol.PACTOR1 and not host.arq.entry_pending

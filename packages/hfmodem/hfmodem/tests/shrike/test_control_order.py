@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hfmodem.shrike import onair, placement
+from hfmodem.shrike import arq, onair, placement
 
 RECORDS_PATH = Path(__file__).with_name('fixtures') / 'p3-accepted-control-order.json'
 RECORDS = (json.loads(RECORDS_PATH.read_text())['pairs']
@@ -26,7 +26,13 @@ def test_recorded_control_order_at_renderer(tmp_path, monkeypatch, row, elapsed)
     tx = onair.RadioTx(transmit=False, outdir=tmp_path)
     # The packet sender is the opposite endpoint. Connection origin persists
     # when ISS/IRS changes; answering=True means we accepted the original call.
-    tx.host = SimpleNamespace(arq=SimpleNamespace(answering=row['direction']=='caller'))
+    tx.host = onair.PtcHost()
+    tx.host.protocol = onair.Protocol.PACTOR3
+    tx.host.arq.role = arq.IRS
+    tx.host.arq.answering = row["direction"] == "caller"
+    tx.host.arq._enter_connected()
+    tx.host.arq._expected_seq = 1
+    tx.host.arq._rx_seen = False
     period = round((3.75 if row['long'] else 1.25)*onair.FS)
     boundary = round(row['leading_gap_ms']*onair.FS/1000)+elapsed*period
     tx.slot = 0

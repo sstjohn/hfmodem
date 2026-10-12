@@ -244,7 +244,7 @@ class Rig:
 
     def unkey(self, why: str = "") -> bool:
         """Bring the key down. No emission and no gate: a transmitter coming
-        down is not something any regulator refuses, and a check between a
+        down needs no emission-profile check, and a check between a
         caller and the key coming down is a check that can hold it up."""
         if why:
             self._log(f"unkey: {why}")

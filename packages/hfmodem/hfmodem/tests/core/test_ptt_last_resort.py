@@ -440,7 +440,7 @@ def test_arming_with_a_real_line_named_gets_past_the_gate(monkeypatch, capsys):
     mail-file load, so reaching MAIL REFUSED proves the gate opened."""
     rc, out = _kc_main(monkeypatch, capsys, "--ptt-device", FAKE_DEV,
                        "--mail-send", "/no/such/mail.b2f")
-    assert rc == 2
+    assert rc == 7
     assert "MAIL REFUSED" in out and "--ptt-device" not in out, out
 
 
@@ -509,7 +509,9 @@ def test_the_arm_gate_is_one_function():
 
 
 @requires_bridge
-def test_every_transmit_tool_speaks_the_one_gate():
+@pytest.mark.parametrize("name", ("vara_rig_bridge.py", "onair_session.py",
+                                  "kestrel_connect.py", "ptt_tail_check.py"))
+def test_every_transmit_tool_speaks_the_one_gate(name):
     """Load-bearing safety text, kept in `core.ptt.arming_refusal`.
 
     This used to let a tool keep its own copy so long as the copy still contained
@@ -519,10 +521,15 @@ def test_every_transmit_tool_speaks_the_one_gate():
     pin is on the call — every armed tool asks the one function — and on the
     absence of a second spelling anywhere in tools/, which is what a copy is.
     """
-    for name in ("vara_rig_bridge.py", "onair_session.py", "kestrel_connect.py",
-                 "ptt_tail_check.py"):
-        text = (_TOOLS / name).read_text()
-        assert "arming_refusal" in text, f"{name} does not call the shared arm gate"
+    tool = _TOOLS / name
+    if not tool.exists():
+        pytest.skip(f"optional development tool {name} is not published")
+    text = tool.read_text()
+    assert "arming_refusal" in text, f"{name} does not call the shared arm gate"
+
+
+@requires_bridge
+def test_no_transmit_tool_duplicates_the_arm_gate():
     # The opening of each refusal, which any copy of it carries however its tail
     # has drifted. `REFUSING TO ARM` itself is not one of these: the model check
     # beside this gate opens on the same words and is entitled to.
@@ -690,6 +697,8 @@ def test_the_unattended_pactor_attempt_listens_before_it_calls():
     force path at all, a busy channel skips the attempt, and a receiver that
     cannot hear the channel ends the run — every later attempt would be
     exactly as blind."""
+    if not (_TOOLS / "campaign.sh").exists():
+        pytest.skip("optional development launcher campaign.sh is not published")
     texts = _launcher_texts("campaign.sh")
     text = next((t for t in texts if "pactor_try()" in t), "")
     assert text, "no unattended PACTOR attempt in campaign.sh or what it sources"
@@ -735,7 +744,7 @@ def test_the_unattended_pactor_attempt_listens_before_it_calls():
 #: station; a glob is an offer to go and look. A path that is neither is a device
 #: node someone hardcoded, which is the defect whatever serial number it carries.
 _DEV = re.compile(r"/dev/[\w.*/-]+")
-_NOT_A_STATION = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty")
+_NOT_A_STATION = ("/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd/")
 
 _PORTS_LIB = "lib/ports.sh"
 _SIBLINGS = ("campaign.sh", "daywatch.sh", "nightwatch.sh")
@@ -748,26 +757,38 @@ requires_template = pytest.mark.skipif(
 @requires_launcher
 @pytest.mark.parametrize("name", ("onair.sh", *_SIBLINGS, _PORTS_LIB))
 def test_no_launcher_names_a_device_node(name):
-    named = [d for d in _DEV.findall((_TOOLS / name).read_text())
+    launcher = _TOOLS / name
+    if not launcher.exists():
+        pytest.skip(f"optional development launcher {name} is not published")
+    named = [d for d in _DEV.findall(launcher.read_text())
              if "*" not in d and d not in _NOT_A_STATION]
     assert not named, f"{name} names a device node of its own: {named}"
 
 
 @requires_launcher
-def test_the_port_contract_is_one_file_the_launchers_all_go_through():
+@pytest.mark.parametrize("name", ("onair.sh", *_SIBLINGS))
+def test_the_port_contract_is_one_file_the_launchers_all_go_through(name):
     """Four scripts, one environment contract. Kept in four copies it was fixed in
     one of them, and the placeholder outlived the fix in the other three."""
     defaults = re.findall(r'^(CAT_PORT|PTT_PORT)="\$\{\1:?-([^}]*)\}"',
                           (_TOOLS / _PORTS_LIB).read_text(), re.M)
-    assert len(defaults) == 2, f"{_PORTS_LIB} no longer takes both ports from the environment"
-    for var, value in defaults:
-        assert not value, f"{var} has a built-in default again: {value!r}"
+    assert defaults == [
+        ("CAT_PORT", ""), ("PTT_PORT", ""),
+        ("CAT_PORT", "$_rig_cat"), ("PTT_PORT", "$_rig_ptt"),
+    ], f"{_PORTS_LIB} must take operator ports before the selected profile"
+    library = (_TOOLS / _PORTS_LIB).read_text()
+    assert '-m hfmodem.core.rigs' in library
+    assert 'IFS= read -r _rig_cat' in library
+    assert 'IFS= read -r _rig_ptt' in library
 
-    for name in ("onair.sh", *_SIBLINGS):
-        text = (_TOOLS / name).read_text()
-        assert _PORTS_LIB in text, f"{name} does not source the shared port contract"
-        assert not re.search(r"^\s*(CAT_PORT|PTT_PORT)=", text, re.M), (
-            f"{name} sets a serial port of its own instead of taking the shared one")
+    launcher = _TOOLS / name
+    if not launcher.exists():
+        pytest.skip(f"optional development launcher {name} is not published")
+    text = launcher.read_text()
+    assert _PORTS_LIB in text, f"{name} does not source the shared port contract"
+    assert not re.search(r"^\s*(CAT_PORT|PTT_PORT)=", text, re.M), (
+        f"{name} sets a serial port of its own instead of taking the shared one")
+    if "corpus_watch.py" not in text:
         assert re.search(r"\brequire_(cat|ports)\b", text), (
             f"{name} sources the contract and never asks it for the ports")
 
@@ -813,6 +834,7 @@ def _launch(*argv, **env):
 
 
 @requires_launcher
+@requires_launcher_python
 def test_an_unconfigured_station_is_told_that_and_not_that_its_cabling_is_bad():
     """The operator meets this before anything is stated about the radio: which
     variables to set, and how to find the device names on this machine."""

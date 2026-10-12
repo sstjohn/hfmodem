@@ -179,7 +179,7 @@ peak envelope power differ, and a meter's response affects its displayed value.
 Audio drive is a peak sample level, not watts. Record measured average power or
 PEP with the meter and its mode when characterizing a transmission.
 
-The console runs an operator-controlled test without a regulatory policy gate.
+The console runs an operator-controlled test without an emission-profile gate.
 It does not require a licence class or power declaration. `--power WATTS` is
 optional metadata and does not set rig power. The console respects the transmit
 enable in `HFMODEM_STATION` or repository `station.toml`, when present, and

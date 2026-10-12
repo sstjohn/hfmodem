@@ -33,9 +33,12 @@ across the band, not the level of the burst, was moving the argmax.
 """
 from __future__ import annotations
 
-import numpy as np
+from pathlib import Path
 
-from hfmodem.tests.kestrel import corpora
+import numpy as np
+import pytest
+
+from hfmodem.tests.kestrel import corpora, greetings_evidence
 from hfmodem.kestrel.rx import varahf2300 as RX
 from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_mfsk as MK
@@ -61,15 +64,17 @@ _FADED_START = 3254580
 FADED_GREETING = (b"RMS Trimode 1.4.2.0 Wadsworth IL - NVIS inverted V at 25 feet "
                   b"with 50 watts\r\nW9SSJ has 12")
 
-# The same banner two days earlier, whole, over the three overs of the 2026-08-16
-# session — the one session in the logs kept here whose overs were read as they
-# arrived. Its first over carries the payload 2026-08-19 died on.
-_OVERS_START = (1987362, 2298340, 2608992)
+# The flat-band control is K0SI's three overs on 2026-09-18. Coordinates,
+# source recordings and hashes for every new cut are in provenance.json.
+_FIXTURES = Path(__file__).with_name("fixtures") / "greetings-a2-0930"
+_FLAT_OVERS = tuple(_FIXTURES / f"k0si-flat-over-{i}.flac" for i in (1, 2, 3))
+_TWO_OVERS = tuple(_FIXTURES / f"kb3ac-over-{i}.flac" for i in (1, 2))
 OVERS_GREETING = (
-    FADED_GREETING,
-    b"0 daily minutes remaining with KC9GHZ (EN62BK)\r{SFI = 129 On 2026-08-17 "
-    b"00:00 UTC}\r\n[WL2K",
-    b"-5.0-B2FWIHJM$]\r;PQ: 99623086\rCMS via KC9GHZ >\r",
+    b"RMS Trimode 1.4.3.0 Welcome to BCARES TriMode in Columbia MO\r\n"
+    b"W9SSJ has 115 daily minutes",
+    b" remaining with K0SI (EM39UA)\r{SFI = 97 On 2026-09-18 15:00 UTC}\r\n"
+    b"[WL2K-5.0-B2FWIHJM$]\r;P",
+    b"Q: 66946910\rCMS via K0SI >\r",
 )
 
 # Where the replay starts: inside the tail of our own session-confirm mute, which
@@ -221,7 +226,8 @@ def test_the_greeting_is_answered_once_and_the_rest_of_the_session_is_silent():
     assert _GREETING[1] <= io.keyed[0] <= _GREETING[1] + _FEED
 
 
-@corpora.requires_onair_faded_greeting
+@pytest.mark.skip(reason="Needs a BW2300 KC9GHZ night flight on 40 m, 7103.5 kHz, "
+                         "with a selective fade: hard CRC fails, equalised CRC passes")
 def test_a_greeting_arriving_through_a_selective_fade_is_read_too():
     """The 2026-08-19 session, replayed whole: 127 s that hold our own eight
     connect-requests, our own link-setup back through the rig monitor at 61.3 s,
@@ -252,7 +258,8 @@ def test_a_greeting_arriving_through_a_selective_fade_is_read_too():
         "our own link-setup at 61.3 s was not recognised as ours", io.msgs)
 
 
-@corpora.requires_onair_faded_greeting
+@pytest.mark.skip(reason="Needs a BW2300 KC9GHZ night flight on 40 m, 7103.5 kHz, "
+                         "with a selective fade: hard CRC fails, equalised CRC passes")
 def test_the_fade_and_not_the_level_is_what_stopped_that_greeting_decoding():
     """Why it failed, as the two numbers that differ.
 
@@ -287,27 +294,22 @@ def test_the_fade_and_not_the_level_is_what_stopped_that_greeting_decoding():
     assert bytes(fr.payload).startswith(FADED_GREETING)
 
 
-@corpora.requires_onair_gateway_overs
+@corpora._requires(*_FLAT_OVERS, what="K0SI flat-band greeting fixtures")
 def test_the_overs_that_already_decoded_still_do_and_score_higher():
-    """The control the fade is read against: the 2026-08-16 session, whose three
-    overs were read as they arrived at 22, 23 and 23 of 24 reference columns.
+    """Three K0SI overs on a flat band still decode and lose no guard hits.
 
-    Its band is flat — per-bin medians within 1.7x, against 3.9x on 2026-08-19 —
-    which is the whole of the difference between a frame that decoded and a frame
-    that did not, since the peer, the channel, the waveform and this receiver are
-    the same on both nights. Equalising a flat band changes little and takes
-    nothing away: every one of the three still decodes, and each scores at least as
-    well as it did unequalised.
+    Median spreads are 1.60/1.69/1.58; hard-to-equalised scores are
+    24→24, 22→23 and 24→24. This is a different channel from the faded case.
     """
-    x = corpora.wav_mono(corpora.ONAIR_GATEWAY_OVERS) / 32768.0
     r = RX.RECORDS[RX.BASE_LEVEL]
-    for at, said in zip(_OVERS_START, OVERS_GREETING):
-        frame = x[at:at + RX._BASE_NCOLS * r.dw50]
+    for path, said, expected in zip(_FLAT_OVERS, OVERS_GREETING,
+                                   ((24, 24), (22, 23), (24, 24))):
+        frame = corpora.wav_mono(path) / 32768.0
         raw = np.abs(np.fft.rfft(frame.reshape(RX._BASE_NCOLS, r.dw50), axis=1))[
             :, r.first_bin:r.first_bin + r.span]
         med = np.median(raw, axis=0)
         assert med.max() / med.min() < 2.0, (
-            f"the over at {at / FS:.3f} s now reads {med.max() / med.min():.2f}x "
+            f"{path.name} now reads {med.max() / med.min():.2f}x "
             f"across the band — it is no longer the flat-band control")
 
         def score(mag):
@@ -317,11 +319,13 @@ def test_the_overs_that_already_decoded_still_do_and_score_higher():
             return int(hits), RX.check_frame(
                 RX.onair_to_frame(onair, RX.BASE_LEVEL), RX.BASE_LEVEL)
 
-        was, _ = score(raw)
+        was, hard = score(raw)
+        assert hard.crc_ok, "the flat-band control must already decode hard"
         hits, fr = score(RX._band_mag(frame, RX.BASE_LEVEL, RX._BASE_NCOLS))
         assert fr.crc_ok and hits >= was, (
-            f"the over at {at / FS:.3f} s scored {was}/24 unequalised and "
+            f"{path.name} scored {was}/24 unequalised and "
             f"{hits}/24 equalised, crc {fr.crc_ok}")
+        assert (was, hits) == expected
         assert bytes(fr.payload).startswith(said)
 
 
@@ -392,7 +396,7 @@ TWO_OVER_GREETING = (
     b"0 (FN10PV)\r[WL2K-5.0-B2FWIHJM$]\r;PQ: 13825159\rCMS via KB3AC-10 >\r")
 
 
-@corpora.requires_onair_two_over_greeting
+@corpora._requires(*_TWO_OVERS, what="KB3AC-10 two-over fixture")
 def test_the_second_over_of_a_greeting_is_read_off_the_columns_not_the_argmax():
     """The 2026-08-31 KB3AC-10 session, whose two overs carry one greeting.
 
@@ -401,15 +405,15 @@ def test_the_second_over_of_a_greeting_is_read_off_the_columns_not_the_argmax():
     without it; 71 of its 395 columns are won by the wrong bin, but the true bin
     is the runner-up in 23 of those and loses by under 3 dB in 45, so the hard
     read hands the turbo decoder hundreds of confidently wrong bits and the soft
-    one does not. The bytes below are also what a stock modem returns off this
-    same audio, and the two decoders agree on all 154.
+    one does not. The surviving tap reads 19/24 hard on over 2 and still fails
+    its CRC; both soft reads retain the exact original payloads. Those bytes
+    matched the stock decoder on the original rig recording, all 154 of them.
     """
-    path, first, second = corpora.ONAIR_TWO_OVER_GREETING
-    x = corpora.wav_mono(path) / 32768.0
     got = []
-    for t0, t1 in (first, second):
-        fr = RX.decode_over(x, int(t0 * FS), int(t1 * FS))
-        assert fr.crc_ok, f"the over at {t0:.2f} s did not decode"
+    for path in _TWO_OVERS:
+        x = corpora.wav_mono(path) / 32768.0
+        fr = RX.decode_over(x, 0, len(x))
+        assert fr.crc_ok, f"{path.name} did not decode"
         got.append(bytes(fr.payload))
 
     said = [g[:len(w)] for g, w in zip(got, TWO_OVER_GREETING)]
@@ -418,7 +422,7 @@ def test_the_second_over_of_a_greeting_is_read_off_the_columns_not_the_argmax():
         "the callsign split across the two overs did not close", said)
 
 
-@corpora.requires_onair_two_over_greeting
+@corpora._requires(*_TWO_OVERS, what="KB3AC-10 two-over fixture")
 def test_the_over_that_needed_it_does_not_decode_off_its_argmax():
     """The half of the pair that says the change was needed and not free.
 
@@ -429,14 +433,13 @@ def test_the_over_that_needed_it_does_not_decode_off_its_argmax():
     """
     import numpy as np
 
-    path, first, second = corpora.ONAIR_TWO_OVER_GREETING
-    x = corpora.wav_mono(path) / 32768.0
     r = RX.RECORDS[RX.BASE_LEVEL]
 
-    def hard(t0, t1):
+    def hard(path):
+        x = corpora.wav_mono(path) / 32768.0
         best = (0, False)
         for onset, g, mag in RX._alignments(
-                np.asarray(x[int(t0 * FS):int(t1 * FS)], float), 6):
+                np.asarray(x, float), 6):
             bins = mag[g:].argmax(1) + r.first_bin
             hits = sum(bins[c] == b for c, b in zip(RX._REF_COL, RX._REF_BIN))
             fr = RX.check_frame(RX.onair_to_frame(
@@ -445,15 +448,14 @@ def test_the_over_that_needed_it_does_not_decode_off_its_argmax():
             best = max(best, (int(hits), fr.crc_ok))
         return best
 
-    hits, ok = hard(*first)
+    hits, ok = hard(_TWO_OVERS[0])
     assert (hits, ok) == (24, True), f"over 1 reads {hits}/24 hard, crc {ok}"
-    hits, ok = hard(*second)
+    hits, ok = hard(_TWO_OVERS[1])
     assert hits >= VA._OVER_GUARD_MIN and not ok, (
         f"over 2 reads {hits}/24 hard, crc {ok} — this is no longer the over the "
         f"soft read was measured on")
 
 
-@corpora.requires_onair_two_over_greeting
 def test_weighing_the_band_does_not_make_a_frame_out_of_the_band_noise():
     """The null the soft read needs, on the recording it was measured on.
 
@@ -462,8 +464,9 @@ def test_weighing_the_band_does_not_make_a_frame_out_of_the_band_noise():
     band noise — every gap between our own keyings while nobody was answering —
     and has to come back empty. The CRC-16 is the only thing refusing it.
     """
-    path, _, _ = corpora.ONAIR_TWO_OVER_GREETING
-    x = corpora.wav_mono(path) / 32768.0
-    for t0 in (110.0, 122.0, 135.0, 148.0, 161.0, 173.0, 186.0, 199.0):
-        fr = RX.decode_over(x, int(t0 * FS), int((t0 + 4.6) * FS))
-        assert not fr.crc_ok, f"band noise at {t0:.0f} s decoded to a frame"
+    x = greetings_evidence.samples("kb3ac-noise-windows.flac") / 32768.0
+    size = round(4.6 * FS)
+    assert len(x) == 8 * size
+    for i in range(8):
+        fr = RX.decode_over(x, i * size, (i + 1) * size)
+        assert not fr.crc_ok, f"band-noise window {i} decoded to a frame"

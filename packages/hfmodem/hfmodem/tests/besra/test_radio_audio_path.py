@@ -27,16 +27,19 @@ import numpy as np
 import pytest
 
 import hfmodem.besra.radio as R
+from hfmodem.tests.evidence import require_input
 from hfmodem.besra import crc
 from hfmodem.besra.frame import frame as F
 from hfmodem.tests import evidence
 from hfmodem.besra.arq.modem import BesraModem
+from hfmodem.besra.arq.session import peer_quality
 from hfmodem.besra.host import protocol as P
 from hfmodem.besra.host.modem_core import ModemObserver
 from hfmodem.besra.phy import modulator as M
 from hfmodem.besra.phy.demodulator import (SAMPLE_RATE, DecodedFrame, Demodulator,
                                            decode, frame_span)
 from hfmodem.core import audio as audio_mod
+from hfmodem.core import wav as recordings
 from hfmodem.core.resample import from_card, to_card
 from hfmodem.core.rigs import RIGS
 
@@ -508,8 +511,95 @@ def test_real_offair_audio_at_the_live_noise_floor():
     assert all(f.target == "K4PAR-2" for f in got)
 
 
+_STALE_ACK = Path(__file__).parent / "fixtures" / "offair_w6ids_stale_ack.flac"
+
+
+def test_an_ack_heard_before_our_last_keydown_does_not_answer_it(monkeypatch):
+    """W6IDS, 2026-09-24 02:13z. The ACK to our first BREAK went unread at the time
+    and sat in the rolling window, which our muted transmissions stretch to 13 s of
+    air. It surfaced in the same decode as data frame #2's own ACK, ahead of it: the
+    stale one released #2 and keyed #3 from inside the delivery, and #2's ACK,
+    handed up after that key-down, released #3 unanswered."""
+    _stub_sounddevice(monkeypatch)
+    require_input(_STALE_ACK)
+    facts = json.loads(require_input(_STALE_ACK.with_suffix(".json")).read_text())
+    stored = iter(_recorded(_STALE_ACK).astype(np.float32).reshape(-1, _BLOCK))
+    keyed = {a: b for a, b in facts["keyed_blocks"]}
+
+    class Iss(_Sink):
+        keydowns = 0
+
+        def expected_session(self):
+            return int(facts["session"], 16)
+
+        def receive_frames(self, frames):
+            for f in frames:
+                self.frames.append((self.keydowns, f))
+                if self.keydowns == len(keyed) and peer_quality(f.type) is not None:
+                    key()
+
+    def key():
+        link.modem.keydowns += 1
+        link._transmit(np.zeros(SAMPLE_RATE // 10, dtype="<i2"))
+
+    link = R.RadioLink(Iss(), rig=None, out_device="stub")
+    block = 0
+    while block < facts["blocks"]:
+        if block in keyed:
+            key()
+            block = keyed[block]
+            continue
+        link._capture(next(stored))
+        link._rx.pump()
+        block += 1
+
+    answers = [peer_quality(f.type) for n, f in link.modem.frames
+               if n >= len(keyed) and peer_quality(f.type) is not None]
+    assert answers == [72], answers
+
+
+_UNREAD_ACKS = Path(__file__).parent / "fixtures" / "offair_ke8lva_unread_acks.flac"
+
+
+def test_a_dataack_whose_last_tones_went_soft_still_answers_our_conack(monkeypatch):
+    """KE8LVA, 2026-09-24 13:58z. It answered our second, third and fourth
+    confirming ConAck2000 with a DATAACK, and the connect waited for the fifth:
+    each of those three headers lost a parity or a session tone where the gateway
+    keyed down, so the hard read failed parity or named another session. The
+    fixture is the audio the live path pushed, keyed where the session keyed."""
+    _stub_sounddevice(monkeypatch)
+    require_input(_UNREAD_ACKS)
+    facts = json.loads(require_input(_UNREAD_ACKS.with_suffix(".json")).read_text())
+    stored = iter(_recorded(_UNREAD_ACKS).astype(np.float32).reshape(-1, _BLOCK))
+    keyed = {a: b for a, b in facts["keyed_blocks"]}
+
+    class Iss(_Sink):
+        keydowns = 0
+
+        def expected_session(self):
+            return int(facts["session"], 16)
+
+        def receive_frames(self, frames):
+            self.frames += [(self.keydowns, f) for f in frames]
+
+    link = R.RadioLink(Iss(), rig=None, out_device="stub")
+    block = 0
+    while block < facts["blocks"]:
+        if block in keyed:
+            link.modem.keydowns += 1
+            link._transmit(np.zeros(SAMPLE_RATE // 10, dtype="<i2"))
+            block = keyed[block]
+            continue
+        link._capture(next(stored))
+        link._rx.pump()
+        block += 1
+
+    answered = [n for n, f in link.modem.frames if f.name == "DATAACK"]
+    assert answered == [2, 3, 4, 5], answered
+
+
 def _recorded(path: Path) -> np.ndarray:
-    with wave.open(str(path)) as w:
+    with wave.open(recordings.source(path)) as w:
         assert w.getframerate() == R.FS_RADIO and w.getnchannels() == 1
         return np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float64) / 32768.0
 

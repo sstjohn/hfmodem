@@ -131,7 +131,7 @@ def test_a_slot_the_grid_keeps_is_not_stepped_past_before_the_render(tmp_path, c
     # comparable at all.
     assert tx.key_instant(grid, tx.slot) == tx.boundary
     late = _stand_late(tx, 100)
-    assert 0 < late <= round(onair.KEY_CLAMP_TOL_S * onair.FS) - tx.cycle_cost_n()
+    assert 0 < late <= round(onair.KEY_CLAMP_TOL_S * onair.FS)
     kept = tx.slot
     assert _regrid(grid, tx) == kept
     assert onair.SLOT_KEPT in capsys.readouterr().out
@@ -145,11 +145,11 @@ def test_a_slot_the_grid_keeps_is_not_stepped_past_before_the_render(tmp_path, c
 def test_an_overrun_past_the_forgiveness_is_given_up_and_says_so(tmp_path, capsys):
     """...and the render seam names its refusal rather than vanishing a slot."""
     grid, tx = _irs_control_cycle(tmp_path)
-    late = _stand_late(tx, 100)
-    # The room is the tolerance LESS what the cycle still owes the tick and the
-    # render, so raising that cost past the overrun is what turns the verdict
-    # over. `_regrid` asks this same function of this same instant.
-    tx.prekey_cost_n = round(onair.KEY_CLAMP_TOL_S * onair.FS) - late + 1
+    # The whole tolerance and not a sample more: what the cycle still owes the
+    # tick and the render is stood off the drain, not deducted here as well.
+    # `_regrid` asks this same function of this same instant.
+    late = _stand_late(tx, round(onair.KEY_CLAMP_TOL_S * onair.FS) + 1)
+    tx.prekey_cost_n = round(.003 * onair.FS)
     assert onair._clamp_forgives(tx.live, tx, late) == 0
     gave = tx.slot
     tx._flip()

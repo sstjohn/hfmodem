@@ -24,10 +24,10 @@ over.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
-
-from hfmodem.tests import evidence
 from hfmodem.tests.kestrel import corpora
 from hfmodem.kestrel.arq import phy
 from hfmodem.kestrel.rx import varahf2300 as RX
@@ -37,20 +37,14 @@ from hfmodem.winlink.session import B2FSession
 FS = RX.FS
 MYCALL, GATEWAY = "W9SSJ", "KE8LVA"
 
-#: The 2026-08-28 23:29z call to KE8LVA on 7103.5 kHz — arm 7 of that slot, the
-#: second of its two connects and the one that proves the link stayed up: the
-#: gateway took our acknowledgement and then keyed 27 responder-idle bursts at a
-#: station that never spoke again, on both connects of the 2026-08-28 slot.
-STALLED = evidence.LOGS / "onair" / "20260828T232946Z-W9SSJ-KE8LVA.wav"
-
-#: The same gateway two days earlier, whose greeting arrived whole. Held in
-#: `corpora` already, for the turn release and the over answer.
-COMPLETED = corpora.ONAIR_OVER_ANSWERED[0]
-
-#: Where each session's first greeting over starts, off the guard scan below.
-#: They are within 0.1 s of each other because everything up to here is the same
-#: exchange run twice.
-_FIRST = {STALLED: 31.053, COMPLETED: 31.155}
+# Surviving home taps: a different stalled KE8LVA session on 08-26, and
+# the original completed session. These taps carry our TX without receiver mute.
+# Exact source coordinates and hashes are in fixtures/greetings-a2-0930/provenance.json.
+_FIXTURES = Path(__file__).with_name("fixtures") / "greetings-a2-0930"
+STALLED = _FIXTURES / "ke8lva-stalled.flac"
+COMPLETED = _FIXTURES / "ke8lva-completed.flac"
+_LINK_SETUP = _FIXTURES / "ke8lva-link-setup.flac"
+_FIRST = {STALLED: 0.5, COMPLETED: 0.5}
 
 #: What KE8LVA says, over by over, off the 2026-08-26 air. The first block ends
 #: mid-callsign and the second mid-sentence; only the third carries the prompt.
@@ -70,7 +64,7 @@ _FLOOR = 10
 
 requires_stalled_greeting = pytest.mark.skipif(
     not (STALLED.exists() and COMPLETED.exists()),
-    reason=f"the 2026-08-28 stall and its 2026-08-26 counterpart ({STALLED})")
+    reason=f"KE8LVA stalled/completed greeting fixtures ({_FIXTURES})")
 
 
 def _overs(path, t0: float, t1: float, guard: int = VA._OVER_GUARD_MIN):
@@ -142,9 +136,9 @@ def test_the_rest_of_the_greeting_never_reached_the_air():
     six columns below what the live gate demands, so this is not a decode that
     was tried and failed.
 
-    Our own emission is in both files — the link-setup decodes at 24 of 24 in
-    each — so a frame absent here is absent from the air rather than lost behind
-    the receiver mute.
+    The completed tap is the positive control for the same post-over scan.
+    The stalled tap also holds our CRC-clean link-setup; neither tap measures
+    receiver mute, which was specific to the lost rig recording.
     """
     span = RX._BASE_NCOLS * RX.RECORDS[RX.BASE_LEVEL].dw50 / FS
 
@@ -157,15 +151,14 @@ def test_the_rest_of_the_greeting_never_reached_the_air():
                   _FIRST[STALLED] + span + 8.0, guard=_FLOOR) == []
 
 
-@requires_stalled_greeting
+@corpora._requires(_LINK_SETUP, what="KE8LVA link-setup control")
 def test_the_link_setup_decodes_in_the_stalled_recording():
-    """The control for the test above: this file does hold a frame we keyed.
+    """The control above comes from a separate clip of the same stalled tap.
 
-    Without it "no second over in the recording" would be equally well explained
-    by a receiver that stopped delivering, and the mute a rig applies while its
-    own transmitter is up is exactly the thing that would do it.
+    This checks that the stalled tap carries decodable frames. It is a weaker
+    control than the original rig-rx pin: the tap cannot measure receiver mute.
     """
-    frames = _overs(STALLED, 20.0, 30.0)
+    frames = _overs(_LINK_SETUP, 0.0, (RX._BASE_NCOLS + 2) * 512 / FS)
     assert [h for _, h, _ in frames] == [24]
     assert all(fr.crc_ok for _, _, fr in frames)
 

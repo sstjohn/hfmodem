@@ -51,9 +51,9 @@ Connect sequence; `CONNECT` → responder `CONNECTED` takes ≈ **7.4 s**:
 |------|-------------|------------------------|----------------------|
 | 1 | Initiator connect-request / acquisition | initiator / **1.73 s** (1.698–1.774) | after `CONNECT`; `BUSY ON` both |
 | 2 | Responder connect-response | responder / **1.0 s** (0.992–1.003) | responder: `PENDING` before keying |
-| 3 | (both) registration / encryption exchange | — | `REGISTERED`, `ENCRYPTION DISABLED` both |
+| 3 | (both) high speed capability / encryption exchange | — | a high speed capability notification, `ENCRYPTION DISABLED` both |
 | 4 | Initiator link-setup over | initiator / **4.31 s** | initiator: `UNENCRYPTED LINK`, `BITRATE (4) 88 bps TX` |
-| 5 | Responder connected-ack ([`04 §4.2C`](04-frame-block-formats.md)) | responder / **0.446–0.492 s**, 11 two-tone symbols | responder: `SN`, `CONNECTED …`, `LINK UNREGISTERED` |
+| 5 | Responder connected-ack ([`04 §4.2C`](04-frame-block-formats.md)) | responder / **0.446–0.492 s**, 11 two-tone symbols | responder: `SN`, `CONNECTED …`, a speed limited link notification |
 | 6 | Initiator confirms | initiator / ~0.70 s | initiator: `CONNECTED …`; then `IAMALIVE` both |
 
 Frame *contents* of the connect bursts (callsigns, BW request, negotiated level)
@@ -341,15 +341,8 @@ tone for tone identical, and two further sets of seven from the responder. Symbo
 0 is `(64, 67)` in every copy at every bandwidth and no other symbol is shared;
 two of the responder's land on bins 22 and 104-105, which no BW2300 burst reaches,
 so the seven behind the lead are drawn on this bandwidth's own alphabet
-[`vara_frames.OVER_CONTINUE_CALLER_2750`].
-
-The **11-symbol tails** are still unmeasured for a link this station called at
-BW2750, so a session there keys the BW2300 pair, which sits inside its band and
-which a BW2750 responder acts on: the stale-state burst answered a delivery's last
-over and closed it  [`vara_frames.control_bursts`]. The two do not share that
-fallback — a bandwidth with no continue frame of its own keys the generated
-32-symbol answer rather than another bandwidth's copy, which three BW2750 fetches
-established by taking one over each and nothing further.
+[`vara_frames.over_continue`]. The **11-symbol tails** at BW2750 are drawn the same
+way; both are generated per link  [`04 §4.2C`, answer tails].
 
 ## 5.4 ARQ mechanics
 

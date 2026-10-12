@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import atexit
 import contextlib
+import hashlib
 from collections import deque
 import itertools
 import json
@@ -36,23 +37,26 @@ import sys
 import threading
 import time
 from dataclasses import replace
-from functools import lru_cache
+from functools import lru_cache, wraps
 from pathlib import Path
 from typing import NamedTuple, Optional
 
 import numpy as np
 from scipy.fft import next_fast_len
 
-from . import (live, ota, p1rx, p2rx, p3acquire, p3frame, p3rx, p4chirp, p4sig, pactor1, pactor2,
+from . import (compress, live, ota, p1rx, p2rx, p3acquire, p3frame, p3rx, p4chirp,
+               p4oracle, p4robusttx, p4shorttx, p4sig, p4words, pactor1, pactor2,
                placement, rxfront, session, spec, traffic)
-from ..core import band, config, cwid, gil, levels, rates, wav
+from ..core import band, config, cwid, gil, identification, levels, rates, wav
 from ..core.devices import find_device
+from ..core.occupied import occupied_hz
 from ..core.ptt import PttError
 from ..core.rig import FATAL_SIGNALS, arm_deadman
-from ..core.rigs import RIGS
-from ..winlink import CLIENT_SID, progress_to_stdout
-from .arq import (ArqConfig, CS_ACK, CS_BREAKIN, CS_CYCLE_TOG, GOODBYE_CYCLES, IRS, ISS, LONG_TICKS,
-                  REFUSED, SEQ_MOD, State, check_entry_ladder)
+from ..core.rigs import RIGS, resolve_rig, flight_defaults, resolve_tx_timing, TX_COMMAND_PATHS
+from ..winlink import CLIENT_SID, MailClient, mask_pr, progress_to_stdout
+from .arq import (ArqConfig, CS_ACK, CS_BREAKIN, CS_CYCLE_TOG,
+                  GOODBYE_CYCLES, IRS, ISS, LONG_TICKS, REFUSED, SEQ_MOD, State,
+                  check_entry_ladder, parse_connect_arg)
 from .ptc import GRANT_ENTRY_SL, PtcHost
 from .spec import Protocol
 from .p3trial import DEFAULT_ENTRY_DELAY_MS, EntryTimingTrial, ReplyClock, TimingTrial
@@ -80,7 +84,7 @@ TX_DRIVE = levels.TX_DRIVE
 # 0.085 stood here before, and 0.10 before that, both asserted rather than read off
 # a capture. This one is worth re-measuring per rig: `--preflight` does it in
 # fifteen seconds and prints what it found.
-TR_SWITCH_S = 0.055
+TR_SWITCH_S = RIGS[resolve_rig()]["tr_switch_s"]
 # The two acknowledging codewords, as indices into spec.P1_CS_NAMES. They carry
 # their meaning in the CHANGE from one to the other rather than in either word --
 # a repeated CS1 is a repeat request exactly as a repeated CS4 is -- so the
@@ -408,7 +412,7 @@ P2_LONG_PACKET_N = round(
 # constant rather than through PACTOR-3's. See `_MasterGrid.cs_n`.
 P2_CS_N = round(p2rx.CS_SYMBOLS * spec.PULSE_SLOT_S * FS)
 
-# Samples every PACTOR-2 keying goes out in FRONT of its own boundary.
+# Conservative PACTOR-2 receive-window reserve before its phase reference.
 #
 # A SHAPED BURST DOES NOT START AT ITS OWN PHASE REFERENCE. The raised cosine
 # puts the leading tail of the first pulse ahead of it, so sample 0 of what
@@ -423,7 +427,10 @@ P2_CS_N = round(p2rx.CS_SYMBOLS * spec.PULSE_SLOT_S * FS)
 # reason: the audio is finished by the time `_tx` holds it and where the carrier
 # comes up is the one thing still free. PACTOR-3 controls and CS3 heads need
 # their own trimmed lead: trimming to 2% retains part of the filter skirt.
+# P2 also measures its actual trimmed lead in `_tx_p2`; this full raw lead is
+# only the conservative scheduling reserve, not the final audio placement.
 P2_KEY_LEAD_N = pactor2.pulse_lead()
+P2_MAIL_PHASE_DELAY_MS = 18.75  # Explicit P2-mail timing hypothesis, not stock timing.
 P3_CS_KEY_LEAD_N = max(placement.control_pulse_lead(cs, swapped=swap)
                        for cs in range(6) for swap in (False, True))
 """Conservative receive-window reserve for the control's first pulse center."""
@@ -488,6 +495,17 @@ MAX_ENTRY_DELAY_MS = 200.0
 # 39.1 ms latch that cost the 2026-08-10 link.
 D_MIN_S = 0.040
 
+# How long after the caller's connect frame a called station keys its answer, and
+# the whole link keeps that phase: the reference responder latches its transmit
+# clock at `frame end + txdelay + 10 ms` and free-runs from there (pactor.c:1745),
+# while the caller searches for the first control signal and then reads every
+# later one at the instant it found it. SCS gateways answer our calls 74-108 ms
+# after our data ends; a caller's receiver is still muted for tens of ms after
+# its own carrier (ours for 55, `TR_SWITCH_S`), and hf-pactor's search stops at
+# 138.75 ms. The rig's PTT settle has to fit in front of it with 10 ms to spare,
+# the reference's own margin, so a slow-keying rig cannot answer at all.
+ANSWER_D_S = 0.090
+
 # WHERE A CHANGEOVER PACKET KEYS IS WHERE THE PEER READS, and the two questions
 # that look alike are not: where a reference modem keys ITS changeover at us, and
 # where the station we are calling reads a codeword of ours. Only the second
@@ -550,6 +568,8 @@ BREAKIN_CLAMP_TOL_S = 0.005
 # this keeps the old answer and steps to the boundary its shift fits.
 KEY_CLAMP_TOL_S = 0.005
 
+P1_PACKET_TAIL_N = round(0.010 * FS)
+
 # How many PACTOR-3 bursts keep their frequency-corrected render. A cycle holds
 # at most an entry or a packet and a codeword, and an unacknowledged packet is
 # re-sent against the same codeword, so four covers every repeat a link makes
@@ -567,7 +587,7 @@ P3_SHIFT_KEEP = 4
 # a search over the whole turnaround span, ending in one decision -- so the only
 # thing left inside this limit is TRACKING, where the phase is known and 50 ms is
 # just an invitation. Measured on a --replay of the 62 s W6IDS recording named
-# under `BLIND_CYCLES` below, which does not ship: over ten
+# under `_MasterGrid.call_hush` below, which does not ship: over ten
 # tracking cycles the detector twice offered a burst 21 and 45 ms out, and each
 # was accepted and moved the window 2.6 and 5.6 ms, while every genuine one sat
 # inside 6 ms. Two bits, which covers the detector's own 5 ms grid and the +/-5 ms
@@ -598,13 +618,19 @@ MAX_PULL_S = 0.020
 # station stops assuming it.
 ONSET_MAX_CYCLES = 8
 
-# WHERE THE IRS ANSWER SLOT IS, in the peer's own coordinates: a control signal's
-# phase reference sits this far past the answered packet's (pactor3.md, "The
-# answer slot" -- 889.4-891.9 ms over sixteen measured cycles, and 3.390 s for
-# the same geometry over the long packet). `_MasterGrid.p3_reply_shift` is the
-# only thing that puts our comb there; until it existed the IRS reply was keyed
-# at a free-running comb carried over from the connect train.
-P3_REPLY_S, P3_LONG_REPLY_S = 0.890, 3.390
+# WHERE THE IRS ANSWER SLOT IS, in the peer's own coordinates: our control's
+# audio start this far past the answered packet's phase reference, and two
+# slots further for the long packet. `_MasterGrid.p3_reply_shift` is the only
+# thing that puts our comb there.
+#
+# 20 MS PAST THE SCS REFERENCE IRS, WHICH ANSWERS AT 889.4-891.9 ms (pactor3.md,
+# "The answer slot"), BECAUSE THAT IS WHERE GATEWAYS HAVE TAKEN OUR ACKS. VE3KPG
+# took them at 908.7-912.1 ms (0923-1910 TX[18/20/21], 0921-0001 TX[22]), and
+# WS8EOC's A5 of 2026-09-12 advanced at a logged 886.5-890.0 keyed before the
+# 20 ms loop latency was compensated, so 906.5-910 on air. WS8EOC 0923-1918 keyed
+# the compensated 890 -- +73.6-78.5 ms past its packet's end on tape against the
+# accepted +93.6-102 -- and took none of 45.
+P3_REPLY_S, P3_LONG_REPLY_S = 0.910, 3.410
 # What a read keeps in hand for the decode that has to finish inside it, on top
 # of the DAC's own notice. `_p3_decode_deadline` spends it on every tracked read
 # in the loop and `_SessionRx._p3_acquisition_fits` on the one read that was
@@ -625,6 +651,13 @@ TURN_RECOVERY_CYCLES = 2 * ONSET_MAX_CYCLES
 # A5 2026-09-12 advanced its counter across a nine-cycle no-decode gap, and the
 # witness fold has the peer radiating a full packet in essentially every cycle.
 RASTER_PROJECT_CYCLES = 16
+
+# How much of each fresh CRC onset's error the raster origin takes up. The
+# frame search reads a packet to a 0.6-2.5 ms quantum, so a single reading is
+# not the raster; a quarter smooths that to ~0.3 ms while a peer clock 16 ppm
+# off ours (1 ms/min, 0.02 ms a cycle) is followed with 0.06 ms of lag.
+# Readings past MAX_PULL_S re-origin instead: those are steps, not drift.
+RASTER_GAIN = 0.25
 
 # The shortest burst that may re-origin the peer's raster. A PACTOR-1 station
 # transmits a 120 ms codeword or a 960 ms packet and nothing between; the
@@ -650,6 +683,25 @@ class _MissedTxSlot(RuntimeError):
     """The DAC queue cannot place an explicitly scheduled burst any more."""
 
 
+class _P3TxCancelled(RuntimeError):
+    """A proposal lost its current P3 receive/ownership permission."""
+
+
+def _p3_owned_render(method):
+    """Own the whole render/retry call, and leave no owner on an early refusal."""
+    @wraps(method)
+    def owned(self, *args, **kwargs):
+        previous = getattr(self, '_p3_render_owner', None)
+        host = getattr(self, 'host', None)
+        if host is not None and host.protocol == Protocol.PACTOR3:
+            self._p3_render_owner = host.arq.p3_tx_owner
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._p3_render_owner = previous
+    return owned
+
+
 class RadioTx:
     """The ARQ FSM's transmit side, on a real rig (or a dry-run WAV sink).
 
@@ -665,6 +717,9 @@ class RadioTx:
         self.rig, self.transmit = rig, transmit
         self.out_dev, self.outdir, self.max_key = out_dev, outdir, max_key
         self.settle, self.drive = settle, drive
+        #: (sounding RMS, peak drive) of the last link burst keyed, which the
+        #: closing ID matches.
+        self.burst_level: tuple[float, float] | None = None
         # The PACTOR-1 leg's share of the drive. `at_drive` normalises every
         # burst to the same peak, which puts constant-envelope FSK ~6 dB ABOVE
         # the speed-level-1 entry packet in average power -- where both modems of
@@ -680,10 +735,13 @@ class RadioTx:
         self.sessrx = None
         self.timing_trial = None
         self.reply_clock = None
+        self.p3_irs_reply_offset_n = 0
         self.last_dur = 0.0
         self.reply_at = None
         self.tx_end = None       # capture-stream index of our carrier dropping
         self.tx_audio_start = None   # ...of our first modulated sample
+        self.corrected_emission_start = None
+        self.corrected_emission_end = None
         self.tx_pulse_offsets = None  # phase centers relative to trimmed audio
         self.tx_key_up = None        # ...and of PTT, a settle in front of that
         self.boundary = None     # the slot this transmission is aimed at
@@ -705,6 +763,7 @@ class RadioTx:
         # `_p1_nth`.
         self.p1_packets = 0
         self._p1_bits45_keyed = False
+        self._p1_setup_waveforms = {}
         # Which entries of `p1_seq` were break-ins. The changeover packet resets
         # the counter, and a reset out of #3 lands on #0 -- arithmetically the
         # same step as the wrap an acknowledged #3 makes, and the only thing that
@@ -794,6 +853,8 @@ class RadioTx:
         # models no guard and so never sets it, which is the right answer for
         # one: nothing there can refuse.
         self.refused = False
+        self.refusal_cause = None
+        self._refused_input = None
         # ...and why the placement in hand could not be made against the peer's
         # transmission, which `_tx` refuses on. See `_MasterGrid.breakin_refusal`.
         self.unplaceable: Optional[str] = None
@@ -804,6 +865,7 @@ class RadioTx:
         # A PACTOR-3 burst the peer's raster has already been applied to, kept
         # by the burst's own identity. See `_p3_offset`.
         self._p3_shifted: dict[tuple, tuple[float, np.ndarray]] = {}
+        self._p3_rendered: dict[tuple, np.ndarray] = {}
         # The changeover packets a retry repeats, with the lead measured on the
         # samples each will key: ident -> (raw render, shifted render, lead).
         # KEYED LIKE `_p3_shifted` AND NOT LIKE A SINGLE SLOT, because the ident
@@ -819,6 +881,15 @@ class RadioTx:
         self.host = host
         self.traffic = traffic.for_host(host)
 
+    def _log_tx_event(self, event, **fields):
+        """Machine-readable host evidence, emitted outside the keying deadline."""
+        from ..core.tx_events import TxEvents
+        journal = getattr(self, "_tx_events", None)
+        if journal is None:
+            journal = self._tx_events = TxEvents("PACTOR")
+        journal.record(event, self.n, **fields)
+        print("\n".join(journal.lines()), flush=True)
+
     def _log_p3_packet(self, sl, payload, status, *, kind="DATA", long_cycle=False):
         # After the TX admission guard: an unkeyed slot is not a packet retry.
         if self.refused:
@@ -830,6 +901,13 @@ class RadioTx:
         lines = self.traffic.packet("TX", sl, status, payload[:path.crc_bytes-3],
                                    kind=kind, long_cycle=long_cycle, field=field)
         self._log_p3_emission(lines)
+        self._log_tx_event("waveform", outcome="sent" if self.transmit and self.rig is not None else "dry_run",
+                           protocol="PACTOR-3", packet_kind=kind,
+                           speed_level=sl if kind != "CHANGEOVER" else None,
+                           modulation="DBPSK" if path.bits_per_cell == 1 else "DQPSK",
+                           symbol_rate=100, carrier_count=len(path.tones),
+                           payload_bytes=min(len(payload), path.crc_bytes-3),
+                           status_byte=status, long_cycle=long_cycle)
 
     def _log_p3_emission(self, lines):
         if not self.transmit:
@@ -923,6 +1001,11 @@ class RadioTx:
         WITH NOTHING READ THERE IS NOTHING TO PLACE AGAINST, and the burst keys
         where it always did.
 
+        ON A GRID PLACED FROM A CALL (`_called_grid`) THE BOUNDARY IS THE READ.
+        The caller latched its read instant on our first answer, keyed on this
+        comb, so nothing measured off its packets can name that instant better;
+        an onset read a few milliseconds off only moves the head off it.
+
         AND IT NAMES ONE INSTANT, WHICH IS THE ONE THE CYCLE IS BUILT AROUND.
         It used to step a peer cycle forward until the transmitter could reach
         the answer, which reads as prudence and is not: the step runs at RENDER
@@ -943,7 +1026,7 @@ class RadioTx:
         if retry is not None:
             return retry
         end = raster.peer_packet_end(slot)
-        if end is None:
+        if end is None or raster.called:
             return raster.boundary(slot)
         gap = (raster.peer_read_gap if self.breakin_at_boundary
                else round(BREAKIN_LEAD_S * FS))
@@ -1014,6 +1097,9 @@ class RadioTx:
                self.raster.peer_packet_end(self.slot))
         if end is None:
             return ""
+        if self.raster.called:
+            self.placed = True
+            return " on the boundary the caller latched its read to"
         self.unplaceable = (self.raster.breakin_refusal(end)
                             or self._clamp_refusal(end))
         if self.unplaceable is not None:
@@ -1108,16 +1194,13 @@ class RadioTx:
         # Do not demand the full settle here: normal holdback keys can have
         # 28–33 ms of PTT lead while their audio still lands on the boundary.
         # A placed break-in must instead be refused/re-placed against the peer.
-        late = (self.live.clamp_late(self.boundary)
+        late = (_late_at_key(self.live, self.boundary, self.still_owed_n())
                 if before_render and not spent and not self.breakin_due
                 and self.boundary is not None else 0)
         # THE QUESTION THE GRID ALREADY ASKED OF THIS INSTANT. `_regrid` ran the
         # same overrun through `_clamp_forgives` a tick ago and kept the slot;
         # a bare `clamp_late` answered the other way in the very next line of
-        # the log and took the cadence to two. Asking again is the conservative
-        # half of the pair: the gate deducts the whole of `cycle_cost_n` a
-        # second time although part of it has been spent since, so it cannot
-        # allow here what `_tx` will refuse on the instant the carrier occupies.
+        # the log and took the cadence to two.
         if late and _clamp_forgives(self.live, self, late):
             late = 0
         if spent or check_late or late:
@@ -1128,9 +1211,11 @@ class RadioTx:
             if late:
                 print(f"    [grid] SLOT {gave} {SLOT_UNRENDERED}. The unrendered "
                       f"burst would miss boundary {gone} by "
-                      f"{late / FS * 1e3:+.1f} ms, past the "
-                      f"{KEY_CLAMP_TOL_S * 1e3:.0f} ms the reader forgives less "
-                      f"the {self.cycle_cost_n() / FS * 1e3:.1f} ms this cycle "
+                      f"{late / FS * 1e3:+.1f} ms "
+                      f"({self.live.clamp_late(gone) / FS * 1e3:+.1f} ms on the "
+                      f"bare clamp), past the "
+                      f"{KEY_CLAMP_TOL_S * 1e3:.0f} ms the reader forgives with "
+                      f"the {self.still_owed_n() / FS * 1e3:.1f} ms this cycle "
                       f"still owes the tick and the render; aiming at slot "
                       f"{self.slot} before choosing its shift.", flush=True)
 
@@ -1198,6 +1283,8 @@ class RadioTx:
         self._tx(pactor1.connect_signal(dxcall, invert=self._flip(),
                                         variant=variant),
                  f"connect->{dxcall}", drive=self.drive * self.p1_drive)
+        if variant == "robust" and not self.refused:
+            self.robust_calls = getattr(self, "robust_calls", 0) + 1
 
     p3_follow_offset = "all"
     """Which PACTOR-3 transmissions follow the peer's measured carrier offset.
@@ -1250,7 +1337,7 @@ class RadioTx:
     drain -- on the stream's own clock.
 
     Measured rather than assumed, because it is what `_regrid` has to allow for
-    before it may leave a sub-symbol overrun to `_tx` (`_clamp_forgives`), and
+    before it may leave a sub-symbol overrun to `_tx` (`_late_at_key`), and
     because it is the one figure that says whether work taken off the pre-key
     path actually came off it.
     """
@@ -1267,10 +1354,14 @@ class RadioTx:
     rather than the remainder of the settle.
     """
 
-    _admitted_at: Optional[int] = None
-    """Where the stream stood when the grid last admitted this cycle. Consumed
-    by `_tx`, so a slot the grid handed back cannot charge its whole listening
-    window to the render."""
+    _admitted: Optional[tuple[int, int]] = None
+    """The slot the grid last admitted and where the stream stood when it did.
+    Consumed by `_tx`, so a slot the grid handed back cannot charge its whole
+    listening window to the render -- and charged only to a burst keyed in that
+    slot. A cycle admitted that then keys nothing leaves its stamp behind, and a
+    burst the next cycle keys from a mid-window decode reaches `_tx` before that
+    cycle's own admission: 0924-0344 WS8EOC-80 charged one long cycle, 3.7 s, to
+    `breakin_cost_n` that way and gave away every changeover slot after it."""
 
     def cycle_cost_n(self) -> int:
         """What THIS cycle still owes between the grid's check and the key.
@@ -1281,6 +1372,13 @@ class RadioTx:
         """
         return (max(self.prekey_cost_n, self.breakin_cost_n)
                 if self.breakin_due else self.prekey_cost_n)
+
+    def still_owed_n(self) -> int:
+        """What is left of `cycle_cost_n` between here and the key."""
+        owed = self.cycle_cost_n()
+        if self._admitted is None or self._admitted[0] != self.slot or self.live is None:
+            return owed
+        return max(0, owed - (int(self.live.sample_now()) - self._admitted[1]))
 
     def _p3_offset(self, audio: np.ndarray, *, control: bool,
                    ident: Optional[tuple] = None) -> np.ndarray:
@@ -1411,11 +1509,9 @@ class RadioTx:
         if self.host is not None and cs_index in (0, 1):
             name = (f"CS{cs_index + 1} "
                     f"{traffic.TrafficLog.control_meaning('TX', cs_index, self.host.arq)}")
-        shape = []
-        if getattr(self, "p3_control_stagger", "off") != "off":
-            shape.append("lead-12" if swapped else "lead-5")
-        if getattr(self, "p3_control_tail", "off") == "repeat":
-            shape.append("tail")
+        tail, _ = self._p3_control_shape()
+        shape = (([] if swapped is None else ["lead-12" if swapped else "lead-5"])
+                 + (["tail"] if tail else []))
         return f"{name} [{', '.join(shape)}]" if shape else name
 
     def p3_reply_shift(self, slot: int, cs_index=None):
@@ -1430,18 +1526,19 @@ class RadioTx:
             raw = placement.control_burst(ci, tail=False, swapped=None)
             audio = self._p3_offset(raw, control=True, ident=("cs", ci, False, None))
             lead = placement.pulse_lead(audio)
-            if r._p3_peer is not None and trial.entry_phase is not None:
-                phase = r._peer_raster_position(r._p3_peer[0], r.cycle_n) or r._p3_peer[0]
+            phase = r.p3_reply_phase()
+            if phase is not None and trial.entry_phase is not None:
                 epoch = trial.target(phase, lead)
                 if trial.arm == "B":
                     target = epoch
-        if (self.reply_clock is not None and r.protocol == Protocol.PACTOR3
-                and not r.sending and r._p3_peer is not None):
+        if self.reply_clock is not None and r.p3_reply_phase() is not None:
             ci = self._pending_p3_cs if cs_index is None else cs_index
             ci = CS_ACK if ci is None else ci
             raw = placement.control_burst(ci, tail=False, swapped=None)
             audio = self._p3_offset(raw, control=True, ident=("cs", ci, False, None))
-            target = self.reply_clock.target(placement.pulse_lead(audio))
+            target = (self.reply_clock.target(placement.pulse_lead(audio),
+                                              r.p3_reply_phase())
+                      + self.p3_irs_reply_offset_n)
         return (r.p3_reply_shift(slot) if target is None else
                 r.p3_reply_shift(slot, target=target))
 
@@ -1462,10 +1559,21 @@ class RadioTx:
     def _p3_reply_carrier_order(self, phase: int, fallback: bool) -> bool:
         """Project the peer's CRC-confirmed arrangement onto a reply's cycle.
 
-        PIII_Complete_1 has the caller's CS3 at 7.7681 s opposite the preceding
-        peer packet, and the answerer's CS3 at 64.9160 s retaining its peer's
-        order. Ordinary staggered controls follow the same origin-dependent
-        rule. Packet counters and our arbitrary local slot parity cannot set it.
+        A CONTROL ANSWERING A PACKET LEADS ON THE PACKET'S OWN CARRIER. Read
+        off the air, VE3KPG 2026-09-20 09:36: every peer control starts 938-943
+        ms after the audio start of the packet it answers, and paired that way
+        127 of 130 readable controls (SL1-SL6) lead on the same carrier as the
+        packet, our packet's lead taken from its sidecar and its audio alike
+        (`test_p3_control_order_onair`). A pairing by log order puts each
+        control against the packet keyed AFTER it, and since our packets
+        alternate every cycle that reads as "opposite" -- an earlier count
+        that read "opposite" made exactly that mispairing, not a different rule.
+
+        PIII_Complete_1 agrees for the answerer (its CS3 at 64.9160 s retains
+        its peer's order, at SL5/SL6) and has the caller's break-in CS3 at
+        7.7681 s opposite the preceding peer packet, which is the one place
+        the order inverts. Packet counters and our arbitrary local slot parity
+        cannot set it.
         """
         r = self.raster
         if r is None or r._p3_peer is None or r._p3_peer_swap is None:
@@ -1477,7 +1585,70 @@ class RadioTx:
             swapped = not swapped
         return swapped
 
+    @_p3_owned_render
     def _send_p3_control(self, cs_index: int, *, p1_codeword: bool = False):
+        self._p3_emitted_cs = None
+        for attempt in range(REGRID_TRIES):
+            if attempt and self.host is not None:
+                current = self.host.arq.p3_tx_owner
+                if getattr(self, '_p3_render_owner', None) != current:
+                    # The bounded retry can decode a new packet while waiting.
+                    # Only that newly queued, currently owned response may
+                    # replace the obsolete render's counter/word.
+                    pending = getattr(self, '_pending_p3_cs', None)
+                    if (not self.defer_p3_cs or pending is None
+                            or getattr(self, '_pending_p3_cs_owner', None) != current
+                            or not self.host.arq.p3_tx_allowed(current)):
+                        self.refused = True
+                        return REFUSED
+                    cs_index = pending
+                    p1_codeword = self._pending_p3_cs_p1
+                    self._p3_render_owner = current
+            self._observe_input_loss("p3-control")
+            self._rerender_late = False
+            previous_end = self.tx_end
+            result = self._render_p3_control(cs_index, p1_codeword=p1_codeword)
+            if result != REFUSED and self.tx_end != previous_end:
+                self._p3_emitted_cs = cs_index
+            if result != REFUSED or not self._rerender_late:
+                return result
+            if attempt == REGRID_TRIES - 1:
+                return REFUSED
+            r = self.raster
+            slot = r.p3_reply_slot(r.next_slot(self.slot))
+            slot = _keyable_slot(self.live, r, slot, round(self.settle * FS),
+                                 listen=False)
+            self.aim(r, slot)
+            origin = self.live.pos
+            settle_n = round(self.settle * FS)
+            until = (self.boundary - _prekey_lead(self.live, settle_n)
+                     - round(REGRID_RESERVE_S * FS)
+                     if self.sessrx is None else
+                     _p3_frame_ready(self.sessrx, _p3_decode_deadline(
+                         self.live, self.boundary, settle_n), self.live.holdback))
+            waiting = self.live.take_until(until)
+            self._observe_input_loss("p3-control-retry")
+            if waiting.size and self.sessrx is not None:
+                self.sessrx.bridge(waiting)
+                _scan_frame(self.sessrx, waiting, origin, tracked_only=True)
+            slot = _p3_place_reply(r, self, slot)
+            slot = _keyable_slot(self.live, r, slot, 0,
+                                 listen=False)
+            self.aim(r, slot)
+        return REFUSED
+
+    def _observe_input_loss(self, name: str) -> bool:
+        if self.live is None or self.raster is None:
+            return False
+        evidence = getattr(self, "_cycle_evidence", None)
+        if evidence is None:
+            evidence = _CycleEvidence(self.live, self, self.raster, self.outdir)
+        lost = evidence.input_loss(name)
+        if lost and self.sessrx is not None:
+            self.sessrx._p3_early_sl3 = None
+        return lost
+
+    def _render_p3_control(self, cs_index: int, *, p1_codeword: bool = False):
         r = self.raster
         if r is not None:
             # THE RESIDUE, NOT THE PLACEMENT. Both loops place the comb where
@@ -1586,12 +1757,19 @@ class RadioTx:
                     or getattr(self, "p3_control_placement", "audio-start")
                     == "audio-start" else lead)
         before = self.n
+        # A control's render is cached and a refused one is held for the next
+        # reply boundary (`emit_pending_cs`); the shift-keeping step below
+        # would spend two slots on it.
         self._tx(audio, self._p3_control_label(cs_index, swapped, p1_codeword),
-                 drive=drive, lead_n=aim_lead, pulse_offsets=offsets)
+                 drive=drive, lead_n=aim_lead, pulse_offsets=offsets,
+                 rerender_on_late=True,
+                 crest=None if p1_codeword else placement.CREST_LIMIT_DB)
         if self.refused or self.n == before:
             return REFUSED
         if not p1_codeword and cs_index == 3 and self.sessrx is not None:
-            self.sessrx.note_p3_speedup_emitted()
+            sl = self.host.arq._p3_rx_sl
+            if sl is not None:
+                self.sessrx.note_p3_speedup_emitted(sl, sl + 1)
         if not p1_codeword:
             self._log_p3_emission(self.traffic.control(
                 "TX", cs_index, None if self.host is None else self.host.arq))
@@ -1623,12 +1801,21 @@ class RadioTx:
             # regrids: it dates the long-frame hypothesis `_p3_transition_window`
             # retains and reads. It grants no reply boundary and refuses none --
             # the comb belongs to the peer's packets (`_keyable_slot`).
+            measured = getattr(r, "_p3_reply_timing", lambda: None)()
+            r._p3_cycle_timing = ((measured, r._p3_controls[-1][0])
+                                  if measured is not None and r._p3_controls else None)
             r._p3_command_slot = self.slot
             if r._p3_peer is not None:
                 at, _, cycle_n, _ = r._p3_peer
                 cycles = max(0, (r.boundary(self.slot) - at) // cycle_n)
                 r._p3_command_row0 = (at + (cycles + 1) * cycle_n
                                      + p3frame.DATA_OFFSET * rxfront.SPS)
+        if (getattr(self.sessrx, "_p3_offset_pending", None) is not None
+                or getattr(self.sessrx, "_p3_carrier_pending", None) is not None):
+            deadline = (self.key_instant(r, self.slot + 1)
+                        - round((self.settle + P3_DECODE_RESERVE_S) * FS)
+                        if r is not None else None)
+            self.sessrx.nominate_p3_offset_after_control(deadline)
         return REFUSED if self.refused else None
 
     def send_cs(self, cs_index: int, *, p1_codeword: bool = False):
@@ -1637,12 +1824,19 @@ class RadioTx:
             # this cycle. Emitting here would wait through that collection and
             # flush it under our carrier. The hold loop emits the final answer.
             self._pending_p3_cs = cs_index
+            self._pending_p3_cs_owner = self.host.arq.p3_tx_owner
             self._pending_p3_cs_p1 = p1_codeword
             return
         return self._send_p3_control(cs_index, p1_codeword=p1_codeword)
 
     def cancel_pending_cs(self) -> None:
         self._pending_p3_cs = None
+        self._pending_p3_cs_owner = None
+
+    def cancel_peer_transmissions(self) -> None:
+        """Quiet/terminal cancellation, distinct from input-loss ACK retirement."""
+        self.cancel_pending_cs()
+        self.breakin_due = False
 
     def recover_p3_turn(self, ev) -> bool:
         """Restore the old IRS clock before ARQ handles a failed turn attempt.
@@ -1668,16 +1862,28 @@ class RadioTx:
         if cs is None or self.host.protocol != Protocol.PACTOR3 \
                 or self.host.arq.role != IRS:
             return
+        owner = getattr(self, '_pending_p3_cs_owner', None)
+        if not self.host.arq.p3_tx_allowed(owner):
+            self.refused = True
+            return
         previous_end = self.tx_end
         self._send_p3_control(cs, p1_codeword=self._pending_p3_cs_p1)
         if not self.refused and self.tx_end != previous_end:
-            self.host.on_cs_emitted(cs)
+            emitted = self._p3_emitted_cs
+            assert emitted is not None
+            if (self._pending_p3_cs == emitted
+                    and self._pending_p3_cs_owner == self.host.arq.p3_tx_owner):
+                self._pending_p3_cs = self._pending_p3_cs_owner = None
+            self.host.on_cs_emitted(emitted)
             return
         # HELD, NOT DROPPED. A refusal names one instant, and the answer it
         # declined is still owed: the IRS owes the ISS a codeword every cycle.
         # Clearing the queue ahead of the emit lost that cycle's answer with no
         # line naming it. ARQ overwrites this the moment it has a newer word.
+        if not self.host.arq.p3_tx_allowed(owner):
+            return
         self._pending_p3_cs = cs
+        self._pending_p3_cs_owner = owner
         print(f"    [grid] CS{cs + 1} {spec.CS_NAMES[cs]} was not placed this "
               f"cycle; held for the next keyable reply boundary.", flush=True)
 
@@ -1757,13 +1963,30 @@ class RadioTx:
             self.breakin_at.add(len(self.seq_sent))
         self.seq_sent.append(packet_count & spec.STATUS_SEQ)
 
+    def prepare_p1_setup(self) -> None:
+        """Render both connect-answer rates and shifts before listening."""
+        payload = self.host.p1_setup_payload()
+        bits45 = self.p1_status_bits45 if self.p1_status_from <= 1 else 0
+        for baud in (100, 200):
+            field = payload[:pactor1.DATA_FIELD[baud]]
+            for invert in (False, True):
+                key = (field, baud, 1, pactor1.DATA_HEADER, bits45,
+                       False, False, invert)
+                self._p1_setup_waveforms[key] = pactor1.packet_signal(
+                    field, baud, packet_count=1, header=pactor1.DATA_HEADER,
+                    bits45=bits45, invert=invert)
+
     def send_p1_packet(self, payload: bytes, baud: int, packet_count: int, *,
                        header: int | None = None,
                        changeover_request: bool = False,
                        qrt: bool = False) -> Optional[int]:
         """A PACTOR-1 data packet -- the caller's answer to a control signal."""
         nth = self._p1_nth(packet_count)
-        bits45 = self.p1_status_bits45 if nth >= self.p1_status_from else 0
+        bits45 = (self.p1_status_bits45 if nth >= self.p1_status_from and not qrt
+                  else 0)
+        if (self.host is not None and getattr(self.host, "pactor2_only", False)
+                and not self.host.p2_announcement_pending):
+            bits45 = 0
         if bits45 and not self._p1_bits45_keyed:
             self._p1_bits45_keyed = True
             status = pactor1.status_byte(packet_count & 3, bits45=bits45,
@@ -1774,13 +1997,24 @@ class RadioTx:
         self.p1_seq.append(packet_count)
         self._note_counter(packet_count)
         flags = ("" if not changeover_request else " BK") + ("" if not qrt else " QRT")
+        invert = self._flip()
+        key = (payload, baud, packet_count, header, bits45,
+               changeover_request, qrt, invert)
+        audio = self._p1_setup_waveforms.get(key)
+        if audio is None:
+            audio = pactor1.packet_signal(
+                payload, baud, packet_count=packet_count, header=header,
+                bits45=bits45, changeover_request=changeover_request,
+                qrt=qrt, invert=invert)
         self._tx(
-            pactor1.packet_signal(payload, baud, packet_count=packet_count,
-                                  header=header, bits45=bits45,
-                                  changeover_request=changeover_request,
-                                  qrt=qrt, invert=self._flip()),
-            f"P1 pkt#{packet_count} {baud}Bd {len(payload)}B{flags}",
-            drive=self.drive * self.p1_drive)
+            audio, f"P1 pkt#{packet_count} {baud}Bd {len(payload)}B{flags}",
+            drive=self.drive * self.p1_drive, tail_n=P1_PACKET_TAIL_N)
+        if (self.host is not None and getattr(self.host, "pactor2_only", False)
+                and bits45 == 1 and not self.refused and self.tx_end is not None
+                and self.host.p2_announcement_end is None):
+            # Freeze the first actually emitted announcement's end. A delayed
+            # decode from before it cannot accept setup or grant an upgrade.
+            self.host.p2_announcement_end = self.tx_end
         return REFUSED if self.refused else None
 
     def send_p1_breakin(self, payload: bytes, baud: int, packet_count: int, *,
@@ -1805,7 +2039,7 @@ class RadioTx:
         self._tx(audio,
                  f"P1 BREAK-IN #{packet_count} {baud}Bd {len(payload)}B"
                  f"{'' if not qrt else ' QRT'}{placed}",
-                 drive=self.drive * self.p1_drive)
+                 drive=self.drive * self.p1_drive, tail_n=P1_PACKET_TAIL_N)
         self.breakin_due = False
         return REFUSED if self.refused else None
 
@@ -1904,8 +2138,8 @@ class RadioTx:
         campaign owes. The module switches are in the key because they are read
         at render time and a command line sets them.
         """
-        key = (sl, payload, status, acquire,
-               placement.CASE0_STAGGER, placement.PROTOCOL_RISE)
+        key = (sl, payload, status, acquire, placement.CASE0_STAGGER,
+               placement.PROTOCOL_RISE, placement.CREST_LIMIT_DB)
         if self._entry_render is None or self._entry_render[0] != key:
             path = placement.SPEED_PATHS[sl]
             self._entry_render = (
@@ -1941,6 +2175,7 @@ class RadioTx:
                  f"{p4chirp.PACKET_S * 1e3:.0f}ms")
         return REFUSED if self.refused else None
 
+    @_p3_owned_render
     def send_packet(self, sl: int, payload: bytes, status: int,
                     breakin: bool = False) -> int:
         # "the digital data stream that constitutes a specific virtual carrier is
@@ -1953,6 +2188,8 @@ class RadioTx:
         # is two carriers and 56 rows whatever the traffic behind it runs at, so
         # `sl` names the level this station will resume at rather than the one on
         # the air here. It takes part in the swap like any other packet.
+        if not breakin:
+            self._prepare_p3_cycle(False)
         grid_swap = self._flip()
         swapped = grid_swap ^ self._p3_packet_swap_bias
         self._note_counter(status, breakin=breakin)
@@ -1972,24 +2209,7 @@ class RadioTx:
             # against a codeword whose render is cached and free, with the 2%
             # trim behind it at 0.69. That 1.66 ms comes out of the same
             # single-digit margin the placement is refused for missing.
-            ident = ("bk", payload, status, swapped)
-            kept = self._p3_breakin.get(ident)
-            raw = (kept[0] if kept is not None else
-                   placement.changeover_packet(payload, status, swapped=swapped))
-            audio = self._p3_offset(raw, control=True, ident=ident)
-            if kept is not None and kept[1] is audio:
-                lead = kept[2]
-            else:
-                # The same phase-reference instant as the control being
-                # replaced, not the first sample of its filter skirt. The
-                # payload can affect peak normalization, so measure the trim on
-                # this actual waveform -- which is why the measurement is kept
-                # against the SHIFTED samples and re-taken when they move.
-                trim = int(np.flatnonzero(abs(audio) > .02 * max(abs(audio)))[0])
-                lead = int(np.argmax(placement.protocol_config().pulse())) - trim
-            self._p3_breakin[ident] = (raw, audio, lead)
-            while len(self._p3_breakin) > P3_SHIFT_KEEP:
-                del self._p3_breakin[next(iter(self._p3_breakin))]
+            audio, lead = self._p3_breakin_audio(payload, status, swapped)
             half = FS // 200 if placement.CASE0_STAGGER else 0
             offsets = (lead + half, lead) if swapped else (lead, lead + half)
             placed = self._place_breakin()
@@ -2022,17 +2242,92 @@ class RadioTx:
             self._log_p3_packet(sl, payload, status, kind="CHANGEOVER")
             return (REFUSED if self.refused else
                     placement.CHANGEOVER.crc_bytes - 3)
-        audio = self._p3_offset(
-            placement.link_packet(sl, payload, status, swapped=swapped),
-            control=False, ident=("pkt", sl, payload, status, swapped))
+        ident = ("pkt", sl, payload, status, swapped)
+        audio = self._p3_offset(self._p3_link_packet(ident), control=False,
+                                ident=ident)
+        n = min(len(payload), placement.SPEED_PATHS[sl].crc_bytes - 3)
         self._send_p3_ordinary_audio(
-            audio, f"SL{sl} pkt {len(payload)}B status=0x{status:02x}", swapped)
+            audio, f"SL{sl} pkt {n}B status=0x{status:02x}", swapped,
+            crest=placement.CREST_LIMIT_DB)
         if self.refused:
             return REFUSED
         self._log_p3_packet(sl, payload, status)
+        self._prerender_p3("pkt", sl, payload, status, not swapped)
         # Report the actual fixed field size to ARQ truncation accounting.
         return placement.SPEED_PATHS[sl].crc_bytes - 3
 
+    def _p3_breakin_audio(self, payload: bytes, status: int,
+                          swapped: bool) -> tuple[np.ndarray, int]:
+        ident = ("bk", payload, status, swapped)
+        kept = self._p3_breakin.get(ident)
+        raw = (kept[0] if kept is not None else
+               placement.changeover_packet(payload, status, swapped=swapped))
+        audio = self._p3_offset(raw, control=True, ident=ident)
+        if kept is not None and kept[1] is audio:
+            lead = kept[2]
+        else:
+            # The same phase-reference instant as the control being
+            # replaced, not the first sample of its filter skirt. The
+            # payload can affect peak normalization, so measure the trim on
+            # this actual waveform -- which is why the measurement is kept
+            # against the SHIFTED samples and re-taken when they move.
+            trim = int(np.flatnonzero(abs(audio) > .02 * max(abs(audio)))[0])
+            lead = int(np.argmax(placement.protocol_config().pulse())) - trim
+        self._p3_breakin[ident] = (raw, audio, lead)
+        while len(self._p3_breakin) > P3_SHIFT_KEEP:
+            del self._p3_breakin[next(iter(self._p3_breakin))]
+        return audio, lead
+
+    def prepare_p3_breakin(self) -> None:
+        """Render both carrier orders before the receive window spends the slot."""
+        a = getattr(self.host, "arq", None)
+        if a is None or self.host.protocol != Protocol.PACTOR3:
+            return
+        packet = a._inflight
+        if a.role == ISS and packet is not None and packet.breakin:
+            fields = packet.payload, packet.status
+        else:
+            fields = a.next_breakin_packet(placement.CHANGEOVER.crc_bytes - 3)
+        if fields is None:
+            return
+        label = self._tx_offset_hz
+        for swapped in (False, True):
+            self._p3_breakin_audio(*fields, swapped)
+        self._tx_offset_hz = label
+
+    def _p3_link_packet(self, ident: tuple) -> np.ndarray:
+        key = (ident, placement.CREST_LIMIT_DB)
+        audio = self._p3_rendered.get(key)
+        if audio is None:
+            kind, sl, payload, status, swapped = ident
+            audio = placement.link_packet(sl, payload, status, swapped=swapped,
+                                          long_cycle=kind == "long")
+            self._p3_rendered[key] = audio
+            while len(self._p3_rendered) > P3_SHIFT_KEEP:
+                del self._p3_rendered[next(iter(self._p3_rendered))]
+        return audio
+
+    def _prerender_p3(self, kind: str, sl: int, payload: bytes, status: int,
+                      swapped: bool) -> None:
+        """Behind our own carrier, both packets the peer's next word can start.
+
+        This one again (a repeat request) and the one behind it (an
+        acknowledgement), in the next cycle's carrier order, so the answer to
+        the word is a selection. `link_packet` is 4.0 ms on a long SL1 frame
+        and `_p3_offset` 3.7, measured, against the 10 ms the sending grid has
+        between its last read and the admission check: 0921-0039 holds 31-40
+        keyed every other long packet 5.6-19.6 ms late, 3.75 s apiece.
+        """
+        preview = getattr(getattr(self.host, "arq", None), "next_packet", None)
+        label = self._tx_offset_hz
+        for fields in ((sl, payload, status), preview() if preview else None):
+            if fields is not None:
+                ident = (kind, *fields, swapped)
+                self._p3_offset(self._p3_link_packet(ident), control=False,
+                                ident=ident)
+        self._tx_offset_hz = label
+
+    @_p3_owned_render
     def send_p3_terminal(self, header_bit: int = 1) -> int:
         """Experimental stock close marker on the established short ISS clock."""
         swapped = self._flip() ^ self._p3_packet_swap_bias
@@ -2046,7 +2341,8 @@ class RadioTx:
             self._log_p3_emission(self.traffic.terminal(header_bit))
         return REFUSED if self.refused else 0
 
-    def _send_p3_ordinary_audio(self, audio, label: str, swapped: bool) -> None:
+    def _send_p3_ordinary_audio(self, audio, label: str, swapped: bool,
+                                crest: float | None = None) -> None:
         """Place an ordinary-header waveform at the retained transmit pulse."""
         lead, offsets = 0, None
         clock = self.reply_clock
@@ -2068,8 +2364,26 @@ class RadioTx:
             lead = placement.pulse_lead(audio)
             half = FS // 200 if placement.CASE0_STAGGER else 0
             offsets = (lead + half, lead) if swapped else (lead, lead + half)
-        self._tx(audio, label, lead_n=lead, pulse_offsets=offsets)
+        self._tx(audio, label, lead_n=lead, pulse_offsets=offsets,
+                 rerender_on_late=True, crest=crest)
 
+    def _prepare_p3_cycle(self, long: bool) -> None:
+        """Apply a granted cycle before rendering, without moving its first key.
+
+        A CS6 callback can emit before the driver next reads ARQ state. The
+        next packet still starts one OLD cycle after the previous packet;
+        only its duration and subsequent cadence use the new cycle. Advance
+        a spent aim on the old grid, then update the guard and receive window.
+        An already aimed, unspent slot stays where the driver put it.
+        """
+        if self.raster is None or self.raster.cycle_long == long:
+            return
+        self._advance_aim()
+        line = self.raster.regear(long)
+        if line:
+            print(f"    [grid] {line}", flush=True)
+
+    @_p3_owned_render
     def send_long_packet(self, sl: int, payload: bytes, status: int) -> int:
         """A data packet on the 3.75 s cycle -- three grid slots to the packet.
 
@@ -2080,23 +2394,24 @@ class RadioTx:
         The answer is then due 3.390 s past our phase reference rather than
         0.890 (`_MasterGrid.regear`).
 
-        NOT YET ON THE AIR. It is driven end to end on the bench --
-        `tests.shrike.test_longcycle` keys one through this grid and reads the
-        placement, the answer instant and the peer's own long packet inside our
-        listen window -- and no arm has keyed one at a gateway.
-        `--no-long-cycle` declines the length for a slot.
+        A received CS6 can call this before the driver's next iteration, so
+        the cycle geometry must be committed here before the render and guard.
         """
+        self._prepare_p3_cycle(True)
         self._note_counter(status)
         swapped = self._flip() ^ self._p3_packet_swap_bias
-        audio = self._p3_offset(
-                placement.link_packet(sl, payload, status, swapped=swapped,
-                                      long_cycle=True), control=False,
-                ident=("long", sl, payload, status, swapped))
+        ident = ("long", sl, payload, status, swapped)
+        audio = self._p3_offset(self._p3_link_packet(ident), control=False,
+                                ident=ident)
+        n = min(len(payload), placement.LONG_PATHS[sl].crc_bytes - 3)
         self._send_p3_ordinary_audio(
-            audio, f"SL{sl} LONG pkt {len(payload)}B status=0x{status:02x}", swapped)
+            audio, f"SL{sl} LONG pkt {n}B status=0x{status:02x}", swapped,
+            crest=placement.CREST_LIMIT_DB)
         self._log_p3_packet(sl, payload, status, long_cycle=True)
-        return (REFUSED if self.refused else
-                placement.LONG_PATHS[sl].crc_bytes - 3)
+        if self.refused:
+            return REFUSED
+        self._prerender_p3("long", sl, payload, status, not swapped)
+        return placement.LONG_PATHS[sl].crc_bytes - 3
 
     # -- PACTOR-2 --------------------------------------------------------
     def _cycle_swap(self) -> bool:
@@ -2126,9 +2441,34 @@ class RadioTx:
         because grading a reverse channel needs a station that answers and a
         monitor never does.
         """
-        self._tx(pactor2.control_signal(index, swapped=self._cycle_swap()),
-                 f"P2 CS{index + 1} {spec.CS_NAMES[index]}",
-                 lead_n=P2_KEY_LEAD_N)
+        self._tx_p2(pactor2.control_signal(index, swapped=self._cycle_swap()),
+                    f"P2 CS{index + 1} {spec.CS_NAMES[index]}")
+
+    p2_phase_delay_n = 0  # Only the P2-mail preset selects the experiment.
+
+    def _tx_p2(self, audio: np.ndarray, what: str) -> None:
+        """Keep the phase reference on the grid after the transmit trim.
+
+        The raw pulse center is 900 samples in, but `_tx` removes about 222
+        samples from an SL1 idle's head. Spending all 900 as lead placed that
+        reference about 4.6 ms early. Measure the actual leveled waveform so
+        carrier arrangement, payload and control words retain their epoch.
+        """
+        keyed = levels.at_drive(audio, self.drive)
+        env = np.abs(keyed)
+        on = np.flatnonzero(env > .02 * env.max())
+        trim = int(on[0]) if on.size else 0
+        self._p2_phase_lead = P2_KEY_LEAD_N - trim
+        # Keep this phase throughout native P2, including after confirmation.
+        # Moving only the entry would move the clock again on the first ACK.
+        delay = (self.p2_phase_delay_n if self.host is not None
+                 and self.host.protocol == Protocol.PACTOR2 else 0)
+        if delay:
+            what += f" phase-delay={delay / FS * 1000:.2f}ms"
+        try:
+            self._tx(audio, what, lead_n=self._p2_phase_lead - delay)
+        finally:
+            self._p2_phase_lead = None
 
     def send_p2_packet(self, sl: int, payload: bytes, status: int) -> int:
         """A PACTOR-2 data packet on the 1.25 s cycle: marker, then 72 pulses."""
@@ -2145,7 +2485,8 @@ class RadioTx:
         return self._p2_burst(pactor2.PATHS_LONG[sl - 1], payload, status)
 
     def _p2_burst(self, path, payload: bytes, status: int, *,
-                  swapped: Optional[bool] = None, what: Optional[str] = None) -> int:
+                  swapped: Optional[bool] = None, what: Optional[str] = None,
+                  marker: Optional[int] = None) -> int:
         """One PACTOR-2 cycle's transmission, keyed on the raster.
 
         `placement.field_info` builds the field for both protocols, because both
@@ -2160,10 +2501,13 @@ class RadioTx:
         """
         n = path.crc_bytes - 3
         self._note_counter(status)
-        self._tx(pactor2.data_burst(
-            pactor2.build_field(placement.field_info(payload, n, status), path),
-            path, swapped=self._flip() if swapped is None else swapped),
-            what or f"P2 {path.name} pkt {len(payload)}B", lead_n=P2_KEY_LEAD_N)
+        field = pactor2.build_field(placement.field_info(payload, n, status), path)
+        arrangement = self._flip() if swapped is None else swapped
+        if marker is None:
+            marker = pactor2.marker_index(path.level, path.n_symbols == 320, status & 1)
+        self._tx_p2(pactor2.data_burst(field, path, swapped=arrangement, k=marker),
+                    (what or f"P2 {path.name} pkt {len(payload)}B") +
+                    f" field={field.hex()} marker={marker} swap={int(arrangement)}")
         return REFUSED if self.refused else n
 
     def send_p2_entry_packet(self, payload: bytes, status: int) -> int:
@@ -2223,8 +2567,11 @@ class RadioTx:
             at, width, cycle_n, _ = r._p3_peer
             elapsed = self.tx_audio_start - at - width
             cycles, gap = divmod(elapsed, cycle_n)
+            raster = r._peer_raster_position(at, cycle_n)
+            comb = ("" if raster is None else
+                    f"; raster @ {raster}, this reading {(at - raster) / FS * 1e3:+.2f} ms off it")
             where = (f"P3 key-dataend {gap / FS * 1e3:+7.1f} ms "
-                     f"(CRC frame @ {at}); elapsed {elapsed / FS * 1e3:+.1f} ms, "
+                     f"(CRC frame @ {at}{comb}); elapsed {elapsed / FS * 1e3:+.1f} ms, "
                      f"{cycles} whole cycle(s)")
         placed = (self.boundary is not None and self.tx_pulse_offsets is None
                   and self.boundary != r.boundary(self.slot))
@@ -2284,16 +2631,16 @@ class RadioTx:
         asymmetry is entirely in where the anchor goes. The reference latches
         the responder's transmit clock to the caller's connect, at `10 ms + our own
         txdelay` past its end (:1744/:1745), and free-runs it by whole cycles
-        from there like any other. Nothing here places that anchor, because
-        nothing here answers a call: `run` takes a `--dxcall` and calls. Until
-        something does both, a burst keyed off the caller's grid is one the
-        station that called us cannot read, and saying so is worth more than
-        a form.
+        from there like any other. `run --answer` places exactly that grid
+        (`_called_grid`); a call answered on any other grid -- a caller's run
+        that falls back to LISTENING -- still keys nothing.
         """
         if self.observing:
             return ("the link is down and this run is only listening out the "
                     "rest of its hold")
         if self.host is None or not self.host.arq.answering:
+            return None
+        if self.raster is not None and self.raster.called:
             return None
         return ("this link was ANSWERED, not placed. The transmit grid is a "
                 "caller's and the station that called us reads at its own "
@@ -2306,6 +2653,9 @@ class RadioTx:
     arrangement is how `--p1-act-on-grant` came to default off and discarded
     every grant for a week. Every line the guard prints names the flag.
     """
+
+    cede_listening = False
+    """Automatic listening, cancellable by a current bare turn answer."""
 
     listening = False
     """This cycle is a deliberate silence: render, refuse, and key nothing.
@@ -2356,6 +2706,15 @@ class RadioTx:
         probe = getattr(self, "p4_probe", None)
         if probe is not None and probe.emitting:
             if not self.qrm_guard:
+                return False
+            if (probe.counter_experiment and probe.requested and not strict and not changeover
+                    and self.raster.key_refusal(carrier, air_n,
+                                               transition_grant=probe.trigger_word) is None):
+                probe.guard_exceptions.append(dict(carrier=carrier, air_samples=air_n,
+                    reason=refusal, hypothesis='grant cancels future P1 reply slots'))
+                print(f"    [p4 experiment] testing grant-to-long-chirp transition: "
+                      f"allowing overlap with FUTURE projected P1 replies ({refusal}); "
+                      "current reply-window overlap remains guarded", flush=True)
                 return False
             print(f"    !! P4 PROBE GUARD -- NOT KEYING {what}: {refusal}; "
                   "probe stops; no automatic stand-down.", flush=True)
@@ -2409,40 +2768,104 @@ class RadioTx:
 
     # -- transmit or stash ------------------------------------------------
     def identify(self, mycall: str) -> None:
-        """Identify a normally completed unanswered call through the TX guards.
+        """Identify a normally completed session in CW, at the next keyable slot.
 
         The connect burst names only the called station. Our callsign is sent
         in link setup after an answer, so an unanswered call has transmitted
-        without identifying its caller. CW supplies that missing identification.
+        without identifying its caller; `--cwid-optional` relies on that link
+        setup only when the digital caller and CW station identity are equal.
+
+        The ID is the tail of our own transmission and senses no channel. The
+        strict guard may only move it past our peer's projected frame, and the
+        projection is aged on the sample clock first: the session loop stops
+        counting cycles when it ends, so a peer's last cycles would otherwise
+        stay projected for ever. `ISS_GUARD_CYCLES` + 1 slots on, every
+        projection has aged out, which bounds the delay.
 
         A refusal leaves identification to the operator. This is never called
-        while unwinding an exception, or for a dry run or replay. Ctrl-C during
-        identification stops playback and is consumed here so device cleanup,
-        the session summary, and mail writes can finish; it never retries CW.
+        while unwinding an exception, or for a dry run or replay.
         """
-        if not (self.transmit and self.rig is not None and self.keyed):
+        if not (self.transmit and self.rig is not None):
             return
-        try:
-            audio = cwid.audio(mycall)
+        with cwid.confirming(mycall):
+            if self.burst_level is None:
+                raise ValueError("no completed data burst for identification level")
+            audio = cwid.audio(mycall, tone_hz=sum(occupied_hz("pactor")) / 2)
             if len(audio) / FS > self.max_key:
                 raise ValueError("CW identification exceeds --max-key")
             if self.live is None or self.raster is None or self.boundary is None:
                 raise ValueError("no receive clock for guarded CW identification")
+            drive = levels.drive_for_rms(audio, *self.burst_level)
             # Completion can follow an unused slot whose boundary has passed.
             self._advance_aim(check_late=True)
+            settle_n = round(self.settle * FS)
+            for _ in range(ISS_GUARD_CYCLES + 2):
+                self.raster.forget_stale(self.boundary - settle_n)
+                refusal = self.raster.key_refusal(self.boundary - settle_n,
+                                                  settle_n + len(audio))
+                if refusal is None:
+                    break
+                print(f"    [grid] ID {mycall.upper()} waits a slot past our peer: "
+                      f"{refusal}", flush=True)
+                self.aim(self.raster, _keyable_slot(
+                    self.live, self.raster, self.raster.next_slot(self.slot),
+                    settle_n, listen=False))
+            else:
+                raise ValueError(f"transmit guard refused identification: {refusal}")
             before = len(self.keyed)
-            self._tx(audio, f"ID {mycall.upper()}", strict_guard=True)
+            self._tx(audio, f"ID {mycall.upper()}", drive, strict_guard=True,
+                     identification=True)
             if len(self.keyed) == before:
                 raise ValueError("transmit guard refused identification")
-        except BaseException as exc:  # Cleanup must survive SystemExit from playback.
-            print(f"  !! IDENTIFICATION NOT CONFIRMED ({exc!r}) -- send "
-                  f"{mycall.upper()} by hand", flush=True)
 
-    def _tx(self, audio: np.ndarray, what: str,
+    def _p3_key_guard(self, key):
+        admit = getattr(self, '_p3_tx_admit', None)
+        if admit is None:
+            return key
+        def guarded(down):
+            if down:
+                admit()
+            return key(down)
+        return guarded
+
+    def _tx(self, *args, **kwargs) -> None:
+        """Bind a P3 waveform to its proposal epoch through final admission."""
+        host = getattr(self, 'host', None)
+        self._p3_tx_admit = None
+        if (host is not None and not kwargs.get("identification")
+                and (host.protocol == Protocol.PACTOR3
+                or getattr(self, "_p3_render_owner", None) is not None)):
+            owner = getattr(self, '_p3_render_owner', None) or host.arq.p3_tx_owner
+            def current():
+                if not host.arq.p3_tx_allowed(owner):
+                    raise _P3TxCancelled('P3 receive-only or obsolete proposal')
+            self._p3_tx_admit = current
+        try:
+            self._tx_admitted(*args, **kwargs)
+        except _P3TxCancelled:
+            self.refused = True
+            self.refusal_cause = 'P3 receive-only or obsolete proposal'
+            self._rerender_late = False
+        finally:
+            self._p3_tx_admit = None
+
+    def _tx_admitted(self, audio: np.ndarray, what: str,
             drive: float | None = None, lead_n: int = 0,
             *, strict_guard: bool = False,
-            pulse_offsets: tuple[int, int] | None = None) -> None:
+            pulse_offsets: tuple[int, int] | None = None,
+            rerender_on_late: bool = False,
+            crest: float | None = None, tail_n: int = 0,
+            identification: bool = False) -> None:
         """Key `audio`, or say why not.
+
+        `identification` is the closing CW ID, which carries no link traffic and
+        so answers to none of the link's admissions: the P3 proposal epoch, a
+        P4 probe or held answer, a listening cycle, an observed hold or an
+        answered link's placement.
+
+        `tail_n` keeps the key down that many samples past the last one: the
+        carrier drops early against the rig's audio path, and at 200 Bd that
+        halves the last CRC bit of a PACTOR-1 packet (1213 witness, 1.2-2.4 ms).
 
         `lead_n` moves the carrier that many samples IN FRONT of the boundary,
         and it survives the backstop below -- a re-aimed burst takes the same
@@ -2453,8 +2876,21 @@ class RadioTx:
         back to the FSM as `arq.REFUSED`: a cycle nothing was keyed in spends no
         retry, because the budget counts air.
         """
+        self.refusal_cause = None
+        self._refused_input = None
+        admit = None if identification else (getattr(self, "p4_tx_admit", None)
+                                             or getattr(self, "_p3_tx_admit", None))
+        if admit is not None:
+            admit()
         probe = getattr(self, "p4_probe", None)
-        if probe is not None and probe.requested and not probe.emitting:
+        if (not identification and probe is not None and probe.requested
+                and not probe.emitting):
+            self.refused = True
+            return
+        if (not identification
+                and getattr(getattr(self, 'p4_hold_audio', None), 'pending', False)
+                and getattr(getattr(self, 'host', None), 'protocol', None) == Protocol.PACTOR1
+                and not (probe is not None and probe.emitting)):
             self.refused = True
             return
         self.tx_pulse_offsets = pulse_offsets
@@ -2466,12 +2902,26 @@ class RadioTx:
         tuned = "" if offset_hz is None else f"  TX {offset_hz:+g} Hz"
         placed, self.placed = self.placed, False
         why, self.unplaceable = self.unplaceable, None
+        # And the grid's admission with them: one left behind by a refused burst
+        # is charged to the next one keyed, and 0923-1434's QRM-guard refusal
+        # wrote 535 ms of listening into `prekey_cost_n`, which then shut every
+        # gate in front of the key for the rest of the link.
+        admission, self._admitted = self._admitted, None
+        admitted = admission[1] if admission and admission[0] == self.slot else None
         self.refused = False
         if self._timing_trial_refusal():
             return
-        if self.listening:
+        if not identification and (self.listening
+                or (self.slot is not None
+                    and getattr(self, "_p3_entry_listen_slot", None) == self.slot)):
+            why = ("the changeover went unanswered and the peer's answer needs "
+                   "the whole cycle (the cede, arq.breakin_listen_due)"
+                   if self.cede_listening else
+                   "the complete entry reply leaves no P3 acquisition budget"
+                   if self.slot is not None and getattr(self, "_p3_entry_listen_slot", None) == self.slot
+                   else "--listen-every")
             print(f"    !! LISTENING CYCLE -- NOT KEYING {what}: this cycle is "
-                  f"given to the receiver (--listen-every). No retry spent; the "
+                  f"given to the receiver ({why}). No retry spent; the "
                   f"packet goes out on the next one.", flush=True)
             self.refused = True
             return
@@ -2489,7 +2939,7 @@ class RadioTx:
                   f"on the next reading.", flush=True)
             self.refused = True
             return
-        answered = self.answered_refusal()
+        answered = None if identification else self.answered_refusal()
         if answered is not None:
             # NOT `refused`, and the difference is what the FSM can do about it.
             # A guard's drop is one cycle of a placement that can be made again;
@@ -2500,17 +2950,29 @@ class RadioTx:
         self.n += 1
         # Consume the rendered arrangement so it cannot constrain a later burst.
         inv, self._sent_invert = self._sent_invert, None
+        tones = getattr(self.live, "tone_offset_hz", 0.0)
+        if tones:
+            audio = _shift_tones(audio, tones)[0]
+            tuned += f"  tones {tones:+g} Hz"
         # The renderers pick amplitudes to suit an offline decode from a file --
         # the PACTOR-1 connect comes out at peak 0.11, nearly 20 dB down -- and on
         # a data interface the level IS the transmit power, so that shipped 5 W
         # where the rig was set for 50.
-        audio = levels.at_drive(audio, self.drive if drive is None else drive)
+        peak = self.drive if drive is None else drive
+        audio = levels.at_drive(audio, peak)
         # Key only for the RF. The renderers pad silence around a burst so a
         # file-fed decoder has room to settle -- the PACTOR-1 connect carries
         # 0.5 s at each end of a 1.98 s file for 0.98 s of signal -- and
         # transmitting that padding holds the key open with dead air, which is
         # both bad practice and half the duration of a PACTOR cycle wasted.
         audio = _trim_silence(audio)
+        if tail_n:
+            audio = np.pad(audio, (0, tail_n))
+        rms = float(np.sqrt(np.mean(audio ** 2))) if audio.size else 0.0
+        level = (levels.sounding_rms(audio), peak)
+        papr_db = round(float(20 * np.log10(np.abs(audio).max() / rms)), 2) if rms else None
+        if crest is not None:
+            tuned += f"  crest {crest:g} dB -> {papr_db:.1f}"
         if lead_n and self.boundary is not None:
             self.boundary -= lead_n
         # HOW FAR INTO ITS BOUNDARY THIS CARRIER COMES UP, and it is carried
@@ -2562,7 +3024,6 @@ class RadioTx:
             # number, and nothing could say whether work taken off the pre-key
             # path had actually come off it. Consumed, so a slot the grid handed
             # back charges its listening window to nobody.
-            admitted, self._admitted_at = self._admitted_at, None
             if admitted is not None:
                 # ...to the path the GRID charged it against, which is the other
                 # end of the same interval: `_clamp_forgives` keyed its question
@@ -2578,17 +3039,19 @@ class RadioTx:
             # Per-burst playback and replay put audio a full settle after now;
             # only duplex can schedule its audio independently of the PTT lead.
             # Guard the onset this path actually emits/models, not merely now.
-            late = self.live.clamp_late(self.boundary)
+            late = _late_at_key(self.live, self.boundary, 0)
             if getattr(self.live, "transmit", None) is None:
                 # A simulated clock may itself impose DAC notice. Notice and
                 # settle overlap, so enforce both floors without summing them.
                 late = max(late, int(self.live.sample_now() + settle_n
+                                     + getattr(self.live, "p4_answer_residual_n", 0)
                                      - self.boundary))
             # THE READER'S OWN NUMBER FOR THIS BURST. Both are five milliseconds
             # -- half a symbol at 100 Bd -- and they are separate constants
             # because they answer about different instants: our comb, and the
             # peer's packet ending.
-            tol_s = BREAKIN_CLAMP_TOL_S if placed else KEY_CLAMP_TOL_S
+            tol_s = (0.0 if getattr(self.live, "p4_answer_residual_n", 0) else
+                     BREAKIN_CLAMP_TOL_S if placed else KEY_CLAMP_TOL_S)
             if (0 < late <= round(tol_s * FS)
                     and getattr(self.live, "transmit", None) is not None):
                 # KEYED WHERE IT CAN BE, which is what the peer is waiting for.
@@ -2632,6 +3095,11 @@ class RadioTx:
                       f"{tol_s * 1e3:.0f} ms the reader forgives, so "
                       f"the cycle is keyed rather than given away.", flush=True)
                 late = 0
+            if late and getattr(self.live, "p4_answer_residual_n", 0):
+                print(f"    !! {LATE_KEY}: calibrated P4 deadline missed by "
+                      f"{late / FS * 1e3:.3f} ms; not keyed.", flush=True)
+                self.refused = True
+                return
             if late and placed:
                 # PAST THE FORGIVENESS A CHANGEOVER PACKET HAS NOWHERE TO BE
                 # MOVED TO. Its instant is the peer's packet ending plus a lead,
@@ -2647,6 +3115,17 @@ class RadioTx:
                       f"{late / FS * 1e3:+.1f} ms ago. Not keyed; the changeover "
                       f"is re-placed on the next cycle.", flush=True)
                 self.refused = True
+                return
+            if late and rerender_on_late:
+                # DATA can be regenerated in the next cycle's arrangement.
+                # Waiting for this finished waveform's parity spends two long
+                # opportunities and blocks all receive dispatch in between.
+                print(f"    !! {LATE_KEY}: {what} missed slot {self.slot} by "
+                      f"{late / FS * 1e3:.1f} ms; not keyed. Retaining the packet "
+                      "for rendering in the next available slot's carrier order.",
+                      flush=True)
+                self.refused = True
+                self._rerender_late = True
                 return
             if late:
                 gone = self.boundary
@@ -2732,13 +3211,25 @@ class RadioTx:
             wait_lead = _prekey_lead(self.live, settle_n,
                                      self.cycle_cost_n() if self.breakin_due
                                      else 0)
+            admission_capture_end = getattr(self, "p4_tx_capture_end", None)
+            if admit is not None and admission_capture_end is not None:
+                wait_lead = max(wait_lead, self.boundary-admission_capture_end)
+            waiting_start = self.live.pos
             waiting = self.live.take_until(self.boundary - wait_lead)
             if waiting.size and self.sessrx is not None:
                 self.sessrx.bridge(waiting)
             self.live.wait_until(self.boundary - wait_lead)
+            if admit is not None:
+                admit()
+            if self._observe_input_loss("pre-key"):
+                self.refusal_cause = "input-loss"
+                self._refused_input = (waiting_start, waiting)
+                self.refused = True
+                self._rerender_late = rerender_on_late
+                return
             # Draining/bridging can itself stall. The already rendered waveform
             # must not be silently clamped late by the duplex transmitter.
-            lost = (self.live.clamp_late(self.boundary)
+            lost = (_late_at_key(self.live, self.boundary, 0)
                     if getattr(self.live, "transmit", None) is not None else 0)
             if 0 < lost <= round(tol_s * FS):
                 # The same forgiveness as above, on the far side of the drain,
@@ -2765,13 +3256,19 @@ class RadioTx:
                       f"{lost / FS * 1e3:+.1f} ms past the boundary; not keyed.",
                       flush=True)
                 self.refused = True
+                self._rerender_late = rerender_on_late
                 return
-        if probe is not None and probe.emitting and not probe.room(
-                max(int(self.live.sample_now()), self.boundary),
-                len(audio) / FS + probe.listen_seconds, FS):
-            self.refused = True
-            probe.reason = "deadline leaves no complete chirp and receive window"
-            return
+        if probe is not None and probe.emitting:
+            now = max(int(self.live.sample_now()), self.boundary)
+            ceiling = getattr(self, 'p4_link_deadline', None)
+            room = (now + len(audio) <= ceiling[0]
+                    and time.monotonic() + len(audio)/FS <= ceiling[1]) if ceiling else probe.room(
+                        now, len(audio)/FS + probe.listen_seconds, FS)
+            if not room:
+                self.refused = True
+                probe.reason = ('session ceiling' if ceiling else
+                                'deadline leaves no complete chirp and receive window')
+                return
         def record_slot():
             if self.boundary is not None:
                 self.slots_used.append(self.slot)
@@ -2781,6 +3278,15 @@ class RadioTx:
                         # Admission evidence belongs to the burst that really
                         # keyed, not the next requested or skipped slot. Retain
                         # the waveform end and this emission's cycle geometry.
+                        phase_lead = getattr(self, "_p2_phase_lead", None)
+                        p2_start = (self.tx_audio_start
+                                    if duplex is not None and self.transmit
+                                    and self.rig is not None else self.boundary)
+                        self.raster._p2_keyed_reply = (
+                            (self.slot, p2_start + phase_lead,
+                             p2_start + len(audio), self.raster.cycle_n)
+                            if self.host.protocol == Protocol.PACTOR2
+                            and phase_lead is not None else None)
                         self.raster._p3_keyed_reply = (
                             (self.slot, self.boundary,
                              self.boundary + len(audio), self.raster.cycle_n)
@@ -2799,17 +3305,21 @@ class RadioTx:
         duplex = getattr(self.live, "transmit", None)
         # A duplex enqueue may still refuse after a scheduling/logging stall.
         # Publish its slot and waveform geometry only after actual transmission.
-        if duplex is None or not (self.transmit and self.rig is not None):
+        if admit is not None:
+            admit()
+        if (duplex is None or not (self.transmit and self.rig is not None)) and not (
+                admit is not None and self.transmit and self.rig is not None):
             record_slot()
         if duplex is None and self.live is not None and self.boundary is not None:
             # MODELLED, not measured: a replay has no carrier, so where one would
             # have come up is the best this path can say. The duplex path below
             # reports the sample it actually came up on instead.
-            off = (self.live.sample_now() + self.settle * FS - self.boundary) / FS
+            residual_n = getattr(self.live, "p4_answer_residual_n", 0)
+            off = (self.live.sample_now() + self.settle * FS + residual_n - self.boundary) / FS
             print(f"    [grid] RF would start {off * 1e3:+.1f} ms from the slot "
                   f"boundary", flush=True)
-            self.tx_audio_start = int(self.live.sample_now() + self.settle * FS)
-            self.tx_key_up = self.tx_audio_start - round(self.settle * FS)
+            self.tx_audio_start = int(self.live.sample_now() + self.settle * FS + residual_n)
+            self.tx_key_up = self.tx_audio_start - round(self.settle * FS) - residual_n
             # ...and where it would have dropped. Overwritten below by the
             # measured instant wherever there is one, and it has to exist even
             # where there is not: the connect search is aimed at the turnaround
@@ -2841,12 +3351,20 @@ class RadioTx:
                         audio,
                         at=None if self.boundary is None
                         else self.boundary + forgiven, settle=self.settle,
-                        key=self.rig.ptt, max_key=self.max_key)
+                        key=self._p3_key_guard(self.rig.ptt), max_key=self.max_key, **({"admit": admit} if admit is not None else {}))
+                    self.corrected_emission_start = getattr(
+                        self.live, "corrected_emission_start", self.tx_audio_start)
+                    self.corrected_emission_end = getattr(
+                        self.live, "corrected_emission_end", self.tx_end)
+                except _P3TxCancelled:
+                    raise
                 except _MissedTxSlot as exc:
                     self.refused = True
+                    self._rerender_late = rerender_on_late
+                    detail = (f"by {int(exc.args[0]) / FS * 1e3:.1f} ms"
+                              if isinstance(exc.args[0], (int, float)) else str(exc.args[0]))
                     print(f"    !! {LATE_KEY}: {what} missed the DAC enqueue "
-                          f"deadline by {int(exc.args[0]) / FS * 1e3:.1f} ms; "
-                          "not keyed.", flush=True)
+                          f"deadline {detail}; not keyed.", flush=True)
                     return
                 self.tx_key_up = self.live.keyed_at
                 record_slot()
@@ -2930,7 +3448,10 @@ class RadioTx:
                 self._ack_gap_line(changeover=placed)
             else:
                 _dur, unkey = ota._play(audio, self.out_dev, self.max_key,
-                                        self.rig, settle=self.settle)
+                                        self.rig, settle=self.settle,
+                                        **({"admit": admit} if admit is not None else {}))
+                if admit is not None:
+                    record_slot()
                 if self.live is not None:
                     was = self.live.pos
                     self.live.flush(before=unkey)
@@ -2946,31 +3467,32 @@ class RadioTx:
                 raise PttError(f"TX[{self.n}] {what} has no keyed carrier "
                                f"behind it: {fail}")
             self.keyed.append((self.slot, dur))
+            if not identification:
+                self.burst_level = level
+            recorder = getattr(self.live, "_rec", None)
+            self._log_tx_event("completed", outcome="sent", label=what,
+                               sample_rate=FS, waveform_samples=len(audio), slot=self.slot,
+                               recording=str(recorder.path) if recorder is not None else None,
+                               ptt_start_sample=self.tx_key_up if duplex is not None else None,
+                               audio_start_sample=self.tx_audio_start if duplex is not None else None,
+                               audio_end_sample=self.tx_end if duplex is not None else None,
+                               output_enqueue_sample=getattr(self.live, "output_enqueue_sample", None),
+                               driver_offset_samples=getattr(self.live, "driver_offset_samples", None),
+                               timing_basis="host capture clock; not measured RF", tx_offset_hz=offset_hz)
+            if getattr(self, "_p2_phase_lead", None) is not None:
+                wav.write(self.outdir / f'tx_{self.n:02d}.wav', audio, FS, source='PACTOR-2 DAC reference', control=what, slot=self.slot, audio_start=self.tx_audio_start, audio_end=self.tx_end, ptt_up=self.tx_key_up, phase_lead_samples=self._p2_phase_lead, p2_phase_delay_ms=self.p2_phase_delay_n / FS * 1000 if self.host is not None and self.host.protocol == Protocol.PACTOR2 else 0, tx_offset_hz=offset_hz, ownership=_capture_recording_for(self.outdir / f'tx_{self.n:02d}.wav'))
             if pulse_offsets is not None:
                 # Exact DAC reference, not an RF recording. Preserve level and
                 # absolute timing for comparison with pickup or independent RF.
-                wav.write(self.outdir / f"tx_{self.n:02d}.wav", audio, FS,
-                          source=("PACTOR-3 entry DAC reference" if " ENTRY " in what
-                                  else "PACTOR-3 control DAC reference"), control=what,
-                          slot=self.slot, audio_start=self.tx_audio_start,
-                          audio_end=self.tx_end, ptt_up=self.tx_key_up,
-                          pulse_offsets=list(pulse_offsets),
-                          tx_offset_hz=offset_hz,
-                          timing_reply_delay_ms=(None if self.timing_trial is None else
-                                                 self.timing_trial.reply_delay_ms),
-                          timing_trial=(None if self.timing_trial is None else
-                                        self.timing_trial.arm),
-                          p3_mail_reply_epoch=(None if self.reply_clock is None else
-                                               self.reply_clock.pulse_epoch),
-                          entry_phase=(self.tx_audio_start + min(pulse_offsets)
-                                       if " ENTRY " in what else
-                                       None if self.timing_trial is None else
-                                       self.timing_trial.entry_phase))
+                wav.write(self.outdir / f'tx_{self.n:02d}.wav', audio, FS, source='PACTOR-3 entry DAC reference' if ' ENTRY ' in what else 'PACTOR-3 control DAC reference', control=what, slot=self.slot, audio_start=self.tx_audio_start, audio_end=self.tx_end, ptt_up=self.tx_key_up, pulse_offsets=list(pulse_offsets), tx_offset_hz=offset_hz, crest_limit_db=crest, papr_db=papr_db, p3_speed_policy=None if self.host is None else self.host.arq.cfg.p3_speed_policy, timing_reply_delay_ms=None if self.timing_trial is None else self.timing_trial.reply_delay_ms, timing_trial=None if self.timing_trial is None else self.timing_trial.arm, p3_mail_reply_epoch=None if self.reply_clock is None else self.reply_clock.pulse_epoch, entry_phase=self.tx_audio_start + min(pulse_offsets) if ' ENTRY ' in what else None if self.timing_trial is None else self.timing_trial.entry_phase, ownership=_capture_recording_for(self.outdir / f'tx_{self.n:02d}.wav'))
             if self.sessrx is not None:
                 self.sessrx.skip(unheard / FS)   # ...do not splice it in either
         else:
             wav_path = str(self.outdir / f"tx_{self.n:02d}.wav")
-            session.write_wav(wav_path, audio)
+            if _capture_writer_for(Path(wav_path)) is None:
+                session.write_wav(wav_path, audio)
+            else:
+                _save_capture(Path(wav_path), audio)
             print(f"  TX[{self.n}] {what}{tuned}  ({dur:.1f}s)  -- dry run -> {wav_path}")
         # WHERE OUR CARRIER ACTUALLY WAS, kept rather than re-derived. The
         # sending-side guard needs to know that a codeword it decoded cannot
@@ -3043,7 +3565,8 @@ class _LiveInput:
 
     def __init__(self, device, out_device=None, fs: int = FS, *,
                  blocksize: int = 128, latency="low", record=None,
-                 tx_latency_n: int = 0):
+                 tx_latency_n: int = 0, geometry_n: int = 0):
+        recording_ownership = _capture_recording_for(Path(record)) if record is not None else None
         import queue
         import sounddevice as sd
         self._q: queue.Queue = queue.Queue()
@@ -3059,6 +3582,9 @@ class _LiveInput:
         self._floor = 0           # capture below this is ours, and is dropped
         self._fit: list[tuple[float, int]] = []  # (ADC instant, samples), thinned
         self._ahead: float | None = None   # converter timeline minus samples, s
+        self._fits: list[list[tuple[float, int]]] = []   # closed by a loss step
+        self.lost_at: list[tuple[int, int, float]] = []  # (sample, lost, callback silence s)
+        self._cb_at: float | None = None
         self._last = (time.monotonic(), 0)       # (ADC instant, its sample index)
         # Bounded callback-entry history, sampled by the scheduler before keying.
         # Keep wall delivery distinct from the ADC's uniform sample clock.
@@ -3076,8 +3602,13 @@ class _LiveInput:
         #: routes. It belongs to the audio path, so it is spent on every burst
         #: of every protocol and lives in no protocol's constant.
         self.tx_latency_n = int(tx_latency_n)
+        self.geometry_n = int(geometry_n)
+        self.corrected_emission_start = None
+        self.corrected_emission_end = None
         self._tx: Optional[np.ndarray] = None    # armed burst, cleared when sent
         self._tx_at = 0                          # output frame it starts on
+        self.output_enqueue_sample: int | None = None
+        self.driver_offset_samples: int | None = None
         self._tx_done = threading.Event()
         self._tx_end_time = 0.0                  # when its last sample leaves
         self.keyed_s = 0.0        # how long PTT was up for the last transmission
@@ -3086,7 +3617,8 @@ class _LiveInput:
         # stream's sample 0 and `end_stream_sample` in a window's sidecar is an
         # offset into it. Fed from the callback, ahead of `_floor`, which the
         # reader never sees below.
-        self._rec = (wav.CaptureRecorder(record, rate=fs, source=str(device))
+        self._rec = (wav.CaptureRecorder(record, rate=fs, source=str(device),
+                                       **({'ownership': recording_ownership} if recording_ownership else {}))
                      if record is not None else None)
         if self._rec is not None:
             self._rec.facts["first_stream_sample"] = self.samples
@@ -3094,7 +3626,7 @@ class _LiveInput:
         self._rec_thread: threading.Thread | None = None
         self._rec_fault: str | None = None
 
-        def _fill(out, frames, n0, dac):
+        def _fill(out, frames, n0, dac, timestamps):
             buf = self._tx
             out.fill(0)
             if buf is None:
@@ -3102,6 +3634,11 @@ class _LiveInput:
             a, b = max(n0, self._tx_at), min(n0 + frames, self._tx_at + buf.size)
             if b > a:
                 out[a - n0:b - n0, 0] = buf[a - self._tx_at:b - self._tx_at]
+                if self.output_enqueue_sample is None:
+                    self.output_enqueue_sample = a
+                    self.driver_offset_samples = round(
+                        (timestamps.outputBufferDacTime
+                         - timestamps.inputBufferAdcTime) * fs)
             if b >= self._tx_at + buf.size:
                 self._tx = None
                 self._tx_end_time = dac + (self._tx_at + buf.size - n0) / fs
@@ -3135,8 +3672,17 @@ class _LiveInput:
             # A rate fit downstream reads what this counts as a crystal
             # instead, which is what -4860 ppm was.
             ahead = t.inputBufferAdcTime - n0 / fs
-            self.lost += rates.lost_step(ahead, self._ahead, blocksize, fs)
+            step = rates.lost_step(ahead, self._ahead, blocksize, fs)
+            if step:
+                # The wall silence between this callback and the last is what
+                # tells a driver that stopped calling from a stream clock that
+                # re-based itself; the loss count alone cannot.
+                self.lost += step
+                self.lost_at.append((n0, step, now - (self._cb_at or now)))
+                self._fits.append(self._fit)
+                self._fit = []
             self._ahead = ahead
+            self._cb_at = now
             blk = ind[:, 0].copy()
             self._q.put((t.inputBufferAdcTime + base, n0, blk))
             if self._rec is not None:
@@ -3156,7 +3702,7 @@ class _LiveInput:
             if not self._fit or t.inputBufferAdcTime - self._fit[-1][0] >= 1.0:
                 self._fit.append((t.inputBufferAdcTime, n0))
             if out is not None:
-                _fill(out, frames, n0, t.outputBufferDacTime + base)
+                _fill(out, frames, n0, t.outputBufferDacTime + base, t)
 
         # ONE STREAM OWNS THE DEVICE, and the small buffer is downstream of that.
         #
@@ -3286,7 +3832,7 @@ class _LiveInput:
         # in the morning is the one they paste into the analysis.
         return (f"session stream: {self._rec.path} -- "
                 f"{self._rec.seconds:.1f} s, "
-                f"{self._rec.path.stat().st_size / 1e6:.1f} MB, on the sample "
+                f"{wav.stored(self._rec.path).stat().st_size / 1e6:.1f} MB, on the sample "
                 f"clock every capture beside it is indexed on")
 
     def clock_ppm(self) -> float:
@@ -3304,13 +3850,18 @@ class _LiveInput:
         and half a second of it over a minute is -8000 ppm of fiction on a
         crystal this station measures at +4 to +7.
         """
-        return rates.rate_fit(self._fit, self.fs)[0]
+        return rates.rate_fit(self._longest_fit(), self.fs)[0]
+
+    def _longest_fit(self) -> list[tuple[float, int]]:
+        # A loss step is a discontinuity in delivered-vs-timestamped and would
+        # read as thousands of ppm; each unbroken stretch fits the crystal.
+        return max(self._fits + [self._fit], key=len)
 
     def clock_report(self) -> str:
         return rates.clock_report(
             samples=self.samples, lost=self.lost, xruns=self.xruns,
-            underruns=self.underruns, points=self._fit, blocksize=self._blk,
-            fs=self.fs)
+            underruns=self.underruns, points=self._longest_fit(),
+            blocksize=self._blk, fs=self.fs, breaks=len(self._fits))
 
     def sample_now(self) -> float:
         """Where the capture stream stands at this instant, between callbacks.
@@ -3361,10 +3912,12 @@ class _LiveInput:
         The measured input-to-output latency plus three blocks -- the callback
         that fills the buffer after next cannot be pre-empted out from under us
         at 2.7 ms a block. `transmit` schedules with the same two terms, and
-        with `tx_latency_n`, which moves the enqueue deadline forward by exactly
-        what it moves the audio.
+        with `tx_latency_n`, less the logical-to-emission geometry already
+        applied by `transmit`.
         """
-        return (self._lat or 0) + self.tx_latency_n + 3 * self._blk
+        return ((self._lat or 0) + self.tx_latency_n
+                - getattr(self, "geometry_n", 0)
+                + 3 * self._blk)
 
     def clamp_late(self, at: int) -> int:
         """How late the earliest schedulable audio would be relative to `at`.
@@ -3399,7 +3952,7 @@ class _LiveInput:
 
     def transmit(self, audio: np.ndarray, *, at: Optional[int] = None,
                  settle: float = 0.0, key=None,
-                 max_key: float = 40.0) -> tuple[int, int]:
+                 max_key: float = 40.0, admit=None) -> tuple[int, int]:
         """Send `audio` so its first sample reaches the DAC as capture sample
         `at` reaches the ADC. Returns (first, end) capture-stream indices.
 
@@ -3459,22 +4012,28 @@ class _LiveInput:
             # EARLIER BY THE WHOLE LOOP, not by the half the driver reports. The
             # contract in the first line of this docstring was not being kept:
             # the burst reached the air `tx_latency_n` after the index it names.
-            # Corrected here rather than in a protocol constant -- `P3_REPLY_S`
-            # 0.890 is measured from SCS traffic and is right -- so the same
-            # correction is spent on PACTOR-1, PACTOR-2, ARDOP and an ID alike.
+            # Corrected here rather than in a protocol constant, so the same
+            # correction is spent on PACTOR-1, PACTOR-2, ARDOP and an ID alike
+            # and `P3_REPLY_S` names an instant on the air.
             # PTT follows it: the key is `settle` in front of the burst's DAC
             # instant, which has just moved, and `_prekey_lead` moves the drain
             # in front of it by the same amount, so the lead is untouched.
-            start = at - self._lat - self.tx_latency_n
+            start = at + self.geometry_n - self._lat - self.tx_latency_n
             if start < earliest:
                 # This is the last admission check before arming the callback.
                 # An explicit sample is a protocol deadline, not permission to
                 # slide the burst into the peer's packet after a Python stall.
                 raise _MissedTxSlot(earliest - start)
         first = start + self._lat + self.tx_latency_n
+        self.corrected_emission_start = first
+        self.corrected_emission_end = first + audio.size
         self.keyed_at = None
         self._tx_done.clear()
         self._tx_at = start
+        self.output_enqueue_sample = None
+        self.driver_offset_samples = None
+        if admit is not None:
+            admit()
         self._tx = audio                  # ...last: it is what arms the callback
         stop = threading.Event()
         limit = settle + dur + max(2.0, 0.25 * dur)
@@ -3523,7 +4082,7 @@ class _LiveInput:
                     pass
                 self.keyed_s = time.monotonic() - up if up else 0.0
             stop.set()
-        return first, first + audio.size
+        return first - self.geometry_n, first + audio.size - self.geometry_n
 
     def flush_to(self, index: int) -> None:
         """Drop capture up to `index` -- our own transmission, to the sample.
@@ -3730,7 +4289,7 @@ class _ReplayInput:
     def clamp_late(self, index: int) -> int:
         """A file has no transmitter and no wall clock to be late against: the
         only instant it cannot key on is one the reader has already gone past."""
-        return max(0, self.pos - index)
+        return max(0, self.pos + getattr(self, "p4_answer_residual_n", 0) - index)
 
     def wait_until(self, index: int) -> float:
         """A recording has no clock to sleep against -- so the file IS the clock,
@@ -3767,6 +4326,13 @@ class _SessionRx:
     """
 
     def __init__(self, host, tag: str = "RX"):
+        from .p4receiver import P4Receiver
+        self.p4 = P4Receiver(FS, admitted=getattr(host.arq, 'p4_admitted', False),
+                             breakin=getattr(getattr(host, 'peer', None), 'p4_link_options', None) is not None)
+        probe = getattr(getattr(host, 'peer', None), 'p4_probe', None)
+        if probe is not None:
+            probe.receiver = self.p4
+            probe.arq = host.arq
         self.host, self.tag = host, tag
         # Retires the optional call-phase experiment after the first payload
         # settles, a role change, or departure from initial P1 setup. This is
@@ -3847,6 +4413,9 @@ class _SessionRx:
         self._p3_offset_contradicts_p1 = False
         self._p3_offset_fixed = False
         self._p3_offset_candidate = None
+        self._p3_offset_pending = None
+        self._p3_carrier_pending = None
+        self._p3_carrier_candidate = None
         self._p3_corrected = None
         self._p3_changeover_pending = False
         self._p3_acquisition_cycle = 0
@@ -3854,16 +4423,23 @@ class _SessionRx:
         self._p3_entry_body_candidate = None
         self._p3_entry_body_checked_at = None
         self._p3_answer_at = None
+        self._p3_preferred_phase = None
+        self._p3_scan_deferred = False
+        self._p3_ahead: dict = {}
+        self._p3_reading_ahead = False
         self._final_connect_listen = False
         self._scan_origin: Optional[int] = None
         self._tracked_only = False
         self._p3_row0: Optional[int] = None
+        self._p3_presence_form = None
         self._p3_clock_role = None
         self._p3_cycle_n = round(spec.CYCLE_SHORT_S * FS)
         self._p3_span = rxfront._frame_span(placement.SPEED_PATHS[1])
         self._p3_delivered_at: Optional[int] = None
         self._p3_repeat_changeover = False
-        self._p3_sl2_expected_until = None
+        self._p3_expected_levels: tuple[int, ...] = ()
+        self._p3_expected_since = 0
+        self._p3_early_sl3 = None
 
         self.p3_wideband_prekey = False
         self._p3_long_window_checked_at = None
@@ -3882,16 +4458,85 @@ class _SessionRx:
                 and self.sync.packet_level in (None, 1, 2, 3)
                 and self._p3_row0 is not None)
 
-    def note_p3_speedup_emitted(self) -> None:
-        """Reserve an SL2 read for the next packets, without claiming an SL2 lock."""
-        if (self.host.protocol == Protocol.PACTOR3 and self.host.arq.role == IRS
-                and self.sync.packet_level == 1 and self._p3_row0 is not None):
-            self._p3_sl2_expected_until = self._p3_row0 + 3 * self._p3_cycle_n
+    def note_p3_speedup_emitted(self, from_sl: int, to_sl: int) -> None:
+        """Expect either level after our CS4, without claiming a lock on either.
 
-    def sl2_prekey_expected(self, target: int) -> bool:
-        return (self.sync.packet_level == 2
-                or (self._p3_sl2_expected_until is not None
-                    and target <= self._p3_sl2_expected_until))
+        HELD UNTIL THE PEER COMMITS, not by the lock. KB5LZK 0926-1920 stayed at
+        SL2 after our CS4 for SL3; the lock dropped on two unread copies and the
+        SL2 read with it, so the readable copy at hold 31 went to readers aimed
+        at SL1 and SL3. A frame at `from_sl` is the peer declining and keeps the
+        pair. The opt-in short SL3 reader retains the SL2/SL3 pair after SL3
+        promotion too: the next physical packet still needs staging, and a
+        narrow header must retain its independently admitted SL2 fallback.
+        A frame outside that pair, a role change or the link's end
+        clears it, and so does the link's own silence budget, `max_retries`
+        cycles with no frame at all.
+        """
+        if self.host.protocol == Protocol.PACTOR3 and self.host.arq.role == IRS:
+            self._p3_expected_levels = (from_sl, to_sl)
+            self._p3_expected_since = self._p3_acquisition_cycle
+
+    def _p3_expected(self) -> tuple[int, ...]:
+        if (self._p3_expected_levels and self._p3_acquisition_cycle
+                - self._p3_expected_since > self.host.arq.cfg.max_retries):
+            self._p3_expected_levels = ()
+        return self._p3_expected_levels
+
+    def sl2_prekey_expected(self) -> bool:
+        accepted = self._p3_presence_form
+        established = (accepted is not None and accepted == (self.host.arq._link_generation, 2)
+                       and self._p3_row0 is not None)
+        return self.sync.packet_level == 2 or 2 in self._p3_expected() or established
+
+    def sl3_prekey_expected(self) -> bool:
+        expected = self._p3_expected()
+        return bool(expected and expected[-1] == 3 and self.wideband_prekey_active())
+
+    def _p3_speculative_sl3_reserve(self) -> float:
+        if self._p3_early_sl3 is not None:
+            return .006
+        reserve = self.P3_WIDEBAND_RESERVE_S
+        if (self._p3_row0 is None or (self.sync.packet_level or 0) >= 3
+                or self.host.arq.cycle_command_emitted):
+            return reserve
+        if (self.host.arq.role == IRS
+                and self._p3_cycle_n == round(spec.CYCLE_SHORT_S * FS)
+                and self.sl2_prekey_expected()):
+            reserve += self.P3_SL2_RESERVE_S * (1 + bool(self.p3_receive_offset_hz))
+        if self.sync.packet_level in (None, 1, 2):
+            reserve += self.P3_SL1_RESERVE_S
+        return reserve
+
+    def prepare_p3_sl3(self, audio: np.ndarray, origin: int) -> None:
+        observe = getattr(self.host.peer, "_observe_input_loss", None)
+        if observe is not None and observe("sl3-prepare"):
+            self._p3_early_sl3 = None
+            return
+        if not self.sl3_prekey_expected() or self._p3_clock_role not in (None, IRS):
+            self._p3_early_sl3 = None
+            return
+        lead = p3frame.DATA_OFFSET * rxfront.SPS
+        end = origin + len(audio)
+        row = self._p3_row0 + ((end - self._p3_row0
+                               - self.sync.WIDEBAND_HEADER_BODY_N) // self._p3_cycle_n) * self._p3_cycle_n
+        if self._p3_delivered_at is not None and row <= self._p3_delivered_at + rxfront.SPS:
+            return
+        start = row - lead - 2400
+        if start < origin or end < row + self.sync.WIDEBAND_HEADER_BODY_N:
+            return
+        key = (row, start, self.p3_receive_offset_hz, self._p3_acquisition_cycle)
+        state = self._p3_early_sl3
+        if state is not None and state[0] != key:
+            self._p3_early_sl3 = state = None
+        corrected = self._corrected(audio[start - origin:])
+        at = row - start
+        if state is None:
+            header = self.sync.wideband_header_at(corrected, at)
+            if header is None or header.long_cycle or header.levels != (3,):
+                return
+            state = (key, rxfront._EarlySL3(header.at + lead))
+            self._p3_early_sl3 = state
+        state[1].update(corrected)
 
     def feed(self, chunk: np.ndarray) -> None:
         if not chunk.size:
@@ -3950,6 +4595,17 @@ class _SessionRx:
         cannot combine.
         """
         self.cs_seen = self.frame_seen = False
+        self._p3_early_sl3 = None
+        self.host.arq._entry_p1_current = False
+        if (self._p3_carrier_pending is not None
+                and self._p3_acquisition_fits(.050)):
+            self.nominate_p3_offset_after_control()
+        self._expire_p3_offset_pending()
+        if hasattr(self, 'p4'):
+            if self.host.arq.state not in (State.CONNECTING, *LINKED):
+                self.p4.new_call()
+            else:
+                self.p4.new_cycle()
         self._p3_word_read = None
         self._p3_prekey_crc = None
         self._p3_control_collect_plan = None
@@ -3958,6 +4614,7 @@ class _SessionRx:
         role = self.host.arq.role
         if role != self._p1_role or self.host.protocol != Protocol.PACTOR3:
             self._p3_answer_at = None
+            self._p3_preferred_phase = None
             self._p3_head_candidate = None
             self._p3_entry_body_candidate = None
         if self.host.arq.state not in (State.CONNECTING, *LINKED):
@@ -3967,6 +4624,7 @@ class _SessionRx:
             self._p3_offset_candidate = None
             self._p3_head_candidate = None
             self._p3_answer_at = None
+            self._p3_preferred_phase = None
             self._p3_changeover_pending = False
         if (self.host.protocol != Protocol.PACTOR3
                 or self.host.arq.state not in (State.CONNECTING, *LINKED)):
@@ -3975,11 +4633,12 @@ class _SessionRx:
             self._p3_entry_body_checked_at = None
         # Our own CS3 is a proposed turn, not proof that the peer stopped
         # sending. Keep its receive-only packet clock while that turn awaits
-        # acknowledgement. In onair-0914-1322 the peer repeated SL4 after our
+        # acknowledgement, including quiet ownership after failed mail retires
+        # the transmit field. In onair-0914-1322 the peer repeated SL4 after our
         # CS3; dropping this clock left readable retries to blind acquisition.
         keep_peer_clock = (self.host.protocol == Protocol.PACTOR3
                            and role == ISS
-                           and self.host.arq.unconfirmed_breakin
+                           and self.host.arq.p3_peer_receive_owned
                            and self._p3_clock_role == IRS
                            and self._p3_row0 is not None)
         # A confirmed/cancelled turn can leave the local role unchanged. Retire
@@ -4003,7 +4662,7 @@ class _SessionRx:
                 self._p3_clock_role = None
                 self.sync.packet_at = None
                 self._p3_repeat_changeover = False
-                self._p3_sl2_expected_until = None
+                self._p3_expected_levels = ()
         self._p1_role = role
 
     @property
@@ -4071,7 +4730,7 @@ class _SessionRx:
         started = time.perf_counter()
         ev = rxfront._cs_event(self._corrected(audio[lo:hi]), CS_BREAKIN, 0,
                               head - origin - lo, head / FS, "")
-        self._p3_stage_ms["changeover_body"] = (time.perf_counter() - started) * 1e3
+        _p3_stage(self, "changeover_body", started)
         if ev.packet is None:
             return
         before = self._p3_delivered_at
@@ -4095,12 +4754,14 @@ class _SessionRx:
         return min(until, early) if early < final_until else until
 
     def control_collect_until(self, until: int, now: int, raster) -> int:
-        """Allocate cold P3 acquisition time without weakening key admission.
+        """Reserve P3 reply processing time without weakening key admission.
 
         A settle-only close leaves eight milliseconds beyond DAC notice,
         less than acquisition plus the shared decode reserve. Collect a little
-        less trailing audio while acquiring an ISS reply, never while reading
-        IRS data or an established control clock. The bounded coherent reader
+        less trailing audio while acquiring an ISS reply. With a tracked
+        control clock, retain the whole word and tracking/filter support.
+        Unconfirmed entry retains the keyed P1 reply and its reader support.
+        IRS data keeps its full receive window. The bounded coherent reader
         still requires the complete control word; an earlier cutoff cannot
         authorize a partial word or an answer to an unkeyed slot.
         """
@@ -4108,10 +4769,11 @@ class _SessionRx:
         keyed = getattr(raster, "_p3_keyed_reply", None)
         if (self.host.protocol != Protocol.PACTOR3 or a.state not in LINKED
                 or a.role != ISS or not raster.sending
-                or not (a.entry_pending or self._p3_answer_at is None)
                 or keyed is None or keyed[0] != raster.keyed_slot):
             self._p3_control_collect_plan = None
             return until
+        if self._p3_answer_at is not None and not a.entry_pending:
+            self._p3_control_collect_plan = None
         plan = self._p3_control_collect_plan
         if plan is not None:
             if plan[:3] == (self._p3_acquisition_cycle, keyed, until):
@@ -4121,7 +4783,41 @@ class _SessionRx:
                 return plan[3]
             self._p3_control_collect_plan = None
         _, started, emitted_end, cycle_n = keyed
+        if self._p3_answer_at is not None and not a.entry_pending:
+            # A tracked answer needs its twenty differential symbols and the
+            # matched filter's support, not all remaining turnaround silence.
+            # Keep the full one-symbol tracking bracket. The callback may
+            # immediately render a long DATA frame, before the loop can reserve
+            # any render budget. Reading to the old settle deadline spent that
+            # budget and cost two long slots once carrier order was rendered.
+            head = self._p3_answer_at
+            count = max(1, (emitted_end - head + cycle_n - 1) // cycle_n)
+            support = (spec.CS_BITS_PER_TONE * rxfront.SPS
+                       + rxfront.MATCHED_DELAY_N
+                       + self.sync.ANSWER_TRACK_SYMBOLS * rxfront.SPS + 1)
+            if a.unconfirmed_breakin:
+                count = max(count, (until - head - support) // cycle_n)
+            head += count * cycle_n
+            live = getattr(self.host.peer, "live", None)
+            ready = head + support + getattr(live, "holdback", 0)
+            if (head >= emitted_end and ready < until
+                    and (a.unconfirmed_breakin or head + support <= started + cycle_n)):
+                return ready
+            return until
         earlier = until - round(self.P3_ANSWER_ACQUIRE_RESERVE_S * FS)
+        p1_extent = self._entry_p1_reply_extent(raster)
+        if p1_extent is not None:
+            peer = self.host.peer
+            live = getattr(peer, "live", None)
+            complete = p1_extent[1] + getattr(live, "holdback", 0)
+            ready = (p1_extent[1] + round(p1rx.CS_SEARCH_HALF_S * FS)
+                     + getattr(live, "holdback", 0))
+            if complete > until:
+                if (getattr(peer, "raster", None) is raster
+                        and getattr(peer, "slot", None) is not None):
+                    peer._p3_entry_listen_slot = peer.slot
+                return ready
+            earlier = min(until, max(earlier, ready))
         if (earlier <= now or earlier < emitted_end + round(.23 * FS)
                 or earlier > started + cycle_n):
             return until
@@ -4133,8 +4829,21 @@ class _SessionRx:
                 return until
         return earlier
 
+    def _entry_p1_reply_extent(self, raster):
+        a = self.host.arq
+        keyed = getattr(raster, "_p3_keyed_reply", None)
+        due = getattr(raster, "rx_due", None)
+        if (self.host.protocol != Protocol.PACTOR3 or not a.entry_pending
+                or a.state not in LINKED or a.role != ISS or not raster.sending
+                or keyed is None or keyed[0] != raster.keyed_slot or due is None):
+            return None
+        _, started, emitted_end, cycle_n = keyed
+        at = due(raster.keyed_slot)
+        end = at + raster.p1_cs_n
+        return (at, end) if emitted_end <= at and end <= started + cycle_n else None
+
     def control_signal_in(self, seg: np.ndarray, seg_start: int, raster):
-        """Read one actual keyed reply, with independent P1 and P3 admission.
+        """Read one keyed reply, with independent P1, P2 and P3 admission.
 
         A released FSK tracker must not disable a learned P3 clock or cold
         entry acquisition. Conversely, a periodic clock cannot invent a reply
@@ -4148,59 +4857,169 @@ class _SessionRx:
             return None, None
         end = seg_start + seg.size
         p1_at = raster.rx_due_in(seg_start, end)
-        keyed = getattr(raster, "_p3_keyed_reply", None)
-        if (self.host.protocol == Protocol.PACTOR3 and keyed is not None
-                and keyed[0] == raster.keyed_slot):
-            _, started, emitted_end, cycle_n = keyed
-            periods = 0
-            if raster.sending and self.host.arq.unconfirmed_breakin:
-                # Select at most one captured interval, with enough trailing
-                # audio for the existing cold acquisition. This projects an
-                # answer to the SAME emitted CS3, not an ACK to an unkeyed new
-                # packet. The original one-slot admission resumes when ARQ
-                # settles that break-in. It also excludes our keyed waveform.
-                periods = max(0, (end - emitted_end - round(.23 * FS)) // cycle_n)
-            lo = max(seg_start, emitted_end + periods * cycle_n)
-            hi = min(end, started + (periods + 1) * cycle_n)
-            nominal = raster.rx_due(raster.keyed_slot) + periods * cycle_n
-            at = None
-            if hi - lo >= P3_CS_N:
-                if self._p3_answer_at is not None:
-                    # Project onto this emitted slot's reply interval, never
-                    # the latest periodic instant anywhere in a recovered tape.
-                    periods = (lo - self._p3_answer_at + cycle_n - 1) // cycle_n
-                    projected = self._p3_answer_at + periods * cycle_n
-                    # A saved phase remains a bounded receive hypothesis for
-                    # this actually keyed packet, even after an outage. The
-                    # age limit protects TX placement, not listening: applying
-                    # it here strands the non-None anchor beyond eight misses
-                    # while also excluding cold acquisition. Only a decoded
-                    # answer refreshes the anchor; silence cannot move it.
-                    if (periods >= 1
-                            and lo <= projected
-                            and projected + P3_CS_N <= hi):
-                        at = projected
-                if (at is None and (self.host.arq.entry_pending
-                                    or self._p3_answer_at is None)
-                        and hi - lo >= round(.23 * FS)):
-                    # The cold sweep has its own 0.46-s bracket and deadline.
-                    # The nominal P1 position is a search centre only here;
-                    # it need not contain a complete P1 word, and may not be
-                    # reused as an independently authorized P1 read.
-                    at = max(lo, min(nominal, hi - P3_CS_N))
-            if at is not None:
-                heard = self.control_signal(seg[lo - seg_start:hi - seg_start],
-                                            lo, at, p1_allowed=False)
+        extent = self._entry_p1_reply_extent(raster)
+        if extent is not None and seg_start <= extent[0]:
+            self.host.arq.note_entry_window_truncated(end < extent[1])
+        if extent is not None and p1_at is not None:
+            before = len(self.cs_log)
+            heard = self.control_signal(seg, seg_start, p1_at,
+                                        p3_allowed=False, p2_allowed=False)
+            if len(self.cs_log) != before:
+                return heard, p1_at
+            peer = self.host.peer
+            if (getattr(peer, "raster", None) is raster
+                    and getattr(peer, "slot", None) is not None
+                    and not self._p3_acquisition_fits(self.P3_ANSWER_ACQUIRE_RESERVE_S)):
+                peer._p3_entry_listen_slot = peer.slot
+                self.host.log("complete entry reply needs P3 acquisition time "
+                              "-> listening for this slot; no late key")
+        p2_keyed = getattr(raster, "_p2_keyed_reply", None)
+        if (self.host.protocol == Protocol.PACTOR2 and p2_keyed is not None
+                and p2_keyed[0] == raster.keyed_slot and raster.sending):
+            _, phase, emitted_end, cycle_n = p2_keyed
+            path = pactor2.PATHS_LONG[0] if cycle_n > round(2 * FS) else pactor2.PATHS[0]
+            at = phase + round(pactor2.cs_slot(path) * FS)
+            # One predicted P2 instant, independent of the retained FSK grant
+            # clock. Never sweep noise, reuse a skipped slot, or read our TX.
+            lo = max(seg_start, emitted_end)
+            hi = min(end, phase + cycle_n)
+            if lo <= at - pactor2.pulse_lead() and at + P2_CS_N <= hi:
+                heard = self.control_signal(seg[lo-seg_start:hi-seg_start], lo, at,
+                                            p1_allowed=False, p3_allowed=False)
                 if heard is not None:
                     return heard, at
-        if p1_at is not None:
+        bracket = self._p3_reply_bracket(raster, seg_start, end)
+        if bracket is not None:
+            lo, hi, at = bracket
+            heard = self.control_signal(seg[lo - seg_start:hi - seg_start],
+                                        lo, at, p1_allowed=False,
+                                        cut=self._p3_cold_cut(at, hi, lo))
+            if heard is not None:
+                return heard, at
+        if p1_at is not None and extent is None:
             return (self.control_signal(seg, seg_start, p1_at,
-                                        p3_allowed=False), p1_at)
+                                        p3_allowed=False, p2_allowed=False), p1_at)
         return None, None
+
+    def _p3_reply_bracket(self, raster, seg_start: int, end: int):
+        """The keyed P3 reply interval `[lo, hi)` and the instant to read it at.
+
+        None where no P3 reply of ours was keyed in the last slot or the
+        window does not hold enough of its interval to read.
+        """
+        keyed = getattr(raster, "_p3_keyed_reply", None)
+        if (self.host.protocol != Protocol.PACTOR3 or keyed is None
+                or keyed[0] != raster.keyed_slot):
+            return None
+        _, started, emitted_end, cycle_n = keyed
+        periods = 0
+        if raster.sending and self.host.arq.unconfirmed_breakin:
+            # Select at most one captured interval, with enough trailing
+            # audio for the existing cold acquisition. This projects an
+            # answer to the SAME emitted CS3, not an ACK to an unkeyed new
+            # packet. The original one-slot admission resumes when ARQ
+            # settles that break-in. It also excludes our keyed waveform.
+            periods = max(0, (end - emitted_end - round(.23 * FS)) // cycle_n)
+        lo = max(seg_start, emitted_end + periods * cycle_n)
+        hi = min(end, started + (periods + 1) * cycle_n)
+        nominal = raster.rx_due(raster.keyed_slot) + periods * cycle_n
+        at = None
+        if hi - lo >= P3_CS_N:
+            if self._p3_answer_at is not None:
+                # Project onto this emitted slot's reply interval, never
+                # the latest periodic instant anywhere in a recovered tape.
+                periods = (lo - self._p3_answer_at + cycle_n - 1) // cycle_n
+                projected = self._p3_answer_at + periods * cycle_n
+                # A saved phase remains a bounded receive hypothesis for
+                # this actually keyed packet, even after an outage. The
+                # age limit protects TX placement, not listening: applying
+                # it here strands the non-None anchor beyond eight misses
+                # while also excluding cold acquisition. Only a decoded
+                # answer refreshes the anchor; silence cannot move it.
+                if (periods >= 1
+                        and lo <= projected
+                        and projected + P3_CS_N <= hi):
+                    at = projected
+            if (at is None and (self.host.arq.entry_pending
+                                or self._p3_answer_at is None)
+                    and hi - lo >= round(.23 * FS)):
+                # The cold sweep has its own 0.46-s bracket and deadline.
+                # The nominal P1 position is a search centre only here;
+                # it need not contain a complete P1 word, and may not be
+                # reused as an independently authorized P1 read.
+                at = max(lo, min(nominal, hi - P3_CS_N))
+        return None if at is None else (lo, hi, at)
+
+    P3_COLD_REACH_S = .31
+    """How far past its anchor an IRS's cold control read reads raw audio:
+    `_p3_bodyless_head_supported`'s window behind a head, the widest of the
+    three (the acquisition's is 0.24 s). The anchored word adds its tracking
+    reach on top (`_p3_cold_cut`)."""
+
+    def _p3_cold_cut(self, at: int, hi: int, lo: int) -> Optional[int]:
+        """Where an IRS's cold control read stops, relative to `lo`, if short of `hi`.
+
+        THE IRS'S ONE READ THAT RAN TO THE KEY. With no answer clock learned,
+        the reply interval behind our control is read from our emission to the
+        end of the window, and the anchored word's transform is one FFT over
+        all of it -- so it could not start until the window closed, and with
+        the acquisition behind it cost 3.4-8.4 ms of the pre-key budget on the
+        no-CRC IRS holds of 0923-1321, where 7 of 15 slots were handed back.
+
+        Every read in it sits within `P3_COLD_REACH_S` of the anchor, so the
+        word is read on that much and no more; `_read_ahead` then reads it
+        while the window is still being collected. What the shorter transform
+        returns was cleared against the whole-window read over every IRS hold
+        of the corpus, zero disagreements. A word it does find is read again
+        over the whole window (`_p3_cs`), so what it decodes -- a changeover
+        body included -- is what the whole-window read decodes.
+        """
+        if self.host.arq.role != IRS or self._p3_answer_at is not None:
+            return None
+        cut = (at + round(self.P3_COLD_REACH_S * FS)
+               + self.sync.track_symbols * rxfront.SPS)
+        return cut - lo if cut < hi else None
+
+    def _p3_read_ahead(self, key: tuple, read):
+        """`read()`, or what `_read_ahead` already read for the same `key`.
+
+        `key` names every input of a pure read: the stream position and length
+        of the audio it reads, and the parameters beside it. A read is taken
+        once, so a caller that edits what it gets back edits its own copy.
+        """
+        if key in self._p3_ahead:
+            return (self._p3_ahead[key] if self._p3_reading_ahead
+                    else self._p3_ahead.pop(key))
+        got = read()
+        if self._p3_reading_ahead:
+            self._p3_ahead[key] = got
+        return got
+
+    def _p3_cold_word(self, audio: np.ndarray, origin: int, at: int):
+        """The anchored control word on the cold read's cut (`_p3_cold_cut`)."""
+        hz = self.p3_receive_offset_hz
+        return self._p3_read_ahead(
+            ("word", origin, audio.size, hz, at),
+            lambda: self.sync.control_signal_at(p3acquire.compensate(audio, hz),
+                                                at, details=False))
+
+    def _p4_read(self, seg, seg_start, *, carrier_end=None, whole=False):
+        self.p4.admitted = getattr(self.host.arq, 'p4_admitted', False)
+        for reg in self.p4.read_window(seg, seg_start, carrier_end=carrier_end, whole=whole):
+            obs = reg.observation
+            text = f"{obs.kind} {obs.word or ''} {reg.outcome}"
+            if obs.frame:
+                text += f" status 0x{obs.frame.status.byte:02x} {obs.frame.data!r}"
+            self._on(rxfront.Event(obs.stream_sample / FS, obs.kind, text,
+                                  protocol='PACTOR-4', p4=reg), anchored=True)
+        if self.p4.consumed is not None:
+            self.cs_seen = True
+        return self.p4.consumed
 
     def control_signal(self, seg: np.ndarray, seg_start: int,
                        at: int, *, p1_allowed: bool = True,
-                       p3_allowed: bool = True) -> Optional[int]:
+                       p3_allowed: bool = True, p2_allowed: bool = True,
+                       cut: Optional[int] = None) -> Optional[int]:
         """The peer's control signal, read at the instant the grid predicts it.
 
         THE ONLY DECODE A ONE-SLOT KEYED CYCLE CAN AFFORD, and for two windows in
@@ -4277,12 +5096,9 @@ class _SessionRx:
         peer's bare acknowledgement in PACTOR-2 reaches the FSM now, which is
         what makes us its ISS rather than a station it can only talk at.
 
-        AND IT IS THE HALF NOTHING OUTSIDE THIS PACKAGE HAS GRADED. The reader
-        closes against `pactor2.control_signal`, which is a hypothesis for the
-        reasons stated there, and a receive-only monitor cannot settle it because
-        a monitor never answers. Where the codewords a real PACTOR-2 station
-        keys actually sit is unmeasured -- the corpus holds none -- so this reads
-        at `pactor2.cs_slot`'s instant and reads nothing anywhere else.
+        The robust-call AI4Y recording validates the CS alphabet with entry 0
+        and entry 6. Ordinary P2 ARQ still reads only at `pactor2.cs_slot`;
+        the robust bridge acquires its distinct reply phase separately.
         """
         # LINKED, AND SO DISCONNECTING TOO. A PACTOR goodbye is an exchange: the
         # QRT bit rides a data packet and the peer acknowledges it, and
@@ -4307,13 +5123,18 @@ class _SessionRx:
         # `QRT_CYCLES` caps the whole teardown.
         if self.cs_seen or self.host.arq.state not in LINKED:
             return None
+        if getattr(self.host.arq, 'p4_admitted', False) or self.p4.expected:
+            self._p4_read(seg, seg_start, whole=len(seg) >= round(1.25 * FS))
+            if self.p4.consumed is not None or self.p4.expected:
+                return None
         readers = [self._p1_cs] if p1_allowed else []
         above = {Protocol.PACTOR2: self._p2_cs,
                  Protocol.PACTOR3: self._p3_cs}.get(self.host.protocol)
-        if above is not None and (above != self._p3_cs or p3_allowed):
+        if (above is not None and (above != self._p3_cs or p3_allowed)
+                and (above != self._p2_cs or p2_allowed)):
             readers.insert(0, above)
         for read in readers:
-            ev = (read(seg, at - seg_start, seg_start=seg_start)
+            ev = (read(seg, at - seg_start, seg_start=seg_start, cut=cut)
                   if read == self._p3_cs else read(seg, at - seg_start))
             if ev is not None:
                 # ON THE SESSION'S CLOCK, which is the one every other line of
@@ -4390,7 +5211,8 @@ class _SessionRx:
                              f"shift {'inverted' if got.sense else 'normal'})",
                              protocol="PACTOR-1", cs=got[0], sense=got.sense)
 
-    def _p3_cs(self, seg: np.ndarray, at: int, *, seg_start: int = 0):
+    def _p3_cs(self, seg: np.ndarray, at: int, *, seg_start: int = 0,
+               cut: Optional[int] = None):
         """Read the P3 answer at the grid anchor, acquiring one where there is none.
 
         Established answers prefer the learned peer clock, then the caller's
@@ -4420,15 +5242,17 @@ class _SessionRx:
         the anchor is (`P3_TRACKED_KEEP_S`). The whole window stands wherever the
         anchor is not inside that tail, which is what several slots given back
         produce and where a trimmed read would be lost outright.
+
+        A `cut` is `_p3_cold_cut`'s: the anchored word is looked for on the
+        audio in front of it first, and read over the whole window only where
+        it is there.
         """
+        cold = None if cut is None else (seg[:cut], seg_start, at)
         keep = self._p3_tracked_keep_n()
         if keep is not None and seg.size > keep and at >= seg.size - keep:
             lo = seg.size - keep
             seg, seg_start, at = seg[lo:], seg_start + lo, at - lo
-        corrected = self._corrected(seg)
-        cfg = self.host.arq.cfg
-        cycle_n = round((cfg.data_cycle_s if self.host.arq.cycle_long
-                         else cfg.cycle_s) * FS)
+        cycle_n = round(self.host.arq.cycle_s * FS)
         details = self._p3_acquisition_fits(self.CHANGEOVER_BODY_RESERVE_S)
         ev = None
         if self._p3_answer_at is not None:
@@ -4437,11 +5261,12 @@ class _SessionRx:
             cycles = round((seg_start + at - self._p3_answer_at) / cycle_n)
             projected = self._p3_answer_at + cycles * cycle_n - seg_start
             ev = (self._p3_read_again(seg_start, projected)
-                  or self.sync.control_signal_tracked(corrected, projected,
+                  or self.sync.control_signal_tracked(self._corrected(seg), projected,
                                                       details=details))
         if ev is None:
-            ev = (self._p3_read_again(seg_start, at)
-                  or self.sync.control_signal_at(corrected, at, details=details))
+            ev = self._p3_read_again(seg_start, at)
+        if ev is None and (cold is None or self._p3_cold_word(*cold) is not None):
+            ev = self.sync.control_signal_at(self._corrected(seg), at, details=details)
         if ev is not None:
             if not self._p3_bodyless_head_supported(seg, ev):
                 return None
@@ -4457,7 +5282,9 @@ class _SessionRx:
                           f"{spec.CS_NAMES[ev.cs]}, "
                           f"{displacement_ms:+.1f} ms from projected answer",
                           flush=True)
+            self._queue_tracked_p3_offset(seg, ev)
             self._p3_answer_at = seg_start + ev.start
+            self._p3_preferred_phase = None
         if ev is not None or not (self.host.arq.entry_pending
                                   or self._p3_answer_at is None):
             return ev
@@ -4520,6 +5347,71 @@ class _SessionRx:
         return (got is not None
                 and abs(lo + got.event.start - ev.start) <= rxfront.SPS)
 
+    def _queue_tracked_p3_offset(self, audio: np.ndarray, ev) -> None:
+        if (self._p3_offset_pending is not None and ev.packet is not None
+                and ev.packet[3]
+                and (not ev.breakin or ev.packet != self._p3_offset_pending[1])):
+            self._p3_offset_pending = None
+        if (self._p3_offset_fixed or ev.packet is None or not ev.packet[3]
+                or not ev.breakin):
+            return
+        # Own a bounded window: the hold buffer may be reused before a deferred
+        # acknowledgement keys. The incoming changeover makes us IRS.
+        lo = max(0, ev.start - round(.08 * FS)) if len(audio) > FS else 0
+        window = audio[lo:lo + FS].copy()
+        window.flags.writeable = False
+        self._p3_offset_pending = (window, ev.packet, ev.start - lo,
+                                   self.host.arq.dxcall)
+
+    def _expire_p3_offset_pending(self) -> None:
+        a = self.host.arq
+        if (self.host.protocol != Protocol.PACTOR3 or a.state not in LINKED
+                or a.role != IRS
+                or (self._p3_carrier_pending is not None
+                    and a.dxcall != self._p3_carrier_pending[2])):
+            self._p3_carrier_pending = self._p3_carrier_candidate = None
+        if (self._p3_offset_pending is not None
+                and (self._p3_offset_fixed or self.host.protocol != Protocol.PACTOR3
+                     or a.state not in LINKED or a.role != IRS
+                     or a.dxcall != self._p3_offset_pending[3])):
+            self._p3_offset_pending = None
+
+    def nominate_p3_offset_after_control(self, deadline: Optional[int] = None) -> None:
+        # The 31-offset search costs 20-28 ms on W6IDS 1001-0215's window.
+        # Reserve 50 ms for the bounded window, after keying and before the
+        # next key's settle/decoder reserve. Refusal or failure retains the work.
+        self._expire_p3_offset_pending()
+        pending = self._p3_offset_pending
+        carrier = self._p3_carrier_pending
+        if pending is None and carrier is None:
+            return
+        live = getattr(self.host.peer, 'live', None)
+        if (deadline is not None and live is not None
+                and live.clamp_late(deadline - round(.050 * FS))):
+            return
+        if carrier is not None:
+            audio, ev, call, cycle = carrier
+            self._p3_carrier_pending = None
+            hz = p3acquire.packet_offset(audio, ev)
+            previous = self._p3_carrier_candidate
+            if (hz is not None and previous is not None
+                    and 1 <= cycle - previous[0] <= 2
+                    and previous[2] == call
+                    and abs(hz - previous[1]) <= self.P3_FOLLOW_TOL_HZ):
+                self._follow_p3_offset(hz)
+                self._p3_carrier_candidate = None
+            else:
+                self._p3_carrier_candidate = None if hz is None else (cycle, hz, call)
+        if pending is None:
+            return
+        audio, packet, start, _ = pending
+        got = p3acquire.changeover(audio, offsets=p3acquire.CONTROL_OFFSETS_HZ)
+        if (got is not None and got.event.packet == packet
+                and abs(got.event.start - start) <= 2 * rxfront.SPS):
+            self._follow_p3_offset(got.offset_hz)
+            if self._p3_offset_fixed:
+                self._p3_offset_pending = None
+
     def _corrected(self, audio: np.ndarray) -> np.ndarray:
         """This cycle's window on the peer's carrier, transformed once.
 
@@ -4544,6 +5436,24 @@ class _SessionRx:
             self._p3_corrected = held
         return held[2]
 
+    def _p3_sl2_at_nominal(self, read, audio: np.ndarray):
+        """An SL2 read that missed at the followed offset, once more at 0 Hz.
+
+        The followed offset is the peer's control signals', and KB5LZK's weak
+        SL2 frames of 2026-09-26 decoded at nominal and not at its -28.5 Hz.
+        The PACTOR-1 cross-check reads no frequency of its own, only that
+        nominal lies within `p3acquire.P1_CROSS_CHECK_HZ` of the peer, so
+        nominal is the one other hypothesis. A CRC at this hypothesis is not
+        a carrier measurement; the qualified carrier estimate stays in place.
+        """
+        if not self.p3_receive_offset_hz or not self._p3_acquisition_fits(self.P3_SL2_RESERVE_S):
+            return None
+        ev = read(audio)
+        if ev is not None and ev.information is not None:
+            self._p3_carrier_pending = (audio.copy(), ev, self.host.arq.dxcall,
+                                        self._p3_acquisition_cycle)
+        return ev
+
     def _p3_read_again(self, seg_start: int, at: int):
         """This cycle's codeword, where a reader has already decoded it there.
 
@@ -4564,6 +5474,26 @@ class _SessionRx:
             return None
         return replace(ev, start=start, t=start / FS)
 
+    def _p3_acquisition_search(self, seg: np.ndarray, seg_start: int, at: int):
+        """`_acquire_answer`'s phase and frequency search: its bracket's start
+        in `seg`, and what it acquired there."""
+        lo = max(0, at - round(.22 * FS))
+        hi = min(len(seg), at + round(.24 * FS))
+        previous = self._p3_head_candidate
+        preferred = (self.p3_receive_offset_hz if self._p3_offset_fixed else
+                     previous[2] if previous is not None
+                     and 1 <= self._p3_acquisition_cycle - previous[0] <= 2
+                     else None)
+        preferred_at = (None if self._p3_preferred_phase is None else
+                        (self._p3_preferred_phase - seg_start - lo)
+                        % round(spec.CYCLE_SHORT_S * FS))
+        return lo, self._p3_read_ahead(
+            ("acquire", seg_start + lo, hi - lo, preferred, preferred_at),
+            lambda: p3acquire.control_signal(
+                seg[lo:hi], offsets=p3acquire.ENTRY_CONTROL_OFFSETS_HZ,
+                preferred_hz=preferred,
+                preferred_at=preferred_at))
+
     def _acquire_answer(self, seg: np.ndarray, seg_start: int, at: int):
         """`_p3_cs`'s cold half: the answer's phase and frequency, searched.
 
@@ -4578,19 +5508,8 @@ class _SessionRx:
         """
         if self.host.arq.state not in LINKED:
             return None
-        cfg = self.host.arq.cfg
-        cycle_n = round((cfg.data_cycle_s if self.host.arq.cycle_long
-                         else cfg.cycle_s) * FS)
-        lo = max(0, at - round(.22 * FS))
-        hi = min(len(seg), at + round(.24 * FS))
-        previous = self._p3_head_candidate
-        preferred = (self.p3_receive_offset_hz if self._p3_offset_fixed else
-                     previous[2] if previous is not None
-                     and 1 <= self._p3_acquisition_cycle - previous[0] <= 2
-                     else None)
-        got = p3acquire.control_signal(
-            seg[lo:hi], offsets=p3acquire.ENTRY_CONTROL_OFFSETS_HZ,
-            preferred_hz=preferred)
+        cycle_n = round(self.host.arq.cycle_s * FS)
+        lo, got = self._p3_acquisition_search(seg, seg_start, at)
         if got is None:
             return None
         got.event = replace(got.event, start=got.event.start + lo,
@@ -4628,6 +5547,7 @@ class _SessionRx:
             return None
         self._follow_p3_offset(got.offset_hz)
         self._p3_answer_at = absolute
+        self._p3_preferred_phase = None
         self._p3_changeover_pending = (got.event.cs == placement.BREAKIN_CS
                                        and got.event.packet is None)
         self.p3_memory.clear()
@@ -4911,7 +5831,14 @@ class _SessionRx:
                 return
 
     def _seed_p3_changeover_clock(self, phase: int) -> None:
-        """Move phase to the changeover; retain the measured cycle and span."""
+        """Seed the peer's changeover on the currently negotiated cycle."""
+        # CS6 received while ISS changes the link period without delivering an
+        # ordinary RX header. The last receive turn's period may therefore be
+        # stale. Carrying it into fresh CS3 evidence makes the reply guard reject
+        # every ACK against the current grid (VE3KPG 2026-09-20 21:42).
+        # A CS3's fixed short waveform does not itself select the cycle length.
+        self._p3_cycle_n = round((spec.CYCLE_LONG_S if self.host.arq.cycle_long
+                                 else spec.CYCLE_SHORT_S) * FS)
         self._p3_row0 = phase + p3frame.DATA_OFFSET * rxfront.SPS
         self._p3_delivered_at = phase
         # Until an ordinary header arrives the peer may repeat this CS3-headed
@@ -4931,54 +5858,6 @@ class _SessionRx:
         return None if ev is None else (ev, "P1 scanned")
 
     def _p3_packet(self, audio: np.ndarray):
-        # A requested SL2 must be decoded before its own ACK. preferred_only
-        # intentionally stays on the last validated level, and the existing
-        # wideband trial is SL3-only; neither can make this transition in time.
-        if (self._tracked_only and self._scan_origin is not None
-                and self._p3_row0 is not None and self.host.arq.role == IRS
-                and self._p3_cycle_n == round(spec.CYCLE_SHORT_S * FS)
-                and not self.host.arq.cycle_command_emitted):
-            origin = self._scan_origin
-            span = rxfront._packet_span(rxfront._frame_span(placement.SPEED_PATHS[2]))
-            latest = origin + audio.size - span
-            target = self._p3_row0 + ((latest - self._p3_row0) // self._p3_cycle_n) * self._p3_cycle_n
-            target = getattr(self, "_p3_target_row0", None) or target
-            fresh = self._p3_delivered_at is None or target > self._p3_delivered_at + rxfront.SPS
-            if (fresh and self.sl2_prekey_expected(target)
-                    and self._p3_acquisition_fits(self.P3_SL2_RESERVE_S)):
-                lo = max(0, target - origin - p3frame.DATA_OFFSET * rxfront.SPS - 2400)
-                ev = self.sync.sl2_packet_at(self._corrected(audio[lo:]), target - origin - lo)
-                if ev is not None:
-                    self._p3_changeover_pending = self._p3_repeat_changeover = False
-                    self._p3_sl2_expected_until = None
-                    self.p3_memory.clear()
-                    return replace(ev, start=ev.start + lo, t=ev.t + lo / FS), "SL2 pre-key"
-        # Read the current SL1 packet before spending time on a repeated CS3
-        # or speculative wideband body. The stock peer can advance immediately
-        # after our ACK; keeping the previous CHANGEOVER's counter for one more
-        # cycle guarantees a wrong reply on every such advance.
-        if (self._tracked_only and self._scan_origin is not None
-                and self._p3_row0 is not None and self.sync.packet_level in (None, 1, 2)
-                and self._p3_cycle_n == round(spec.CYCLE_SHORT_S * FS)
-                and not self.host.arq.cycle_command_emitted
-                and self._p3_acquisition_fits(self.P3_SL1_RESERVE_S)):
-            origin = self._scan_origin
-            span = rxfront._packet_span(rxfront._frame_span(placement.SPEED_PATHS[1]))
-            latest = origin + audio.size - span
-            target = self._p3_row0 + ((latest - self._p3_row0) // self._p3_cycle_n) * self._p3_cycle_n
-            target = getattr(self, "_p3_target_row0", None) or target
-            lo = max(0, target - origin - p3frame.DATA_OFFSET * rxfront.SPS - 2400)
-            # Share the retained-window correction with the following tracked
-            # codeword reader if this CRC misses. The sparse decoder itself
-            # still samples only this packet's header and body.
-            lo = min(lo, max(0, audio.size - (self._p3_tracked_keep_n() or audio.size)))
-            fresh = self._p3_delivered_at is None or target > self._p3_delivered_at + rxfront.SPS
-            if fresh and target - origin >= p3frame.DATA_OFFSET * rxfront.SPS + rxfront.SPS:
-                ev = self.sync.sl1_packet_at(self._corrected(audio[lo:]), target - origin - lo)
-                if ev is not None:
-                    self._p3_changeover_pending = self._p3_repeat_changeover = False
-                    self.p3_memory.clear()
-                    return replace(ev, start=ev.start + lo, t=ev.t + lo / FS), "SL1 pre-key"
         # A repeated changeover has a CS3 head, not a variable header, and
         # its shortened case-0 body is not an ordinary SL1 frame. Project the
         # head on its retained clock before the wideband-only branch can
@@ -5006,6 +5885,113 @@ class _SessionRx:
                     self.p3_memory.clear()
                     return (replace(ev, start=ev.start + lo, t=ev.t + lo / FS),
                             "changeover pre-key")
+        wideband_first = (self._tracked_only and self._scan_origin is not None
+                          and self.sl3_prekey_expected())
+        wideband_checked = False
+        if wideband_first:
+            origin = self._scan_origin
+            target = getattr(self, "_p3_target_row0", None)
+            if target is None:
+                target = _p3_wideband_target(self, origin + audio.size)
+            fresh = (self._p3_delivered_at is None
+                     or target > self._p3_delivered_at + rxfront.SPS)
+            prepared = self._p3_early_sl3
+            if prepared is not None and (prepared[0] != (
+                    target, target - p3frame.DATA_OFFSET * rxfront.SPS - 2400,
+                    self.p3_receive_offset_hz, self._p3_acquisition_cycle)
+                    or origin > prepared[0][1]):
+                self._p3_early_sl3 = prepared = None
+            reserve = self._p3_speculative_sl3_reserve()
+            if (fresh and target >= origin + p3frame.DATA_OFFSET * rxfront.SPS
+                    and self._p3_acquisition_fits(reserve)):
+                lo = max(0, target - origin - p3frame.DATA_OFFSET * rxfront.SPS - 2400)
+                wideband_checked = True
+                ev, owned = self.sync.wideband_packet_at(
+                    self._corrected(audio[lo:]), target - origin - lo,
+                    allow_short_fallback=True,
+                    can_decode=lambda: self._p3_acquisition_fits(reserve),
+                    prepared=prepared[1] if prepared is not None else None)
+                if prepared is not None and not owned:
+                    wideband_checked = False
+                if ev is not None:
+                    self._p3_changeover_pending = self._p3_repeat_changeover = False
+                    return (replace(ev, start=ev.start + lo, t=ev.t + lo / FS),
+                            "wideband pre-key")
+                if owned or ((self.sync.packet_level or 0) >= 3
+                             and not self.sl2_prekey_expected()):
+                    return None
+        # A requested SL2 must be decoded before its own ACK. preferred_only
+        # intentionally stays on the last validated level, and the existing
+        # wideband trial is SL3-only; neither can make this transition in time.
+        if (self._tracked_only and self._scan_origin is not None
+                and self._p3_row0 is not None and self.host.arq.role == IRS
+                and self._p3_cycle_n == round(spec.CYCLE_SHORT_S * FS)
+                and not self.host.arq.cycle_command_emitted):
+            origin = self._scan_origin
+            span = rxfront._packet_span(rxfront._frame_span(placement.SPEED_PATHS[2]))
+            latest = origin + audio.size - span
+            target = self._p3_row0 + ((latest - self._p3_row0) // self._p3_cycle_n) * self._p3_cycle_n
+            target = getattr(self, "_p3_target_row0", None) or target
+            fresh = self._p3_delivered_at is None or target > self._p3_delivered_at + rxfront.SPS
+            if (fresh and self.sl2_prekey_expected()
+                    and self._p3_acquisition_fits(self.P3_SL2_RESERVE_S)):
+                lo = max(0, target - origin - p3frame.DATA_OFFSET * rxfront.SPS - 2400)
+                at = target - origin - lo
+                ev = self.sync.sl2_packet_at(self._corrected(audio[lo:]), at)
+                if ev is None:
+                    ev = self._p3_sl2_at_nominal(
+                        lambda a: self.sync.sl2_packet_at(a, at), audio[lo:])
+                if ev is not None:
+                    self._p3_changeover_pending = self._p3_repeat_changeover = False
+                    self.p3_memory.clear()
+                    return replace(ev, start=ev.start + lo, t=ev.t + lo / FS), "SL2 pre-key"
+        # Read the current SL1 packet before spending time on a repeated CS3
+        # or speculative wideband body. The stock peer can advance immediately
+        # after our ACK; keeping the previous CHANGEOVER's counter for one more
+        # cycle guarantees a wrong reply on every such advance.
+        if (self._tracked_only and self._scan_origin is not None
+                and self._p3_row0 is not None and self.sync.packet_level in (None, 1, 2)
+                and not self.host.arq.cycle_command_emitted
+                and self._p3_acquisition_fits(self.P3_SL1_RESERVE_S)):
+            origin = self._scan_origin
+            paths = (placement.LONG_PATHS if self._p3_cycle_n == round(spec.CYCLE_LONG_S * FS)
+                     else placement.SPEED_PATHS)
+            span = rxfront._packet_span(rxfront._frame_span(paths[1]))
+            latest = origin + audio.size - span
+            target = self._p3_row0 + ((latest - self._p3_row0) // self._p3_cycle_n) * self._p3_cycle_n
+            target = getattr(self, "_p3_target_row0", None) or target
+            lo = max(0, target - origin - p3frame.DATA_OFFSET * rxfront.SPS - 2400)
+            # Share the retained-window correction with the following tracked
+            # codeword reader if this CRC misses. The sparse decoder itself
+            # still samples only this packet's header and body.
+            lo = min(lo, max(0, audio.size - (self._p3_tracked_keep_n() or audio.size)))
+            fresh = self._p3_delivered_at is None or target > self._p3_delivered_at + rxfront.SPS
+            if fresh and target - origin >= p3frame.DATA_OFFSET * rxfront.SPS + rxfront.SPS:
+                ev = self.sync.sl1_packet_at(self._corrected(audio[lo:]), target - origin - lo)
+                if ev is not None:
+                    self._p3_changeover_pending = self._p3_repeat_changeover = False
+                    self.p3_memory.clear()
+                    return replace(ev, start=ev.start + lo, t=ev.t + lo / FS), "SL1 pre-key"
+        if wideband_first:
+            if wideband_checked:
+                self.sync.note_miss()
+            return None
+        if (self._tracked_only and self._scan_origin is not None
+                and self._p3_row0 is not None and self.sync.packet_level == 1
+                and not self._p3_repeat_changeover
+                and not self.host.arq.cycle_command_emitted
+                and (self._p3_cycle_n == round(spec.CYCLE_LONG_S * FS)
+                     or not self.host.arq.unconfirmed_breakin)):
+            # A missed or unaffordable bounded CRC is not permission to open
+            # the alignment/combining ladder before the ACK deadline. The
+            # unrestricted sweep can recover this audio after the key. On the
+            # short cycle too: a window holding no frame -- the frame sits in
+            # the hold before it -- ran the 18-trial ladder for 44-73 ms on
+            # every other hold of 0919-2059. Not while our own turn is
+            # unconfirmed there: the row the projection stands on is the old
+            # stint's, and the peer's first packet of the new one sits 90 ms
+            # off it.
+            return None
         # A recovered window can span many cycles. Only the latest complete
         # cycle can inform the next reply; bound the blind search accordingly.
         # Include a preceding cycle too: a window ending partway through the
@@ -5030,7 +6016,7 @@ class _SessionRx:
             trim = min(trim, max(0, head))
         audio = audio[trim:]
         if (self._tracked_only and self._scan_origin is not None
-                and self.wideband_prekey_active()):
+                and self.wideband_prekey_active() and not wideband_first):
             origin = self._scan_origin + trim
             target = _p3_wideband_target(self, origin + len(audio))
             if target is not None and target >= origin + p3frame.DATA_OFFSET * rxfront.SPS:
@@ -5123,19 +6109,28 @@ class _SessionRx:
                 # the peer's cycle against our nominal 60000 -- 2.3 samples a
                 # cycle on `onair-0913-0014`, 2.5 on `onair-0912-2321` --
                 # against the 300-sample bias it removes.
+                self._queue_tracked_p3_offset(audio, ev)
                 return replace(ev, start=at, t=at / FS), "changeover tracked"
         if changeover_first and not self._tracked_only:
             got = self._p3_changeover_packet(audio)
             if got is not None:
                 return got
-        ev = self.sync.packet(corrected, preferred_only=self._tracked_only)
+        level, at = self.sync.packet_level, self.sync.packet_at
+        expected = self._p3_expected()
+        ev = self.sync.packet(corrected, preferred_only=self._tracked_only,
+                              requested_level=expected[-1] if expected else None)
+        how = "tracked"
+        if ev is None and level == 2 and at is not None:
+            ev = self._p3_sl2_at_nominal(lambda a: self.sync.level_at(a, at, 2), audio)
+            how = "tracked RX 0 Hz"
         if ev is not None:
             # A single-shot decode ends the run of copies, `decode_expected_p1_packet`'s
             # rule: the field is delivered and the peer stops repeating it.
             self.p3_memory.clear()
             self._p3_changeover_pending = False
             self._p3_repeat_changeover = False
-            return ev, "tracked"
+            self._queue_tracked_p3_offset(audio, ev)
+            return ev, how
         if self._tracked_only:
             # THE TRACKED READ OWNED THE CYCLE AND NEVER PAID FOR IT. Aiming at
             # the projected head is a 3 ms read where the acquisition is a 10,
@@ -5153,7 +6148,13 @@ class _SessionRx:
             # by nothing, and a reply deadline is not where it may run --
             # `test_prekey_miss_does_not_launch_a_blind_scan`. Every P3
             # delivery of both arms came from this acquisition anyway.
-            return self._p3_changeover_packet(audio)
+            #
+            # ON THE TAIL A CHANGEOVER CAN OCCUPY, whatever the window is
+            # long. The sweep costs 24 ms a second of audio, and a recovered
+            # slot hands it a whole cycle: 3.75 s at 90 ms against `_regrid`'s
+            # 150 ms reserve took 0920-2242 hold 24 three slots (+21, +87,
+            # +329 ms) and 0920-2151 hold 27 one.
+            return self._p3_changeover_packet(audio, keep_s=self.P3_TRACKED_KEEP_S)
         ev = rxfront.decode_expected_packet(corrected, self.p3_memory)
         how = "scanned"
         if ev is None and self.p3_receive_offset_hz:
@@ -5284,6 +6285,12 @@ class _SessionRx:
     it they are different grid points and one of them is an alias."""
 
     @property
+    def receive_centre_hz(self) -> Optional[float]:
+        """Where the peer's signal is centred, once a frame has placed it."""
+        return (spec.CENTER_FREQ_HZ + self.p3_receive_offset_hz
+                if self._p3_offset_fixed else None)
+
+    @property
     def p3_transmit_offset_hz(self) -> float:
         """The receive raster, where the PACTOR-1 leg does not contradict it.
 
@@ -5400,14 +6407,20 @@ class _SessionRx:
             (hz for hz in p3acquire.ENTRY_CONTROL_OFFSETS_HZ if hz not in tried),
             key=lambda hz: (abs(hz - self.p3_receive_offset_hz), hz)))
 
-    P3_SL1_RESERVE_S = .004
+    P3_SL1_RESERVE_S = .00330
     """One narrow header fit and CRC, before the shared admission reserve."""
 
-    P3_SL2_RESERVE_S = .006
+    P3_TRACKED_RESERVE_S = .010
+    """A tracked frame read on the sending grid: 9.7 ms median and 24 at the
+    ninetieth percentile over the 3,714 `tracked` stages of the 09-19..21
+    arms. The sending grid's last read stops where this has to fit, so the
+    read waits for the top of the next cycle (`_p3_tracked_read_fits`)."""
+
+    P3_SL2_RESERVE_S = .00751
     """One short six-carrier field, at most two physical arrangements."""
 
-    P3_WIDEBAND_RESERVE_S = .012
-    """Bounded header/body trial, plus the shared 6 ms admission reserve."""
+    P3_WIDEBAND_RESERVE_S = .01252
+    """Loaded reader maxima; the shared 6 ms admission reserve is additional."""
 
     def _p3_tracked_keep_n(self) -> Optional[int]:
         """Samples a tracked read may transform, or None for the whole window."""
@@ -5439,12 +6452,15 @@ class _SessionRx:
         if (live is None or raster is None or slot is None
                 or getattr(live, "transmit", None) is None):
             return True
+        if (getattr(tx, "_p3_entry_listen_slot", None) == slot
+                and self.host.arq.entry_pending):
+            return True
         return not live.clamp_late(tx.key_instant(raster, slot)
                                    - round(reserve_s * FS)
                                    - round(P3_DECODE_RESERVE_S * FS))
 
-    def _p3_changeover_packet(self, audio: np.ndarray):
-        trim = max(0, len(audio) - 4 * FS)
+    def _p3_changeover_packet(self, audio: np.ndarray, keep_s: float = 4.0):
+        trim = max(0, len(audio) - round(keep_s * FS))
         window = audio[trim:]
         got = p3acquire.changeover(window, offsets=self._p3_coarse_offsets())
         if got is None or got.event.packet is None:
@@ -5550,6 +6566,9 @@ class _SessionRx:
 
     def _note_p3_frame(self, ev, absolute: int) -> bool:
         """Accept one CRC-valid physical frame across tracked and rolling reads."""
+        observe = getattr(self.host.peer, "_observe_input_loss", None)
+        if observe is not None:
+            observe("p3-crc")
         if self._p3_delivered_at is not None and absolute <= self._p3_delivered_at + rxfront.SPS:
             return False
         raster = getattr(self.host.peer, "raster", None)
@@ -5560,6 +6579,17 @@ class _SessionRx:
             # newly decoded historical frame is not an answer to this CS6.
             return False
         self._p3_delivered_at = absolute
+        self._p3_presence_form = (self.host.arq._link_generation, ev.packet[0])
+        if (self._p3_offset_pending is not None
+                and (not ev.breakin or ev.packet != self._p3_offset_pending[1])):
+            self._p3_offset_pending = None
+        if (self._p3_expected_levels and not ev.breakin
+                and (ev.packet[0] == self._p3_expected_levels[0]
+                     or self.p3_wideband_prekey and not ev.cycle_long
+                     and self._p3_expected_levels == (2, 3) and ev.packet[0] == 3)):
+            self._p3_expected_since = self._p3_acquisition_cycle
+        else:
+            self._p3_expected_levels = ()
         trial = getattr(self.host.peer, "timing_trial", None)
         if trial is not None:
             phase = absolute if ev.breakin else absolute - p3frame.DATA_OFFSET * rxfront.SPS
@@ -5594,6 +6624,25 @@ class _SessionRx:
         if (self._final_connect_listen and self.host.arq.state == State.CONNECTING
                 and ev.protocol == Protocol.PACTOR1 and ev.kind == "cs"
                 and not connect_confirmed):
+            return
+        if getattr(ev, 'p4', None) is not None:
+            print(f"    {self.tag} {ev.t:6.2f} {ev.text}", flush=True)
+            self.host.on_rx_event(ev)
+            return
+        if (getattr(getattr(self, 'p4', None), 'expected', False) and ev.kind in ('cs', 'unassigned', 'packet')
+                and ev.protocol in (Protocol.PACTOR1, Protocol.PACTOR3)):
+            return
+        announcement_end = getattr(self.host, "p2_announcement_end", None)
+        if (getattr(self.host, "pactor2_only", False)
+                and self.host.p2_announcement_pending
+                and self.host.arq.state in LINKED
+                and ev.protocol == Protocol.PACTOR1
+                and ev.kind in ("cs", "unassigned")
+                and announcement_end is not None
+                and round(ev.t * FS) < announcement_end):
+            print(f"    {self.tag} {ev.t:6.2f} {ev.text} -- ignored for P2 setup: "
+                  f"precedes announcement end {announcement_end / FS:.3f} s",
+                  flush=True)
             return
         # ONE TRANSMISSION, ONE EVENT, ACROSS THE CYCLE BOUNDARY TOO.
         # `new_cycle`'s one-shot flags hold that within a cycle and cannot hold it
@@ -5653,7 +6702,24 @@ class _SessionRx:
                 raster.note_peer_codeword(phase, P3_CS_N, _cs_name(ev),
                                           self.host.arq.dxcall,
                                           protocol=ev.protocol)
+        # A current, admitted bare P3 answer supersedes the automatic cede
+        # listen selected before collecting it. Cancel before the synchronous
+        # ARQ callback can retransmit. An operator's listening cycle is never
+        # overridden, and a CS3 still needs its complete packet. Every other
+        # word answers: 0924-0033's CS4 acknowledged our changeover and the
+        # cede then refused the data packet it released, twice.
+        if (anchored and ev.protocol == Protocol.PACTOR3 and ev.kind == "cs"
+                and ev.cs is not None and ev.cs != CS_BREAKIN and not ev.breakin
+                and self.host.arq.unconfirmed_breakin
+                and getattr(peer, "cede_listening", False)):
+            peer.cede_listening = peer.listening = False
         self.host.on_rx_event(ev)
+        if (ev.protocol == Protocol.PACTOR3 and ev.kind == "cs"
+                and ev.cs == CS_BREAKIN and not ev.breakin
+                and self.host.arq.role == IRS and raster is not None):
+            raster.note_p3_head(round(ev.t * FS), round(
+                (spec.CYCLE_LONG_S if self.host.arq.cycle_long
+                 else spec.CYCLE_SHORT_S) * FS))
         if was_p1_connecting and not (self.host.protocol == Protocol.PACTOR1
                                      and self.host.arq.state == State.CONNECTING):
             self.rx.enable_p3_packets_after(ev.t)
@@ -5876,6 +6942,31 @@ def _d_max_n(cycle: float, settle: float) -> int:
     production expression cannot disagree with it.
     """
     return round((cycle - settle - spec.P1_PACKET_S - spec.P1_CS_S) * FS)
+
+
+def _called_grid(start: int, call: p1rx.Connect, settle: float, *,
+                 offset_n: int) -> "_MasterGrid":
+    """The called station's grid, placed from the call it is answering.
+
+    Slot 0 is the caller's cycle: its packet starts on `start`, where the call
+    frame began, and our control signal keys `ANSWER_D_S` past a 960 ms packet
+    from there. Measured from the frame's START because a robust call is 0.88 s
+    and still runs on "normal PACTOR timing" (SCS PTC-II manual 6.22.2): what the
+    caller reads is its cycle, not our frame. Every later instant is whole cycles
+    from that one and moved by nothing the caller does, the same free rotation
+    as the caller's own grid (`tests.shrike.test_ackplace._reference`). The
+    cycle is the call's, 1.4 s on a longpath call, and the shift in slot 0 is
+    the one the call came in, because within one cycle both directions share it.
+    """
+    cycle = (spec.CYCLE_SHORT_LONGPATH_S if call.variant == "Longpath"
+             else spec.CYCLE_SHORT_S)
+    slot_n, d_n = round(cycle * FS), round(ANSWER_D_S * FS)
+    packet_n, cs_n = round(spec.P1_PACKET_S * FS), round(spec.P1_CS_S * FS)
+    g = _MasterGrid(start + packet_n + d_n, slot_n, offset_n, packet_n=packet_n,
+                    cs_n=cs_n, d_max_n=_d_max_n(cycle, settle))
+    g.called, g.sending, g.shift_slot = True, False, int(call.inverted)
+    g.d_n = slot_n - packet_n - cs_n - d_n
+    return g
 
 
 def _acquisition_window(seg_n: int, since_tx: int, d_max_n: int,
@@ -6458,7 +7549,8 @@ class _AnswerBand:
 
 
 def _report_answer_band(band: _AnswerBand, host, raster: "_MasterGrid", seg,
-                        since_tx: int, d_max_n: int, *, read: bool) -> None:
+                        since_tx: int, d_max_n: int, *, read: bool,
+                        seg_start: int) -> None:
     """Say what the slot carried, and hold the cycle where it carried a station.
 
     The two halves are one call because they must not come apart: a line an
@@ -6475,18 +7567,129 @@ def _report_answer_band(band: _AnswerBand, host, raster: "_MasterGrid", seg,
     that four times over had granted us PACTOR-3.
     """
     sessrx = getattr(raster, "sessrx", None)
+    owed = (host.protocol == Protocol.PACTOR3 and host.arq.state in LINKED
+            and (host.arq.role == IRS or host.arq.unconfirmed_breakin)
+            and host.arq.peer_qualified)
     reading = band.sight(seg, since_tx, d_max_n, read=read,
-                         answered=raster.acquired,
-                         peer_owes_a_packet=(host.protocol == Protocol.PACTOR3
-                                             and host.arq.state in LINKED
-                                             and (host.arq.role == IRS
-                                                  or host.arq.unconfirmed_breakin)),
+                         answered=raster.acquired, peer_owes_a_packet=owed,
                          offset_hz=getattr(sessrx, "p3_receive_offset_hz", 0.0))
     if reading is None:
         return
     print(f"    !! {reading.line}", flush=True)
     if reading.occupied:
         host.arq.note_unreadable_answer()
+        if owed:
+            t0, _ = _acquisition_window(seg.size, since_tx, d_max_n)
+            raster.note_peer_unread(seg_start + round(t0 * FS))
+
+
+class _PeerSpectrum:
+    """Whether an unread window carries the PACTOR-III peer, by the peer's own
+    spectrum as this session has decoded it.
+
+    NO ABSOLUTE MEASURE SEPARATES A WEAK PEER FROM AN EMPTY CHANNEL. Over 4260
+    decoded and 238 empty IRS windows of 128 sessions, the anchor channels over
+    the passband's quiet tenth read 17.2-39 dB decoded and up to 22.0 empty, and
+    wm4rb-30 0920-1501 decoded packets at 18.2 while its empty windows read 19.4.
+    What does separate them is where the power sits: the bins the peer's decoded
+    packets light, against the bins within 300 Hz of them that they leave dark.
+    A peer at the noise still tilts that and a tone does not: after WS8EOC-80
+    0924-0249's gateway hung up, holds 57-60 carry a keyed 1605 Hz tone and read
+    -19..-24 dB, and the empty holds 61-66 read -0.2..+0.8, where its unread
+    packets read +12.8 and up.
+
+    AND A NEW SPEED LEVEL IS NOT THE TEMPLATE'S SHAPE. WS8EOC-40 0913-2050 went
+    to SL3 on our CS4 and read -0.7..+1.3 for thirteen holds at +19..+21 dB, so a
+    window standing `WIDE_DB` over the session's quietest across `WIDE_HZ` is
+    the peer too. Every window feeds that floor (`hear`), the PACTOR-1 legs
+    included.
+
+    Nonzero windows without a decoded template get grace within ARQ's finite
+    CRC-free receive budget; narrow packets and mute release can lack a floor.
+    """
+
+    NPERSEG = 2048
+    KEEP = 32
+    KNEE_DB = 1.5
+    WIDE_DB = 6.0
+    WIDE_HZ = 1000.0
+
+    def __init__(self) -> None:
+        self.decoded: deque = deque(maxlen=self.KEEP)
+        self.floor: Optional[float] = None
+        self.excess: Optional[float] = None
+        f = np.fft.rfftfreq(self.NPERSEG, 1 / FS)
+        self.band = (f > 300) & (f < 2800)
+
+    @classmethod
+    def psd(cls, seg: np.ndarray) -> np.ndarray:
+        n, hop = cls.NPERSEG, cls.NPERSEG // 2
+        w = np.hanning(n)
+        frames = [np.abs(np.fft.rfft(w * seg[i:i + n])) ** 2
+                  for i in range(0, seg.size - n + 1, hop)]
+        return np.mean(frames, axis=0)
+
+    def learn(self, seg: np.ndarray) -> None:
+        if seg.size < self.NPERSEG:
+            return
+        p = self.psd(seg)
+        if (mid := np.median(p[self.band])) > 0:
+            self.decoded.append(10 * np.log10(p / mid + 1e-30))
+
+    def contrast_db(self, seg: np.ndarray) -> Optional[float]:
+        if not self.decoded or seg.size < self.NPERSEG:
+            return None
+        t = np.median(self.decoded, axis=0)
+        lit = self.band & (t > max(self.KNEE_DB, 0.5 * t[self.band].max()))
+        near = np.convolve(lit, np.ones(27), mode="same") > 0      # +-300 Hz
+        ref = self.band & near & ~lit & (t < np.median(t[self.band]))
+        if not lit.any() or not ref.any():
+            return None
+        p = self.psd(seg)
+        return 10 * float(np.log10((p[lit].mean() + 1e-30) / (p[ref].mean() + 1e-30)))
+
+    def hear(self, seg: np.ndarray) -> None:
+        level = rxfront.quiet_level_db(seg, 0.0, seg.size / FS)
+        if level is None:
+            self.excess = None
+            return
+        floor, self.floor = self.floor, (level if self.floor is None
+                                         else min(self.floor, level))
+        self.excess = None if floor is None else level - floor
+
+    def carries_peer(self, seg: np.ndarray) -> bool:
+        if seg.size < self.NPERSEG or not np.any(seg):
+            return False
+        if not self.decoded:
+            return True
+        c = self.contrast_db(seg)
+        return ((c is not None and c > self.KNEE_DB)
+                or (self.excess is not None and self.excess >= self.WIDE_DB
+                    and rxfront.occupied_bw(seg) >= self.WIDE_HZ))
+
+    def verdict(self, seg: np.ndarray, cycle_n: int, *, decoded: bool) -> bool:
+        """Whether the window carries the peer, taken BEFORE the key that
+        answers it -- and taken for nothing where a packet decoded.
+
+        `hear` filters the whole window through one FFT, so it costs what the
+        window is long: 8 ms at 3.4 s, 34 at 7.1, 91 at 14.7, measured on
+        0926-2353 WS8EOC-80's own holds. Taken between the grid's admission
+        and the key it was charged to `prekey_cost_n` and owed by every
+        admission after it, and the window behind a handed-back slot is two
+        cycles: one recovered long window put 36.6 ms in front of every
+        following ordinary slot, each refused at +0.0 ms on the bare clamp,
+        and the link keyed every second long cycle until the gateway hung up.
+
+        A decoded window IS the peer and needs no judging here; its floor is
+        fed after the key. A dark one is judged on the cycle the key answers,
+        which bounds what a recovered window costs to what an ordinary one
+        does.
+        """
+        if decoded:
+            return True
+        seg = seg[-cycle_n:]
+        self.hear(seg)
+        return self.carries_peer(seg)
 
 
 class _ConnectTail:
@@ -6541,104 +7744,24 @@ class _ConnectTail:
 
 
 class _ConnectEvidence:
-    """The candidate answers a call has collected, and whether they are a station.
+    """Two strong answers or three level-gated answers identify the peer.
 
-    ONE ZERO-ERROR CODEWORD IS NOT AN ANSWER. The connect search reads twelve
-    bits against two legal codewords in two shift senses, so four words of 4096
-    match at every alignment it tries -- one accept in every 37 cycles of the band
-    it now searches, which over a call of any length is a coin toss rather than a
-    decode. The sessions of 2026-08-06 are what that costs: three calls, three
-    gateways, one accept each, three links reported to stations that were never
-    there, and an operator listening live who heard all three.
-
-    What separates a station from the floor is not the strength of one accept but
-    the AGREEMENT of several. A peer answers every cycle until the caller's first
-    data packet decodes, and it answers at its own turnaround, which is a property
-    of its hardware and does not move WITHIN a session -- across the seven WS8EOC
-    sessions of 2026-07-30 its bursts start anywhere from 87 to 134 ms
-    (`PEER_TURNAROUND_S`), but the tightest three inside any eight cycles of one
-    session span 2.5 ms at their widest. Noise has no turnaround, so its accepts
-    scatter across the whole band and each is independent of the last.
-
-    So the rule is three accepts inside `SPAN` SEARCHED WINDOWS whose offsets
-    agree to `TOL_S`, and every term in it is MEASURED over 31996 cycle-windows
-    of real off-air energy addressed to nobody -- 11.3 hours from 1005
-    recordings, all of rf-corpus and this station's own ARDOP captures, of which
-    416 hold at least one accept:
-
-      * THREE, and ANY three rather than the last three. The longest run of
-        ADJACENT accepts agreeing to even 20 ms in that population is two, so the
-        third is what the rule is bought with and adjacency buys nothing on top of
-        it. Adjacency does cost: `onair-0730-2036` is a session a real gateway
-        answered and its accepts fall on cycles 3, 5 and 7. So does taking the
-        last three, which is the same mistake wearing a sleeve -- see `offer`.
-      * INSIDE TWELVE SEARCHED WINDOWS, and the bound is what the rule stands
-        on: three accepts agreeing anywhere in a whole recording fires on 34 of
-        the 416, bounded to 12 windows it fires on 1, and bounded to 8 on none.
-
-        WINDOWS AND NOT CYCLES, because a cycle we did not call in has no answer
-        due and is never offered to the search. `note_search` counts the draws
-        this rule is exposed to, and the negative population is 31996
-        consecutive such draws. A hush costs six cycles in ten and the band
-        falls off the front of the window from its second cycle on, so
-        `onair-0911-2332` searched 13 of its 25 cycles: an eight-CYCLE bound
-        spent four of the twelve windows it was priced for, and the rule ran at
-        twice the strictness it was measured at.
-
-        TWELVE AND NOT EIGHT, bought against a real peer rather than a
-        preference. WS8EOC answered that call three times at 98, 100 and 99 ms
-        -- a 2 ms group, against the 2.5 ms the seven 2026-07-30 sessions put on
-        `TOL_S` -- in searched windows 5, 7 and 13, and the whole group was
-        discarded while the operator listened to the gateway answering on a
-        monitor receiver. Nine windows end to end is what this station's own
-        4-call/6-hush rotation costs when a peer answers the last call of each
-        run: three answers from three runs cannot land inside eight. The price
-        is the one the line above already measures, one false link over the 416
-        against none at eight, and it is paid in the currency the 2026-08-06
-        phantoms were: 1005 recordings, one of which now fires.
-      * TEN MILLISECONDS, which is half the grid's own capture range
-        (`MAX_PULL_S`) and four times the widest real group. Twenty fires on 3 of
-        the 416; ten fires on none.
-
-    AND A LEVEL NOW STANDS IN FRONT OF IT. `ANSWER_CODEWORD_X` refuses an accept
-    that does not stand over its own window, which takes 97.6% of this
-    population's accepts off this rule's input and closes the one recording it
-    still fired on. Everything priced here is the rule against the UNGATED
-    search, which is the harder population and the one it has to keep standing
-    on: a gate is a level, and a level is the first thing a night of poor
-    conditions takes away.
-
-    RE-PRICED WHEN THE SEARCH'S CEILING ROSE, because a band 19 ms wider is 19 ms
-    more chance as well as 19 ms more peer. Over the same population re-swept --
-    32239 windows from 1012 recordings -- the search accepts in 2.70% of them at
-    the slot's reach and 3.60% at the read's, and this rule closes on ONE
-    recording either way, the same one. So nothing here moved: the accepts the
-    wider band adds are spread across recordings rather than stacked three deep
-    inside twelve windows of one, which is the difference the rule exists to
-    read. `tests/shrike/fixtures/connect-ceiling-negatives.json` is that sweep.
-
-    Against the seven 2026-07-30 sessions this fires on the four that ran long
-    enough to hold three answers, at cycles 7, 5, 4 and 5 -- two to four cycles
-    later than the single accept did, which is two to four cycles of a call the
-    peer was going to repeat anyway. It fires on none of the three sessions of
-    2026-08-06, and on no eight-cycle span of the 31996 negative windows.
-
-    THE SEARCH'S OWN COARSENESS IS THE REMAINING COST, and it is measured rather
-    than left implied: at a 1.25 ms hop over a 10 ms bit, five of the 57 accepts
-    those seven sessions hold fall between trial alignments, and `onair-0730-2037`
-    never reaches three because of it. Halving the hop recovers them and takes the
-    per-window false-accept rate from 2.7% to 4.9%, at which this rule fires on
-    four of the negative recordings. Four fictional links is not a price worth
-    paying for one real session recognised, so the hop stays.
-
-    The project's working notes, not part of this distribution, re-derive all of it.
+    0929-1934 held two CS4s two cycles apart in the final-call listen; waiting
+    for a third lost the link. A pair needs 2.1x in-band excess, chosen from
+    the negatives' 99th percentile (2.11x), within eight searches. Weaker
+    answers retain the three-in-twelve rule and the 1.4x acquisition gate.
+    0916-150542Z remains disputed: the operator heard WS8EOC on rig audio,
+    while the tape and witness did not establish a reply. Its pair is too
+    weak for this rule, as pinned in test_connect_evidence_0916.
     """
 
     N, SPAN, TOL_S = 3, 12, 0.010
+    PAIR_N, PAIR_SPAN, PAIR_X = 2, 8, 2.1
 
     def __init__(self) -> None:
         # cycle, offset, and which search of the session drew it
         self.candidates: list[tuple[int, float, int]] = []
+        self.levels: dict[int, float] = {}
         self.at: Optional[int] = None      # the cycle the evidence closed in
         self.searched = 0
         self.discarded = 0                 # accepts the level gate refused
@@ -6669,35 +7792,25 @@ class _ConnectEvidence:
         the UNGATED rate and the operator is owed the difference."""
         self.discarded += 1
 
-    def offer(self, cycle: int, d: float) -> bool:
-        """Take one accepted codeword; True when the evidence now names a peer.
+    def offer(self, cycle: int, d: float, level: float = ANSWER_CODEWORD_X) -> bool:
+        """Corroborate distinct cycles; the caller applies the 1.4x level gate.
 
-        ANY `N` of the live candidates, not the last `N`. Taking the last N is
-        strictly stronger than the rule this class argues for, and it fails the
-        way the rule is written not to: one chance accept landing between a peer's
-        answers undoes them, however many of them agree.
-
-        The seven real sessions do not show it, and that is luck rather than a
-        property -- `onair-0730-2036` holds an accept at 74 ms among answers at
-        100, 99, 98 and 95, but it arrives in cycle 20, twelve cycles after the
-        rule has already closed. 23% of eight-cycle spans of occupied HF hold a
-        spurious accept, and priced against the measured accept rate and the
-        measured answer offsets, taking the last three recognises a peer later in
-        3.7% of calls -- 5.9% when it answers every other cycle -- by three
-        cycles. Those are cycles of a connect budget that is six.
-
-        LIVE MEANS DRAWN WITHIN `SPAN` SEARCHES, counted off `note_search`,
-        which the loop calls immediately in front of every search and nowhere
-        else -- so a caller driving `offer` directly drives that too.
+        Search count preserves evidence age when the caller hushes. Missing
+        level evidence can support a triple, but never the stronger pair rule.
         """
+        if any(c == cycle for c, _, _ in self.candidates):
+            return self.at is not None
         self.candidates.append((cycle, d, self.searched))
-        live = sorted(x[1] for x in self.candidates
-                      if self.searched - x[2] < self.SPAN)
-        if any(live[i + self.N - 1] - live[i] <= self.TOL_S
-               for i in range(len(live) - self.N + 1)):
-            if self.at is None:
-                self.at = cycle
-            return True
+        self.levels[cycle] = level
+        for n, span, floor in ((self.PAIR_N, self.PAIR_SPAN, self.PAIR_X),
+                               (self.N, self.SPAN, 0.0)):
+            live = sorted(d for c, d, w in self.candidates
+                          if self.searched - w < span and self.levels[c] >= floor)
+            if any(live[i + n - 1] - live[i] <= self.TOL_S
+                   for i in range(len(live) - n + 1)):
+                if self.at is None:
+                    self.at = cycle
+                return True
         return False
 
     def closest_pair(self) -> Optional[float]:
@@ -6791,7 +7904,7 @@ class _TurnaroundEvidence:
     which held a burst at all and 50 a burst inside the band, ending in 16
     acquisitions across 11 sessions:
 
-      * TWO, not `_ConnectEvidence`'s three. That search reads twelve bits
+      * TWO, as for `_ConnectEvidence`. That search reads twelve bits
         against four legal words and accepts on 2.7% of windows; this one is
         offered an in-band envelope onset in 6% of cycles and the two rates are
         not the same kind of number. Three corroborates 5 of the 16 acquisitions
@@ -6956,6 +8069,17 @@ class _MasterGrid:
     and it happens at most while cold and off the air. See `_place`.
     """
 
+    called = False
+    """Placed from a call we are answering (`_called_grid`), not from our own.
+
+    It free-runs like a master's. The reference responder also trims its
+    transmit anchor toward the caller, but the caller's receive anchor follows
+    us every cycle either way (pactor1-timing.md sec 1), a 24 ppm pair of
+    clocks moves 30 us a cycle, and the onsets `_track` reads jump by a bit
+    period between packet and codeword: steering the transmitter off them
+    walks it off the instant the caller latched, where holding it still does
+    not."""
+
     MAX_MISSES = 3
     """Cycles with no control signal where the grid predicts one before `d` goes
     back to being searched for. THE TRANSMIT ANCHOR IS NOT TOUCHED -- only the
@@ -6968,34 +8092,26 @@ class _MasterGrid:
     detector on a 5 ms grid, which QRM satisfies, so acquiring wrong is a real
     outcome here and has to be recoverable."""
 
-    BLIND_CYCLES = 4
-    """Cycles hearing nothing before the session stops transmitting.
+    call_hush: Optional[tuple[int, int]] = None
+    """`--call-hush N,M`: after N cycles hearing nothing, M cycles off the air.
 
-    Our own transmission is what is most likely to be covering the peer: on the
-    one-slot cadence our RF plus the T/R recovery either side of it occupy about
-    1.1 s of the 1.25 s cycle, so a grid placed at the wrong phase misses the
-    peer's burst -- and, because both grids are stable to a fraction of a
-    millisecond a cycle, misses it identically for the rest of the session. There
-    is no drift to walk us out of it. Silence is the only move that changes the
-    geometry, and for a master it is the ONLY move: it may not retime itself
-    towards the peer.
+    OFF BY DEFAULT, because an SCS caller never pauses. The PTC-II manual bounds
+    an unanswered call by MAXErr alone ("the maximum number of sync packets that
+    the PTC sends without a response", default 70) and the stock trains on file
+    key one call every 1.25 s without a break: KY4RY 35 and WM4RB 33 in
+    `offair/captures`. So this station calls every cycle until it is answered or
+    its connect budget is spent.
 
-    Four, because a station has to be given a call or two before its not
-    answering means anything.
+    The hush was the escape from a grid placed at a phase where our own carrier
+    covers the peer's burst -- both rasters are stable, so such a phase would
+    hide the peer for good, and a cycle off the air is the only thing `_place`
+    may phase the grid from. Every arm until 2026-09-23 flew 4,6. It stays an
+    experiment: a gateway keeps answering for tens of its own cycles after the
+    caller goes quiet (a provoked gateway and W6IDS, 77 s and 62 s on tape,
+    31 and 38 bursts found by `rxfront.p1_burst_onsets`), and a hush hears those
+    in the clear.
 
     AND ONLY WHILE NOTHING HAS EVER BEEN HEARD ON THIS GRID -- see `_blind`."""
-
-    HUSH_CYCLES = 6
-    """Cycles spent off the air once BLIND_CYCLES have gone by with nothing heard.
-
-    Call, then stop and listen: the working record does this by hand, and the
-    premise is measured. A gateway keeps calling for tens of its own cycles after
-    the caller goes quiet -- two recordings, 77 s and 62 s, hold one doing exactly
-    that, a provoked gateway and W6IDS, bursts 1.25 s apart with our transmitter
-    off, and `rxfront.p1_burst_onsets` finds 31 and 38 of them. Six of our slots is
-    7.5-15 s depending on the cadence, comfortably inside that, and short enough
-    that a peer which simply is not there gets called again rather than
-    abandoned."""
 
     def __init__(self, anchor: int, slot_n: int, offset_n: int, *,
                  packet_n: int, cs_n: int, d_max_n: int):
@@ -7049,6 +8165,7 @@ class _MasterGrid:
         self._p3_peer: Optional[tuple[int, int, int, int]] = None
         self._p3_peer_confirmed = False
         self._p3_peer_swap: Optional[bool] = None
+        self._p3_peer_seeded = False
         self._p3_peer_identity: Optional[tuple] = None
         self._p3_turn: Optional[_P3TurnSnapshot] = None
         self._p3_reply_phase_invalid = False
@@ -7068,8 +8185,13 @@ class _MasterGrid:
         # The peer's raster: the frame every later one has projected from, and
         # how many have. The reply comb rides this rather than each decode, so
         # the frame search's own quantum does not walk our transmit phase.
-        self._p3_raster_origin: Optional[int] = None
+        self._p3_raster_origin: Optional[float] = None
         self._p3_raster_run = 0
+        self._p3_lost_n = 0
+        self._p3_loss_after: Optional[int] = None
+        self._p3_loss_timing: Optional[tuple[_P3ReplyTiming, int]] = None
+        self._p3_timing_history: list[_P3ReplyTiming] = []
+        self._p3_cycle_timing: Optional[tuple[_P3ReplyTiming, int]] = None
         self._p3_command_slot: Optional[int] = None
         self._p3_command_row0: Optional[int] = None
         # Actual emitted control phase references, not requested slot boundaries.
@@ -7101,6 +8223,7 @@ class _MasterGrid:
         # `nearest_gap_n` is taken from, read from the boundary instead of from
         # our data end; nothing here is a second measurement.
         self.entry_at: Optional[int] = None
+        self.p2_keyed_cycles: list[int] = []
         self._entry_variant: Optional[str] = None
         self._first_entry_key_n: Optional[int] = None
         # Where our entry's last symbol falls past the boundary; the answer
@@ -7289,7 +8412,22 @@ class _MasterGrid:
         """
         if bool(long) == self.cycle_long:
             return None
+        # A CRC-observed transition may already have measured the new pair.
+        # An unresolved emitted command may retain its old pair as evidence,
+        # but it is never exposed as a timing measurement of the new cycle.
+        target = round((spec.CYCLE_LONG_S if long else spec.CYCLE_SHORT_S) * FS)
+        timing = self._p3_timing
+        confirmed = (timing is not None and timing.cycle_n == target
+                     and self._p3_peer is not None
+                     and self._p3_peer[0] == timing.packet_phase
+                     and timing.observed_cycle == self.cycles)
+        pending = (getattr(self, "_p3_cycle_timing", None)
+                   if self._p3_command_slot is not None else None)
         self._clear_p3_reply_timing()
+        self._p3_cycle_timing = pending
+        if confirmed:
+            self._p3_timing = timing
+            self._p3_controls.append((timing.control_phase, target))
         was, was_data = self.cycle_n, self.data_n
         self.cycle_long = bool(long)
         if not self.sending:
@@ -7437,6 +8575,8 @@ class _MasterGrid:
         BOTH POSITIONS.
         """
         override, self._entry_extent_override = self._entry_extent_override, None
+        if protocol is Protocol.PACTOR2:
+            self.p2_keyed_cycles.append(self.cycles)
         if protocol is Protocol.PACTOR3 and (entry_pending or self.entry_at is None):
             if self.entry_at is None or (entry_pending and
                                           entry_variant != self._entry_variant):
@@ -7509,6 +8649,13 @@ class _MasterGrid:
         if not to_iss:
             self._clear_p3_reply_timing()
             self._p3_reply_phase_invalid = False
+            # The raster of the stint that is over places nothing in this one.
+            # A packet decoded this cycle is the changeover that turned the link
+            # and is the new stint's first frame; anything older waits for one.
+            peer = self._p3_peer
+            fresh = peer is not None and self.cycles - peer[3] <= 1
+            self._p3_raster_origin = float(peer[0]) if fresh else None
+            self._p3_raster_run = 1 if fresh else 0
         # Returning to ISS leaves our transmit phase unchanged. An unanswered
         # CS3 retry still needs the observed position of its original head.
         self.sending = to_iss
@@ -7635,7 +8782,8 @@ class _MasterGrid:
             self._clear_p3_reply_timing()
 
     def key_refusal(self, carrier: int, air_n: int, *,
-                    changeover: bool = False) -> Optional[str]:
+                    changeover: bool = False,
+                    transition_grant: Optional[str] = None) -> Optional[str]:
         """Why the carrier must NOT come up at `carrier`, or None.
 
         ONE QUESTION IN BOTH ROLES: does the air we are about to occupy --
@@ -7687,10 +8835,18 @@ class _MasterGrid:
             # ISS and sends 960 ms, of which `peer_cs` names the first 120. Our
             # own answer window reads that head; the peer's reads ours.
             width = max(width, self.data_n)
-        cycle_n = (self._p3_peer[2] if self.protocol == Protocol.PACTOR3
-                   and not self.sending and self._p3_peer is not None
-                   and at == self._p3_peer[0] else self.cycle_n)
+        cycle_n = self._peer_projection_cycle(at)
         phase = (carrier - at) % cycle_n
+        # Explicit P4 experiment only: test whether this decoded P1 grant
+        # releases the old short-cycle reply schedule. Do not reinterpret a
+        # different control, a peer data packet, or a currently occupied slot.
+        cs = self.peer_cs
+        if (transition_grant in ("0x59A", "0x6A9") and self.sending
+                and cs is not None and cs.protocol == Protocol.PACTOR1
+                and cs.name.split('/')[0] == transition_grant
+                and at == cs.at and width == cs.width
+                and carrier >= at + width and phase >= width):
+            return None
         # FIT, not merely start clear: our whole keying has to be down before the
         # peer's next burst, or its tail lies across the head of that one.
         #
@@ -7711,6 +8867,30 @@ class _MasterGrid:
         return (f"{whose}{where} begins "
                 f"{(phase + air_n - cycle_n) / FS * 1e3:.0f} ms before our "
                 f"{air_n / FS:.3f} s transmission would end")
+
+    def forget_stale(self, at: int) -> None:
+        """Age the peer's evidence to sample `at` by the lives `_peer_air` gives it
+        in cycles, for when the cycle count has stopped and the clock has not."""
+        cs, p3 = self.peer_cs, self._p3_peer
+        width = (self._peer_codeword_width(cs) if cs is not None else 0)
+        if cs is not None and at - cs.at > ISS_GUARD_CYCLES * self.cycle_n + width:
+            self.peer_cs = None
+        if p3 is not None and at - p3[0] > self._peer_projection_cycle(p3[0]) + p3[1]:
+            self._p3_peer = None
+        if self.peer_onset is not None and at - self.peer_onset > self.cycle_n + self.data_n:
+            self.peer_onset = None
+
+    def _peer_projection_cycle(self, at: int) -> int:
+        """Use the same peer cadence for guard projection and sample ageing."""
+        p3 = self._p3_peer
+        return (p3[2] if self.protocol == Protocol.PACTOR3
+                and not self.sending and p3 is not None and at == p3[0]
+                else self.cycle_n)
+
+    def _peer_codeword_width(self, cs) -> int:
+        if self.protocol == Protocol.PACTOR3 and self._p3_peer_confirmed:
+            return self._bare_peer_width(cs.at) or self.data_n
+        return cs.width
 
     def _peer_air(self) -> Optional[tuple[int, int, str]]:
         """The peer's next transmission -- onset, width, and what says so.
@@ -7747,7 +8927,7 @@ class _MasterGrid:
             if packet_fresh and (not cs_fresh or packet[0] >= cs.at):
                 return packet[0], packet[1], "the CRC-valid P3 packet we decoded"
             if cs_fresh:
-                width = self._bare_peer_width(cs.at) or self.data_n
+                width = self._peer_codeword_width(cs)
                 return cs.at, width, f"the {cs.name} we decoded"
             return None
         if not self.sending:
@@ -7774,14 +8954,25 @@ class _MasterGrid:
                        swapped: Optional[bool] = None,
                        identity: Optional[tuple] = None) -> None:
         """Carry a decoded packet's sample position separately from FSK energy."""
-        if self._p3_peer is not None and at <= self._p3_peer[0]:
+        seeded, self._p3_peer_seeded = self._p3_peer_seeded, False
+        if self._p3_peer is not None and at <= self._p3_peer[0] and not seeded:
+            return
+        if self._p3_loss_after is not None and at < self._p3_loss_after:
+            return
+        if self._p3_lost_n and identity is None:
             return
         self._p3_peer_confirmed = True
+        self._p3_lost_n = 0
+        if not self._recover_p3_loss_timing(at, width, cycle_n, identity):
+            self._observe_p3_reply_timing(at, width, cycle_n)
+        self._p3_loss_after = None
         self._p3_command_slot = self._p3_command_row0 = None
-        self._observe_p3_reply_timing(at, width, cycle_n)
-        if self._peer_raster_position(at, cycle_n) is None:
-            self._p3_raster_origin, self._p3_raster_run = at, 1
+        self._p3_cycle_timing = None
+        projected = self._peer_raster_position(at, cycle_n)
+        if projected is None:
+            self._p3_raster_origin, self._p3_raster_run = float(at), 1
         else:
+            self._p3_raster_origin += RASTER_GAIN * (at - projected)
             self._p3_raster_run += 1
         # THE LATCH DESCRIBES THE GEOMETRY OF AN OLDER READING. The guard
         # re-decides against this frame at the key, and a latch that outlives its
@@ -7793,6 +8984,39 @@ class _MasterGrid:
         self._p3_peer_identity = identity
         self.peer_onset = at
         self._peer_raster_at = self._p3_heard_at = at
+        measured = self._p3_reply_timing()
+        if measured is not None:
+            self._p3_timing_history.append(measured)
+            del self._p3_timing_history[:-ONSET_MAX_CYCLES]
+
+    def note_p3_head(self, at: int, cycle_n: int) -> None:
+        """A CS3 head decoded at `at`: the phase reference of its packet.
+
+        The head IS the changeover packet's first 210 ms, so it seats the reply
+        clock as the body would -- 0924-0033's heads read within a rounding of
+        the frames behind them (45.26 s, frame @ 2172497). The body decodes too
+        late for the first reply: P3 REPLY CLOCK refused the CS2 after both of
+        that arm's CS3s. A frame of the same packet replaces it. The receive
+        side's data clock is not seeded (`test_changeover_clock`).
+        """
+        if self._p3_peer is not None and at - self._p3_peer[0] < P3_PACKET_N:
+            return
+        self.note_p3_packet(at, P3_PACKET_N, cycle_n)
+        self._p3_peer_seeded = True
+
+    def reseat_changeover(self) -> None:
+        """Put the changeover that turned the link on the cycle the turn opens.
+
+        Its phase reference is the new ISS's raster, and a turn opens short.
+        The body of a changeover decoded off a long link is noted on the long
+        cycle, before the ARQ has taken the turn, and against the short grid
+        `p3_control_refusal` then refused its ACK as a stale clock. Only the
+        fresh packet `reverse` seats the new stint's raster on moves; an older
+        one is still a different cycle's.
+        """
+        peer = self._p3_peer
+        if peer is not None and self.cycles - peer[3] <= 1:
+            self._p3_peer = (peer[0], peer[1], self.cycle_n, peer[3])
 
     def _peer_raster_position(self, at: int, cycle_n: int) -> Optional[int]:
         """`at` snapped to the peer's established raster, or None if it is off it.
@@ -7808,20 +9032,104 @@ class _MasterGrid:
         if origin is None or peer is None or peer[2] != cycle_n:
             return None
         periods = round((at - origin) / cycle_n)
-        projected = origin + periods * cycle_n
+        projected = round(origin + periods * cycle_n)
         if periods < 1 or abs(at - projected) > round(MAX_PULL_S * FS):
             return None
         return projected
+
+    def p3_reply_phase(self) -> Optional[int]:
+        """The packet the next reply answers, on the raster of THIS stint.
+
+        None until a frame of the current stint has seated the raster: the
+        rotation `reverse` applies is the answer's first guess, and the guess
+        is not improved on by a packet from the stint before it.
+        """
+        peer = self._p3_peer
+        if (self.protocol != Protocol.PACTOR3 or self.sending or peer is None
+                or self._p3_raster_origin is None or peer[2] != self.cycle_n
+                or self.cycles - peer[3] > ONSET_MAX_CYCLES):
+            return None
+        return self._peer_raster_position(peer[0], peer[2]) or peer[0]
 
     @property
     def _p3_raster_corroborated(self) -> bool:
         """Three CRC frames in a row on one comb: a raster, not one reading."""
         return self._p3_raster_run >= 3
 
+    def note_capture_loss(self, samples: int, *, at: Optional[int] = None) -> None:
+        """The sample clock lost `samples` of air, so every index taken before
+        the hole now stands that far ahead of the same instant on the air.
+
+        Our own instants move back with it: the transmit anchor, the reply
+        clock, the keyed replies and entry keys, the peer's last codeword. The
+        peer's P3 raster is forgotten instead and no control is keyed until a
+        CRC frame seats it again. `d_n` and `d_ref_n` are durations and stay."""
+        candidate = self._p3_loss_timing
+        measured = self._p3_reply_timing() if candidate is None else candidate[0]
+        if candidate is None and at is not None:
+            measured = next((pair for pair in reversed(self._p3_timing_history)
+                             if pair.packet_phase + pair.packet_width <= at),
+                            measured)
+        total = samples + (0 if candidate is None else candidate[1])
+        if (at is None or measured is None
+                or at < measured.packet_phase + measured.packet_width
+                or not 0 <= self.cycles - measured.observed_cycle <= ONSET_MAX_CYCLES):
+            candidate = None
+        else:
+            candidate = (measured._replace(
+                control_phase=measured.control_phase - samples,
+                packet_phase=measured.packet_phase - samples), total)
+        self.anchor -= samples
+        if self.reply_clock is not None:
+            self.reply_clock.slip(samples)
+        if self.peer_cs is not None:
+            self.peer_cs = self.peer_cs._replace(at=self.peer_cs.at - samples)
+        if self.entry_key_n is not None:
+            self.entry_key_n -= samples
+        if self._first_entry_key_n is not None:
+            self._first_entry_key_n -= samples
+        for name in ("_p2_keyed_reply", "_p3_keyed_reply"):
+            keyed = getattr(self, name, None)
+            if keyed is not None:
+                slot, start, end, cycle_n = keyed
+                setattr(self, name, (slot, start - samples, end - samples, cycle_n))
+        self._p3_command_slot = self._p3_command_row0 = None
+        self._p3_peer = None
+        self._p3_raster_origin, self._p3_raster_run = None, 0
+        self._p3_heard_at = self._peer_raster_at = self.peer_onset = None
+        self._p3_reply_phase_invalid = False
+        self._p3_lost_n = samples
+        self._clear_p3_reply_timing()
+        self._p3_loss_timing = candidate
+        self._p3_loss_after = at
+
+    def _recover_p3_loss_timing(self, at: int, width: int, cycle_n: int,
+                                identity: Optional[tuple]) -> bool:
+        candidate = self._p3_loss_timing
+        if candidate is None or identity is None:
+            return False
+        measured, _ = candidate
+        elapsed = at - measured.packet_phase
+        periods = round(elapsed / cycle_n)
+        if (self.protocol != Protocol.PACTOR3 or cycle_n != self.cycle_n
+                or measured.cycle_n != cycle_n or measured.packet_width != width
+                or not 0 <= self.cycles - measured.observed_cycle <= ONSET_MAX_CYCLES
+                or not 1 <= periods <= ONSET_MAX_CYCLES
+                or abs(elapsed - periods * cycle_n) > round(MAX_PULL_S * FS)):
+            return False
+        self._p3_timing = measured._replace(packet_phase=at, observed_cycle=self.cycles)
+        self._p3_loss_timing = None
+        print("    [grid] fresh CRC packet restored the translated P3 reply timing "
+              "after capture loss", flush=True)
+        return True
+
     def _clear_p3_reply_timing(self) -> None:
+        self._p3_cycle_timing = None
         self._p3_controls.clear()
         self._p3_timing = None
         self._p3_turn = None
+        self._p3_loss_timing = None
+        self._p3_timing_history.clear()
 
     def remember_p3_turn(self, emitted_phase: int) -> None:
         """Snapshot a credible IRS clock only after its outgoing CS3 emitted."""
@@ -7878,21 +9186,49 @@ class _MasterGrid:
             return None
         if self._p3_reply_phase_invalid:
             return "the IRS reply phase overlapped a decoded peer packet and remains invalid"
+        if self._p3_lost_n:
+            return (f"the input lost {self._p3_lost_n / FS * 1e3:.0f} ms of air "
+                    f"since the last CRC frame and no packet has re-seated the "
+                    f"peer's raster")
         peer = self._p3_peer
         if peer is None or peer[2] != self.cycle_n:
             return "no fresh packet clock supports this PACTOR-3 reply"
         # THE BOUNDARY DOES NOT DEPEND ON THE DECODE -- it is the comb, held on
         # the peer's own raster -- so what ages here is the evidence that the
         # peer is still transmitting. An undecoded burst on that raster is that
-        # evidence (`note_peer_bursts`), and a raster three CRC frames have
+        # evidence (`note_peer_bursts`), as is an unread packet standing in its
+        # answer window (`note_peer_unread`), and a raster three CRC frames have
         # agreed on carries further than one reading of it: 0913-0014 stopped
         # answering after five `no fresh packet clock` with the peer still keying.
+        #
+        # AND A CORROBORATED COMB CARRIES THE REPLY PAST THAT. A peer gone
+        # silent is owed repeat requests on the raster it went silent on, and
+        # the ARQ's silence budget, not this guard, ends them: 0924-0033 keyed
+        # five after VE3KPG's last CS3, refused the next two here, and hung up
+        # on the same cycle it would have anyway. One reading still expires.
         heard = max(peer[0], self._p3_heard_at or 0)
         limit = (RASTER_PROJECT_CYCLES if self._p3_raster_corroborated
                  else ONSET_MAX_CYCLES) * peer[2]
-        if not 0 < self.boundary(slot) - heard <= limit:
+        age = self.boundary(slot) - heard
+        if age <= 0 or (age > limit and not self._p3_raster_corroborated):
             return "no fresh packet clock supports this PACTOR-3 reply"
         return None
+
+    def p3_reply_slot(self, slot: int) -> int:
+        """Select the long reply residue from a recent CRC packet's phase.
+
+        Regearing changes the step, but a delayed long-header decode may arrive
+        on either of the two slots inside the peer's packet. Stepping by three
+        from that slot preserves the collision forever.
+        """
+        peer = self._p3_peer
+        if (self.protocol != Protocol.PACTOR3 or self.sending or not self.cycle_long
+                or peer is None or peer[2] != self.cycle_n
+                or self.cycles - peer[3] > ONSET_MAX_CYCLES):
+            return slot
+        due = peer[0] + round(P3_LONG_REPLY_S * FS)
+        reference = round((due - self.anchor) / self.slot_n)
+        return slot + (reference - slot) % self.ticks
 
     def p3_reply_shift(self, slot: int, *, target: Optional[int] = None) -> Optional[str]:
         """Put the reply comb back on the decoded packet. Returns a line, or None.
@@ -7915,7 +9251,7 @@ class _MasterGrid:
         our transmit phase, a cycle at a time.
 
         THE LONG CYCLE NEEDS NO TERM OF ITS OWN AND `P3_LONG_REPLY_S` SUPPLIES
-        NONE. 3.390 - 0.890 is 2.500 s, which is exactly two slots, so the two
+        NONE. 3.410 - 0.910 is 2.500 s, which is exactly two slots, so the two
         branches below reduce to the same anchor and the constant is a statement
         of where the long answer sits rather than an instruction to move there.
         What actually puts the codeword 3.390 s past the packet is the SLOT:
@@ -7925,12 +9261,9 @@ class _MasterGrid:
         finds the number here -- and a geometry in which the difference stopped
         being a whole number of slots would need this line to fire.
         """
-        peer = self._p3_peer
-        if (self.protocol != Protocol.PACTOR3 or self.sending or peer is None
-                or peer[2] != self.cycle_n
-                or self.cycles - peer[3] > ONSET_MAX_CYCLES):
+        peer, at = self._p3_peer, self.p3_reply_phase()
+        if at is None:
             return None
-        at = self._peer_raster_position(peer[0], peer[2]) or peer[0]
         due = at + round((P3_LONG_REPLY_S if self.cycle_long
                           else P3_REPLY_S) * FS)
         if target is not None:
@@ -7965,6 +9298,36 @@ class _MasterGrid:
         self._p3_controls.append((phase, self.cycle_n))
         del self._p3_controls[:-ONSET_MAX_CYCLES]
 
+    def _p3_transition_timing(self, at: int, width: int, cycle_n: int) -> bool:
+        """Qualify a new geometry from an emitted CS6 and a CRC-valid packet.
+
+        The command's next packet phase was projected before the cycle changed.
+        Require that phase and the newly measured reverse gap to agree with the
+        established pair. A changed period alone never supplies TX evidence.
+        """
+        saved = getattr(self, "_p3_cycle_timing", None)
+        expected = self._p3_command_row0
+        if saved is None or expected is None or self.sending:
+            return False
+        old, control = saved
+        short = round(spec.CYCLE_SHORT_S * FS)
+        long = round(spec.CYCLE_LONG_S * FS)
+        if ({old.cycle_n, cycle_n} != {short, long}
+                or not 0 <= self.cycles - old.observed_cycle <= ONSET_MAX_CYCLES
+                or not 0 < control - old.packet_phase <= ONSET_MAX_CYCLES * old.cycle_n):
+            return False
+        expected -= p3frame.DATA_OFFSET * rxfront.SPS
+        gap = at - control - self.cs_n
+        room = cycle_n - width - self.cs_n
+        minimum = round(D_MIN_S * FS)
+        tolerance = round(MAX_PULL_S * FS)
+        if (abs(at - expected) > tolerance
+                or abs(gap - old.reverse_gap) > tolerance
+                or not minimum <= gap <= room - minimum):
+            return False
+        self._p3_timing = _P3ReplyTiming(control, at, width, cycle_n, gap, self.cycles)
+        return True
+
     def _observe_p3_reply_timing(self, at: int, width: int, cycle_n: int) -> None:
         """Measure RX phase after actual TX; two distinct cycles corroborate it.
 
@@ -7989,6 +9352,8 @@ class _MasterGrid:
             return
         if self.sending:
             self._reanchor_p3_reply_timing(at, cycle_n)
+            return
+        if self._p3_transition_timing(at, width, cycle_n):
             return
         if cycle_n != self.cycle_n:
             self._p3_timing = None
@@ -8267,6 +9632,23 @@ class _MasterGrid:
                 f"{width / FS * 1e3:.0f} ms at sample {at}, "
                 f"{moved / FS * 1e3:+.1f} ms on its own comb")
 
+    def note_peer_unread(self, at: int) -> None:
+        """The peer's packet stood over the floor at `at` and nothing read it.
+
+        Its raster is still keyed, and that is all the reply clock's freshness
+        asks. VE3KPG 0923-1910 faded ~7 dB and printed PEER'S PACKET UNREAD
+        every cycle from hold 13; with only CRC frames refreshing the clock, holds
+        28-33 went NOT KEYING while the gateway kept transmitting, and the
+        repeat request it was waiting for never went out.
+        """
+        peer, origin = self._p3_peer, self._p3_raster_origin
+        if peer is None or origin is None or peer[2] != self.cycle_n:
+            return
+        periods = round((at - origin) / peer[2])
+        if periods >= 1:
+            self._p3_heard_at = max(self._p3_heard_at or 0,
+                                    round(origin + periods * peer[2]))
+
     def breakin_refusal(self, end: _PeerEnd) -> Optional[str]:
         """Why the changeover cannot be placed against `end`, or None.
 
@@ -8471,7 +9853,7 @@ class _MasterGrid:
             #
             # It buys keeping the air, and nothing else: `_place` is reached
             # only from a hush, and the corroboration that aims a receive window
-            # is still three of these. See `_ConnectEvidence`.
+            # needs a second exact codeword. See `_ConnectEvidence`.
             self.answered_word = (self.cycles, *answered)
             self.blind, self.hush_left = 0, 0
         if linked:
@@ -8605,8 +9987,8 @@ class _MasterGrid:
         fine when the call is answered and a lottery when it is not: both rasters
         are stable to a fraction of a millisecond a cycle, so a phase that puts
         our 0.96 s packet over the peer's 0.12 s burst puts it there for the whole
-        session, with no drift to walk us out of it. That happened, and HUSH_CYCLES
-        exists because of it.
+        session, with no drift to walk us out of it. That happened, and
+        `call_hush` exists because of it.
 
         So the grid is placed from what we can hear, and only from a cycle spent
         off the air, where nothing on the channel can be an answer to us. A
@@ -8803,7 +10185,7 @@ class _MasterGrid:
         where `locked` does not. A session holding a link is the same argument
         from the other end, and it is the one with teeth: an IRS times its
         acknowledgement against a 1.25 s raster and is gone several cycles before
-        a six-cycle hush is spent, so all the hush can do there is drop a station
+        a hush is spent, so all the hush can do there is drop a station
         that IS answering. Measured on 2026-08-06 over four sessions against three
         gateways: the setup phase transmitted 4 cycles in every 10 and the hold
         phase kept the same rhythm the whole way down, on a raster that never
@@ -8852,16 +10234,16 @@ class _MasterGrid:
                 self.blind = 0
                 return ("NO CONTROL SIGNAL -- the hush heard nothing either; "
                         f"back on the air and calling{said}")
-        elif self.blind >= self.BLIND_CYCLES:
-            self.hush_left = self.HUSH_CYCLES
+        elif self.call_hush and self.blind >= self.call_hush[0]:
+            self.hush_left = self.call_hush[1]
         if self.hush_left:
             return (f"NO CONTROL SIGNAL after {self.blind} cycles ({why}) -- OFF "
                     f"THE AIR, {self.hush_left} cycle(s) of listening in the clear "
                     f"left to find a raster to call on{said}")
+        before = (f" ({self.call_hush[0] - self.blind} more before going quiet)"
+                  if self.call_hush else "")
         return (f"NO CONTROL SIGNAL -- {why} for {self.blind} cycle(s); calling on "
-                f"a grid nothing has answered yet "
-                f"({self.BLIND_CYCLES - self.blind} more before going quiet)"
-                f"{said}")
+                f"a grid nothing has answered yet{before}{said}")
 
     # -- did the peer READ the entry packet -------------------------------
     @property
@@ -8945,6 +10327,11 @@ class _MasterGrid:
         saying so reads as a result. Arms have been spent on that reading.
         """
         if self.entry_at is None:
+            if self.p2_keyed_cycles:
+                return (f"PACTOR-2 WAS KEYED: {len(self.p2_keyed_cycles)} burst(s), "
+                        f"first in cycle {self.p2_keyed_cycles[0]}; the PACTOR-3 "
+                        "entry-position diagnostic does not apply. Keying alone "
+                        "does not confirm the peer received PACTOR-2.")
             return ("NO ENTRY PACKET WAS KEYED IN THIS ARM: nothing went out for "
                     "the peer to read, so where it answered decides nothing "
                     "about entry detection and no position is reported")
@@ -8958,11 +10345,7 @@ class _MasterGrid:
             # the nearest onset and from nothing else, so a link whose answers
             # are decoded but whose bursts never registered reads as silence
             # here. What the decoders made of the same cycles is beside it.
-            return (f"NO ANSWER TO THE ENTRY PACKET: one was keyed in cycle "
-                    f"{self.entry_at} and no cycle since carried a burst to time. "
-                    f"The peer answered at {self.answer_unread_ms:.1f} ms after "
-                    f"our slot boundary before it and has not answered since"
-                    f"{f'. {self.reading}' if self.reading else ''}")
+            return f"NO TIMED ENTRY ANSWER RECORDED: entry packet was keyed in cycle {self.entry_at}, and no timed answer burst was registered after it. The pre-entry measured position was {self.answer_unread_ms:.1f} ms after our slot boundary. Later decoded packet traffic is reported separately{(f'. {self.reading}' if self.reading else '')}"
         placed = [(self.entry_tracked.get(cycle, ms), cycle in self.entry_tracked)
                   for cycle, _, ms in self.entry_answers]
         series = ", ".join(f"{ms:.1f}{' (tracked)' if word else ''}"
@@ -9089,14 +10472,24 @@ def _grid_reversal(raster: _MasterGrid, host) -> Optional[str]:
     # in it. Rotate using that accepted protocol, not the last emitted waveform:
     # P1's 960-120 ms rotation puts a P3 ACK 240 ms late (810-210 ms).
     raster.protocol = host.protocol
-    return raster.reverse(to_iss=role == ISS)
+    line = raster.reverse(to_iss=role == ISS)
+    if role != ISS and raster.protocol == Protocol.PACTOR3:
+        # Every turn opens SL1 short (`arq._give_link`), and the grid takes it
+        # now rather than at the next cycle's top: 0924-0033 held a 3.4 s window
+        # across VE3KPG's first two short packets after its CS3.
+        geared = raster.regear(host.arq.cycle_long)
+        if geared:
+            raster.reseat_changeover()
+            line = f"{line}; {geared}"
+    return line
 
 
 def _align_shift(raster: _MasterGrid, sessrx, tx, slot: int, at: int) -> None:
     """Take the peer's FSK shift for the cycle its control signal belongs to.
 
-    Normally the peer's reading sets our phase. The opt-in P1-only setup
-    experiment retains the call train's phase until the first payload settles.
+    Normally the peer's reading sets our phase. The opt-in setup experiment
+    retains the call train's phase until the first payload settles, on a
+    PACTOR-1-only arm or ahead of a P4 probe, which it never outlives.
     KI0BK's recorded reply polarity disagreed with that coherent call train;
     this switch tests causality without changing the normal alignment policy.
 
@@ -9111,8 +10504,10 @@ def _align_shift(raster: _MasterGrid, sessrx, tx, slot: int, at: int) -> None:
         # Repeated P1 grants still place unconfirmed entry. Once the peer has
         # answered in P3, a lower-protocol word cannot change P3 carrier order.
         return
+    probe = getattr(tx, "p4_probe", None)
     if (getattr(tx, "p1_setup_phase", "reply") == "call"
-            and sessrx.host.stay_in_pactor1
+            and (sessrx.host.stay_in_pactor1 or probe is not None)
+            and not getattr(probe, "requested", False)
             and sessrx.host.protocol == Protocol.PACTOR1
             and sessrx.host.arq.role == ISS
             and sessrx.host.arq.state in (State.CONNECTING, State.CONNECTED)
@@ -9232,6 +10627,14 @@ def _loss_seen(live) -> Optional[str]:
     if live.lost:
         said.append(f"{live.lost} samples ({live.lost / live.fs * 1e3:.0f} ms) "
                     f"the converter timestamped and we were never handed")
+        for at, step, silence in getattr(live, "lost_at", ()):
+            said.append(
+                f"{step / live.fs * 1e3:.0f} ms of it at sample {at}, "
+                + (f"where the driver went {silence * 1e3:.0f} ms without "
+                   f"calling us: air missing from the stream"
+                   if silence * live.fs > step / 2 else
+                   f"between two callbacks {silence * 1e3:.1f} ms apart: the "
+                   f"stream clock stepped, not the air"))
     if live.xruns:
         said.append(f"{live.xruns} driver xrun(s), first at sample {live.xrun_at}")
     return ", ".join(said) or None
@@ -9245,6 +10648,40 @@ class _CycleEvidence:
     def __init__(self, live, tx, raster: "_MasterGrid", outdir: Path):
         self.live, self.tx, self.raster, self.outdir = live, tx, raster, outdir
         self.xruns = self.lost = 0
+        self._loss_count = 0
+        if tx is not None:
+            tx._cycle_evidence = self
+
+    def input_loss(self, name: str) -> bool:
+        """Say what the input lost since last asked, and tell the grid.
+
+        Asked before the key as well as at the window's record: 0921-1209
+        lost 3.2 s of air in hold 84 and keyed ten ACKs into a peer whose
+        packets were 706 ms off every projection, on the strength of a raster
+        corroborated before the hole.
+        """
+        live = self.live
+        lost, xruns = getattr(live, "lost", 0), getattr(live, "xruns", 0)
+        if not (lost > self.lost or xruns > self.xruns):
+            return False
+        new = lost - self.lost
+        self.lost, self.xruns = lost, xruns
+        print(f"    !!!! CAPTURE LOSS: the input lost {new} samples "
+              f"({new / live.fs * 1e3:.0f} ms) at {name} -- "
+              f"{_loss_seen(live)} for the session so far", flush=True)
+        if new and self.raster is not None:
+            losses = getattr(live, "lost_at", ())
+            pending = losses[self._loss_count:]
+            self._loss_count = len(losses)
+            if sum(step for _, step, _ in pending) == new:
+                for at, step, _ in pending:
+                    self.raster.note_capture_loss(step, at=at)
+            else:
+                self.raster.note_capture_loss(new)
+            print(f"    !!!! GRID MOVED BACK {new} samples to meet the air: our "
+                  f"keys stay on the raster the peer latched, and a measurement "
+                  f"spanning the hole is off by the loss.", flush=True)
+        return bool(new)
 
     def record(self, name: str, seg: np.ndarray,
                seg_start: int) -> list[tuple[int, int]]:
@@ -9253,18 +10690,7 @@ class _CycleEvidence:
             return []
         _save_capture_async(self.outdir / f"{name}.wav", seg, live.xruns,
                             end=seg_start + seg.size, lost=live.lost)
-        if live.lost > self.lost or live.xruns > self.xruns:
-            new, first = live.lost - self.lost, not (self.lost or self.xruns)
-            self.lost, self.xruns = live.lost, live.xruns
-            print(f"    !!!! CAPTURE LOSS: {new} samples "
-                  f"({new / live.fs * 1e3:.0f} ms) in this window -- "
-                  f"{_loss_seen(live)} for the session so far", flush=True)
-            if first:
-                print("    !!!! Every sample index from here on is offset from "
-                      "the air by at least that much and growing: the cycle "
-                      "grid has shifted permanently, and no timing measurement "
-                      "from this session is usable. SESSION INVALID for timing "
-                      "-- restart it.", flush=True)
+        self.input_loss(name)
         # AGAINST FULL SCALE, and against the window's own peak until now, which
         # is the measurement the sidecar beside it warns about: relative to the
         # peak, every capture rails at its own maximum and a real one hides
@@ -9397,6 +10823,99 @@ def _trim_silence(audio: np.ndarray, thresh: float = 0.02) -> np.ndarray:
     return audio if on.size == 0 else audio[on[0]:on[-1] + 1]
 
 
+def _allpass_chain(coeffs: tuple[float, ...], delay: int) -> tuple[np.ndarray, np.ndarray]:
+    b, a = np.eye(1, delay + 1, delay)[0], np.ones(1)
+    for c in coeffs:
+        b, a = np.convolve(b, [c * c, 0, -1]), np.convolve(a, [1, 0, -c * c])
+    return b, a
+
+
+# Two allpass chains 90 degrees apart to within 0.7 degree across 0.3-3 kHz at
+# 48 kHz (O. Niemitalo's pair), with 0.2 ms of group delay at the PACTOR tones.
+# Causal, so a stream can be moved in whatever blocks it arrives in.
+_QUADRATURE = (_allpass_chain((0.6923878, 0.9360654322959, 0.9882295226860,
+                               0.9987488452737), 1),
+               _allpass_chain((0.4021921162426, 0.8561710882420, 0.9722909545651,
+                               0.9952884791278), 0))
+
+
+def _shift_tones(x: np.ndarray, hz: float, n0: int = 0, state=None):
+    """`x` moved up by `hz`, from stream sample `n0`: (audio, filter state)."""
+    from scipy.signal import lfilter
+    if state is None:
+        state = [np.zeros(max(len(b), len(a)) - 1) for b, a in _QUADRATURE]
+    (bq, aq), (bi, ai) = _QUADRATURE
+    q, zq = lfilter(bq, aq, x, zi=state[0])
+    i, zi = lfilter(bi, ai, x, zi=state[1])
+    phase = 2 * np.pi * hz / FS * (n0 + np.arange(x.size))
+    return (i * np.cos(phase) - q * np.sin(phase)).astype(np.float32), [zq, zi]
+
+
+class _Retuned:
+    """The capture stream with a caller's tones moved onto our own pair.
+
+    A called station comes to the caller's frequency: SCS's link setup adds the
+    call's tone offset to the modem's centre, and the reference
+    responder tracks the master in frequency as well as time. Every PACTOR-1
+    reader here listens at 1400/1600 Hz and searches time only, so the caller is
+    brought to them once, here, for the whole link; `RadioTx._tx` moves our own
+    bursts up by the same `tone_offset_hz`.
+    """
+
+    def __init__(self, live, hz: float):
+        self._live, self.tone_offset_hz = live, hz
+        self._state = None
+
+    def __getattr__(self, name):
+        return getattr(self._live, name)
+
+    def _moved(self, x: np.ndarray) -> np.ndarray:
+        if not x.size:
+            return x
+        x, self._state = _shift_tones(x, -self.tone_offset_hz,
+                                      self._live.pos - x.size, self._state)
+        return x
+
+    def read(self, count: int) -> np.ndarray:
+        return self._moved(self._live.read(count))
+
+    def take(self, seconds: float) -> np.ndarray:
+        return self._moved(self._live.take(seconds))
+
+    def take_until(self, index: int) -> np.ndarray:
+        return self._moved(self._live.take_until(index))
+
+    def read_ready(self) -> np.ndarray:
+        return self._moved(self._live.read_ready())
+
+
+CALL_HOP_S = 0.25
+
+
+def _await_call(live, mycall: str, seconds: float, *, strict: bool = False):
+    """Listen for a call to `mycall`: (stream sample its frame began at, the call).
+
+    None if `seconds` pass, or the input runs dry, with no call heard. The
+    search is `p1rx.search_calls`, over a window one frame and two hops long,
+    so every frame is seen whole at least once.
+    """
+    hop = round(CALL_HOP_S * FS)
+    keep = p1rx.CALL_N + 2 * hop
+    buf = np.zeros(0, np.float32)
+    deadline = live.pos + round(seconds * FS)
+    while live.pos < deadline:
+        chunk = live.read(hop)
+        if not chunk.size:
+            return None
+        buf = np.concatenate([buf, chunk])[-keep:]
+        calls = p1rx.search_calls(buf, mycall, strict=strict)
+        if calls:
+            t, call = calls[0]
+            frame = p1rx.CALL_B_N if call.variant == "Robust" else p1rx.CALL_N
+            return live.pos - buf.size + round(t * FS) - frame, call
+    return None
+
+
 class _PeerCodeword(NamedTuple):
     """A twelve-bit word read at zero errors, and where it sat.
 
@@ -9491,6 +11010,7 @@ class _PhasePower:
     def __init__(self, rig, *, p1: Optional[float], p3: Optional[float]):
         self.rig = rig
         self.levels = {Protocol.PACTOR1: None if p1 is None else p1 / MAX_WATTS,
+                       Protocol.PACTOR2: None if p3 is None else p3 / MAX_WATTS,
                        Protocol.PACTOR3: None if p3 is None else p3 / MAX_WATTS}
         #: What this arm last put on the rig, and None until it has put anything
         #: there -- which is also what says whether there is a level to restore.
@@ -9715,6 +11235,11 @@ def _preflight(in_dev, out_dev, rig, settle: float, *, key: bool,
 
 
 _WRITER = None
+# Registry entries are bound once to an exclusively owned root; no global
+# "current session" redirects old jobs. Each queued owned job carries its own
+# fixed writer/name tickets, materialized only on the recording thread.
+_CAPTURE_ROOTS = {}
+_CAPTURE_RECORDINGS = {}
 # How long the end of a session will wait for the writer. Long enough for a
 # queue of ordinary windows to land, short enough that a disk which has stopped
 # answering costs a finished session a pause and not an evening.
@@ -9734,26 +11259,59 @@ class _CaptureWriter:
     def __init__(self) -> None:
         self._q = queue.Queue()
         self._idle = threading.Condition()
+        self._owned = {}
+        self.status_errors = {}
         self.queued = 0
         self.written = 0
         self.lost: list[str] = []
+        self.unstored: list[Path] = []
         threading.Thread(target=self._run, daemon=True).start()
 
     @property
     def pending(self) -> int:
         return self.queued - self.written - len(self.lost)
 
+    @staticmethod
+    def _owner(item):
+        if len(item) > 5 and item[-1] is not None:
+            return item[-1].audio.writer
+        return None
+
+    def snapshot(self, writer):
+        key = (writer.capture.capture_id, writer.role)
+        with self._idle:
+            row = self._owned.get(key)
+            counts = dict(row[1]) if row else dict(queued=0, written=0, lost=0, store_pending=0, partial=0)
+        return dict(pending=counts['queued'] - counts['written'] - counts['lost'] + counts['store_pending'],
+                    written=counts['written'], lost=counts['lost'], partial=counts['partial'])
+
+    def publish_status(self, writer):
+        facts = self.snapshot(writer)
+        state = 'partial' if facts['lost'] or facts['partial'] else 'finalized' if writer.capture.ended() and not facts['pending'] else 'ongoing'
+        try:
+            writer.update_status(state=state, component='deferred-windows', **facts)
+        except Exception as exc:
+            # A failed journal never invents completion or kills the audio worker.
+            self.status_errors[(writer.capture.capture_id, writer.role)] = type(exc).__name__
+
     def put(self, item: tuple) -> None:
         with self._idle:
             self.queued += 1
+            writer = self._owner(item)
+            if writer is not None:
+                key = (writer.capture.capture_id, writer.role)
+                row = self._owned.setdefault(key, (writer, dict(queued=0, written=0, lost=0, store_pending=0, partial=0)))
+                row[1]['queued'] += 1
         self._q.put(item)
 
     def _run(self) -> None:
         while True:
-            path, *rest = self._q.get()
+            item = self._q.get()
+            path, *rest = item
+            writer = self._owner(item)
             note = None
             try:
-                _save_capture(path, *rest)
+                ownership = _save_capture(path, *rest)
             except Exception as exc:
                 # Still swallowed -- a transmission in progress outranks a
                 # recording, and a raise here would take the session with it.
@@ -9764,9 +11322,17 @@ class _CaptureWriter:
             with self._idle:
                 if note is None:
                     self.written += 1
+                    self.unstored.append((path, ownership) if ownership is not None else path)
                 else:
                     self.lost.append(note)
+                if writer is not None:
+                    counts = self._owned[(writer.capture.capture_id, writer.role)][1]
+                    counts['written' if note is None else 'lost'] += 1
+                    if note is None:
+                        counts['store_pending'] += 1
                 self._idle.notify_all()
+            if writer is not None:
+                self.publish_status(writer)
 
     def drain(self, timeout: float) -> int:
         """Wait for the queue to empty; answer with what never made it."""
@@ -9776,6 +11342,37 @@ class _CaptureWriter:
                 if not self._idle.wait(max(0.0, deadline - time.monotonic())):
                     break
             return self.pending
+
+    def store(self) -> None:
+        with self._idle:
+            paths, self.unstored = self.unstored, []
+        for index, path in enumerate(paths):
+            writer = path[1].audio.writer if isinstance(path, tuple) else None
+            try:
+                if isinstance(path, tuple):
+                    _store_capture(*path)
+                else:
+                    _store_capture(path)
+            except BaseException:
+                with self._idle:
+                    # Preserve later work for a later bounded drain; do not
+                    # attribute any old item to the current global output root.
+                    self.unstored = paths[index + 1:] + self.unstored
+                    if writer is not None:
+                        counts = self._owned[(writer.capture.capture_id, writer.role)][1]
+                        counts['store_pending'] -= 1
+                        counts['partial'] += 1
+                if writer is not None:
+                    self.publish_status(writer)
+                raise
+            if writer is not None:
+                with self._idle:
+                    self._owned[(writer.capture.capture_id, writer.role)][1]['store_pending'] -= 1
+                self.publish_status(writer)
+        with self._idle:
+            writers = [row[0] for row in self._owned.values()]
+        for writer in writers:
+            self.publish_status(writer)
 
     def report(self) -> str:
         line = f"captures written {self.written}"
@@ -9787,6 +11384,7 @@ class _CaptureWriter:
         return line if self.lost or self.pending else line + ", all on disk"
 
 
+
 def _drain_captures(timeout: float = CAPTURE_DRAIN_S) -> str:
     """Wait for the queued captures to reach the disk, and say whether they did.
 
@@ -9794,10 +11392,15 @@ def _drain_captures(timeout: float = CAPTURE_DRAIN_S) -> str:
     before -- so the operator gets the account beside the rest of the summary,
     and again from `atexit` for the exits that never reach that `finally`.
     Draining twice is free: the second call finds nothing pending.
+
+    The captures become FLAC here and nowhere earlier, because the card is closed
+    by now. `flac` is a fork of this whole process, and one per cycle under a
+    live stream cost the capture ~10 ms of audio in 7 of 50 sessions.
     """
     if _WRITER is None:
         return "captures written 0, none were taken"
     _WRITER.drain(timeout)
+    _WRITER.store()
     return _WRITER.report()
 
 
@@ -9809,7 +11412,7 @@ def _drain_at_exit() -> None:
     before the loop, a `sys.exit` from another entry point -- has not, and its
     captures are the ones worth the most.
     """
-    if _WRITER is not None and _WRITER.pending:
+    if _WRITER is not None and (_WRITER.pending or _WRITER.unstored):
         print("\n" + _drain_captures(), flush=True)
 
 
@@ -9832,11 +11435,18 @@ def _save_capture_async(path: Path, seg: np.ndarray, xruns: int = 0,
     if _WRITER is None:
         _WRITER = _CaptureWriter()
         atexit.register(_drain_at_exit)
-    _WRITER.put((path, np.asarray(seg).copy(), xruns, end, lost))
+    writer = _capture_writer_for(path)
+    if writer is None:
+        _WRITER.put((path, np.asarray(seg).copy(), xruns, end, lost))
+    else:
+        from hfmodem.core.capture_identity import Recording
+        job = Recording.queued(writer, path.absolute().relative_to(writer.root),
+                               clock_id=writer.capture.capture_id + ':local-stream')
+        _WRITER.put((path, np.asarray(seg).copy(), xruns, end, lost, job))
 
 
 def _save_capture(path: Path, seg: np.ndarray, xruns: int = 0,
-                  end: Optional[int] = None, lost: int = 0) -> None:
+                  end: Optional[int] = None, lost: int = 0, ownership=None):
     """Write a capture, and beside it the levels it had BEFORE normalisation.
 
     `session.write_wav` scales every file to 0.8 peak, so a capture that was
@@ -9890,8 +11500,98 @@ def _save_capture(path: Path, seg: np.ndarray, xruns: int = 0,
         # every capture self-pinning instead.
         "end_stream_sample": end,
     }
-    session.write_wav(str(path), seg)
-    path.with_suffix(".json").write_text(json.dumps(stats) + "\n")
+    from hfmodem.core.capture_identity import QueuedRecording
+    if isinstance(ownership, QueuedRecording):
+        ownership = ownership.reserve()
+    elif ownership is None:
+        ownership = _capture_recording_for(path)
+    if ownership is None:
+        session.write_wav(str(path), seg)
+        path.with_suffix(".json").write_text(json.dumps(stats) + "\n")
+        return None
+    if path.exists() or path.is_symlink():
+        raise FileExistsError('Owned window recording already exists')
+    ownership.sidecar.update(stats | {'capture_state': 'partial'})
+    temporary, sink = ownership.audio.temporary()
+    sink.close()
+    # Preserve the old window normalization and exact session WAV renderer;
+    # ownership changes only publication, not recording samples or levels.
+    session.write_wav(str(temporary), seg)
+    ownership.audio.publish_file(temporary)
+    with path.open('rb') as source:
+        import hashlib
+        digest = hashlib.file_digest(source, 'sha256').hexdigest()
+    ownership.sidecar.update(stats | {'capture_state': 'finalized', 'sha256': digest})
+    _CAPTURE_RECORDINGS[path.absolute()] = ownership
+    return ownership
+
+
+def _store_capture(path: Path, ownership=None) -> None:
+    side = path.with_suffix(".json")
+    ownership = ownership or _CAPTURE_RECORDINGS.get(path.absolute())
+    if ownership is None:
+        side.write_text(json.dumps(json.loads(side.read_text()) | wav.store(path)) + "\n")
+    else:
+        facts = json.loads(side.read_text())
+        for name in (*ownership.audio.record, 'metadata_version', 'previous_sha256'):
+            facts.pop(name, None)
+        ownership.sidecar.update(facts | wav.store(path, ownership=ownership))
+
+
+def _capture_writer_for(path):
+    path = Path(path).absolute()
+    roots = [root for root in _CAPTURE_ROOTS if path.is_relative_to(root)]
+    return _CAPTURE_ROOTS[max(roots, key=lambda root: len(root.parts))] if roots else None
+
+
+def _capture_write_bytes(path, raw, *, legacy_exclusive=False):
+    """Write a finite artifact through its current owner, preserving legacy IO."""
+    path = Path(path)
+    writer = _capture_writer_for(path)
+    if writer is None:
+        if legacy_exclusive:
+            with path.open('xb') as stream:
+                return stream.write(raw)
+        return path.write_bytes(raw)
+    import hashlib
+    component = 'finite-' + hashlib.sha256(str(path.absolute().relative_to(writer.root)).encode('utf-8')).hexdigest()
+    try:
+        artifact = writer.reserve(path.absolute().relative_to(writer.root))
+        writer.update_status(state='ongoing', pending=1, component=component)
+        artifact.publish(raw)
+        writer.update_status(state='finalized', written=1, component=component)
+        return len(raw)
+    except BaseException:
+        writer._status['failed'] = True
+        try:
+            writer.update_status(state='partial', partial=1, component=component)
+        except BaseException as trouble:
+            writer._status['journal_error'] = type(trouble).__name__
+        raise
+
+
+def _capture_write_text(path, text, *, legacy_exclusive=False):
+    path = Path(path)
+    if _capture_writer_for(path) is None:
+        if legacy_exclusive:
+            with path.open('x') as stream:
+                return stream.write(text)
+        return path.write_text(text)
+    return _capture_write_bytes(path, text.encode('utf-8'), legacy_exclusive=legacy_exclusive)
+
+
+def _capture_recording_for(path):
+    path = Path(path).absolute()
+    writer = _capture_writer_for(path)
+    if writer is None:
+        return None
+    from hfmodem.core.capture_identity import Recording
+    if path in _CAPTURE_RECORDINGS:
+        raise FileExistsError('Owned recording name cannot be reopened')
+    result = Recording.reserve(writer, path.relative_to(writer.root),
+                               clock_id=writer.capture.capture_id + ':local-stream')
+    _CAPTURE_RECORDINGS[path] = result
+    return result
 
 
 def _assert_capturing(seg: np.ndarray, live, n0: int) -> None:
@@ -9922,7 +11622,8 @@ def _assert_capturing(seg: np.ndarray, live, n0: int) -> None:
 
 
 def _listen_until_answer(live, want: int, host, sessrx, feed_n: int,
-                         slice_s: float = 0.25, *, forget_burst: bool = True):
+                         slice_s: float = 0.25, *, forget_burst: bool = True,
+                         ahead=None):
     """Collect `want` SAMPLES of audio, stopping the instant a reply is decoded.
 
     Counted in samples, not seconds, because this is what holds the raster: the
@@ -9946,6 +11647,9 @@ def _listen_until_answer(live, want: int, host, sessrx, feed_n: int,
     and a real reply arrives 0.49-0.85 s in, so we would miss it and send another
     connect instead of the acknowledgement. Missing the reply costs a whole
     cycle; the polling delay costs 145 ms. Leave it at 250 ms.
+
+    `ahead(audio, origin)` is handed the window so far after every slice, for
+    reads that need only its front (`_read_ahead`).
     """
     # Forget any earlier cycle's burst. The stamp is what the ACK latency is
     # measured against, and the cheap start-of-burst test can fire on a cycle
@@ -9985,6 +11689,7 @@ def _listen_until_answer(live, want: int, host, sessrx, feed_n: int,
               flush=True)
     slice_n = int(slice_s * FS)
     got, n = [], 0
+    prepared_audio = None
     while n < want:
         chunk = live.read(min(slice_n, want - n))
         if chunk.size == 0:
@@ -10063,6 +11768,20 @@ def _listen_until_answer(live, want: int, host, sessrx, feed_n: int,
                 break
             # A held link listens the window out: its early break belongs to the
             # connect, where the thing being waited for is one short burst.
+        if ahead is not None or (sessrx is not None and getattr(
+                sessrx, "sl3_prekey_expected", lambda: False)()):
+            held = np.concatenate(got)
+            start = live.pos - n
+            if ahead is not None:
+                ahead(held, start)
+            if sessrx is not None and sessrx.sl3_prekey_expected():
+                sessrx.prepare_p3_sl3(held, start)
+                prepared_audio = held
+    # Keep the final prepared buffer's identity: its carrier-corrected view is
+    # cached for the immediate scan. Re-concatenation would repeat that transform
+    # in the post-capture budget despite having exactly the same samples.
+    if prepared_audio is not None and prepared_audio.size == n:
+        return prepared_audio
     return np.concatenate(got) if got else np.zeros(0, np.float32)
 
 
@@ -10108,6 +11827,29 @@ def _read_codeword_at_bursts(sessrx, seg: np.ndarray, seg_start: int,
         if any(abs(at / FS - t) < 2 * spec.P1_CS_S for t in sessrx.words_at):
             continue
         sessrx.control_signal(seg, seg_start, at)
+
+
+def _note_peer_word(ev, tx, raster) -> None:
+    """Hand the sending side's guard a word we decoded, unless we covered it.
+
+    A WORD WE DECODED WAS NOT UNDER OUR OWN CARRIER. The rig mutes this
+    receiver while we key, so a codeword read at zero errors is proof the
+    transmitter was off while it was on the air. Where the grid puts one inside
+    our own last keying, the grid is out of step with the file rather than the
+    peer being early -- one session lost 298 ms of capture and walked the
+    answer instant 133 ms against a grid whose own off-grid line read +/-2 ms
+    every cycle -- and a projection off that instant is not evidence about the
+    next one. `captures/onair-0819-2210` is the recording this is measured on:
+    every codeword there decodes cleanly and the grid places all of them 124 ms
+    inside our own packet.
+    """
+    at = round(ev.t * FS)
+    if any(lo <= at <= hi for lo, hi in getattr(tx, "keyings", ())):
+        return
+    burst = raster.p1_cs_n if ev.protocol == Protocol.PACTOR1 else P3_CS_N
+    arq = getattr(getattr(tx, "host", None), "arq", None)
+    raster.note_peer_codeword(at, burst, _cs_name(ev),
+                              getattr(arq, "dxcall", None), protocol=ev.protocol)
 
 
 def _forecast_next_key(sessrx, tx, raster, seg_start: int) -> None:
@@ -10157,29 +11899,13 @@ def _forecast_next_key(sessrx, tx, raster, seg_start: int) -> None:
         # Keep the lower-protocol event in the transcript, but do not let an
         # ignored word replace confirmed P3 duration or phase evidence.
         return
-    # The PEER's codeword, which is what `raster.cs_n` is not: that one is ours,
-    # and on an upgraded link the two are 210 ms and 120.
-    burst = raster.p1_cs_n if ev.protocol == Protocol.PACTOR1 else P3_CS_N
-    at = round(ev.t * FS)
-    # A WORD WE DECODED WAS NOT UNDER OUR OWN CARRIER. The rig mutes this
-    # receiver while we key, so a codeword read at zero errors is proof the
-    # transmitter was off while it was on the air. Where the grid puts one inside
-    # our own last keying, the grid is out of step with the file rather than the
-    # peer being early -- one session lost 298 ms of capture and walked the
-    # answer instant 133 ms against a grid whose own off-grid line read +/-2 ms
-    # every cycle -- and a projection off that instant is not evidence about the
-    # next one. The narration below still runs; only the refusal declines to
-    # stand on it. `captures/onair-0819-2210` is the recording this is measured
-    # on: every codeword there decodes cleanly and the grid places all of them
-    # 124 ms inside our own packet.
-    #
     # RECORDED AHEAD OF THE TWO INSTANTS BELOW, because the refusal is about the
     # word and the narration is about the lead: a session that has not keyed yet
     # has no measured lead and still has a peer.
-    if not any(lo <= at <= hi for lo, hi in getattr(tx, "keyings", ())):
-        arq = getattr(getattr(tx, "host", None), "arq", None)
-        raster.note_peer_codeword(at, burst, _cs_name(ev),
-                                  getattr(arq, "dxcall", None), protocol=ev.protocol)
+    _note_peer_word(ev, tx, raster)
+    # The PEER's codeword, which is what `raster.cs_n` is not: that one is ours,
+    # and on an upgraded link the two are 210 ms and 120.
+    burst = raster.p1_cs_n if ev.protocol == Protocol.PACTOR1 else P3_CS_N
     if tx.tx_key_up is None or tx.boundary is None:
         return
     nxt = round(ev.t * FS) + raster.slot_n
@@ -10229,6 +11955,14 @@ def _collect(live, sessrx, seg: np.ndarray, seg_start: int,
     return tail, origin, ms
 
 
+def _p3_stage(sessrx, name: str, started: float) -> None:
+    """One entry per read: a hold that scans twice after a SLOT GONE prints
+    both, so a 54 ms sum is not read as one slow decode."""
+    stages = getattr(sessrx, "_p3_stage_ms", None)
+    if stages is not None:
+        stages.setdefault(name, []).append((time.perf_counter() - started) * 1e3)
+
+
 def _scan_frame(sessrx, audio: np.ndarray, origin: int, *,
                 tracked_only: bool = False, upgrade: bool = False,
                 p3_row0: Optional[int] = None) -> None:
@@ -10237,7 +11971,21 @@ def _scan_frame(sessrx, audio: np.ndarray, origin: int, *,
     Keep deep_scan's one-argument seam for existing replay clocks. The origin
     is scoped to this call; a rolling decoder must never inherit it.
     """
-    probe = getattr(getattr(getattr(sessrx, "host", None), "peer", None), "p4_probe", None)
+    tx = getattr(getattr(sessrx, "host", None), "peer", None)
+    observe = getattr(tx, "_observe_input_loss", None)
+    if observe is not None:
+        observe("frame-scan")
+    probe = getattr(tx, "p4_probe", None)
+    # NOT WHILE CALLING. Every answer to our call is FSK, and the P4 word scan
+    # over a robust call's 0.287 s window cost more than the pre-key reserve,
+    # so it lost the next slot on every cycle (onair-0927-1749, -1755).
+    calling = getattr(getattr(getattr(sessrx, "host", None), "arq", None),
+                      "state", None) == State.CONNECTING
+    if hasattr(sessrx, 'p4') and (sessrx.p4.admitted or sessrx.p4.expected) and not calling:
+        tx = getattr(sessrx.host, 'peer', None)
+        sessrx._p4_read(audio, origin, carrier_end=getattr(tx, 'tx_end', None), whole=True)
+        if sessrx.p4.expected or sessrx.p4.consumed is not None:
+            return
     if probe is not None and probe.requested:
         return  # Full receive audio is retained for offline P4 analysis.
     old = (getattr(sessrx, "_scan_origin", None),
@@ -10254,10 +12002,8 @@ def _scan_frame(sessrx, audio: np.ndarray, origin: int, *,
             sessrx.deep_scan(audio)
     finally:
         sessrx._scan_origin, sessrx._tracked_only, sessrx._p3_target_row0 = old
-        stages = getattr(sessrx, "_p3_stage_ms", None)
-        if stages is not None:
-            name = "upgrade" if upgrade else "tracked" if tracked_only else "scan"
-            stages[name] = stages.get(name, 0.0) + (time.perf_counter() - started) * 1e3
+        _p3_stage(sessrx, "upgrade" if upgrade else "tracked" if tracked_only
+                  else "scan", started)
     delivered = getattr(sessrx, "_p3_delivered_at", None)
     if tracked_only and delivered is not None and delivered != before:
         tx = getattr(sessrx.host, "peer", None)
@@ -10266,7 +12012,121 @@ def _scan_frame(sessrx, audio: np.ndarray, origin: int, *,
             sessrx._p3_prekey_crc = (delivered, slot)
 
 
-def _p3_current_packet_crc(sessrx, raster, slot: int) -> bool:
+def _read_ahead(sessrx, raster, audio: np.ndarray, origin: int) -> None:
+    """Take an IRS cycle's pre-key header and control reads while it still listens.
+
+    Both could only run once the window closed, so on a cycle whose tracked
+    read missed its CRC they stacked 6-13 ms behind it in front of the key
+    (0923-1321: 7 of 15 such slots handed back). What each reads is fixed
+    before then -- the header by the projected row, the control word by
+    `_p3_cold_cut` -- so `_listen_until_answer` hands each slice here and the
+    reads are taken as soon as their audio is in, kept against exactly what
+    they read. The pre-key path makes the same calls, still decides whether
+    they happen, and takes these results only where the keys match; this
+    decides nothing. Called again on a longer window it reads nothing twice.
+    """
+    host = sessrx.host
+    if (host.protocol != Protocol.PACTOR3 or host.arq.role != IRS
+            or host.arq.state not in LINKED or sessrx.cs_seen or not audio.size):
+        return
+    sessrx._p3_reading_ahead = True
+    try:
+        # The pre-key read takes the row the CLOSED window holds whole, which
+        # can be the next one on from what this much of it holds; read both
+        # where their prefix is in.
+        row = _p3_wideband_target(sessrx, origin + audio.size)
+        for target in (() if row is None else
+                       (row, row + round(spec.CYCLE_SHORT_S * FS))):
+            if target + round(.05 * FS) <= origin + audio.size:
+                _p3_long_header(sessrx, audio, origin, target)
+        bracket = sessrx._p3_reply_bracket(raster, origin, origin + audio.size)
+        if bracket is None:
+            return
+        lo, hi, at = bracket
+        cut = sessrx._p3_cold_cut(at, hi, lo)
+        if cut is not None:
+            cold = audio[lo - origin:lo - origin + cut]
+            if sessrx._p3_cold_word(cold, lo, at - lo) is None:
+                sessrx._p3_acquisition_search(cold, lo, at - lo)
+    finally:
+        sessrx._p3_reading_ahead = False
+
+
+def _read_held_window(live, raster, tx, sessrx, slot, audio, origin, boundary,
+                      *, cede=False):
+    """Read the owed control before spending an ISS reply on packet recovery.
+
+    A PACTOR-1 WORD READ HERE IS THE GUARD'S NEWEST EVIDENCE, and it is handed
+    over before the key rather than after it. Left to the forecast behind the
+    key, the guard refused on the word before it -- which, the cycle after our
+    changeover packet took the link, is the peer's CS3 head projected on the
+    raster it left when it answered us. 0923-1452 read KB5LZK's CS1 at the
+    anchor and dropped the first data packet twice on that head, after every
+    changeover of the link. A peer that did not hear us and repeats its packet
+    sends no control signal to supersede it, so the refusal still stands there.
+    """
+    started = time.perf_counter()
+    heard, at = (sessrx.control_signal_in(audio, origin, raster)
+                 if live is not None
+                 and not _p3_current_long_crc(sessrx, slot)
+                 and not _p3_current_packet_crc(sessrx, raster, slot)
+                 else (None, None))
+    if (live is not None and slot is not None
+            and getattr(tx, "_p3_entry_listen_slot", None) == slot
+            and sessrx.host.arq.entry_pending):
+        keyed = getattr(raster, "_p3_keyed_reply", None)
+        if keyed is not None and keyed[0] == raster.keyed_slot:
+            _p3_stage(sessrx, "control", started)
+            audio, origin, _ = _collect(
+                live, sessrx, audio, origin,
+                keyed[1] + keyed[3] + getattr(live, "holdback", 0))
+            started = time.perf_counter()
+            heard, at = sessrx.control_signal_in(audio, origin, raster)
+    _p3_stage(sessrx, "control", started)
+    if heard is not None and sessrx.host.protocol == Protocol.PACTOR1:
+        _note_peer_word(sessrx.cs_log[-1], tx, raster)
+    if (audio.size and raster.sending and heard is None and not sessrx.cs_seen
+            and sessrx.host.protocol == Protocol.PACTOR3):
+        if cede and tx.listening:
+            audio, origin, _ = _collect(live, sessrx, audio, origin, boundary)
+        if _p3_tracked_read_fits(live, raster, tx, sessrx, slot):
+            _scan_frame(sessrx, audio, origin, tracked_only=True)
+        else:
+            sessrx._p3_scan_deferred = True
+    return heard, at, audio, origin
+
+
+def _p3_tracked_read_fits(live, raster, tx, sessrx, slot: int) -> bool:
+    """Whether the tracked read finishes where this cycle's last read stops.
+
+    The sending grid's last read closes `_prekey_lead` in front of the key and
+    the admission check, the tick, the render and the drain are budgeted from
+    there; the tracked read is 10-25 ms, and run past that deadline it spent
+    the slot on 0920-2142 holds 23-25 and 0920-2217 holds 39-45. A listening
+    cycle has no key to be late for and a stream with no transmitter no
+    deadline; every other cycle's read waits for the next top-of-cycle sweep,
+    in front of a whole cycle of listening (`_scan_previous_window`).
+
+    NOT `_p3_acquisition_fits`, which bounds a read against the DAC notice and
+    so lets it spend the lead past it -- right for the answer acquisition,
+    which `control_collect_until` cuts the collection short by exactly its
+    reserve to buy, and wrong for a read nothing planned for. Measured against
+    the notice, the tracked reserve was in hand on every cut cycle, the lead
+    past the notice and the cut's 12 ms both counting as room, and on the
+    shipped budget `arm-v9-A-40-ws8eoc-b` gave every other entry slot away
+    again. What this read may spend is what the cut left over, in front of
+    the deadline the collection was cut FROM, less the reserve every read
+    keeps and the cost this cycle still owes the tick and the render.
+    """
+    if tx.listening or getattr(live, "transmit", None) is None:
+        return True
+    room = (tx.key_instant(raster, slot)
+            - _prekey_lead(live, round(tx.settle * FS), tx.still_owed_n())
+            - int(live.sample_now()))
+    return room >= round((sessrx.P3_TRACKED_RESERVE_S + P3_DECODE_RESERVE_S) * FS)
+
+
+def _p3_current_packet_crc(sessrx, raster, slot: int, *, peer_presence=False) -> bool:
     """Fresh pre-key CRC for this physical packet and this reply opportunity.
 
     A previous-window delivery or a recovered slot cannot spend this proof.
@@ -10278,7 +12138,8 @@ def _p3_current_packet_crc(sessrx, raster, slot: int) -> bool:
     delivered = getattr(sessrx, "_p3_delivered_at", None)
     proof = getattr(sessrx, "_p3_prekey_crc", None)
     if (proof is None or proof != (delivered, slot)
-            or host.protocol != Protocol.PACTOR3 or host.arq.role != IRS
+            or host.protocol != Protocol.PACTOR3
+            or not (host.arq.role == IRS or peer_presence and host.arq.p3_peer_receive_owned)
             or host.arq.state not in LINKED or host.arq.entry_pending):
         return False
     peer = getattr(raster, "_p3_peer", None)
@@ -10287,6 +12148,62 @@ def _p3_current_packet_crc(sessrx, raster, slot: int) -> bool:
         return False
     gap = raster.boundary(slot) - peer[0]
     return peer[1] <= gap < peer[2]
+
+
+def _p3_qualify_presence(sessrx, raster, tx, audio, origin):
+    """Set the opportunity's one presence verdict before any response key."""
+    from .p3presence import tracked_structure
+    a = sessrx.host.arq
+    op = a._receive_opportunity
+    if op is None or sessrx.host.protocol != Protocol.PACTOR3:
+        return
+    generation = a._link_generation
+    live = getattr(tx, 'live', None)
+    if getattr(op, 'capture_lost', 0) != getattr(live, 'lost', 0):
+        a.qualify_peer(op.token, generation, None)
+        return
+    accepted = sessrx._p3_presence_form
+    current_form = accepted is not None and accepted[0] == generation
+    row = sessrx._p3_row0
+    cycle = sessrx._p3_cycle_n
+    gaps = list(getattr(sessrx, '_p3_presence_gaps', ()))
+    gaps.extend(getattr(tx, 'keyings', ()))
+    key_up = getattr(tx, 'tx_key_up', None)
+    if key_up is None:
+        key_up = getattr(tx, 'tx_audio_start', None)
+    if key_up is not None and getattr(tx, 'tx_end', None) is not None:
+        gaps.append((key_up, tx.tx_end))
+    source = None
+    if current_form and row is not None and _p3_current_packet_crc(sessrx, raster, tx.slot, peer_presence=True):
+        begin = row-p3frame.DATA_OFFSET*rxfront.SPS
+        end = (begin+round(placement.PACKET_S*FS) if sessrx._p3_repeat_changeover
+               else row+sessrx._p3_span-rxfront.UNREAD_TAIL_N+1)
+        context = round(.08*FS) if sessrx._p3_repeat_changeover else 2400
+        support = begin-context
+        if (origin <= support and origin+len(audio) >= end
+                and not any(a < end and b > support for a, b in gaps)):
+            source = 'current CRC'
+    reserve = sessrx.P3_SL1_RESERVE_S
+    if cycle == round(spec.CYCLE_LONG_S*FS) or a.cycle_command_emitted:
+        # Long SL1 retains dense carrier validation over the full form. Charge
+        # its transform and validation with the existing larger reader reserve.
+        reserve += sessrx.P3_WIDEBAND_RESERVE_S
+    if (source is None and current_form and row is not None and audio.size
+            and a.p3_peer_receive_owned
+            and sessrx._p3_acquisition_fits(reserve)):
+        # Bind evidence to this reply opportunity, even when its buffer is
+        # truncated. Retained audio from the previous packet cannot qualify it.
+        target = row + ((raster.boundary(tx.slot) - row) // cycle) * cycle
+        levels = (accepted[1], *sessrx._p3_expected())
+        # The delivered buffer is contiguous. Any known local emission or
+        # input-loss span must also be excluded from structural evidence.
+        started = time.perf_counter()
+        context = round(.08*FS) if sessrx._p3_repeat_changeover else 2400
+        lo = max(0, target-origin-p3frame.DATA_OFFSET*rxfront.SPS-context)
+        source = tracked_structure(sessrx._corrected(audio[lo:]), origin+lo, target, levels,
+                                   changeover=sessrx._p3_repeat_changeover, gaps=gaps)
+        _p3_stage(sessrx, 'presence', started)
+    a.qualify_peer(op.token, generation, source)
 
 
 def _window_swept(host, flowing: bool) -> bool:
@@ -10322,12 +12239,14 @@ def _scan_previous_window(sessrx, audio: np.ndarray, origin: int, *,
     packet search into the final pre-key reserve or change any TX permission.
     """
     host = sessrx.host
-    pending_turn = (host.protocol == Protocol.PACTOR3
-                    and host.arq.unconfirmed_breakin)
-    if (not audio.size or (sending and not pending_turn)
+    pending_turn = (host.protocol == Protocol.PACTOR3 and host.arq.role == ISS
+                    and host.arq.p3_peer_receive_owned)
+    deferred, sessrx._p3_scan_deferred = sessrx._p3_scan_deferred, False
+    if (not audio.size or (sending and not pending_turn and not deferred)
             or _window_swept(host, flowing)):
         return False
-    _scan_frame(sessrx, audio, origin)
+    _scan_frame(sessrx, audio, origin,
+                tracked_only=deferred and sending and not pending_turn)
     return sessrx.frame_seen
 
 
@@ -10348,6 +12267,34 @@ def _p3_cs6_pending(host) -> bool:
             and arq.cycle_request is not None and arq.cycle_command_emitted)
 
 
+def _p3_long_header(sessrx, audio: np.ndarray, origin: int,
+                    target: Optional[int] = None):
+    """The header at `target`, by default the latest projected row this window
+    holds, and where its read starts in `audio`; None where no row is owed a read.
+
+    Its prefix is fixed by the row alone, so `_read_ahead` can take it before
+    the window closes and the pre-key read finds it done.
+    """
+    if target is None:
+        target = _p3_wideband_target(sessrx, origin + audio.size)
+    delivered = getattr(sessrx, "_p3_delivered_at", None)
+    checked = getattr(sessrx, "_p3_long_window_checked_at", None)
+    if (target is None or (delivered is not None and target <= delivered + rxfront.SPS)
+            or (checked is not None and target <= checked + rxfront.SPS)):
+        return None
+    lead = p3frame.DATA_OFFSET * rxfront.SPS
+    lo = max(0, target - origin - lead - 2400)
+    at = target - origin - lo
+    if at < lead + rxfront.SPS // 4:
+        return None
+    prefix = audio[lo:min(audio.size, target - origin + round(.05 * FS))]
+    narrow = sessrx.sync.packet_level == 1
+    header_reader = sessrx.sync.sl1_header_at if narrow else sessrx.sync.wideband_header_at
+    return lo, sessrx._p3_read_ahead(
+        ("header", origin + lo, prefix.size, at, narrow, sessrx.p3_receive_offset_hz),
+        lambda: header_reader(sessrx._corrected(prefix), at))
+
+
 def _p3_unexpected_long_window(live, raster, tx, host, sessrx, slot, audio,
                               origin, settle_n):
     """Respect an observed SCS long body without assuming a negotiated veto.
@@ -10366,28 +12313,19 @@ def _p3_unexpected_long_window(live, raster, tx, host, sessrx, slot, audio,
         return slot, audio, origin
     if _p3_current_packet_crc(sessrx, raster, slot):
         return slot, audio, origin
-    target = _p3_wideband_target(sessrx, origin + audio.size)
-    delivered = getattr(sessrx, "_p3_delivered_at", None)
-    checked = getattr(sessrx, "_p3_long_window_checked_at", None)
-    if (target is None or (delivered is not None and target <= delivered + rxfront.SPS)
-            or (checked is not None and target <= checked + rxfront.SPS)):
-        return slot, audio, origin
-    lead = p3frame.DATA_OFFSET * rxfront.SPS
-    lo = max(0, target - origin - lead - 2400)
-    at = target - origin - lo
-    if at < lead + rxfront.SPS // 4:
-        return slot, audio, origin
     started = time.perf_counter()
-    prefix = audio[lo:min(audio.size, target - origin + round(.05 * FS))]
-    header = sessrx.sync.wideband_header_at(sessrx._corrected(prefix), at)
-    stages = getattr(sessrx, "_p3_stage_ms", None)
-    if stages is not None:
-        stages["long_header"] = stages.get("long_header", 0.0) + (time.perf_counter() - started) * 1e3
+    read = _p3_long_header(sessrx, audio, origin)
+    if read is None:
+        return slot, audio, origin
+    _p3_stage(sessrx, "long_header", started)
+    lo, header = read
     if header is None or not header.long_cycle:
         return slot, audio, origin
+    lead = p3frame.DATA_OFFSET * rxfront.SPS
+    narrow = sessrx.sync.packet_level == 1
     first = origin + lo + header.at + lead
     sessrx._p3_long_window_checked_at = first
-    levels = [sl for sl in header.levels if sl >= 3]
+    levels = [1] if narrow else [sl for sl in header.levels if sl >= 3]
     # The header already fixes the alignment. Retain the last sparse matched-
     # filter sample (inclusive), not the unused tracking margin after it.
     end = first + max(rxfront._frame_span(p3rx.path_for(sl, header))
@@ -10429,7 +12367,9 @@ def _p3_unexpected_long_window(live, raster, tx, host, sessrx, slot, audio,
                 start + (np.arange(path.n_symbols + 1) - 1) * rxfront.SPS + delay,
                 path.clock_offsets(rxfront.SPS)).ravel())
             Z = rxfront._sampled_baseband(window, path.tones, idx)
-            rot, _ = p3rx.field_rotation(Z, start, path, h.rot)
+            rot = h.rot
+            if sl >= 2:
+                rot, _ = p3rx.field_rotation(Z, start, path, h.rot)
             packet = p3rx.decode_at(window, start, sl, Z=Z, header=replace(h, rot=rot))
             if packet is not None:
                 ev = rxfront._packet_event(packet, t=first / FS, tag=", retained long")
@@ -10441,8 +12381,7 @@ def _p3_unexpected_long_window(live, raster, tx, host, sessrx, slot, audio,
                 sessrx.sync.rotation = rot
                 sessrx.p3_memory.clear()
                 break
-        if stages is not None:
-            stages["long_body"] = stages.get("long_body", 0.0) + (time.perf_counter() - started) * 1e3
+        _p3_stage(sessrx, "long_body", started)
     line = raster.regear(arq.cycle_long)
     if line:
         print(f"    [grid] {line}", flush=True)
@@ -10517,6 +12456,14 @@ def _p3_transition_window(live, raster, tx, host, sessrx, slot, audio, origin,
         first_slot = command_slot + group * 3 + 1
         first = sessrx._p3_row0 + max(
             0, (raster.boundary(first_slot) - sessrx._p3_row0) // cycle) * cycle
+    if slot == command_slot + group * 3 + 1 and sessrx.sync.packet_level == 1:
+        # A strong long SL1 header settles which body is in progress. Retain
+        # that exact header and read its body once, rather than interpreting
+        # its middle as another short header at each probe.
+        resolved, audio, origin = _p3_unexpected_long_window(
+            live, raster, tx, host, sessrx, slot, audio, origin, settle_n)
+        if resolved != slot:
+            return resolved, audio, origin
     for probe in range(slot, endpoint + 1):
         fresh = probe != slot
         if fresh:
@@ -10529,17 +12476,29 @@ def _p3_transition_window(live, raster, tx, host, sessrx, slot, audio, origin,
             audio, origin, _ = _collect(
                 live, sessrx, audio, origin,
                 _p3_frame_ready(sessrx, deadline, live.holdback))
-        # Try the retained long header before a putative short header inside it.
-        if probe == endpoint and first is not None:
-            _scan_frame(sessrx, audio, origin, tracked_only=True, p3_row0=first)
-        # ...and the short read only where this probe added audio to look in.
+        # The long frame first at the endpoint, and the short read behind it
+        # only where it still fits in front of the key. The endpoint is the
+        # long reply slot, and both reads there cost 0923-1948 WS8EOC-80 every
+        # long reply but the one the backstop keyed: 9.7 ms for the long frame
+        # and 37.6 for the short, SLOT 24 IS GONE by +24.2 ms, then 27 and 28
+        # in the recovery and 33 the same way. A short repeat left unread there
+        # is read in the next cycle's free sweep (`_scan_previous_window`).
+        #
+        # The short read otherwise only where this probe added audio to look in.
         # The caller hands in a window it has just read out at the same aim, so
         # on the first probe this is that read repeated: 16.2 ms of the 0909
         # overloaded-reader session's own budget, spent behind the collect and
         # charged to the keying settle, for a decode that cannot find anything
         # the first one did not.
-        if (fresh or first is None) and waiting():
-            _scan_frame(sessrx, audio, origin, tracked_only=True)
+        long_read = probe == endpoint and first is not None
+        if long_read:
+            _scan_frame(sessrx, *_p3_probe_window(sessrx, audio, origin, first),
+                        tracked_only=True, p3_row0=first)
+        if ((fresh or first is None) and waiting()
+                and not (long_read and not _p3_tracked_read_fits(
+                    live, raster, tx, sessrx, probe))):
+            _scan_frame(sessrx, *_p3_probe_window(sessrx, audio, origin),
+                        tracked_only=True)
         if not waiting():
             break
     slot = probe
@@ -10551,9 +12510,32 @@ def _p3_transition_window(live, raster, tx, host, sessrx, slot, audio, origin,
     return slot, audio, origin
 
 
-def _regear_next_slot(raster, slot: int, long: bool) -> tuple[int, Optional[str]]:
+def _p3_probe_window(sessrx, audio: np.ndarray, origin: int,
+                     row: Optional[int] = None) -> tuple[np.ndarray, int]:
+    """The tail of a pending-CS6 window that one probe's read can decode from.
+
+    From `row`'s header on, or else the last short cycle and the frame whose
+    row it projects. A pending command lifts `_p3_tracked_keep_n`, so each probe
+    handed the whole walk transformed all of it: 0923-1948 hold 7 read
+    10, 13, 26, 36, 39, 73 and 90 ms as the window grew. Neither read can find
+    anything earlier in it.
+    """
+    lead = p3frame.DATA_OFFSET * rxfront.SPS + 2400
+    if row is not None:
+        lo = row - lead - origin
+    elif getattr(sessrx, "_p3_span", None) is not None:
+        span, cycle_n = _p3_receive_geometry(sessrx)
+        lo = audio.size - (cycle_n + rxfront._packet_span(span) + lead)
+    else:
+        return audio, origin
+    lo = min(max(0, lo), audio.size)
+    return audio[lo:], origin + lo
+
+
+def _regear_next_slot(raster, slot: int, long: bool, *,
+                      stepped_ticks: Optional[int] = None) -> tuple[int, Optional[str]]:
     """A next-slot index was advanced using the previous cycle's length."""
-    old_ticks = raster.ticks
+    old_ticks = raster.ticks if stepped_ticks is None else stepped_ticks
     line = raster.regear(long)
     return slot + raster.ticks - old_ticks, line
 
@@ -10610,11 +12592,16 @@ def _p3_frame_ready(sessrx, deadline: int, holdback: int = 0) -> int:
     span, cycle_n = _p3_receive_geometry(sessrx)
     packet_span = rxfront._packet_span(span)
     target = row0 + ((deadline - row0 - packet_span) // cycle_n) * cycle_n
-    if (cycle_n == round(spec.CYCLE_SHORT_S * FS)
-            and getattr(sessrx, "sl2_prekey_expected", lambda _: False)(target)
+    bounded_sl1 = (cycle_n == round(spec.CYCLE_LONG_S * FS)
+                   and getattr(getattr(sessrx, "sync", None), "packet_level", None) == 1
+                   and not getattr(sessrx, "_p3_repeat_changeover", False))
+    bounded_sl2 = (cycle_n == round(spec.CYCLE_SHORT_S * FS)
+                   and getattr(sessrx, "sl2_prekey_expected", lambda: False)()
+                   and not getattr(sessrx, "sl3_prekey_expected", lambda: False)())
+    if ((bounded_sl1 or bounded_sl2)
             and not sessrx.host.arq.cycle_command_emitted):
-        # The bounded SL2 reader needs the packet, not the old tracked
-        # decoder's two trailing margin rows. Spend those 20 ms on its CRC
+        # The bounded SL1/SL2 readers need the packet, not the old tracked
+        # decoder's two trailing margin rows. Spend that time on the CRC
         # before the reply instead. Pay capture holdback and alignment slack.
         return min(deadline, target + packet_span + holdback + rxfront.SPS // 2)
     end = row0 + span
@@ -10695,13 +12682,16 @@ def _prekey_lead(live, settle_n: int, owed_n: int = 0) -> int:
     there and the settle alone is the deadline, exactly as it was.
     """
     if getattr(live, "transmit", None) is None:
-        return settle_n
+        # File replays have no DAC, but retain the earlier decision clock.
+        return settle_n + getattr(live, "p4_answer_residual_n", 0)
     # THE SETTLE CARRIES THE TRANSMIT CORRECTION AND SO DOES THE NOTICE, so what
     # this leaves past `key_notice` -- the budget for the tick, the render and
     # the drain -- is the same interval whether the correction is set or not.
     # Without it here the audio moves early and the drain does not, and the
     # station spends the correction out of its own PTT lead.
-    return (max(settle_n + getattr(live, "tx_latency_n", 0),
+    effective_latency = (getattr(live, "tx_latency_n", 0)
+                         - getattr(live, "geometry_n", 0))
+    return (max(settle_n + effective_latency,
                 getattr(live, "key_notice", 0) + _callback_delivery_n(live))
             + round(TX_ADMIT_RESERVE_S * FS) + owed_n)
 
@@ -10721,10 +12711,12 @@ def _clock_line(live, settle_n: int) -> str:
     hold = getattr(live, "holdback", 0)
     lead = _prekey_lead(live, settle_n)
     extra = getattr(live, "tx_latency_n", 0)
+    geometry = getattr(live, "geometry_n", 0)
     return (f"clocks: block {blk}, ADC->DAC {lat} samples "
             f"({lat / FS * 1e3:.1f} ms) + {extra} samples "
             f"({extra / FS * 1e3:.1f} ms) of station transmit latency the "
-            f"driver does not report, DAC notice {notice} "
+            f"driver does not report, logical geometry +{geometry} samples, "
+            f"logical DAC notice {notice} "
             f"({notice / FS * 1e3:.1f} ms), holdback {hold} "
             f"({hold / FS * 1e3:.1f} ms -- the part of the PTT lead the key does "
             f"not get, because a read returns once the codec has DELIVERED its "
@@ -10759,7 +12751,48 @@ def _p3_decode_deadline(live, audio_at: int, settle_n: int) -> int:
     return audio_at - reserve
 
 
-def _p3_place_reply(raster, tx, slot: int) -> None:
+def _p3_window_close(live, sessrx, host, tx, raster, key_at: int,
+                     settle_n: int, flowing: bool) -> Optional[int]:
+    """Where an IRS cycle's read closes: on the packet's delivery, or None
+    where the fixed geometry stands.
+
+    THE LISTEN CLOSES HERE AS WELL AS THE BRIDGE BEHIND IT. The listen ran to
+    `PREKEY_RESERVE_S` past the settle and the holdback, 84 ms in front of the
+    key, whatever the packet did, and the bridge then closed on the packet --
+    an instant already gone. A long packet ends 118-125 ms in front of the
+    key (0926-2353 WS8EOC-80, every long slot on the tape), so 16-23 ms the
+    bounded SL1 read could have spent were slept through in front of it and
+    spent past the admission instead: hold 8 kept slot 21 at +3.7 ms and
+    gave it up before the render at +11.7. The recovered slot behind a
+    hand-back already read to this instant (`_regrid`), which is why every
+    second long slot of that arm was the one that keyed.
+    """
+    if (host.protocol != Protocol.PACTOR3 or not tx.defer_p3_cs
+            or raster.sending
+            or not (flowing or sessrx.wideband_prekey_active())):
+        return None
+    return _p3_frame_ready(sessrx, _p3_decode_deadline(live, key_at, settle_n),
+                           live.holdback)
+
+
+def _p3_answer_due(sessrx, raster, slot: int) -> int:
+    """Where this slot's control word is read, for the hold line.
+
+    The tracked answer clock projected past the key, which is what
+    `control_signal_in` reads at. `rx_due` is the PACTOR-1 geometry -- the
+    boundary plus `rx_ref_n` and `d` -- and on the long cycle it names an
+    instant 104 ms past the word: 0921-0039 hold 31 printed 7491548 and read
+    the REQ at 7486560, so the line read as a miss where there was none.
+    """
+    answer = getattr(sessrx, "_p3_answer_at", None)
+    if (answer is None or not raster.sending
+            or raster.protocol != Protocol.PACTOR3):
+        return raster.rx_due(slot)
+    cycle_n = raster.cycle_n
+    return answer + ((raster.boundary(slot) - answer) // cycle_n + 1) * cycle_n
+
+
+def _p3_place_reply(raster, tx, slot: int) -> int:
     """Put the IRS reply comb on the packet it answers, while the cycle can move.
 
     WHERE THE GRID IS SETTLED FOR THE CYCLE, AND NOT AT THE EMIT. The answer
@@ -10787,10 +12820,18 @@ def _p3_place_reply(raster, tx, slot: int) -> None:
     """
     shift = getattr(tx, "p3_reply_shift", raster.p3_reply_shift)
     moved = shift(slot)
-    if moved is None:
-        return
-    print(f"    [grid] {moved}", flush=True)
-    tx.aim(raster, slot)
+    if moved is not None:
+        print(f"    [grid] {moved}", flush=True)
+    placed = raster.p3_reply_slot(slot)
+    if placed != slot:
+        print(f"    [grid] P3 long reply slot {slot} -> {placed}: "
+              "aligned to the decoded peer packet's cycle", flush=True)
+        # This refusal described the old cycle residue. The normal collision
+        # and freshness guards must evaluate the newly selected slot again.
+        raster._p3_reply_phase_invalid = False
+    if moved is not None or placed != slot:
+        tx.aim(raster, placed)
+    return placed
 
 
 def _keyable_slot(live, raster: _MasterGrid, slot: int, lead_n: int, *,
@@ -10947,6 +12988,53 @@ def _finish_entry_candidate(live, raster, tx, host, sessrx, slot,
     return seg, seg_start
 
 
+def _off_grid(live, tx, slot: int, reference: int) -> str:
+    """Where the stream stands against this cycle's key, or that it has keyed.
+
+    A burst the FSM keys from a decode inside the window goes out on this
+    slot before the line is printed, and `transmit` returns at its PTT drop:
+    measured then, the figure is the burst's own length. WS8EOC-80 0924-0344
+    printed `off-grid +869 ms` on every ISS cycle from hold 40 whose packet
+    answered a CS4 mid-window, while each keyed -52..-60 ms from its boundary
+    and the peer asked for the next level five times running.
+    """
+    if tx.slots_used and tx.slots_used[-1] >= slot:
+        return "keyed from the decode (RF line above)"
+    return f"off-grid {(live.sample_now() - reference) / FS * 1e3:+.1f} ms"
+
+
+def _late_at_key(live, at: int, owed_n: int) -> int:
+    """`clamp_late(at)` as `RadioTx._tx` will find it, `owed_n` of clock from now.
+
+    The three gates in front of a key -- `_regrid`, `RadioTx._advance_aim` and
+    `_tx` itself -- measure the same overrun through this, each with the cost
+    it still has to spend; `_tx` owes nothing and gets the bare clamp.
+
+    THE CLAMP IS A STAIRCASE, NOT A CLOCK. It is taken on the delivered count,
+    which the driver moves three 128-frame blocks at a time every 8 ms, so the
+    tick and the render do not add their 1.5 to 2.8 ms to it: it stands where
+    the grid found it until a batch lands, and then moves by the whole batch.
+    185 kept slots across the 09-19..21 arms reached `_tx` at the overrun the
+    grid had measured or fractionally under it, never over. So the cost is not
+    deducted from the tolerance; the count is carried forward over it, and a
+    batch due inside it is what hands the slot back.
+
+    CARRIED FROM THE DELIVERY, NOT FROM THE CONVERTER. `sample_now()` leads
+    the delivered count by the input latency -- 532 samples on the FT-891 --
+    and carried from there a 384-sample batch was always due: 0923-1405 gave
+    up CS acks before the render at +5.1 and +7.1 ms that `_tx` keys at the
+    bare clamp. The lead is the holdback less its block; a stream with no
+    callbacks to time delivers what the converter has, and has none.
+    """
+    if owed_n <= 0 or getattr(live, "transmit", None) is None:
+        return live.clamp_late(at)
+    delivery = _callback_delivery_n(live)
+    lead = live.holdback - live._blk if getattr(live, "_callback_timing", ()) else 0
+    ahead = int(live.sample_now()) - lead + owed_n - live.samples
+    return max(0, live.samples + max(0, ahead // delivery) * delivery
+               + live.key_notice - at)
+
+
 def _clamp_forgives(live, tx, late: int) -> int:
     """Whether the emission path will key this overrun INTO its own boundary.
 
@@ -10971,12 +13059,13 @@ def _clamp_forgives(live, tx, late: int) -> int:
     is past the gate every time it comes round, so the first lost slot costs
     every other slot for the rest of the stint.
 
-    WITH THE CYCLE'S OWN REMAINING WORK ALLOWED FOR, because this is the earlier
-    gate. `RadioTx.prekey_cost_n` is what the interval between the two checks
-    measured last cycle, on the stream's own clock; forgiving without it would
-    hand `_tx` an overrun already past the tolerance, and a burst with a
-    polarity baked into its samples then steps TWO slots where this gate would
-    have spent one.
+    ON THE WHOLE TOLERANCE, against the overrun `_tx` WILL measure rather than
+    the one the grid measures now: `late` here comes from `_late_at_key`, which
+    carries the delivered count forward over the cost the cycle still owes.
+    Deducting that cost from the tolerance instead refused at +2.2 to +3.5 ms
+    what `_tx` keys at +5: 0921-1053 holds 10, 13 and 16, three long slots at
+    exactly +4.8 ms, and 79 `IS GONE` at or under the tolerance across the
+    09-19..21 arms.
 
     A CHANGEOVER IS FORGIVEN ON ITS OWN TOLERANCE AND ITS OWN COST, and the
     exclusion that stood here cost 0913-1550 the link. It read `_tx`'s "nowhere
@@ -10988,18 +13077,11 @@ def _clamp_forgives(live, tx, late: int) -> int:
     +7.2, twenty-three slots given away in all, and a gateway that stopped being
     readable because our cadence had gone to two slots under it.
 
-    ITS COST IS ITS OWN because a changeover cycle does strictly more work than
-    the cycle whose figure it would otherwise borrow (`breakin_cost_n`) -- and
-    that cost is now STOOD OFF THE DRAIN rather than deducted here
-    (`_prekey_lead`), which is why this asks a changeover for the whole
-    tolerance. Charged in both places the gate shuts for good: `RadioTx._tx`
-    measures the interval before it asks the clamp, so a refused changeover
-    records its cost too, and `arm-v23-A-40-ws8eoc`'s first refusal wrote 8.2 ms
-    against a 5 ms tolerance and left `room` negative for the seven behind it.
-    An ordinary cycle still pays here, because nothing stands ITS cost off: a
-    figure that under-counts hands `_tx` an overrun already past the tolerance,
-    and a burst with a polarity baked into its samples then steps TWO slots
-    where this gate would have spent one.
+    ITS COST IS ITS OWN (`breakin_cost_n`), and charged in both places the gate
+    shuts for good: `RadioTx._tx` measures the interval before it asks the
+    clamp, so a refused changeover records its cost too, and
+    `arm-v23-A-40-ws8eoc`'s first refusal wrote 8.2 ms against a 5 ms tolerance
+    and left `room` negative for the seven behind it.
 
     A STREAM WITH NO TRANSMITTER IS NOT FORGIVEN: there the shortfall is
     measured against the PTT settle rather than against an instant a converter
@@ -11016,14 +13098,7 @@ def _clamp_forgives(live, tx, late: int) -> int:
     if getattr(live, "transmit", None) is None:
         return 0
     tol = BREAKIN_CLAMP_TOL_S if tx.breakin_due else KEY_CLAMP_TOL_S
-    # A changeover cycle's cost is STOOD OFF THE DRAIN and so is not deducted
-    # here as well (`_prekey_lead`). Charged in both places the gate shuts for
-    # good: `RadioTx._tx` measures the interval before it asks the clamp, so a
-    # REFUSED changeover records its cost too, and 8.2 ms against a 5 ms
-    # tolerance leaves `room` negative for every changeover behind it. That is
-    # the seven refusals behind the first on `arm-v23-A-40-ws8eoc`.
-    room = round(tol * FS) - (0 if tx.breakin_due else tx.cycle_cost_n())
-    return late if 0 < late <= room else 0
+    return late if 0 < late <= round(tol * FS) else 0
 
 
 def _regrid(live, raster: _MasterGrid, tx, host, sessrx, slot: int,
@@ -11093,9 +13168,20 @@ def _regrid(live, raster: _MasterGrid, tx, host, sessrx, slot: int,
     # chosen against `boundary`, and on a PACTOR-3 IRS the boundary that matters
     # is the answered packet's answer slot. Both loops reach the key through
     # here, so this is where a comb the cycle's own decode moved gets on it.
-    _p3_place_reply(raster, tx, slot)
+    slot = _p3_place_reply(raster, tx, slot)
     early = raster.boundary(slot) - tx.key_instant(raster, slot)
     lead_n = settle_n + round(REGRID_RESERVE_S * FS) + early
+    p4_hold = (getattr(tx, 'p4_link_options', None) is not None
+               and getattr(host, 'p4_after_first_ack', False)
+               and host.protocol == Protocol.PACTOR1 and host.arq.state in LINKED)
+    if p4_hold:
+        _p4_retain_hold(tx, seg, seg_start)
+        if not raster.sending and not any(
+                o.provisional and o.word in ('X27', 'Y27')
+                for o in sessrx.p4.observations):
+            tx.p4_hold_audio.pending = False
+    elif getattr(tx, 'p4_hold_audio', None) is not None:
+        tx.p4_hold_audio.pending = False
     # THE PROGRESS TERM FOR THE TRANSITION WINDOW, and the loop above says why it
     # needs one. The window walks to the end of a possible long body and decodes
     # behind each probe, so the slot it hands back is late by its own read --
@@ -11113,8 +13199,12 @@ def _regrid(live, raster: _MasterGrid, tx, host, sessrx, slot: int,
             # overrun: handing the slot back here moved every following
             # transmission a slot on and took the cadence to two.
             return slot, seg, seg_start
-        late = live.clamp_late(tx.key_instant(raster, slot))
+        late = _late_at_key(live, tx.key_instant(raster, slot), tx.cycle_cost_n())
+        if p4_hold and tx.p4_hold_audio.pending:
+            late = max(late, 1)
         kept = _clamp_forgives(live, tx, late)
+        if p4_hold and tx.p4_hold_audio.pending:
+            kept = 0
         if kept:
             print(f"    [grid] SLOT {slot} {SLOT_KEPT} -- the cycle overran its "
                   f"own key instant by {kept / FS * 1e3:+.1f} ms, which is "
@@ -11130,16 +13220,33 @@ def _regrid(live, raster: _MasterGrid, tx, host, sessrx, slot: int,
             # handed back below is stamped with nothing: its recovered window is
             # a whole slot of listening and charging that to the render would
             # shut the forgiveness for the cycle after it.
-            tx._admitted_at = int(live.sample_now())
+            tx._admitted = (slot, int(live.sample_now()))
             tx._callback_at_admit = tuple(getattr(live, "_callback_timing", ())) [-16:]
             return slot, seg, seg_start
-        tx._admitted_at = None
+        tx._admitted = None
         gave = slot
+        bare = live.clamp_late(tx.key_instant(raster, gave))
         slot = _keyable_slot(live, raster, slot, lead_n)
         tx.aim(raster, slot)
         key = tx.key_instant(raster, slot)
+        if p4_hold:
+            heads = [o.stream_sample for o in sessrx.p4.observations
+                     if o.provisional and o.word in ('X27', 'Y27')]
+            if heads:
+                until = min(key-lead_n, min(heads)+round(.275*FS))
+                if until > live.pos:
+                    origin = live.pos
+                    fresh = live.take_until(until)
+                    if fresh.size:
+                        sessrx.bridge(fresh)
+                        _p4_retain_hold(tx, fresh, origin)
+            word_slot = _p4_read_hold(tx, live, raster,
+                tx.tx_end or tx.p4_hold_audio.origin, key=key)
+            if word_slot is not None:
+                return slot, tx.p4_hold_audio.audio, tx.p4_hold_audio.origin
         print(f"    [grid] SLOT {gave} {SLOT_GONE} -- the cycle overran its own "
-              f"key instant by {late / FS * 1e3:+.1f} ms, so the carrier could "
+              f"key instant by {late / FS * 1e3:+.1f} ms ({bare / FS * 1e3:+.1f} "
+              f"ms on the bare clamp), so the carrier could "
               f"not come up on it. Keying on slot {slot} instead and listening "
               f"until then; the grid has not moved.", flush=True)
         # HELD, NEVER FED, and this is the whole of what makes handing a slot back
@@ -11174,10 +13281,12 @@ def _regrid(live, raster: _MasterGrid, tx, host, sessrx, slot: int,
         p3_reply = (getattr(tx, "defer_p3_cs", False)
                     and host.protocol == Protocol.PACTOR3 and not raster.sending)
         pending_turn = (host.protocol == Protocol.PACTOR3 and raster.sending
-                        and getattr(host.arq, "unconfirmed_breakin", False)
+                        and host.arq.role == ISS
+                        and getattr(host.arq, "p3_peer_receive_owned", False)
                         and getattr(sessrx, "_p3_row0", None) is not None)
-        tracked_read = p3_reply or pending_turn
-        if tracked_read:
+        p3_iss = host.protocol == Protocol.PACTOR3 and raster.sending
+        tracked_read = p3_reply or p3_iss
+        if p3_reply or pending_turn:
             # A recovered P3 slot owes the same complete-frame read as an
             # ordinary slot. The generic regrid reserve ends inside its body.
             #
@@ -11186,24 +13295,33 @@ def _regrid(live, raster: _MasterGrid, tx, host, sessrx, slot: int,
                 _p3_frame_ready(sessrx, _p3_decode_deadline(live, key, settle_n),
                                 live.holdback))
         heard = None
-        if pending_turn and more.size:
-            # Our CS3 has not established the peer's new role. It can answer
-            # with a bare ACK or continue its old packet. Read the bounded
-            # control first; its ARQ callback can settle the turn and emit.
+        if p3_iss and more.size:
+            # Read the owed control before bounded packet recovery. A broad
+            # scan plus rolling flush costs more than the recovery reserve on
+            # long silence, repeatedly consuming every recovered key instant.
             heard, _ = sessrx.control_signal_in(more, more_start, raster)
             _reverse_before_key(raster, host, tx, slot)
             key = tx.key_instant(raster, slot)
         delivered_before = getattr(sessrx, "_p3_delivered_at", None)
+        if more.size and p4_hold:
+            retained = _p4_retain_hold(tx, more, more_start)
+            recovered, recovered_start = retained.audio, retained.origin
+            word_slot = _p4_read_hold(tx, live, raster, tx.tx_end or recovered_start,
+                                      key=key)
+            if word_slot is not None:
+                tx.p4_probe.handoff_audio = (recovered_start, recovered.copy())
+                return slot, recovered, recovered_start
         if more.size and heard is None:
             _scan_frame(sessrx, more, more_start, tracked_only=tracked_read)
         if pending_turn:
             _reverse_before_key(raster, host, tx, slot)
-            _p3_place_reply(raster, tx, slot)
+            slot = _p3_place_reply(raster, tx, slot)
             key = tx.key_instant(raster, slot)
         if p3_reply and not walked:
             walked = True
             slot, more, more_start = _p3_transition_window(
                 live, raster, tx, host, sessrx, slot, more, more_start, settle_n)
+            slot = _p3_place_reply(raster, tx, slot)
             key = tx.key_instant(raster, slot)
         if not tracked_read:
             sessrx.flush()
@@ -11248,11 +13366,13 @@ def _regrid(live, raster: _MasterGrid, tx, host, sessrx, slot: int,
         for fresh, start in ((more, more_start), (tail, tail_start)):
             if not fresh.size:
                 continue
+            if p4_hold:
+                _p4_retain_hold(tx, fresh, start)
             if seg.size and start == seg_start + seg.size:
                 seg = np.concatenate([seg, fresh])
             else:
                 seg, seg_start = fresh, start
-    over = live.clamp_late(tx.key_instant(raster, slot))
+    over = _late_at_key(live, tx.key_instant(raster, slot), tx.cycle_cost_n())
     if over and not _clamp_forgives(live, tx, over):
         print(f"    !! REGRID GAVE UP after {REGRID_TRIES} tries: slot {slot} "
               f"is late already -- the cycle is overrunning slots faster than "
@@ -11337,6 +13457,7 @@ class _HoldBudget:
         self.idle, self.ceiling, self.closed = cycles, ceiling, False
         self.unbounded = unbounded
         self.slots, self.ticks = 0, 1
+        self.turned = False
         self.moved(0)
 
     def spend(self, slots: int) -> None:
@@ -11347,8 +13468,14 @@ class _HoldBudget:
     def cycle(self, h: int, was: "_Link", now: "_Link") -> None:
         if self.closed:
             return
-        if (now.sent, now.rcvd) != (was.sent, was.rcvd) or (
-                now.role == IRS and was.role != IRS):
+        # One changeover buys the peer's first packet; a second before any byte
+        # has moved is a link turning round empty, and WS8EOC 2026-09-24 pushed
+        # a --hold 96 deadline out to cycle 281 on exactly that.
+        if (now.sent, now.rcvd) != (was.sent, was.rcvd):
+            self.turned = False
+            self.moved(h)
+        elif now.role == IRS and was.role != IRS and not self.turned:
+            self.turned = True
             self.moved(h)
 
     def moved(self, h: int) -> None:
@@ -11404,7 +13531,7 @@ def _drain_host_log(host) -> None:
     cycle, and the session log showed only the codewords it was written about.
     """
     for line in host.log_lines:
-        print(f"    [host] {line}", flush=True)
+        print(f"    [host] {mask_pr(line)}", flush=True)
     del host.log_lines[:]
 
 
@@ -11569,7 +13696,8 @@ def _observe_out_the_hold(live, raster: _MasterGrid, tx, sessrx, host,
         # reads `since_tx` to decide.
         line = raster.update(onsets, whole, seg_start, hushed=True,
                              reading=_scheduler_reading(sessrx, host, raster),
-                             since_tx=seg_start - (tx.tx_end or 0))
+                             since_tx=seg_start - (tx.tx_end or 0),
+                             linked=host.arq.state in LINKED)
         if line:
             print(f"    [grid] {line}", flush=True)
 
@@ -11640,6 +13768,8 @@ def _summary(cs_log: list, tx_slots: list[int], cycles: int,
     # control signals, which reads exactly like a dead band.
     p3 = [ev for ev in cs_log
           if ev.protocol == Protocol.PACTOR3 and ev.cs is not None]
+    p2 = [ev for ev in cs_log
+          if ev.protocol == Protocol.PACTOR2 and ev.cs is not None]
     print("\n-- session summary --", flush=True)
     print(f"session ended: {ended}")
     print(_duty(keyed, cycles, cycle_s))
@@ -11676,8 +13806,9 @@ def _summary(cs_log: list, tx_slots: list[int], cycles: int,
     # carried two clocks -- the rolling decoder's session time and the anchored
     # read's offset into its own window -- and a 0.09 among figures of 38.16 read
     # as a codeword in the first tenth of a second.
+    p2_count = f"{len(p2)} PACTOR-2, " if p2 else ""
     print(f"control signals decoded {len(cs_log)} ({len(p1)} PACTOR-1 at zero "
-          f"errors, {len(p3)} PACTOR-3), at seconds into the session")
+          f"errors, {p2_count}{len(p3)} PACTOR-3), at seconds into the session")
     for ev in p3:
         print(f"  {ev.t:7.2f}  {spec.CS_NAMES[ev.cs]}  (PACTOR-3)")
     # The transmit cadence, MEASURED. A prediction that fails on the two-slot
@@ -11721,11 +13852,12 @@ def _summary(cs_log: list, tx_slots: list[int], cycles: int,
     advanced = next((f"#{a} -> #{b}"
                      for i, (a, b) in enumerate(zip(seq_sent, seq_sent[1:]))
                      if (b - a) % SEQ_MOD == 1 and i + 1 not in breakin_at), None)
-    if not p1 and p3:
+    if not p1 and (p2 or p3):
         # The PACTOR-1 alternation test does not apply to a link that left
         # PACTOR-1: PACTOR-3 has an explicit NAK, so its acknowledgement is the
         # codeword and not the toggle.
-        print(f"verdict: the link ran in PACTOR-3 -- {len(p3)} control signals "
+        higher = 'PACTOR-2/3' if p2 and p3 else 'PACTOR-2' if p2 else 'PACTOR-3'
+        print(f"verdict: the link ran in {higher} -- {len(p2) + len(p3)} control signals "
               f"decoded and our counter reached "
               f"#{seq_sent[-1] if seq_sent else '?'}.", flush=True)
     elif not p1 and evidence.candidates:
@@ -11777,13 +13909,59 @@ def _summary(cs_log: list, tx_slots: list[int], cycles: int,
               f"counter advanced {advanced}. Prediction met.", flush=True)
 
 
+def _goodbye_result(link) -> str:
+    """Report the completed stage, including after ARQ clears pending state."""
+    if link.terminal_confirm_started:
+        if link.goodbye_acked:
+            return "confirmed by the final P3 terminal acknowledgment"
+        return ("QRT acknowledged, marker unconfirmed; "
+                "closed locally, peer shutdown unconfirmed")
+    if link.goodbye_acked:
+        return "acknowledged"
+    if link.goodbye_unplaceable:
+        return "QRT unplaceable; closed locally, peer shutdown unconfirmed"
+    return (f"QRT sent but unconfirmed; closed locally, peer shutdown unconfirmed on "
+            f"{GOODBYE_CYCLES}-cycle teardown")
+
+
 def _mail_arm(args) -> bool:
     """Whether this arm is carrying Winlink mail, which is a different arm."""
     return bool(args.mail_send or args.mail_fetch)
 
 
+def _mail_send_callback(host):
+    host.p3_mail_active = True
+    def send(blob):
+        host.p3_mail_active = True
+        traffic.for_host(host).withhold(blob)
+        host.arq.on_host_data(blob)
+    return send
+
+
+def _write_unconfirmed_transfer(outdir, link):
+    import hashlib
+
+    retained = link.transfer_unconfirmed
+    if retained is None:
+        return None
+    field, suffix = retained['field'], retained['suffix']
+    blob = field + suffix
+    path = outdir / 'p3-transfer-unconfirmed.bin'
+    _capture_write_bytes(path, blob, legacy_exclusive=True)
+    report = dict(result='transfer unconfirmed', counter=retained['counter'],
+                  status=retained['status'], sl=retained['sl'], file=path.name,
+                  sha256=hashlib.sha256(blob).hexdigest(),
+                  field=dict(offset=0, bytes=len(field), sha256=hashlib.sha256(field).hexdigest()),
+                  suffix=dict(offset=len(field), bytes=len(suffix), sha256=hashlib.sha256(suffix).hexdigest()))
+    _capture_write_text(outdir / 'p3-transfer-unconfirmed.json', json.dumps(report, indent=2) + '\n', legacy_exclusive=True)
+    return path
+
+
 def _p3_mail_defaults(args) -> None:
     """Opt-in mail preset using the measured initial IRS pulse placement."""
+    progress_seconds = getattr(args, "p3_mail_progress_seconds", 120.)
+    if not math.isfinite(progress_seconds) or progress_seconds <= 0:
+        raise SystemExit("--p3-mail-progress-seconds must be finite and positive")
     if not getattr(args, "p3_mail", False):
         if getattr(args, "p3_qrt_confirm", False):
             raise SystemExit("--p3-qrt-confirm requires --p3-mail")
@@ -11798,15 +13976,16 @@ def _p3_mail_defaults(args) -> None:
             or getattr(args, "p3_timing_reply_delay", None) is not None):
         raise SystemExit("--p3-mail requires granted P3 entry without timing trials, "
                          "forced modes or alternate controls")
-    if (args.p3_control_waveform != "historical"
-            or args.p3_control_placement != "audio-start"
-            or args.p3_control_tail != "off" or args.p3_control_stagger != "off"
+    # The control burst's shape is orthogonal to the reply grid this preset
+    # pins, so the waveform, tail and stagger flags ride a mail arm.
+    if (args.p3_control_placement != "audio-start"
             or not args.p3_entry_stagger or not args.p3_rise
             or args.p3_entry_delay != DEFAULT_ENTRY_DELAY_MS
             or args.cycle != 1.25 or tuple(args.p3_entry) != ("template",)
             or args.p1_setup_phase != "reply"):
-        raise SystemExit("--p3-mail requires historical audio-start controls and "
-                         "the staggered shaped template entry at +4.875 ms")
+        raise SystemExit("--p3-mail requires audio-start controls and the "
+                         "staggered shaped template entry at +4.875 ms")
+    args.p3_qrt_confirm = True
     args.p1_grant_only = True
     args.p3_repeat_gear = 0
     args.p3_entry_sl = args.p3_traffic_sl = 1
@@ -11895,8 +14074,25 @@ def _timing_trial_close(tx, host, now):
     # scored reply before requesting our ordinary bounded disconnect sequence.
     if not host.arq._rx_close_pending:
         tx.cancel_pending_cs()
-        host.arq.on_host_disconnect()
+        if not host.arq._qrt_pending:
+            # The trial's budget has ended; pending application bytes must not
+            # turn its bounded goodbye into a new, unacknowledged data turn.
+            host.arq._give_up(f"P3 timing trial {trial.arm}: {trial.reason}")
     return f"P3 timing trial {trial.arm}: {trial.reason}"
+
+
+def _mail_close(host, mail, budget, h: int) -> str | None:
+    progress = getattr(mail, 'progress', None)
+    if progress is not None and progress.expired and not progress.close_requested:
+        return None
+    if not mail.done or (not mail.session.failure and host._txbuf):
+        return None
+    failure = mail.session.failure
+    verdict = f"exchange failed: {failure}" if failure else "exchange complete"
+    print(f"    [mail] {verdict} -- closing", flush=True)
+    budget.close(h)
+    return (f"the mail exchange failed: {failure}" if failure
+            else "the mail exchange completed")
 
 
 def _mail_app_turns(host, mail, *, wait_greeting: bool = False) -> None:
@@ -11910,7 +14106,18 @@ def _mail_app_turns(host, mail, *, wait_greeting: bool = False) -> None:
     host.app_turns(allow_breakin=not wait_greeting or bool(mail.session.sent_text))
 
 
-UPGRADE_DOORS = ("pactor3_only", "offer_pactor2", "p1_grant_only",
+def _p4_mail_progress(mail, machine, now, *, drained):
+    if mail.progress is not None:
+        machine.update_application_progress(*mail.progress.check())
+        if machine.application_failure and not mail.session.failure:
+            mail.progress.fail(machine.application_failure)
+    terminal = bool(mail.session.failure or mail.done and drained)
+    if terminal:
+        machine.finish_application(now, failure=mail.session.failure)
+    return terminal
+
+
+UPGRADE_DOORS = ("pactor2_only", "pactor3_only", "offer_pactor2", "p1_grant_only",
                  "p3_uninvited")
 """The flags of the `level` group that lead OUT of PACTOR-1.
 
@@ -11921,46 +14128,1669 @@ a PACTOR-1 run behind the operator's back, which is what `--unannounced` did to
 three arms on 2026-09-17."""
 
 
-def _run_p4_probe(tx, live, raster) -> str:
+#: The tape's own caller burst, as `p4robusttx` numbers it.
+P4_CLONE_VALUE, P4_CLONE_HEADER = 6, "A"
+
+
+def _p4_spell(emission: dict) -> str:
+    """How a query names itself: our status byte, a datablock value, or a clone."""
+    if emission.get("value") is not None:
+        return f"v{emission['value']}/{emission['header']}"
+    if emission.get("word"):
+        return emission["word"]
+    return p4oracle.status_name(emission["status"])
+
+
+def _p4_query_row(probe, index: int, emission: dict, window, *, headers: bool):
+    """One (query -> reply) row, or a row saying why the reading failed."""
+    # A clone carries the tape's field and not ours, on both paths out of here.
+    field_len = 0 if probe.packet == "robust" else len(probe.payload)
+    try:
+        row = p4oracle.query(index, emission["status"], field_len,
+                             emission["audio_end"], window, FS,
+                             cfo_hz=probe.cfo_hz, headers=headers,
+                             floor_db=probe.floor_db)
+        row["status_hex"] = _p4_spell(emission)
+        return row
+    except Exception as error:
+        # The window is already on disk and the next chirp is owed a slot, so a
+        # reading that fails is a reading that failed, not a probe that ended.
+        return dict(index=index, status=emission["status"],
+                    status_hex=_p4_spell(emission),
+                    counter=(None if emission["status"] is None
+                             else emission["status"] & 3),
+                    payload_len=field_len,
+                    chirp_end_sample=emission["audio_end"],
+                    chirp_end_s=round(emission["audio_end"] / FS, 3),
+                    window_samples=int(np.asarray(window).size), reply_class="unread",
+                    window_rms_db=0.0, window_floor_db=0.0, replies=[],
+                    error=f"{type(error).__name__}: {error}")
+
+
+def _print_p4_query(row) -> None:
+    if row.get("error"):
+        print(f"    [p4 query] {row['index']} NOT READ: {row['error']}", flush=True)
+        return
+    for line in p4oracle.lines(row):
+        print(line, flush=True)
+
+
+def _read_p4_reply(probe, start: int, window, emission: int = -1) -> None:
+    """Read the window behind one chirp as the answer to it, on the probe's clock.
+
+    THE PROBE IS A QUESTION TO THE PEER AND THIS IS THE ANSWER SLOT. What went out is a
+    status byte, a counter and a field; what comes back is a PACTOR-1 codeword, a
+    robust-mode header, something else or nothing, and only the pair says what
+    any of the three meant. It reads on every arm -- `--p4-mail`'s own teardown
+    analysis is a separate, preregistered comparison and keeps its own report.
+
+    CHEAP HALF ONLY, and `p4oracle.read_burst` draws the line. Segmentation,
+    the PACTOR-1 decode and the SF-16 energy fraction cost milliseconds and name
+    the FAMILY; the word lock, the training lattice and the Chu family cost
+    1.13 s for one burst and 1.95 s for a ten-burst window, out of the same
+    sixty seconds the next chirp needs. `_resolve_p4_queries` runs those once
+    nothing is waiting on the clock.
+    """
+    if not probe.emissions:
+        return
+    row = _p4_query_row(probe, len(probe.queries) + 1, probe.emissions[emission],
+                        window, headers=False)
+    row["window_start"] = int(start)
+    probe.queries.append(row)
+    _print_p4_query(row)
+
+
+def _resolve_p4_queries(probe) -> None:
+    """Name every provisional header off the retained windows, transmitter down."""
+    resolved = []
+    for attempt, start, window in probe.received:
+        if attempt >= len(probe.emissions):
+            continue
+        row = _p4_query_row(probe, len(resolved) + 1, probe.emissions[attempt],
+                            window, headers=True)
+        row["window_start"] = int(start)
+        resolved.append(row)
+    probe.queries = resolved
+    for row in resolved:
+        _print_p4_query(row)
+
+
+P4_WORD_LOOKBACK_S = 0.5
+"""How far each cycle's word scan reaches back into the cycle before it, so a
+word straddling our boundary is still read whole."""
+
+P4_WORD_S = 0.240
+P4_WORD_SLACK_S = 0.035
+"""The timing bracket a placed word read allows (`p4oracle.placed_despread`)."""
+
+
+def _p4_words_heard(probe, raster, audio, start: int, phase: str,
+                    hits=None) -> list[dict]:
+    """The bank words in `audio`, placed on our raster, each printed and kept once."""
+    from dataclasses import replace
+    from .p4receiver import P4Receiver, Registered, Kind
+    receiver = getattr(probe, 'receiver', None)
+    if receiver is None:
+        receiver = probe.receiver = P4Receiver(FS, admitted=True, cfo_hz=probe.cfo_hz)
+    receiver.cfo_hz = probe.cfo_hz or receiver.cfo_hz
+    if hits is None:
+        records = receiver.read_window(audio, start, whole=True)
+    else:
+        records = [receiver.register(replace(hit, origin=start,
+                    stream_sample=start+hit.first_chip)) for hit in hits]
+    new = []
+    for reg in records:
+        if reg.outcome == Registered.DUPLICATE and phase != 'hold':
+            continue
+        if reg.outcome != Registered.DUPLICATE and getattr(probe, 'arq', None) is not None:
+            probe.arq.on_rx_p4(reg)
+        hit = reg.observation
+        if hit.kind != Kind.WORD or hit.provisional or reg.outcome == Registered.EXTENDED:
+            continue
+        at = hit.stream_sample
+        slot = int((at - raster.anchor) // raster.slot_n)
+        row = dict(phase=phase, word=hit.word, slot=slot, onset_sample=int(at),
+                   after_boundary_s=round((at - raster.boundary(slot)) / FS, 3),
+                   score=round(float(hit.score), 4),
+                   coherence=round(float(hit.coherence), 4))
+        probe.heard.append(row)
+        new.append(row)
+        print(f"    [p4 probe] heard {row['word']} in slot {slot}, "
+              f"{row['after_boundary_s']:+.3f} s after our boundary "
+              f"(match {row['score']:.2f}, lock {row['coherence']:.2f}; {phase})",
+              flush=True)
+    return new
+
+
+def _p4_peer_breakin(tx, live, raster, audio, start, carrier_end, *, read=True):
+    probe = tx.p4_probe
+    receiver = tx.sessrx.p4
+    probe.receiver, probe.arq = receiver, tx.p4_link_host.arq
+    receiver.admitted = True
+    if read:
+        receiver.read_breakin(audio, start, carrier_end=carrier_end)
+    words = [o for o in receiver.observations if o.word == 'Y27'
+             and o.stream_sample < start + len(audio)
+             and o.stream_sample + round(.240 * FS) > start
+             and o.stream_sample >= carrier_end - round(0.240 * FS)]
+    if not words:
+        return None
+    word = words[-1]
+    probe.request(max(int(live.sample_now()), tx.tx_end or 0), b"", 0)
+    probe.peer_breakin = True
+    probe.handoff_audio = (start, audio.copy())
+    probe.trigger_word = "Y27 peer break-in"
+    probe.handoff_slot = int((word.stream_sample - raster.anchor) // raster.slot_n)
+    return probe.handoff_slot
+
+
+def _irs_word_span(raster, start: int, end: int, carrier_end: int) -> tuple[int, int]:
+    """The part of an IRS window, [start, end), a peer's break-in word can be in.
+
+    The window runs from our CS to our next key, the better part of a cycle,
+    and the peer keys within `d_max` of our carrier's end on each cycle's
+    position. Only the latest position whose onsets the window has passed is
+    read; the peer repeats an unanswered word. Read whole, the window cost
+    159-789 ms in front of every IRS key on onair-0929-1240.
+    """
+    word = round(P4_WORD_S * FS)
+    at = carrier_end + max(0, (end - carrier_end - raster.d_max_n) // raster.cycle_n) * raster.cycle_n
+    reach = raster.d_max_n + word + round(P4_WORD_SLACK_S * FS)
+    return max(start, at - word), max(start, min(end, at + reach))
+
+
+def _p4_retain_hold(tx, audio, origin):
+    from .p4holdwork import HoldAudio
+
+    if getattr(tx, 'p4_hold_audio', None) is None:
+        tx.p4_hold_audio = HoldAudio(FS)
+    retained = tx.p4_hold_audio
+    receiver = tx.sessrx.p4
+    gaps = list(receiver.capture_gaps)
+    start, end = getattr(tx, 'tx_audio_start', None), getattr(tx, 'tx_end', None)
+    if start is not None and end is not None:
+        gaps.append((start, end))
+    retained.retain(audio, origin, gaps)
+    return retained
+
+
+def _p4_read_hold(tx, live, raster, carrier_end, *, key=None):
+    from .p4budget import WorkBudget
+
+    retained = tx.p4_hold_audio
+    if key is None:
+        now = max(live.pos, int(live.sample_now()))
+        slot = getattr(tx, 'slot', (now-raster.anchor)//raster.slot_n)
+        key_at = (lambda slot: tx.key_instant(raster, slot)) if hasattr(tx, 'key_instant') else raster.boundary
+        key = key_at(slot)
+        if (key <= now
+                or getattr(tx, 'slots_used', []) and tx.slots_used[-1] >= slot):
+            key = key_at(raster.next_slot(slot))
+    owed = tx.cycle_cost_n() if hasattr(tx, 'cycle_cost_n') else 0
+    reserve = max(round(.110*FS), _prekey_lead(live,
+        round(getattr(tx, 'settle', .074)*FS), owed)+owed)
+    work = WorkBudget(FS, key, lambda: max(live.pos, int(live.sample_now())),
+                      wall_now=time.monotonic, reserve_s=reserve/FS)
+    receiver = tx.sessrx.p4
+    receiver.admitted = True
+    receiver.capture_gaps = sorted(set(retained.gaps + [
+        gap for gap in receiver.capture_gaps if gap[1] > retained.origin]))
+    retained.read(receiver, raster, carrier_end, work, time.monotonic)
+    # A candidate transfers receive ownership, never an inferred data grant.
+    words = [o for o in receiver.observations if o.word in ('X27', 'Y27')
+             and not o.provisional and not o.weak and not o.unexpected
+             and retained.origin <= o.stream_sample+round(.240*FS)
+             and o.stream_sample < retained.origin+len(retained.audio)
+             and o.stream_sample >= carrier_end-round(.240*FS)]
+    if not words:
+        return None
+    word = words[0]
+    if (word.word == 'Y27' and not word.provisional
+            and retained.origin+len(retained.audio) >= word.stream_sample+round(.810*FS)):
+        receiver.read_window(retained.audio, retained.origin, whole=True, work=work)
+    probe = tx.p4_probe
+    probe.receiver, probe.arq = receiver, tx.p4_link_host.arq
+    probe.request(max(int(live.sample_now()), tx.tx_end or 0), b'', 0)
+    probe.peer_breakin = True
+    probe.handoff_audio = retained.origin, retained.audio.copy()
+    probe.trigger_word = f'{word.word} in the hold'
+    probe.handoff_slot = int((word.stream_sample-raster.anchor)//raster.slot_n)
+    retained.pending = False
+    return probe.handoff_slot
+
+
+def _p4_hold_word(tx, host, live, raster, whole, seg_start: int,
+                  carrier_end: int) -> int | None:
+    started = time.monotonic()
+    try:
+        return _p4_hold_word_read(tx, host, live, raster, whole, seg_start, carrier_end)
+    finally:
+        if getattr(tx, 'p4_link_options', None) is not None:
+            print(f"    [p1 stage] slot {getattr(tx, 'slot', '?')} "
+                  f"p4-hold={(time.monotonic()-started)*1000:.2f}ms", flush=True)
+
+
+def _p4_hold_word_read(tx, host, live, raster, whole, seg_start: int,
+                       carrier_end: int) -> int | None:
+    """The slot of an X27/Y27 read past our own carrier while packet 1 still airs.
+
+    Read after the cycle's key, out of the time our own packet takes: KB5LZK
+    left P1 on onair-0926-1342 with us still keying, and the window after our
+    carrier holds only the word's tail.
+    """
+    probe = tx.p4_probe
+    if host.p4_after_first_ack and getattr(tx, 'p4_link_options', None) is not None:
+        _p4_retain_hold(tx, whole, seg_start)
+        return _p4_read_hold(tx, live, raster, carrier_end)
+    if not host.p4_after_first_ack or not probe.replies or probe.requested:
+        return None
+    start = max(seg_start, carrier_end)
+    past = whole[start - seg_start:]
+    if getattr(tx, 'sessrx', None) is not None:
+        probe.receiver = tx.sessrx.p4
+        probe.arq = host.arq
+    heard = _p4_words_heard(probe, raster, past, start, "hold",
+                            p4oracle.word_tail(past, FS))
+    if not heard:
+        return None
+    probe.request(max(int(live.sample_now()), tx.tx_end or 0), b"", 0)
+    probe.trigger_word = f"{heard[0]['word']} in the hold"
+    return heard[0]["slot"]
+
+
+def _listen_for_p4_word(probe, live, raster, slot: int, *, first: bool, link_tx=None):
+    """Key nothing and read each of our cycles for the peer's P4 words.
+
+    Returns the slot the first word was heard in when `first`, else reads on to
+    the deadline; None when no word ends the listen.
+    """
+    lookback = round(P4_WORD_LOOKBACK_S * FS)
+    begin, tail = live.pos, np.empty(0, np.float32)
+    try:
+        while True:
+            if live.pos >= probe.deadline(FS) or not probe.room(int(live.sample_now()), 0, FS):
+                probe.reason = ("post-stall deadline; no X27/Y27 word ended the listen"
+                                if first else "post-stall listen complete")
+                return None
+            until = min(raster.boundary(raster.next_slot(slot)), probe.deadline(FS))
+            start, pieces = live.pos - tail.size, [tail]
+            while live.pos < until:
+                part = live.take_until(min(until, live.pos + FS // 4))
+                if not part.size:
+                    probe.reason = "capture ended during the post-stall listen"
+                    return None
+                pieces.append(part.copy())
+                if link_tx is not None:
+                    heard = _p4_peer_breakin(link_tx, live, raster,
+                                             np.concatenate(pieces), start, start)
+                    if heard is not None:
+                        return heard
+            window = np.concatenate(pieces)
+            heard = _p4_words_heard(probe, raster, window, start, "silent listen")
+            if first and heard:
+                return heard[0]["slot"]
+            print(f"    [p4 probe] listened to {live.pos / FS:.3f}; entry ceiling "
+                  f"{(probe.deadline(FS) - live.pos) / FS:.1f} of {probe.timeout:g} s left", flush=True)
+            tail = window[-lookback:]
+            slot = raster.next_slot(slot)
+    finally:
+        probe.windows.append(dict(kind="stall-listen", start=begin, end=live.pos,
+                                  target=probe.deadline(FS)))
+
+
+def _p4_link_waveforms(probe, *, word_render='off'):
+    from . import p4breakintx, p4shorttx
+    from .p4receiver import Kind
+
+    from .p4waveforms import Waveforms
+
+    cache = getattr(probe, 'link_waveforms', None)
+    if cache is not None:
+        if cache.word_render != word_render:
+            raise ValueError('P4 probe cache render mode mismatch')
+        return cache
+    cache = Waveforms(word_render)
+    def cache_key(kind, word=None, value=None, header="A", payload=b"", status=0):
+        return kind, word, value, header, payload, status
+    for word in p4words.STEPS:
+        key = cache_key(Kind.WORD, word=word)
+        if key not in cache:
+            cache[key] = p4robusttx.robust_word(word, word_render=word_render)
+    for value in dict.fromkeys((*probe.values, 7, 38, 13, 60, 49, 53, 37)):
+        for header in ("A", "B"):
+            key = cache_key(Kind.SHORT, value=value, header=header)
+            if key not in cache:
+                cache[key] = p4robusttx.robust_short(value, header)
+    for status in (0x20, 0x40):
+        key = cache_key(Kind.BODY, status=status)
+        if key not in cache:
+            cache[key] = p4breakintx.changeover_packet(b"", status, word_render=word_render)
+    for status in range(4):
+        cache[cache_key(Kind.NORMAL, status=status)] = p4shorttx.short_packet(b"", status)
+    probe.link_waveforms = cache
+    return cache
+
+
+def _p4_peer_normal_reader(machine, receiver):
+    """Arm the side raster only for IRS or the current actually keyed grant."""
+    from .p4turn import State
+    from .p4receiver import Kind, Role
+    receiver.peer_normal_grant = None
+    pending = machine.state in (State.IRS_BREAKIN, State.IRS_YIELD)
+    em = receiver.last_emission
+    if (machine.state == State.ISS_GRANT and machine.offers_turn()
+            and em is not None and em.kind == Kind.BODY and em.role == Role.ISS
+            and em.packet_reply and em.stream_sample == machine.last.stream_sample
+            and receiver.peer_onset is not None):
+        receiver.peer_normal_grant = (em.stream_sample, receiver._train_generation)
+        pending = True
+    receiver.peer_normal_pending = pending
+
+
+
+def _p4_grant_read_owned(machine, receiver):
+    """Keep side-raster timing with its actual grant across receive state changes."""
+    from .p4turn import State
+    from .p4receiver import Kind, Role
+    last, em = machine.last, receiver.last_emission
+    return (last is not None and last.kind == Kind.BODY and last.state == State.ISS_GRANT
+            and em is not None and em.kind == Kind.BODY and em.role == Role.ISS
+            and em.packet_reply and em.stream_sample == last.stream_sample
+            and receiver.peer_onset is not None
+            and receiver.peer_normal_grant == (last.stream_sample, receiver._train_generation))
+
+
+def _p4_breakin_phase_live(machine, pending):
+    return (not pending and machine.state in ('IRS_ANSWER', 'IRS_BREAKIN')
+            and machine._wants_turn() and machine.peer_phase is not None)
+
+
+def _p4_link_due(machine, pending, onset, delay, now, lead, iss_slot):
+    if iss_slot:
+        return machine.next_raster(now)
+    if _p4_breakin_phase_live(machine, pending):
+        return machine.breakin_due(now, lead=lead)
+    return (min(pending) if pending else onset) + round(delay * FS)
+
+
+def _p4_early_empty_answer(machine, receiver, clock, onset, word_expected):
+    # A NORMAL candidate without a measured score still needs the full read.
+    # Weak measured copies can be refined after the request is keyed.
+    return (machine.state == 'IRS_ANSWER'
+            and (machine.ack_word is not None or machine._last_body_ack is not None)
+            and not word_expected and clock.cycle_s == 1.25
+            and (receiver.hold is None or receiver.hold.kind != 'normal')
+            and not (receiver.normal_waiting and receiver.normal_coherence == 0)
+            and not receiver.peer_normal_pending
+            and not machine._wants_turn() and machine._deferred is None
+            and not any(abs(o.stream_sample-onset) < FS//10
+                        for o in receiver.observations))
+
+
+def _p4_word_confirmation_end(receiver, machine, onset, decision, chirp_admission):
+    from .p4observation import Kind
+
+    horizons = []
+    for obs in receiver.observations:
+        if not (obs.provisional and obs.kind == Kind.WORD
+                and abs(obs.stream_sample-onset) < FS//10):
+            continue
+        horizon = obs.stream_sample + round(
+            (receiver._word_horizon(obs) if machine._requesting() else .245)*FS)
+        passive_head = (machine.train_policy == 'passive' and machine._train_root is not None
+                        and obs.word in ('T27', 'W27', 'Z27')
+                        and machine.state in ('ISS_LADDER', 'ISS_DATA', 'ISS_DATA_ACK')
+                        and machine.last is not None
+                        and machine.last.stream_sample == machine._train_root)
+        if (machine._requesting() or passive_head or obs.weak
+                or (machine._data_packet is not None or machine.offers_turn()
+                    or machine.state == 'ISS_HOLD' or chirp_admission)
+                and horizon <= decision):
+            horizons.append(horizon)
+    return max(horizons, default=None)
+
+
+def _p4_reader_results(calls):
+    """Expand raw reader calls only when a completed cycle logs a miss."""
+    rows = []
+    while calls is not None:
+        name, expectation, records, calls = calls
+        row = dict(reader=name, registrations=0 if records is None else len(records),
+                   kinds=[] if records is None else [r.observation.kind.value for r in records])
+        if name == 'chirp_decode':
+            row['result'] = 'not selected' if records is None else 'read'
+        else:
+            row['expectation'] = expectation
+        rows.append(row)
+    rows.reverse()
+    return rows
+
+
+def _p4_reader_miss(onset, silent, expectation, reader_calls, normal_coherence):
+    """Report calls actually made; WORD misses have no normal-reader metric."""
+    text = (f'    [p4 link] no live packet at {onset / FS:.3f}; '
+            f'silent {silent}/16, expect={expectation.upper()} '
+            f'reader_results={reader_calls}')
+    if expectation == 'packet':
+        text += f', normal coherence {normal_coherence:.3f}'
+    return text
+
+
+def _p4_answer_timing_defaults(args):
+    """Validate chain calibration before devices open, also for direct replays."""
+    plan = getattr(args, 'tx_timing_plan', None)
+    residual = getattr(plan, 'p4_answer_residual_samples', 0)
+    if residual:
+        if plan.tx_latency_ms != plan.p4_answer_base_tx_latency_ms:
+            raise SystemExit("P4 residual calibration requires its station TX latency; "
+                             "restore p4_answer_residual_ms=0 before changing tx_latency_ms")
+        if getattr(args, 'p4_answer_offset', .920) != .920:
+            raise SystemExit('P4 chain calibration requires --p4-answer-offset 0.920; '
+                             'restore p4_answer_residual_ms=0 for an offset trial')
+        for field, endpoint in (('audio_in', plan.p4_audio_input),
+                                ('audio_out', plan.p4_audio_output)):
+            if getattr(args, field, endpoint) != endpoint:
+                raise SystemExit('P4 chain calibration does not match selected audio endpoints')
+    return residual
+
+
+def _p4_answer_timing_scope(run_link):
+    """Reuse the existing scheduler correction for the duration of a P4 link.
+
+    The pure turn/receiver retain nominal air coordinates. The scheduler moves
+    DAC enqueue, PTT, notice and decode lead together, exactly once. Restoration
+    includes decoder/capture exceptions; subsequent protocols keep their plan.
+    """
+    @wraps(run_link)
+    def calibrated(tx, live, raster):
+        residual = _p4_answer_timing_defaults(tx.p4_link_options)
+        if not residual:
+            return run_link(tx, live, raster)
+        plan = tx.p4_link_options.tx_timing_plan
+        if getattr(live, 'p4_answer_residual_n', 0):
+            raise RuntimeError('P4 answer timing scope is already active')
+        existed = hasattr(live, 'tx_latency_n')
+        original = getattr(live, 'tx_latency_n', 0)
+        live.tx_latency_n = original + residual
+        live.p4_answer_residual_n = residual
+        try:
+            tx.p4_probe.link_events.append(dict(
+                event='AnswerTiming', residual_ms=plan.p4_answer_residual_ms,
+                residual_samples=residual, chain=plan.chain,
+                evidence=plan.p4_answer_residual_evidence,
+                base_tx_latency_samples=original,
+                effective_tx_latency_samples=live.tx_latency_n,
+                coordinate='nominal air; local due excludes residual'))
+            print(f'    [p4 timing] residual={plan.p4_answer_residual_ms:+.6g}ms '
+                  f'({residual} samples) chain={plan.chain} '
+                  f'evidence={plan.p4_answer_residual_evidence}', flush=True)
+            return run_link(tx, live, raster)
+        finally:
+            if existed:
+                live.tx_latency_n = original
+            else:
+                del live.tx_latency_n
+            del live.p4_answer_residual_n
+    return calibrated
+
+
+@_p4_answer_timing_scope
+def _run_p4_link(tx, live, raster):
+    """Drive the pure P4 machine through the ordinary radio admission guard."""
+    from .p4receiver import P4Receiver, Emission, Role, Kind
+    from .p4host import P4Host, P4Outbox
+    from .p4turn import P4Turn, State as P4State
+
+    args, host, mail = tx.p4_link_options, tx.p4_link_host, tx.p4_link_mail
+    from .p4robusttx import carrier_hz as word_carrier_hz
+    word_render = getattr(args, 'p4_word_render', 'off')
+    scan = getattr(args, 'p4_rx_scan', 'legacy')
+    if scan not in ('legacy', 'incremental'):
+        raise ValueError('unknown P4 receive scan mode')
+    session_rx, tx.sessrx = tx.sessrx, None
+    receiver = (
+        session_rx.p4 if session_rx is not None else P4Receiver(FS, admitted=True)
+    )
+    receiver.admitted = True
+    receiver.breakin = True
+    receiver.enable_hold()
+    # The admitted peer may send chirps regardless of our transmit preset.
+    receiver.chirp = True
+    receiver.scan = scan
+    probe = tx.p4_probe
+    offsets = dict(p4words.CARRIER_HZ) if word_render == 'stock' else {}
+    probe.link_events.append(dict(event='WordRender', word_render=word_render,
+                                  word_offsets_hz=offsets))
+    print(f'    [p4 link] word_render={word_render} word_offsets_hz={offsets}', flush=True)
+    lead = _prekey_lead(live, round(tx.settle * FS))
+    link_end = live.pos + round(getattr(args, 'p4_link_timeout', 600.)*FS)
+    machine = P4Turn(
+        P4Outbox(host.arq),
+        P4Host(host, terminal=mail is not None or args.p4_text is not None),
+        fs=FS,
+        ladder=args.p4_ladder,
+        data="hold" if args.p4_data == "none" else args.p4_data,
+        hold_cycles=args.p4_hold_cycles,
+        prekey_lead=lead / FS,
+        role="iss",
+        app_done=mail is None and args.p4_text is not None,
+        managed_application=mail is not None,
+        answer_offset=args.p4_answer_offset,
+        breakin=getattr(args, "p4_breakin", "body"),
+        normal_ack=args.p4_normal_ack,
+        long_ack=getattr(args, "p4_long_ack", "fixed-x27"),
+        ack_53=getattr(args, "p4_ack_53", "U27"),
+        peer_ack=dict(getattr(args, "p4_peer_ack", None) or {}),
+        v59_answer=getattr(args, "p4_v59_answer", "current"),
+        chirp_ack=getattr(args, "p4_chirp_ack", "parity"),
+        irs_silent_cycles=getattr(args, "p4_irs_silent_cycles", 0),
+        train_policy=getattr(args, "p4_train_policy", "repeat"),
+        session_end=link_end,
+    )
+    T = machine.t
+    residual_n = getattr(live, "p4_answer_residual_n", 0)
+    if mail and getattr(args, "mail_wait_greeting", False):
+        machine.allow_breakin = bool(mail.session.sent_text)
+    if args.p4_text is not None:
+        from ..winlink.session import sid_line
+
+        host.arq.on_host_data(
+            sid_line().encode("latin-1") + args.p4_text.encode("latin-1")
+        )
+    if probe.emissions and not getattr(probe, 'peer_breakin', False):
+        for entry in probe.emissions:
+            if any(e.stream_sample == entry['audio_start'] for e in receiver.emissions):
+                continue
+            receiver.note_emission(Emission(
+                Kind.SHORT, Role.ISS, entry['audio_start'],
+                (entry['audio_end']-entry['audio_start'])/FS,
+                train=entry.get('value') in (7, 38),
+                train_words=frozenset(('X27', 'Z27', 'Y27'))
+                if entry.get('value') == 38 else None))
+        machine.seed_opening(probe.emissions, receiver.observations, values=probe.values or (7, 38))
+    receiver.expected_words = machine.expected_words()
+    begin = live.pos
+    audio = np.empty(0, np.float32)
+    # The entry probe may already have read the head of the last answer.
+    if probe.received:
+        _, begin, audio = probe.received[-1]
+        audio = audio.copy()
+    if getattr(probe, "handoff_audio", None) is not None:
+        begin, audio = probe.handoff_audio
+        audio = audio.copy()
+    receiver.normal_deadline = lambda at: time.monotonic() + (
+        at + round(T[Kind.SHORT]*FS) - lead - max(live.pos, int(live.sample_now()))) / FS
+    sf8_deadlines = {}
+
+    def sf8_deadline(at):
+        candidate = time.monotonic() + (
+            at + round(T[Kind.LONG]*FS) - lead - max(live.pos, int(live.sample_now()))) / FS
+        deadline = min(sf8_deadlines.get(at, candidate), candidate)
+        sf8_deadlines[at] = deadline
+        return deadline
+
+    receiver.sf8_deadline = sf8_deadline
+    work_ms = {}
+    reader_calls = None
+    timing = [] if getattr(args, 'p4_rx_timing_trace', False) else None
+    if timing is not None:
+        probe.timing_trace = timing
+    trace_wall = max(live.pos, int(live.sample_now())) if timing is not None else None
+    trace_depth = 0
+    trace_phase = 'entry'
+
+    # Stream-sample wall coordinates are authoritative. Reader/feed spans
+    # include their decoder/host children; elapsed_s is a separate host measurement.
+    # Uninstrumented driver time is explicit, never an extra CPU charge.
+    def trace(name, start, end, **fields):
+        nonlocal trace_wall
+        if trace_wall < start:
+            timing.append(dict(stage='driver', start=trace_wall, end=start,
+                               support_end=live.pos, phase=trace_phase))
+        timing.append(dict(stage=name, start=start, end=end,
+                           support_end=live.pos, phase=trace_phase, **fields))
+        trace_wall = end
+
+    event_counts = [0, 0, 0]
+    messages = []
+
+    def flush_messages():
+        if messages:
+            print('\n'.join(messages), flush=True)
+            messages.clear()
+
+    def measured(name, call, *a, **kw):
+        nonlocal trace_depth
+        started = time.perf_counter()
+        outer = timing is not None and trace_depth == 0
+        wall_start = max(live.pos, int(live.sample_now())) if outer else None
+        support_start = live.pos
+        trace_depth += 1
+        try:
+            return call(*a, **kw)
+        finally:
+            trace_depth -= 1
+            elapsed = time.perf_counter()-started
+            work_ms[name] = work_ms.get(name, 0.) + elapsed*1000
+            if outer:
+                trace(name, wall_start, max(live.pos, int(live.sample_now())),
+                      support_start=support_start, elapsed_s=elapsed)
+
+    cache = (measured('waveform_cache', _p4_link_waveforms, probe, word_render=word_render)
+             if timing is not None else _p4_link_waveforms(probe, word_render=word_render))
+
+    def details():
+        for i, events in enumerate((machine.link_events, receiver.live_events, receiver.hold.events)):
+            for row in events[event_counts[i]:]:
+                fields = ' '.join(f'{k}={v}' for k, v in row.items() if k not in ('event', 'at'))
+                at = f" at {row['at']/FS:.3f}" if row.get('at') is not None else ''
+                messages.append(f"    [p4 detail] {row['event']}{at} {fields}")
+            event_counts[i] = len(events)
+
+    from .p4waveforms import cache_key, prepare as prepare_waveforms
+
+    def prepare():
+        prepare_waveforms(cache, machine, word_render=word_render)
+
+    def capture_support(until, *, idle=False):
+        nonlocal begin, audio
+        rescheduled = False
+        target = until
+        until = min(until, link_end)
+        gap = live.pos - (begin + len(audio))
+        if gap > 0:
+            receiver.note_gap(begin+len(audio), live.pos)
+        if gap >= 6 * FS:
+            begin = live.pos
+            audio = np.empty(0, np.float32)
+        elif gap > 0:
+            audio = np.concatenate((audio, np.zeros(gap, np.float32)))
+        while live.pos < until:
+            if idle and receiver.scan == 'incremental':
+                receiver._retain_scan(audio, begin)
+                scan_clock = receiver.clock
+                scan_due = scan_clock.next_due if scan_clock else None
+                scan_events = len(receiver.live_events)
+                scan_registrations = len(receiver.registrations)
+                mandatory = min(until, live.pos+FS//4)
+                if scheduled_at is not None:
+                    mandatory = min(mandatory, scheduled_at-lead)
+                read('scan_idle', receiver.scan_idle,
+                    now=max(live.pos, int(live.sample_now())), next_event=mandatory)
+                if len(receiver.registrations) > scan_registrations and (receiver.clock is not scan_clock
+                        or receiver.clock.next_due != scan_due):
+                    # Acquisition may have placed a new word raster. Let the
+                    # outer dispatcher choose its mandatory read first.
+                    rescheduled = True
+                    break
+                if any(e['event'] in ('word scan', 'word scan extent')
+                       for e in receiver.live_events[scan_events:]):
+                    # A catch-up dispatch yields here. The next dispatch checks
+                    # capture/key slack again before spending another block.
+                    continue
+            part_end = min(until, live.pos + FS // 4)
+            if idle and timing is not None:
+                capture_start, capture_sample = max(live.pos, int(live.sample_now())), live.pos
+            part = live.take_until(part_end)
+            if idle and timing is not None:
+                trace('capture', capture_start, max(live.pos, int(live.sample_now())),
+                      support_start=capture_sample, requested_end=part_end,
+                      available_at=max(live.pos, int(live.sample_now())),
+                      complete=live.pos >= part_end)
+            if not part.size:
+                return False
+            audio = np.concatenate((audio, part))
+        if len(audio) > 6 * FS:
+            trim = len(audio) - 6 * FS
+            audio = audio[trim:]
+            begin += trim
+        return live.pos >= target or rescheduled
+
+    def capture(until, *, idle=False):
+        if timing is None or idle:
+            return capture_support(until, idle=idle)
+        start, support = max(live.pos, int(live.sample_now())), live.pos
+        result = capture_support(until, idle=idle)
+        end = max(live.pos, int(live.sample_now()))
+        trace('capture', start, end, support_start=support,
+              requested_end=until, available_at=end, complete=result)
+        return result
+
+    def pending_onsets():
+        # A post-key read can register the preceding packet after its answer
+        # instant. It still needs decide() to expire it, but must not select
+        # the next cycle's capture/decode deadline.
+        def answered_by(s, packet):
+            kind = packet['body'].kind if packet.get('body') is not None else Kind.SHORT
+            return s + round(T[kind] * FS)
+        return [s for s, packet in machine.pending.items()
+                if s not in machine._decided and answered_by(s, packet) > live.pos]
+
+    def refuse(reason, proposal):
+        print(f"    [p4 link] Refused {reason}: {proposal.kind} "
+              f"at {proposal.stream_sample / FS:.3f}", flush=True)
+        receiver.note_refusal(proposal.kind, proposal.stream_sample)
+        if machine._next is proposal:
+            machine.refused(reason)
+        probe.link_events.append(
+            dict(
+                event="Refused",
+                kind=proposal.kind,
+                at=proposal.stream_sample,
+                reason=reason,
+                state=machine.state,
+            )
+        )
+
+    # Retained source admission owns this deadline even after receiver cleanup.
+    sf8_eligible = lambda obs: time.monotonic()+.005 <= sf8_deadline(obs.stream_sample)
+    host.arq.p4_sf8_eligible = sf8_eligible
+    machine.sf8_eligible = sf8_eligible
+
+    receiver.set_receive_phase(machine._peer_generation)
+
+    def feed(records):
+        for reg in records:
+            original = reg.observation
+            reg = host.arq.on_rx_p4(reg)
+            if reg.observation is not original:
+                late = reg.observation
+                receiver.observations = [late if row is original else row
+                                         for row in receiver.observations]
+                receiver.registrations = [replace(row, observation=late)
+                    if row.observation is original else row for row in receiver.registrations]
+            now = max(live.pos, int(live.sample_now()))
+            machine.observe(reg, now=now)
+            receiver.set_receive_phase(machine._peer_generation)
+            if (receiver.train_lease is not None
+                    and (machine.state in (P4State.DOWN, P4State.IRS_ANSWER,
+                                           P4State.IRS_BREAKIN, P4State.ISS_CLOSE)
+                         or machine._next is not None
+                         and machine.train_root_for(machine._next) != receiver.train_lease.root)):
+                receiver.revoke_train()
+            if mail and machine.adapter.failure:
+                mail.session.failure = machine.adapter.failure
+            obs = reg.observation
+            row = dict(
+                phase="link",
+                kind=obs.kind,
+                word=obs.word,
+                onset_sample=obs.stream_sample,
+                outcome=reg.outcome,
+                extent_s=obs.extent_s,
+                weak=obs.weak, unexpected=obs.unexpected, placed=obs.placed,
+                responds_to=reg.responds_to, answered=reg.answered,
+                received_at_sample=now, capture_end_sample=live.pos,
+                provisional=obs.provisional, score=obs.score, coherence=obs.coherence,
+                value=obs.value, header=obs.header, walsh_peak=obs.walsh_peak,
+                cfo_hz=obs.cfo_hz, lattice=obs.lattice,
+            )
+            if obs.speedlevel:
+                row['speedlevel'] = obs.speedlevel
+            if obs.frame:
+                row.update(status=obs.frame.status.byte, data=obs.frame.data.hex())
+            probe.heard.append(row)
+            name = obs.word or (f"v{obs.value}/{obs.header or '?'}"
+                                if obs.value is not None else obs.header or '-')
+            quality = (f"match={obs.score:.3f}" if obs.word else
+                       f"walsh={obs.walsh_peak}" if obs.walsh_peak is not None else
+                       f"lattice={obs.lattice:.3f}")
+            status = f" status=0x{obs.frame.status.byte:02x} CRC=valid" if obs.frame else ''
+            messages.append(
+                f"    [p4 link] {obs.kind} {name} {reg.outcome} at {obs.stream_sample / FS:.3f} "
+                f"{'provisional' if obs.provisional else 'full'} {quality} "
+                f"coherence={obs.coherence:.3f} cfo={obs.cfo_hz:+.2f}Hz{status}"
+            )
+            if obs.frame:
+                messages.append(f"    [p4 frame] {obs.kind} at {obs.stream_sample / FS:.3f} "
+                                f"status=0x{obs.frame.status.byte:02x} data={obs.frame.data.hex()}")
+
+    def read(name, method, *a, **kw):
+        nonlocal reader_calls
+        expectation = receiver.clock.expects.value if receiver.clock else 'untracked'
+        records = measured(name, method, *a, **kw)
+        measured('feed', feed, records)
+        # Keep references only: expansion belongs to the miss log after all
+        # reads and the decision, outside the deadline-sensitive read_cost.
+        reader_calls = (name, expectation, records, reader_calls)
+
+    def read_chirp(onset):
+        nonlocal reader_calls
+        # A placed chirp head already selects the decoder. Do not spend its
+        # turnaround trying robust and normal bodies before the chirp CRC.
+        records = measured('chirp_decode', receiver.read_chirp, audio, begin, onset=onset)
+        if records is not None:
+            measured('feed', feed, records)
+        reader_calls = ('chirp_decode', None, records, reader_calls)
+        return records is not None
+
+    def mail_status(turn):
+        if mail:
+            _mail_app_turns(
+                host, mail, wait_greeting=getattr(args, "mail_wait_greeting", False)
+            )
+            if machine.adapter.failure:
+                mail.session.failure = machine.adapter.failure
+            machine.allow_breakin = not getattr(
+                args, "mail_wait_greeting", False
+            ) or bool(mail.session.sent_text)
+            if (_p4_mail_progress(mail, machine, max(live.pos, int(live.sample_now())),
+                                  drained=host._txbuf == 0)
+                    and probe.stopped is None):
+                budget = getattr(tx, "p4_link_budget", None)
+                if budget is not None:
+                    budget.close(turn)
+                probe.stopped = (
+                    f"the mail exchange failed: {mail.session.failure}"
+                    if mail.session.failure
+                    else "the mail exchange completed"
+                )
+                print(
+                    f"    [mail] {'failed: ' + str(mail.session.failure) if mail.session.failure else 'exchange complete'}",
+                    flush=True,
+                )
+
+    def over(onset, expect, silent, purpose=None):
+        nonlocal lost
+        if getattr(live, 'lost', 0) > lost:
+            print(f"    !!!! CAPTURE LOSS: the input lost {live.lost - lost} samples "
+                  f"({(live.lost - lost) / FS * 1e3:.0f} ms) by {live.pos / FS:.3f} in the P4 link",
+                  flush=True)
+            lost = live.lost
+        counts = [f"at {onset / FS:.3f}", f"state={machine.state}", f"expect={expect}",
+                  f"silent={silent}/16", f"unread={machine.unread}"]
+        if machine.last is not None and machine.last.kind != Kind.WORD:
+            repeats, budget = machine.retry_budget()
+            counts.append(f"try={repeats + 1}/{budget}")
+        if machine.state == P4State.ISS_GRANT:
+            counts.append(f"grants={machine.grants}/4")
+        if machine.breakins:
+            counts.append(f"breakins={machine.breakins}/4")
+        if purpose is not None:
+            counts.append(f"purpose={purpose}")
+        if machine.last is not None and machine.last.kind == Kind.WORD:
+            if machine.last.accepted_target is not None:
+                counts.append(f"held_at={machine.last.accepted_target/FS:.6f}")
+                if machine.last.ack_identity is not None:
+                    counts.append(f"held_status={machine.last.ack_identity[0]}")
+                elif machine.last.peer_control is not None:
+                    counts.append(f"held_control={machine.last.peer_control}")
+            if not machine.last.current_slot_accepted:
+                counts.append('slot_accepted=false')
+        if machine._deferred is not None:
+            counts.append(f"deferred={machine._deferred[1]['due'] / FS:.3f}")
+        if machine.state in (P4State.ISS_HOLD, P4State.ISS_HANDBACK):
+            counts.extend(machine.waiting_status(onset))
+        counts.append(f"link={link_s - (link_end - live.pos) / FS:.1f}/{link_s:g}s")
+        print("    [p4 over] " + " ".join(counts), flush=True)
+
+    lost = getattr(live, 'lost', 0)
+    link_s = getattr(args, 'p4_link_timeout', 600.)
+    measured('feed', feed, receiver.registrations.copy())
+    turn = -1
+    breakin_long_generation = None
+    wall_end = time.monotonic() + (link_end-live.pos)/FS
+    machine.session_wall_end = wall_end
+    if machine._opening_end is not None:
+        machine._opening_wall_end = time.monotonic() + (machine._opening_end-live.pos)/FS
+    if machine._train_root is not None:
+        machine._train_wall_end = time.monotonic() + (
+            machine._train_root+round(9*1.25*FS)-live.pos)/FS
+    tx.p4_link_deadline = (link_end, wall_end)
+    try:
+        while machine.state != P4State.DOWN:
+            if live.pos >= link_end:
+                machine.link_down('session ceiling')
+                break
+            receiver.expected_words = machine.expected_words()
+            receiver.acked_counter = machine.acked_counter
+            _p4_peer_normal_reader(machine, receiver)
+            receiver.normal_coherence = 0.
+            turn += 1
+            work_ms = {}
+            reader_calls = None
+            trace_phase = 'predecision'
+            first_heard = len(probe.heard)
+            clock = receiver.clock
+            if clock is not None and clock.expects.value == 'packet':
+                sf8_deadline(clock.next_due)
+            scheduled_at = (machine.next_raster(max(live.pos, int(live.sample_now())))
+                            if clock and clock.expects.value == 'word' else
+                            clock.next_due+round(T[Kind.SHORT]*FS) if clock else None)
+            measured('prepare', prepare)
+            if clock is None:
+                if not capture(live.pos + round(1.25 * FS), idle=receiver.scan == 'incremental'):
+                    break
+                if receiver.scan == 'incremental' and receiver.clock is not None:
+                    continue
+                read('read_window', receiver.read_window, audio, begin, whole=True)
+                measured('mail', mail_status, turn)
+                details()
+                flush_messages()
+                cycle_onset = receiver.clock.next_due if receiver.clock else live.pos
+                silent = receiver.finish_cycle(cycle_onset)
+                if silent >= 16:
+                    machine.link_down('peer silent')
+                over(cycle_onset, '-', silent)
+                receiver.new_cycle()
+                continue
+            onset = clock.next_due
+            word_expected = clock.expects.value == "word"
+            early = onset + round((clock.slack_s + .180 if word_expected else .81) * FS)
+            grant_owned = _p4_grant_read_owned(machine, receiver)
+            if receiver.peer_normal_pending and receiver.peer_onset is not None:
+                cycle = round(1.25*FS)
+                peer = receiver.peer_onset + (
+                    ((onset-receiver.peer_onset)//cycle)*cycle if grant_owned else cycle)
+                if peer+round(.810*FS) > live.pos:
+                    early = min(early, peer+round(.810*FS))
+            if not capture(early, idle=receiver.scan == 'incremental'):
+                break
+            if receiver.scan == 'incremental' and (
+                    receiver.clock is not clock or clock.next_due != onset):
+                continue
+            capture_lag_before_read_ms = max(0, int(live.sample_now())-live.pos)*1000/FS
+            if not (getattr(probe, 'handoff_read', False)
+                    and any(abs(o.stream_sample-onset) < FS//100 for o in receiver.observations)):
+                read('read_partial', receiver.read_partial, audio, begin, deadline=early)
+            probe.handoff_read = False
+            if (machine.state == P4State.ISS_GRANT and clock.expects.value == 'word'
+                    and receiver.last_emission is not None
+                    and receiver.last_emission.packet_reply
+                    and receiver.peer_onset is not None
+                    and not any(o.word is not None and abs(o.stream_sample-onset) < FS//10
+                                for o in receiver.observations)):
+                cycle = round(1.25*FS)
+                peer = receiver.peer_onset + (
+                    (receiver.last_emission.stream_sample-receiver.peer_onset)//cycle+1)*cycle
+                if not capture(max(live.pos, peer+round(.840*FS))):
+                    break
+                read('read_partial', receiver.read_partial, audio, begin, deadline=live.pos)
+            if (word_expected and machine.state == P4State.ISS_LADDER
+                    and any(o.kind == Kind.WORD and o.word in (None, 'BREAKIN', 'Y27')
+                            and abs(o.stream_sample-onset) < FS//10
+                            for o in receiver.observations)):
+                # A ladder answer can be a Y27 body head; leave its whole word on air.
+                if not capture(max(live.pos, onset + round((.300 + clock.slack_s) * FS))):
+                    break
+                read('read_window', receiver.read_window, audio, begin, whole=True)
+            if (word_expected and machine.state == P4State.ISS_CLOSE
+                    and machine.close_context is not None
+                    and any(o.kind == Kind.WORD
+                            and o.word in (None, 'BREAKIN', 'Y27')
+                            and abs(o.stream_sample-onset) < FS//10
+                            and receiver._response_target(o) == machine.close_context.emission
+                            for o in receiver.observations)):
+                if not capture(max(live.pos, onset + round(.810*FS))):
+                    break
+                read('read_window', receiver.read_window, audio, begin, whole=True)
+            if receiver.clock is not clock and machine.state == P4State.IRS_YIELD:
+                clock = receiver.clock
+                onset = clock.next_due
+            word_expected = receiver.clock.expects.value == "word"
+            if not word_expected and receiver.clock is clock:
+                onset = clock.next_due
+            pending = pending_onsets()
+            early_empty = _p4_early_empty_answer(
+                machine, receiver, clock, onset, word_expected)
+            if early_empty:
+                if not capture(max(live.pos, onset+round(.865*FS))):
+                    break
+                read('read_turn_word', receiver.read_turn_word, audio, begin)
+                early_empty = _p4_early_empty_answer(
+                    machine, receiver, clock, onset, word_expected)
+            iss_slot = word_expected and not pending
+            def packet_delay():
+                if (_p4_breakin_phase_live(machine, pending)
+                        and machine.peer_phase.cycle == round(3.75 * FS)):
+                    return T[Kind.LONG]
+                nearby = [o for o in receiver.observations
+                          if abs(o.stream_sample-onset) < FS//10]
+                kinds = {o.kind for o in nearby
+                         if o.kind != Kind.NORMAL or not o.provisional}
+                if any(machine.pending[s].get('body') is not None
+                       and machine.pending[s]['body'].kind in (Kind.LONG, Kind.CHIRP) for s in pending):
+                    return T[Kind.CHIRP]
+                if (any(machine.pending[s].get('word') is not None
+                        or machine.pending[s].get('accepted') for s in pending)
+                        or kinds & {Kind.SHORT, Kind.NORMAL, Kind.BODY, Kind.WORD}):
+                    return T[Kind.SHORT]
+                return T[Kind.LONG] if kinds & {Kind.LONG, Kind.CHIRP} or (not word_expected and clock.cycle_s == 3.75) else T[Kind.SHORT]
+
+            delay = packet_delay()
+            if delay == T[Kind.LONG]:
+                iss_slot = False
+            due = _p4_link_due(machine, pending, onset, delay,
+                               max(live.pos, int(live.sample_now())), lead, iss_slot)
+            decision = due - lead
+            chirp_admission = (machine.state == P4State.ISS_LADDER
+                               and not machine._opening and machine.data_kind == Kind.CHIRP
+                               and machine.index == len(machine.ladder) - 1)
+            confirmation_end = _p4_word_confirmation_end(
+                receiver, machine, onset, decision, chirp_admission)
+            if iss_slot and confirmation_end is not None:
+                requesting = machine._requesting()
+                if not capture(max(live.pos, confirmation_end)):
+                    break
+                read('read_window', receiver.read_window, audio, begin, whole=True)
+                if requesting:
+                    word_expected = receiver.clock.expects.value == 'word'
+                    if not word_expected and receiver.clock is clock:
+                        onset = clock.next_due
+                    pending = pending_onsets()
+                    iss_slot = word_expected and not pending
+                    delay = packet_delay()
+                    due = _p4_link_due(machine, pending, onset, delay,
+                                       max(live.pos, int(live.sample_now())), lead, iss_slot)
+                    decision = due - lead
+            if not iss_slot and not early_empty:
+                skip_long_read = (delay == T[Kind.LONG]
+                    and breakin_long_generation == machine._peer_generation
+                    and machine._next is not None
+                    and machine._next.state == P4State.IRS_BREAKIN
+                    and machine._next.stream_sample <= onset + round(T[Kind.LONG]*FS) + FS//20)
+                read_at = (max(min(pending)+round(.810*FS), decision-round(.060*FS))
+                           if pending else decision-round(.030*FS))
+                if delay == T[Kind.LONG] and not skip_long_read:
+                    read_at = min(read_at, onset+round(.845*FS))
+                if receiver.last_emission and receiver.last_emission.packet_reply:
+                    # A checked side-raster packet has its own answer instant;
+                    # the independent grant WORD clock can be 605 ms later.
+                    read_at = (min(pending) if pending and _p4_grant_read_owned(machine, receiver)
+                               else onset)+round(.810*FS)
+                elif receiver.normal_waiting:
+                    read_at = max(read_at, onset+round(.845*FS))
+                if not capture(max(live.pos, read_at)):
+                    break
+                if not word_expected and not any(abs(o.stream_sample-onset) < FS//10
+                                                 and not (o.kind == Kind.NORMAL and o.provisional)
+                                                 for o in receiver.observations):
+                    read('read_partial', receiver.read_partial, audio, begin, deadline=live.pos)
+                read('read_window', receiver.read_window, audio, begin, whole=True)
+                if not word_expected and receiver.clock is clock:
+                    onset = clock.next_due
+                pending = pending_onsets()
+                delay = packet_delay()
+                if delay == T[Kind.LONG]:
+                    if clock.cycle_s == 1.25:
+                        # Confirm open-burst cadence after allowing a short to close.
+                        if not capture(max(live.pos, onset+FS)):
+                            break
+                        read('read_window', receiver.read_window, audio, begin, whole=True)
+                    chirp_heads = [o.stream_sample for o in receiver.observations
+                                   if o.kind == Kind.CHIRP and abs(o.stream_sample-onset) < FS//10]
+                    heads = [o.stream_sample for o in receiver.observations
+                             if o.kind in (Kind.LONG, Kind.CHIRP) and abs(o.stream_sample-onset) < FS//10]
+                    if chirp_heads:
+                        onset = chirp_heads[-1]
+                    elif heads:
+                        onset = min(onset, heads[-1])
+                    placed_chirp = bool(chirp_heads) and receiver.has_chirp_header(onset)
+                    if not placed_chirp and clock.expects.value == 'packet':
+                        prepare_at = onset+round(3.230*FS)
+                        if prepare_at < decision-round(.030*FS):
+                            if not capture(max(live.pos, prepare_at)):
+                                break
+                            measured('sf8_prepare', receiver.prepare_sf8, audio, begin)
+                            if (not receiver.sf8_prepared()
+                                    and not receiver.has_normal_long(onset)):
+                                measured('long_prepare', receiver.prepare_long, audio, begin)
+                    final_read = onset+round(delay*FS)-lead-round(.030*FS)
+                    # Enabled chirp reception alone must not spend the LONG work reserve.
+                    sf8_prepared = receiver.sf8_prepared()
+                    full_read = (onset+round(3.280*FS) if sf8_prepared else
+                                 onset+round(p4chirp.PACKET_S*FS) if placed_chirp else
+                                 final_read if chirp_heads else
+                                 max(onset+round(3.300*FS), final_read-round(.015*FS)))
+                    if not capture(max(live.pos, full_read)):
+                        break
+                    capture_lag_before_read_ms = max(0, int(live.sample_now())-live.pos)*1000/FS
+                    before_read = time.perf_counter()
+                    if not placed_chirp or not read_chirp(onset):
+                        read('read_window', receiver.read_window, audio, begin, whole=True)
+                    read_cost = round((time.perf_counter()-before_read)*FS)
+                    complete = any(not o.provisional and o.kind in (Kind.LONG, Kind.CHIRP)
+                                   and (o.frame is not None or o.kind == Kind.LONG and not machine.require_long_crc)
+                                   and abs(o.stream_sample-onset) < FS//10 for o in receiver.observations)
+                    if (not complete and final_read > live.pos
+                            and max(final_read, int(live.sample_now()))+read_cost <= onset+round(delay*FS)-lead):
+                        if not capture(final_read):
+                            break
+                        read('read_window', receiver.read_window, audio, begin, whole=True)
+                    if receiver.clock is clock:
+                        onset = clock.next_due
+                    pending = pending_onsets()
+                    delay = packet_delay()
+                    if (machine.state in (P4State.IRS_ANSWER, P4State.IRS_BREAKIN)
+                            and machine._wants_turn() and machine.peer_phase is not None):
+                        breakin_long_generation = machine._peer_generation
+                due = _p4_link_due(machine, pending, onset, delay,
+                                   max(live.pos, int(live.sample_now())), lead, False)
+                decision = due - lead
+            if (machine.state == P4State.IRS_ANSWER and not word_expected and not early_empty
+                    and delay == T[Kind.SHORT]
+                    and not any(abs(o.stream_sample-onset) < FS//10
+                                for o in receiver.observations)):
+                read('read_turn_word', receiver.read_turn_word, audio, begin)
+            measured('mail', mail_status, turn)
+            machine.reschedule_breakin(max(live.pos, int(live.sample_now())), lead=lead)
+            if iss_slot:
+                due = machine.next_raster(max(live.pos, int(live.sample_now())))
+                decision = due - lead
+            unread = machine.unread
+            proposal = (measured('decide', machine.decide, decision) if timing is not None
+                        else machine.decide(decision))
+            if proposal is None:
+                machine.silence(decision, answer_due=due)
+                proposal = (measured('decide', machine.decide, decision) if timing is not None
+                        else machine.decide(decision))
+            keyed_purpose = None
+            if (proposal is not None and proposal.state == P4State.IRS_BREAKIN
+                    and proposal.stream_sample > due + round(.05 * FS)):
+                proposal = None
+            if machine.unread != unread:
+                probe.link_events.append(dict(event="BREAKIN_UNREAD", count=machine.unread,
+                                              at=onset))
+                receiver.hold.unread += machine.unread-unread
+                messages.append(f"    [p4 link] BREAKIN_UNREAD {machine.unread} "
+                                f"epoch {receiver.hold.epoch}:{receiver.hold.unread} at {onset / FS:.3f}")
+            now = max(live.pos, int(live.sample_now()))
+            reason = ('proposal' if proposal is not None else
+                      machine.reason if machine.state == P4State.DOWN else
+                      'body unread at decision' if machine.unread != unread else
+                      'awaiting ACK confirmation' if machine._waiting_ack is not None else
+                      'answer deferred' if machine._deferred is not None else
+                      'awaiting body' if pending else
+                      'packet observed; no response selected' if len(probe.heard) > first_heard else
+                      'no new registration')
+            missed = (max(0, round((proposal.stream_sample-scheduled_at)/(clock.cycle_s*FS)))
+                      if proposal is not None and iss_slot and scheduled_at is not None else 0)
+            packet_read = getattr(receiver, 'packet_read', None)
+            if packet_read and abs(packet_read.get('at', -FS)-onset) >= FS//10:
+                packet_read = None
+            decision_work = dict(work_ms)
+            decision_row = dict(event='Decision', at=onset, state=machine.state,
+                expected=clock.expects.value, scheduled_at=scheduled_at if iss_slot else due, decision_at=decision,
+                nominal_due=due, local_due=due-residual_n,
+                answer_residual_samples=residual_n,
+                now_sample=now, capture_end_sample=live.pos, reason=reason,
+                capture_lag_before_read_ms=round(capture_lag_before_read_ms, 3),
+                proposed_at=proposal.stream_sample if proposal else None,
+                missed_slots=missed, registrations=len(probe.heard)-first_heard,
+                packet_read=dict(packet_read or {}),
+                work_ms={k: round(v, 3) for k, v in work_ms.items()})
+            probe.link_events.append(decision_row)
+            if timing is not None:
+                trace('decision', now, now, due=due, nominal_due=due, local_due=due-residual_n,
+                      answer_residual_samples=residual_n, lead=lead, deadline=decision,
+                      proposed_at=proposal.stream_sample if proposal else None,
+                      reason=reason)
+            trace_phase = 'postdecision'
+            stages = ' '.join(f'{k}={v:.1f}ms' for k, v in work_ms.items())
+            key = f'{proposal.stream_sample/FS:.3f}' if proposal else 'none'
+            messages.append(f"    [p4 decision] {machine.state} peer={onset/FS:.3f} "
+                  f"expect={clock.expects.value} key={key} reason={reason}; "
+                  f"margin={(decision-now)/FS*1000:.1f}ms "
+                  f"capture_lag={(now-live.pos)/FS*1000:.1f}ms missed_slots={missed}; {stages}; "
+                  f"nominal_due={due/FS:.6f} local_due={(due-residual_n)/FS:.6f}")
+            if packet_read:
+                messages.append(f"    [p4 read] {packet_read}")
+            details()
+            if proposal is not None:
+                if proposal.kind == Kind.LONG:
+                    refuse("no renderer", proposal)
+                else:
+                    key = cache_key(
+                        proposal.kind,
+                        proposal.word,
+                        proposal.value,
+                        proposal.header,
+                        proposal.payload,
+                        proposal.status,
+                        proposal.repeat,
+                        proposal.chirp_slot,
+                    )
+                    waveform = cache.get(key)
+                    if waveform is None:
+                        refuse("waveform not prepared", proposal)
+                    else:
+                        aimed = _MasterGrid(
+                            anchor=proposal.stream_sample,
+                            slot_n=round(1.25 * FS),
+                            offset_n=0,
+                            packet_n=len(waveform),
+                            cs_n=round(0.244 * FS),
+                            d_max_n=round(0.1 * FS),
+                        )
+                        sf8_source = machine.sf8_source(proposal)
+                        key_wait = round(.010*FS) if sf8_source is not None else 0
+                        if not capture(max(live.pos, proposal.stream_sample - lead - key_wait)):
+                            break
+                        if not machine.can_key(proposal):
+                            refuse("deadline", proposal)
+                        elif (
+                            _keyable_slot(
+                                live, aimed, 0, 0, listen=False, shift=False
+                            )
+                            != 0
+                        ):
+                            refuse("deadline", proposal)
+                        else:
+                            tx.aim(aimed, 0)
+                            before = len(tx.slots_used)
+                            probe.emitting = True
+                            def admit_answer():
+                                if sf8_source is not None and not sf8_eligible(sf8_source):
+                                    raise _MissedTxSlot("late SF8 answer")
+                                if not machine.can_key(proposal):
+                                    raise _MissedTxSlot('proposal no longer keyable')
+                            guarded_answer = sf8_source is not None or machine.managed_application
+                            tx.p4_tx_admit = admit_answer if guarded_answer else None
+                            tx.p4_tx_capture_end = proposal.stream_sample - lead - key_wait
+                            try:
+                                admit_answer()
+                                if timing is None:
+                                    tx._tx(waveform,
+                                           f"P4 LINK {proposal.kind} {proposal.word or proposal.value or ''}")
+                                else:
+                                    measured('emit', tx._tx, waveform,
+                                             f"P4 LINK {proposal.kind} {proposal.word or proposal.value or ''}")
+                            except _MissedTxSlot:
+                                refuse("deadline", proposal)
+                            else:
+                                if tx.refused or len(tx.slots_used) == before:
+                                    refuse("admission", proposal)
+                                else:
+                                    sent = machine.keyed(tx.tx_audio_start)
+                                    keyed_purpose = sent.purpose
+                                    packet = (dict(status=sent.status, payload=sent.payload.hex())
+                                              if sent.kind in (Kind.BODY, Kind.CHIRP, Kind.NORMAL) else {})
+                                    probe.link_events.append(
+                                        dict(
+                                            event="Keyed",
+                                            kind=sent.kind,
+                                            at=sent.stream_sample,
+                                            nominal_due=sent.stream_sample,
+                                            local_due=sent.stream_sample-residual_n,
+                                            answer_residual_samples=residual_n,
+                                            word=sent.word,
+                                            word_render=word_render,
+                                            word_offset_hz=word_carrier_hz(
+                                                'Y27' if sent.kind == Kind.BODY else
+                                                sent.word if sent.kind == Kind.WORD else None,
+                                                word_render),
+                                            ack_reason=sent.ack_reason,
+                                            purpose=sent.purpose,
+                                            accepted_target=sent.accepted_target,
+                                            current_slot=sent.current_slot,
+                                            current_slot_accepted=sent.current_slot_accepted,
+                                            ack_identity=(sent.ack_identity[0], sent.ack_identity[1].hex())
+                                            if sent.ack_identity is not None else None,
+                                            value=sent.value,
+                                            state=machine.state,
+                                            **packet,
+                                        )
+                                    )
+                                    if packet:
+                                        print(f"    [p4 link] Keyed {sent.kind} status=0x{sent.status:02x} "
+                                              f"payload={sent.payload!r} at {sent.stream_sample/FS:.3f} "
+                                              f"state={machine.state}", flush=True)
+                                    train_root = machine.train_root_for(sent)
+                                    emission = Emission(
+                                            sent.kind,
+                                            Role.IRS
+                                            if (sent.kind == Kind.WORD
+                                                and sent.state != P4State.IRS_BREAKIN)
+                                            or sent.purpose == 'close-grant'
+                                            else Role.ISS,
+                                            sent.stream_sample,
+                                            len(waveform) / FS,
+                                            packet_reply=sent.kind in (Kind.BODY, Kind.NORMAL)
+                                            and sent.state != P4State.ISS_CLOSE,
+                                            train=train_root is not None,
+                                            train_root=(train_root if train_root != sent.stream_sample else None),
+                                            train_words=frozenset(('X27', 'Z27', 'Y27'))
+                                            if sent.kind == Kind.SHORT and sent.value == 38 else None,
+                                            accepted_target=sent.accepted_target,
+                                            current_slot=sent.current_slot,
+                                            current_slot_accepted=sent.current_slot_accepted,
+                                            close_grant=sent.purpose == 'close-grant',
+                                        )
+                                    receiver.note_emission(emission)
+                                    receiver.set_receive_phase(machine._peer_generation)
+                                    if (sent.state == P4State.ISS_CLOSE
+                                            and machine.close_context is not None):
+                                        receiver.arm_close_lease(sent.stream_sample,
+                                                                 end=machine.close_context.end)
+                                    if (sent.kind == Kind.WORD and sent.word == 'U27'
+                                            and sent.peer_control == 53 and sent.responds_to is not None):
+                                        receiver.chirp = True
+                                        probe.link_events.append(dict(event='peer-mode', mode='SL1 chirp',
+                                            at=sent.stream_sample, responds_to=sent.responds_to))
+                                    probe.emissions.append(
+                                        dict(
+                                            slot=tx.slot,
+                                            audio_start=tx.tx_audio_start,
+                                            audio_end=tx.tx_end,
+                                            status=sent.status,
+                                            payload=sent.payload.hex(),
+                                            value=sent.value,
+                                            header=sent.header,
+                                            word=sent.word,
+                                            word_render=word_render,
+                                            word_offset_hz=word_carrier_hz(
+                                                'Y27' if sent.kind == Kind.BODY else
+                                                sent.word if sent.kind == Kind.WORD else None,
+                                                word_render),
+                                            proposed_at=proposal.stream_sample,
+                                            keyed_at=sent.stream_sample,
+                                            nominal_due=sent.stream_sample,
+                                            local_due=sent.stream_sample-residual_n,
+                                            answer_residual_samples=residual_n,
+                                            output_enqueue_sample=getattr(live, "output_enqueue_sample", None),
+                                            refused=None,
+                                            waveform_sha256=hashlib.sha256(
+                                                waveform.tobytes()
+                                            ).hexdigest(),
+                                        )
+                                    )
+                            finally:
+                                tx.p4_tx_admit = None
+                                tx.p4_tx_capture_end = None
+                                probe.emitting = False
+            if (proposal is None or not proposal.current_slot_accepted) and machine.state != P4State.DOWN:
+                if not capture(max(live.pos, decision)):
+                    break
+                elapsed = max(0, max(live.pos, int(live.sample_now()))-decision)/FS
+                budget = .250 if proposal is not None else max(0., .250-elapsed)
+                read('refine', receiver.refine, deadline=time.monotonic()+budget)
+            # Full observations resolve behind our carrier. Keep the old head
+            # available even after note_emission has placed the next peer onset.
+            # Complete the packet horizon so off-raster word acquisition can run.
+            if not capture(max(live.pos, onset + round((.28 if word_expected else .85) * FS))):
+                break
+            old_clock = receiver.clock
+            receiver.clock = clock
+            read('read_window', receiver.read_window, audio, begin, whole=True,
+                 long_fallback=True)
+            receiver.clock = old_clock
+            if (machine.state == P4State.IRS_ANSWER
+                    and receiver._close_grant_word
+                    and receiver.last_emission is not None
+                    and not any(o.word == 'V27'
+                                and abs(o.stream_sample-receiver.last_emission.stream_sample
+                                        -round(.935*FS)) < FS//10
+                                for o in receiver.observations)):
+                read('read_turn_word', receiver.read_turn_word, audio, begin)
+            later_work = {k: round(v-decision_work.get(k, 0.), 3) for k, v in work_ms.items()
+                          if v != decision_work.get(k, 0.)}
+            decision_row.update(postdecision_work_ms=later_work,
+                                cycle_end_sample=live.pos,
+                                cycle_now_sample=int(live.sample_now()))
+            if later_work:
+                messages.append('    [p4 cycle] after decision ' + ' '.join(
+                    f'{k}={v:.1f}ms' for k, v in later_work.items()))
+            details()
+            flush_messages()
+            silent = receiver.finish_cycle(onset)
+            yielding = machine.state == P4State.IRS_YIELD
+            # The full packet read may finish too close to the next grant.
+            # Choose its raster after the remaining pre-key and device notice.
+            fallback_at = max(onset, live.pos + lead + getattr(live, 'key_notice', 0))
+            machine.peer_cycle(silent, fallback_at if yielding else onset)
+            if yielding and machine.state == P4State.ISS_GRANT:
+                receiver.restore_grant_clock(onset)
+            if silent:
+                print(_p4_reader_miss(onset, silent,
+                      'word' if word_expected else 'packet', _p4_reader_results(reader_calls),
+                      receiver.normal_coherence), flush=True)
+            if silent >= 16:
+                machine.link_down('peer silent')
+            over(onset, clock.expects.value, silent, keyed_purpose)
+            if receiver.clock is clock:
+                receiver.new_cycle(max(live.pos, clock.next_due+round(clock.cycle_s*FS)))
+        if machine.state != P4State.DOWN:
+            machine.link_down("session ceiling" if live.pos >= link_end else "capture ended")
+    finally:
+        if timing is not None:
+            now = max(live.pos, int(live.sample_now()))
+            trace('stop', now, now)
+            probe.link_events.append(dict(event='TimingTrace', stages=timing))
+        details()
+        flush_messages()
+        machine.outbox.requeue()
+        tx.p4_link_deadline = None
+        receiver.normal_deadline = None
+        receiver.sf8_deadline = None
+        receiver.invalidate_long_phase()
+        tx.p4_tx_admit = None
+        tx.p4_tx_capture_end = None
+        host.arq.p4_sf8_eligible = None
+        tx.sessrx = session_rx
+        probe.emitting = False
+    probe.link_events.extend(machine.link_events)
+    probe.link_events.extend(receiver.live_events)
+    probe.link_events.extend(receiver.hold.events)
+    from .p4budget import decision_summary
+    try:
+        summary = decision_summary(probe.link_events, probe.heard, FS)
+    except Exception as exc:
+        print(f"    [p4 decode budget] summary failed: {exc}", flush=True)
+    else:
+        probe.link_events.append(summary)
+        print(f"    [p4 decode budget] {summary}", flush=True)
+    probe.link_events.append(dict(event="Stopped", unread=machine.unread,
+                                  state=machine.state))
+    probe.reason = machine.reason or "P4 link complete"
+    host.arq.state = State.DISCONNECTING
+    print(f"    [p4 link] LINK DOWN: {probe.reason}", flush=True)
+    return probe.reason
+
+
+def _run_p4_probe(tx, live, raster, *, in_slot: bool = False, stalled: int = 0,
+                  heard: int | None = None) -> str:
     """Own the post-grant clock; retain RX without running connected P3 ARQ.
 
     A full four-second RX interval follows each burst. This is an experiment
     cadence on the inherited phase grid, not a claim about the peer's P4 state.
+
+    `stalled`: the repeat requests our first P1 packet drew instead of the ACK.
+    No short goes out; the probe keys nothing until it hears the peer's own
+    X27/Y27, then keys the replies.
+
+    `heard`: the slot the peer's word was read in during the hold, while we
+    were still keying packet 1. The replies follow it with no listen first.
     """
     probe = tx.p4_probe
+    if getattr(tx, "host", None) is not None:
+        _drain_host_log(tx.host)
+    if probe.counter_experiment:
+        print("    [p4 experiment] grant-to-chirp hypothesis; status challenge 0x61,0x61,0x62; "
+              "fixed payload; no inferred ACK or mail delivery", flush=True)
     if live is None or raster is None:
         probe.reason = "probe requires a sample-clock capture stream"
         return probe.reason
-    audio = p4chirp.entry_packet(probe.payload, probe.status)
-    # Render once, before choosing a future boundary. No scan/render is owed
+    if hasattr(tx, "_observe_input_loss"):
+        tx._observe_input_loss("P4 entry before render")
+    statuses = probe.statuses()
+    shorts = 0 if stalled or heard is not None else probe.attempts
+    probe.path = "hold word" if heard is not None else "stall" if stalled else "trigger"
+    render = {"short": p4shorttx.short_packet,
+              "chirp": p4chirp.entry_packet}.get(probe.packet)
+    label = {"short": "SHORT", "robust": "ROBUST"}.get(probe.packet, "CHIRP")
+    field = f"field {len(probe.payload)}B" if render else "the tape's own field"
+    asked = [f" v={v} hdr={h}" for v, h in zip(probe.values, probe.headers)] \
+        if probe.values else [""] * probe.attempts
+    if not stalled and heard is None:
+        print("    [p4 probe] query schedule "
+              + (",".join(f"v{v}/{h}" for v, h in zip(probe.values, probe.headers))
+                 if probe.values else ",".join(map(p4oracle.status_name, statuses)))
+              + (f" then {','.join(probe.replies)}" if probe.replies else "")
+              + f"; {probe.packet} packet; {field}; "
+              "each window read back as the answer", flush=True)
+    if render is None:
+        # Without values the probe repeats the tape's own caller burst, which
+        # `p4robusttx.robust_short` numbers as value 6 on header word A.
+        keyed = probe.values or (P4_CLONE_VALUE,) * probe.attempts
+        spoken = probe.headers or (P4_CLONE_HEADER,) * probe.attempts
+        waveforms = [p4robusttx.robust_short(v, h)
+                     for v, h in zip(keyed, spoken)]
+    else:
+        rendered = {status: render(probe.payload, status)
+                    for status in dict.fromkeys(statuses)}
+        waveforms = [rendered[status] for status in statuses]
+    # A reply follows the last short in the next slot, and each reply the one
+    # before it, whatever the shorts' own cadence.
+    waveforms = waveforms[:shorts] + [p4robusttx.robust_word(w) for w in probe.replies]
+    if getattr(tx, 'p4_link_options', None) is not None:
+        waveforms = waveforms[:shorts]
+    total = len(waveforms)
+    # Render each distinct waveform before choosing a future boundary. No scan/render is owed
     # between the final admission check and the chirp's key instant.
     slot = tx.slot
-    receiver, tx.sessrx = tx.sessrx, None
+    # The offset the session measured on the peer's own carrier, kept before the
+    # receiver is set aside: with it the Chu search runs at one offset instead
+    # of thirteen, and `p4sig.header_score` says why that matters.
+    probe.cfo_hz = getattr(tx.sessrx, "p3_receive_offset_hz", 0.0) or None
+    if heard is not None:
+        print(f"    [p4 probe] path: the peer's {probe.trigger_word} -- "
+              f"keying {','.join(probe.replies)} one per slot", flush=True)
+        slot, in_slot = raster.next_slot(heard), False
+    elif stalled:
+        probe.trigger_word = f"P1 stall: {stalled} repeat requests"
+        remaining = max(0., (probe.deadline(FS)-max(live.sample_now(), live.pos))/FS)
+        print(f"    [p4 probe] path: silent listen -- our first P1 packet drew {stalled} "
+              "repeat requests and no ACK; keying nothing more, reading each "
+              "cycle for the peer's X27/Y27"
+              + (f", then {','.join(probe.replies)} one per slot" if probe.replies else "")
+              + f"; entry ceiling in {remaining:.1f}s",
+              flush=True)
+        heard = _listen_for_p4_word(probe, live, raster, raster.next_slot(tx.slot),
+                                    first=bool(probe.replies) or getattr(tx, 'p4_link_options', None) is not None,
+                                    link_tx=tx if getattr(tx, 'p4_link_options', None) is not None else None)
+        if heard is None:
+            print(f"    [p4 probe] STOP: {probe.reason}", flush=True)
+            return probe.reason
+        slot, in_slot = raster.next_slot(heard), False
+    else:
+        print(f"    [p4 probe] path: {label.lower()} packets on the {probe.trigger_word}",
+              flush=True)
     tx.breakin_due = tx.listening = False
+    if getattr(probe, 'peer_breakin', False):
+        return _run_p4_link(tx, live, raster)
+    receiver, tx.sessrx = tx.sessrx, None
+    if receiver is not None and hasattr(receiver, 'p4'):
+        probe.receiver = receiver.p4
+        if getattr(tx, 'p4_link_options', None) is not None:
+            probe.receiver.breakin = True
+        probe.arq = receiver.host.arq
     probe.reason = "probe interrupted"
 
-    def capture(until, kind="post-chirp"):
+    # A gap between back-to-back packets is read once the next packet is on the
+    # air: a burst in it costs the reader 80 ms, and the gap leaves 30. That is
+    # what keyed onair-0923-1624's v9 a slot late after an answered v6, and v8
+    # on time after an unanswered v9.
+    unread = []
+    loss_refusals = 0
+    last_p1_word = None
+    prekey_input = None
+
+    def read_p1(window, origin):
+        # Diagnostic receive ownership only: never call the ARQ/keying seam
+        # recursively from an entry attempt. Read outside the final key drain.
+        nonlocal last_p1_word
+        for event in rxfront.decode_events(window, p3_envelope=False,
+                p3_packets=False, p3_headers=False, p2_markers=False):
+            if event.kind != 'cs' or event.protocol != 'PACTOR-1':
+                continue
+            word = f'CS{event.cs + 1}'
+            at = origin + round(event.t * FS)
+            last_p1_word = word
+            raster.note_peer_codeword(at, round(.120 * FS), word, None,
+                                      protocol=Protocol.PACTOR1)
+            probe.link_events.append(dict(event='entry P1 control', at=at,
+                                          word=word, sense=event.sense))
+            print(f"    [p4 entry] peer {word} at {at/FS:.3f}; entry pending",
+                  flush=True)
+
+    def capture(until, kind="post-chirp", defer=False):
+        nonlocal prekey_input
         begin = live.pos
         until = min(until, probe.deadline(FS))
+        pieces, stopped, window = [], False, np.empty(0, np.float32)
         try:
             while live.pos < until:
                 if not probe.room(int(live.sample_now()), 0, FS):
                     probe.reason = "post-grant deadline during receive window"
+                    stopped = True
                     break
                 part = live.take_until(min(until, live.pos + FS // 4))
+                pieces.append(part.copy())
                 if not part.size:
                     probe.reason = "capture ended before receive window completed"
+                    stopped = True
                     break
         finally:
             probe.windows.append(dict(kind=kind, start=begin, end=live.pos, target=until))
+            if pieces:
+                window = np.concatenate(pieces)
+            if kind == "post-chirp":
+                probe.received.append((len(probe.emissions) - 1, begin, window))
+            elif window.size:
+                # The quietest the channel was heard beside these windows. A
+                # receive window with no edges in it is only distinguishable
+                # from silence against something measured elsewhere.
+                floor = p4oracle.inband_db(window, FS)[1]
+                probe.floor_db = (floor if probe.floor_db is None
+                                  else min(probe.floor_db, floor))
+        if kind == "prekey":
+            prekey_input = (begin, window)
+        if loss_refusals and kind == "after-refusal" and window.size:
+            read_p1(window, begin)
+        # Outside the `finally`: a window cut short by the deadline, or by an
+        # interrupt on its way out, is read once at teardown and not twice.
+        if kind == "post-chirp" and not stopped:
+            if reactive:
+                return live.pos >= until
+            if getattr(tx, 'p4_link_options', None) is None:
+                _p4_words_heard(probe, raster, window, begin, kind)
+            if defer:
+                unread.append((len(probe.emissions) - 1, begin, window))
+            else:
+                _read_p4_reply(probe, begin, window)
         return live.pos >= until
 
+    reactive = getattr(tx, 'p4_link_options', None) is not None and probe.packet == 'robust'
+    if reactive:
+        _p4_link_waveforms(probe, word_render=getattr(tx.p4_link_options, 'p4_word_render', 'off'))
+        from .p4turn import ACK
+        probe.receiver.cfo_hz = probe.cfo_hz or probe.receiver.cfo_hz
+        probe.receiver.enable_hold()
+        probe.receiver.breakin = True
+    back_to_back = probe.cadence == "consecutive"
+    # `in_slot`: the caller read up to the slot it hands over, as a back-to-back
+    # packet's gap was read up to its own.
+    held = in_slot
     try:
-        for attempt in range(probe.attempts):
+        attempt = 0
+        while attempt < total:
+            audio = waveforms[attempt]
+            reply = attempt - shorts
+            chained = back_to_back or reply >= 0
+            follows = back_to_back or attempt + 1 >= shorts
             now = max(live.pos, int(live.sample_now()))
             # Keep half a second for admission, or longer for a slow rig/DAC.
-            reserve = max(FS // 2, _prekey_lead(live, round(tx.settle * FS)) + FS // 4)
-            while raster.boundary(slot) < now + reserve:
+            # Back to back leaves 0.49 s between packets, so there the reserve is
+            # the key's own lead: the waveforms are already rendered.
+            tight = _prekey_lead(live, round(tx.settle * FS)) + round(PREKEY_RESERVE_S * FS)
+            reserve = (tight if chained else
+                       max(FS // 2, _prekey_lead(live, round(tx.settle * FS)) + FS // 4))
+            # A back-to-back packet owns the slot its gap was read up to, and the
+            # key's own guard in `_tx` says whether it is still on time. Re-asked
+            # here on the converter's clock, which leads the reader by the input
+            # latency after the gap and trails it after the TX flush, the slot was
+            # always lost: onair-0923-1532, 1600, 1603 and 1615 keyed n, n+2, n+4.
+            while not held and raster.boundary(slot) < now + reserve:
                 slot = raster.next_slot(slot)
             boundary = tx.aim(raster, slot)
             span = (boundary - now) / FS + len(audio) / FS + probe.listen_seconds
@@ -11970,38 +15800,287 @@ def _run_p4_probe(tx, live, raster) -> str:
             # Capture early waiting time without invoking the rolling decoder.
             if not capture(boundary - reserve, "prekey"):
                 break
+            what = (f"P4 PROBE REPLY {reply + 1}/{len(probe.replies)} {probe.replies[reply]}"
+                    if reply >= 0 else
+                    f"P4 PROBE {label} {attempt + 1}/{probe.attempts}{asked[attempt]}")
             before = len(tx.slots_used)
             probe.emitting = True
             try:
-                tx._tx(audio, f"P4 PROBE CHIRP {attempt + 1}/{probe.attempts}")
+                tx._tx(audio, what)
             finally:
                 probe.emitting = False
             if tx.refused or len(tx.slots_used) == before:
-                probe.reason = "chirp refused; stopping without automatic retry or guard stand-down"
-                capture(min(probe.deadline(FS), live.pos + round(probe.listen_seconds * FS)),
-                        "after-refusal")
+                if getattr(tx, 'refusal_cause', None) == 'input-loss' and reply < 0:
+                    loss_refusals += 1
+                    retained = getattr(tx, '_refused_input', None)
+                    pieces = [part for part in (prekey_input, retained) if part is not None]
+                    if pieces:
+                        # The final drain may contain only a control's tail;
+                        # retain its preceding prekey samples as one read.
+                        origin = pieces[0][0]
+                        waiting = np.concatenate([audio for _, audio in pieces])
+                        if waiting.size:
+                            read_p1(waiting, origin)
+                    prekey_input = tx._refused_input = None
+                    retry = loss_refusals < REGRID_TRIES
+                    probe.link_events.append(dict(event='entry refused', label=what,
+                        cause='input-loss', attempt=attempt, anchor=raster.anchor,
+                        refusals=loss_refusals, retry=retry,
+                        remaining_s=max(0., (probe.deadline(FS)-live.pos)/FS)))
+                    print(f"    [p4 entry] {what} refused: input-loss; "
+                          f"grid={raster.anchor}, refusal {loss_refusals}/{REGRID_TRIES}, "
+                          f"{max(0., (probe.deadline(FS)-live.pos)/FS):.3f}s left; "
+                          f"last peer {last_p1_word or 'unread'}", flush=True)
+                    probe.reason = 'P4 entry not emitted after capture-loss refusal'
+                    span = raster.slot_n if retry else round(probe.listen_seconds * FS)
+                    if capture(min(probe.deadline(FS), live.pos + span), 'after-refusal') and retry:
+                        # This waveform never aired: keep its index and choose
+                        # a future boundary on the translated capture raster.
+                        audio = (p4robusttx.robust_short(keyed[attempt], spoken[attempt])
+                                 if render is None else render(probe.payload, statuses[attempt]))
+                        waveforms[attempt] = audio
+                        slot, held = raster.next_slot(tx.slot), False
+                        continue
+                else:
+                    probe.reason = "chirp refused; stopping without automatic retry or guard stand-down"
+                    capture(min(probe.deadline(FS), live.pos + round(probe.listen_seconds * FS)),
+                            "after-refusal")
                 break
+            short = reply < 0
             probe.emissions.append(dict(slot=tx.slot, audio_start=tx.tx_audio_start,
-                                        audio_end=tx.tx_end))
-            print(f"    [p4 probe] chirp {len(probe.emissions)}/{probe.attempts}; "
-                  f"receiving continuously for {probe.listen_seconds:g} seconds; "
-                  "P3 scans and ARQ replies suspended", flush=True)
+                                        audio_end=tx.tx_end,
+                                        status=statuses[attempt] if short else None,
+                                        value=(probe.values[attempt]
+                                               if short and probe.values else None),
+                                        header=(probe.headers[attempt]
+                                                if short and probe.values else None),
+                                        word=None if short else probe.replies[reply],
+                                        waveform_sha256=hashlib.sha256(audio.tobytes()).hexdigest()))
+            if getattr(probe, 'receiver', None) is not None:
+                from .p4receiver import Emission, Kind, Role
+                kind = Kind.WORD if not short else Kind.CHIRP if probe.packet == 'chirp' else Kind.SHORT
+                train = bool(short and probe.values and probe.values[attempt] in (7, 38))
+                root = (next(e['audio_start'] for e in probe.emissions
+                             if e.get('value') == probe.values[attempt]) if train else None)
+                probe.receiver.note_emission(Emission(kind, Role.IRS if kind == Kind.WORD else Role.ISS,
+                                                       tx.tx_audio_start, len(audio)/FS,
+                                                       train=train,
+                                                       train_root=root if root != tx.tx_audio_start else None,
+                                                       train_words=frozenset(('X27', 'Z27', 'Y27'))
+                                                       if short and probe.values
+                                                       and probe.values[attempt] == 38 else None))
+            while unread:
+                emission, begin, window = unread.pop(0)
+                _read_p4_reply(probe, begin, window, emission)
             if live.pos < tx.tx_end:  # Dry replay has no duplex TX flush.
                 live.take_until(tx.tx_end)
-            if not capture(tx.tx_end + round(probe.listen_seconds * FS)):
+            gap = follows and attempt + 1 < total
+            gap = gap or (getattr(tx, 'p4_link_options', None) is not None and attempt + 1 == total)
+            until = (raster.boundary(raster.next_slot(tx.slot)) - tight if gap
+                     else tx.tx_end + round(probe.listen_seconds * FS))
+            print("    [p4 probe] "
+                  + (f"reply {reply + 1}/{len(probe.replies)}; " if reply >= 0 else
+                     f"{label.lower()} {len(probe.emissions)}/{probe.attempts}; ")
+                  + f"status={_p4_spell(probe.emissions[-1])}; "
+                  + (f"receiving {(until - tx.tx_end) / FS * 1e3:.0f} ms, the gap to the "
+                     "next slot; " if gap else
+                     f"receiving continuously for {probe.listen_seconds:g} seconds; ")
+                  + "P3 scans and ARQ replies suspended", flush=True)
+            if reactive:
+                probe.receiver.expected_words = {'Y27', 'Z27', 'T27', 'W27', 'X27',
+                                                  ACK.get(probe.emissions[-1].get('value'), 'Y27')}
+                first = len(probe.received)
+                early = min(until, tx.tx_audio_start+round((.923+.215)*FS))
+                if not capture(early, defer=True):
+                    break
+                _, origin, window = probe.received[-1]
+                read_started, read_clock = time.perf_counter(), max(live.pos, int(live.sample_now()))
+                records = probe.receiver.read_partial(window, origin, deadline=early)
+                read_cost = max(round((time.perf_counter()-read_started)*FS),
+                                max(live.pos, int(live.sample_now()))-read_clock)
+                if not records and early < until:
+                    if not capture(until, defer=True):
+                        break
+                    window = np.concatenate([w for _, _, w in probe.received[first:]])
+                    if max(live.pos, int(live.sample_now()))+read_cost <= until+round(PREKEY_RESERVE_S*FS):
+                        records = probe.receiver.read_partial(window, origin, deadline=until)
+                    else:
+                        probe.receiver.live_events.append(dict(event='probe tail deferred',
+                            at=until, read_cost_ms=1000*read_cost/FS))
+                probe.received[first:] = [(len(probe.emissions)-1, origin, window)]
+                if any(r.responds_to == tx.tx_audio_start for r in records):
+                    probe.handoff_audio = origin, window
+                    probe.handoff_read = True
+                    probe.reason = 'probe answered'
+                    break
+            elif not capture(until, defer=gap):
                 break
-            slot = raster.next_slot(tx.slot)
+            slot, held = raster.next_slot(tx.slot), follows
+            attempt += 1
         else:
             probe.reason = "chirp limit reached; final receive window complete"
     finally:
+        for emission, begin, window in unread:
+            _read_p4_reply(probe, begin, window, emission)
         tx.sessrx = receiver
         probe.emitting = False
+    if getattr(tx, 'p4_link_options', None) is not None:
+        if probe.emissions or getattr(probe, 'peer_breakin', False):
+            return _run_p4_link(tx, live, raster)
+        if loss_refusals:
+            probe.reason = ('P4 entry not emitted after capture-loss refusal; '
+                            f'last peer {last_p1_word or "unread"}')
+        else:
+            probe.reason = f'P4 entry not emitted; {probe.reason}'
+    for _, start, window in probe.received:
+        _p4_words_heard(probe, raster, window, start, "after our packet")
     print(f"    [p4 probe] STOP: {probe.reason}", flush=True)
     return probe.reason
 
 
+ROBUST_ANSWER_FLOOR_S = 0.020
+"""The earliest a Robust Connect answer is looked for after our call ends.
+
+Not `ACQUIRE_FLOOR_S`: KB5LZK's answer starts 48-49 ms after our call's audio
+ends (onair-0923-1413), inside that floor, and this read places the burst on its
+own envelope edge rather than accepting a codeword wherever one lines up."""
+
+AFTER_ROBUST = {"listen": "listen", "p1": "arq", "p2": "arq", "p3": "arq", "p4-robust": "chirp"}
+"""`--after-robust` spelled as the `--after-connect` path that runs it."""
+
+ROBUST_ENTRY_GAP = 2
+"""Preserve the direct-P3 experiment's third-slot entry after the answered call.
+
+This is an experimental wait, not a reproduction of two silent slots on tape:
+the recording carries P2 packets and controls there. The default P2 bridge
+supplies that exchange and enters P3 in the slot after its confirmed grant.
+"""
+
+ROBUST_PROBE_VALUES = (6, 9, 8)
+
+
+def _robust_answer(seg, seg_start: int, keyed_at: int, boundary: int,
+                   raster, d_max_n: int, projected: bool):
+    """`(answer, d)` if this window holds the answer to our Robust Connect.
+
+    Searched off the same carrier ends the P1 codeword search uses, and held to
+    the level a transmission stands at in its own window, the P1 gate's. Both
+    ends are read, not the first with a band: the slot's projection assumes a
+    P1 packet, 80 ms longer than a robust call, and a band opened that late
+    starts inside the answer.
+    """
+    for origin in _answer_origins(keyed_at, boundary, raster.slot_n,
+                                  raster.p1_data_n, projected):
+        since = seg_start - origin
+        lo = max(0.0, ROBUST_ANSWER_FLOOR_S - since / FS)
+        hi = min(d_max_n - since, seg.size - p1rx.ROBUST_CS_SHORT * p1rx.CS_BIT_S * FS) / FS
+        if hi <= lo:
+            continue
+        got = p1rx.acquire_robust_answer_search(seg, lo, hi - lo)
+        if got is not None and _candidate_excess(seg, got.at) >= ANSWER_CODEWORD_X:
+            return got, got.at + since / FS
+    return None
+
+
+def _key_robust_bridge(tx, bridge):
+    """Repeat the same counter-1 field; alternate arrangement by keyed cycle.
+
+    `--robust-p2-opening k9` spends the first keyed cycle on K4MCK's counter-0
+    frame, so the callsign packet follows it in the swapped arrangement.
+    """
+    swapped = bool(bridge.cycles % 2)
+    if bridge.opening == "k9" and bridge.cycles == 0:
+        tx._p2_burst(pactor2.PATHS[1], b"", 0x18, swapped=swapped, marker=9,
+                     what="P2 ROBUST OPENING counter=0")
+        return
+    note = " (inverted)" if bridge.marker_flag == "inverted" else ""
+    tx._p2_burst(pactor2.PATHS[1], bridge.payload, bridge.status, swapped=swapped,
+                 marker=bridge.marker, what=f"P2 ROBUST BRIDGE counter=1{note}")
+
+
+def _run_robust_bridge(args, bridge, live, raster, tx, host, sessrx, outdir):
+    """Read each P2 answer before its next key, preserving the caller's grid.
+
+    Normal ARQ is suspended until the confirmed grant. The first bridge frame
+    has already keyed at the answer boundary, before any post-key diagnostics.
+    """
+    granted = grant = False
+    try:
+        while bridge.cycles < bridge.max_cycles and live is not None:
+            if host.arq.terminal_pending or host.arq.state not in LINKED:
+                break
+            keyed_slot = tx.slot
+            slot = keyed_slot + 1
+            boundary = raster.boundary(slot)
+            until = boundary - round(tx.settle * FS) - live.holdback
+            # Read only: do not pass the bridge words through ordinary CS ARQ.
+            live.wait_until(until)
+            audio = live.read_ready()
+            origin = live.pos - len(audio)
+            started = time.perf_counter()
+            grant, report = bridge.read(audio, origin, raster.boundary(keyed_slot), keyed_slot)
+            cost = (time.perf_counter()-started)*1000
+            print(f"    [robust bridge] slot {keyed_slot}: {report}; read={cost:.2f}ms", flush=True)
+            forced = bool(not grant and bridge.force_after is not None
+                          and bridge.cycles >= max(1, bridge.force_after))
+            tx.aim(raster, slot)
+            if grant or forced:
+                if bridge.phase is not None:
+                    sessrx._p3_preferred_phase = raster.boundary(keyed_slot) + bridge.phase + round(.005*FS)
+                granted = host.take_bridge_grant(forced=forced)
+                _drain_host_log(host)
+                break
+            if bridge.cycles >= bridge.max_cycles:
+                break
+            _key_robust_bridge(tx, bridge)
+        if not granted:
+            print(f"    !! P2 call packet never taken: {bridge.cycles} cycles, "
+                  f"words seen {[(h['form'], h['entry']) for h in bridge.heard]}; "
+                  "listen only; wait about 2 min before re-calling this gateway", flush=True)
+        return tx.slot, granted
+    finally:
+        args._robust_result = dict(answer=getattr(args, '_robust_answer', None),
+            cycles=bridge.cycles, reads=bridge.heard, granted=granted,
+            forced=bool(granted and bridge.force_after is not None and not grant))
+        _capture_write_text(outdir / 'robust-bridge.json', json.dumps(args._robust_result, indent=2) + '\n')
+
+
+def _after_answer(args, arq) -> str:
+    """What follows the answer this link came up on, as an `--after-connect`."""
+    if getattr(arq, "robust_answer", None) is None:
+        return args.after_connect
+    return AFTER_ROBUST[getattr(args, "after_robust", "listen")]
+
+
 def _p1_response_defaults(args) -> None:
     """Select the alternate P1 announcement/response, independently of entry mode."""
+    if getattr(args, "after_robust", None) == "p2":
+        for name in ("pactor1_only", "pactor2_only", "p2_mail"):
+            if getattr(args, name, False):
+                print(f"warning: --{name.replace('_', '-')} conflicts with the robust P2-to-P3 bridge; using the bridge ceiling", flush=True)
+                setattr(args, name, False)
+    args.p2_phase_delay_ms = (P2_MAIL_PHASE_DELAY_MS
+                              if (getattr(args, "p2_mail", False)
+                                  or getattr(args, "after_robust", None) == "p2") else 0.0)
+    if getattr(args, "p2_mail", False):
+        incompatible = ("pactor1_only", "pactor3_only", "offer_pactor2",
+                        "p3_uninvited", "decline_grant", "p1_grant_only")
+        if any(getattr(args, name, False) for name in incompatible):
+            raise SystemExit("--p2-mail requires the PACTOR-2 ceiling without other upgrade policies")
+        args.pactor2_only = True
+        args.mail_fetch = True
+        args.over = True
+        args.p3_repeat_gear = 0
+        args.observe_after_link_down = False
+        if args.mail_wait_greeting is None:
+            args.mail_wait_greeting = True
+    if getattr(args, "pactor2_only", False):
+        incompatible = ("p4_entry", "p3_mail", "p3_timing_trial",
+                        "p3_entry_timing_trial", "p3_timing_unbounded",
+                        "no_p3_fallback")
+        if any(getattr(args, name, False) for name in incompatible):
+            raise SystemExit("--pactor2-only conflicts with P3/P4 entry and hold policies")
+        args.p1_6a9 = True
     if not getattr(args, "p1_6a9", False):
         return
     if args.p1_status_bits45 not in (None, 1):
@@ -12011,25 +16090,157 @@ def _p1_response_defaults(args) -> None:
     args.p1_status_bits45 = 1
 
 
+def _connect_defaults(args) -> None:
+    """Resolve the call this arm keys, and what it makes of the answer.
+
+    A Robust Connect is "only allowed within the normal PACTOR time frame", so
+    the PTC refuses `C !%CALL` outright rather than choosing one of the two
+    [PTC-IIIusb 4.1 §6.22]. A `%`, `!` or `;` on the callsign is the same
+    operator by another route, so the two are combined and parsed here rather
+    than at the key. `chirp` runs the probe from the connect answer, so it owes
+    the same coherence `--p4-entry` does and says so through the same check.
+    """
+    call = (getattr(args, "dxcall", None) or "").strip()
+    if call:
+        # The argument the call is made with, read here rather than at the key:
+        # `%!CALL` is the PTC's refusal, and a rig is open by the time `run`
+        # builds it.
+        try:
+            parse_connect_arg(("%" if args.connect == "robust" else "") + call)
+        except ValueError as refused:
+            raise SystemExit(f"--dxcall {call} with --connect {args.connect}: {refused}")
+    if args.connect_fallback_after is not None:
+        if args.connect != "robust":
+            raise SystemExit("--connect-fallback-after falls back FROM --connect robust")
+        if args.connect_fallback_after < 1:
+            raise SystemExit("--connect-fallback-after counts unanswered calls")
+    if args.after_connect_cycles < 1:
+        raise SystemExit("--after-connect-cycles reads at least one peer cycle")
+    if args.after_connect in ("listen", "chirp") and args.message:
+        raise SystemExit(f"--after-connect {args.after_connect} keys no data packet, "
+                         "so it can carry no --message")
+    if args.after_connect == "chirp":
+        args.p4_entry = True
+    if getattr(args, "p1_robust_stall", 0):
+        if args.after_connect != "p1-robust":
+            raise SystemExit("--p1-robust-stall counts repeat requests of the first "
+                             "packet of --after-connect p1-robust")
+        if args.p1_robust_stall < 1:
+            raise SystemExit("--p1-robust-stall counts at least one repeat request")
+    elif getattr(args, "p1_robust_stall_then", "silent") != "silent":
+        raise SystemExit("--p1-robust-stall-then says what --p1-robust-stall keys")
+    after_robust = getattr(args, "after_robust", "listen")
+    if after_robust != "listen" and args.connect != "robust":
+        raise SystemExit(f"--after-robust {after_robust} follows a robust answer, "
+                         f"and --connect {args.connect} draws none")
+    if after_robust == "p3":
+        closed = next((k for k in ("pactor1_only", "pactor2_only", "p2_mail")
+                       if getattr(args, k, False)), None)
+        if closed:
+            raise SystemExit("--after-robust p3 keys a PACTOR-3 entry packet, which "
+                             f"--{closed.replace('_', '-')} rules out")
+    flag = ("--after-robust p4-robust" if after_robust == "p4-robust" else
+            "--after-connect p1-robust" if args.after_connect == "p1-robust" else None)
+    if flag:
+        if args.p4_probe_packet not in ("chirp", "robust"):
+            raise SystemExit(f"{flag} keys the robust short "
+                             f"packet, not --p4-probe-packet {args.p4_probe_packet}")
+        args.p4_entry = True
+        args.p4_probe_packet = "robust"
+        args.p4_probe_values = args.p4_probe_values or ROBUST_PROBE_VALUES
+
+
 def _p4_entry_defaults(args) -> None:
     """Resolve the explicit P4 entry probe before any hardware is opened."""
+    mode = getattr(args, 'p4_word_render', 'off')
+    if mode == 'stock' and not getattr(args, 'p4_link', False):
+        raise SystemExit('--p4-word-render stock requires --p4-link')
+    if getattr(args, "p4_link", False):
+        _p4_answer_timing_defaults(args)
+    if getattr(args, 'p4_irs_silent_cycles', 0) < 0:
+        raise SystemExit('--p4-irs-silent-cycles must be nonnegative')
+    if getattr(args, 'p4_irs_silent_cycles', 0) and not getattr(args, 'p4_link', False):
+        raise SystemExit('--p4-irs-silent-cycles requires --p4-link')
+    if getattr(args, 'p4_train_policy', 'repeat') != 'repeat' and not getattr(args, 'p4_link', False):
+        raise SystemExit('--p4-train-policy passive requires --p4-link')
+    if getattr(args, "p4_mail", False):
+        if any(getattr(args, k, False) for k in ("p2_mail", "p3_mail", "pactor2_only")):
+            raise SystemExit("--p4-mail conflicts with P2/P3 mail or a P2 ceiling")
+        args.p4_entry = True
+        args.p4_entry_attempts = 3
+    if getattr(args, 'p4_link', False):
+        if not getattr(args, 'p4_entry', False):
+            raise SystemExit('--p4-link requires P4 entry')
+        if args.p4_text is not None and (args.mail_fetch or args.mail_send):
+            raise SystemExit('--p4-text cannot be combined with --mail-fetch or --mail-send')
+        if not np.isfinite(args.p4_link_timeout) or args.p4_link_timeout <= 0 or args.p4_hold_cycles < 0:
+            raise SystemExit('--p4-link-timeout must be positive and finite; --p4-hold-cycles must be nonnegative')
+        if args.p4_ladder == 'none' and args.p4_data != 'body':
+            raise SystemExit('--p4-ladder none sends a body then normal frames; it needs --p4-data body')
+    schedule = getattr(args, "p4_probe_statuses", None)
+    field = getattr(args, "p4_probe_payload", None)
+    packet = getattr(args, "p4_probe_packet", "chirp") != "chirp"
+    # `is not None`, because an EMPTY field is a query too, and replacing the
+    # preregistered one with it is exactly what this refuses.
+    asked = (bool(schedule) or field is not None or packet
+             or getattr(args, "p4_probe_cadence", "spaced") != "spaced"
+             or bool(getattr(args, "p4_probe_values", None))
+             or bool(getattr(args, "p4_probe_headers", None)))
+    if asked and getattr(args, "p4_mail", False):
+        raise SystemExit("--p4-probe-statuses/--p4-probe-payload/--p4-probe-packet "
+                         "cannot rewrite --p4-mail's preregistered query")
+    if asked and not getattr(args, "p4_entry", False):
+        raise SystemExit("--p4-probe-statuses/--p4-probe-payload/--p4-probe-packet "
+                         "describe the --p4-entry chirp probe, which is off")
+    robust = getattr(args, "p4_probe_packet", "") == "robust"
+    if getattr(args, 'p4_link', False) and not robust:
+        raise SystemExit('--p4-link starts after robust shorts; use --after-connect p1-robust or --p4-probe-packet robust')
+    if (schedule or field is not None) and robust:
+        raise SystemExit("--p4-probe-packet robust keys a datablock value, "
+                         "which carries neither our status byte nor our field")
+    values = getattr(args, "p4_probe_values", None)
+    words = getattr(args, "p4_probe_headers", None)
+    if getattr(args, "p4_probe_reply", None) and not robust:
+        raise SystemExit("--p4-probe-reply keys a gateway's robust answer word "
+                         "after robust shorts; --p4-probe-packet robust keys them")
+    if (values or words) and not robust:
+        raise SystemExit("--p4-probe-values/--p4-probe-headers describe the "
+                         "robust datablock; --p4-probe-packet robust keys it")
+    if words and not values:
+        raise SystemExit("--p4-probe-headers names a header per value, and "
+                         "--p4-probe-values names none")
+    if values:
+        args.p4_probe_headers = (("A", "B", "A", "B")[:len(values)] if words == "alt"
+                                 else tuple(words or ("A",) * len(values)))
+        if len(args.p4_probe_headers) != len(values):
+            raise SystemExit("--p4-probe-headers takes one header per "
+                             "--p4-probe-values entry")
+        args.p4_entry_attempts = len(values)
+    if schedule:
+        args.p4_entry_attempts = len(schedule)
     if not getattr(args, "p4_entry", False):
         return
     incompatible = ("pactor1_only", "pactor3_only", "offer_pactor2", "p3_uninvited",
-                    "decline_grant", "mail_send", "mail_fetch", "message",
+                    "decline_grant", "message",
                     "p3_timing_trial", "p3_entry_timing_trial")
-    if any(getattr(args, k, False) for k in incompatible):
+    if not getattr(args, "p4_link", False):
+        incompatible += ("mail_send", "mail_fetch")
+    if any(getattr(args, k, False) for k in incompatible) \
+            or getattr(args, "after_connect", "arq") == "listen":
         raise SystemExit("--p4-entry requires a granted entry probe without mail, "
-                         "forced modes or P3 timing trials")
+                         "forced modes, P3 timing trials or a listening arm")
     if tuple(args.p3_entry) not in (("template",), ("p4chirp",)):
         raise SystemExit("--p4-entry cannot be combined with a different --p3-entry ladder")
     if not 1 <= args.p4_entry_attempts <= 4:
         raise SystemExit("--p4-entry-attempts must be between 1 and 4")
-    if not 0 < args.p4_entry_timeout <= 60:
-        raise SystemExit("--p4-entry-timeout must be positive and at most 60 seconds")
+    if not 0 < args.p4_entry_timeout <= 120:
+        raise SystemExit("--p4-entry-timeout must be positive and at most 120 seconds")
+    if not 0 < args.p4_probe_listen <= args.p4_entry_timeout:
+        raise SystemExit("--p4-probe-listen must be positive and within --p4-entry-timeout")
     args.p3_entry = ("p4chirp",)
     args.p1_grant_only = True
-    args.hold = 12
+    # Past the stall, so the idle hold never queues a goodbye in front of it.
+    args.hold = max(12, getattr(args, "p1_robust_stall", 0) + 1)
     args.observe_after_link_down = False
 
 
@@ -12072,18 +16283,45 @@ def _arm_defaults(args) -> None:
     `--p1-status-bits45` always wins.
     """
     if _mail_arm(args):
-        if not args.pactor1_only \
-                and not any(getattr(args, door) for door in UPGRADE_DOORS):
+        if not args.pactor1_only and getattr(args, "after_robust", "listen") != "p3" \
+                and not any(getattr(args, door, False) for door in UPGRADE_DOORS):
             args.pactor1_only = True
         if args.p1_status_bits45 is None and not (
-                args.pactor3_only or args.offer_pactor2 or args.p1_grant_only):
+                getattr(args, "pactor2_only", False) or args.pactor3_only
+                or args.offer_pactor2 or args.p1_grant_only):
             args.p1_status_bits45 = 0
         if not args.hold:
             args.hold = MAIL_HOLD_CYCLES
     if args.p1_status_bits45 is None:
         args.p1_status_bits45 = P1_STATUS_ANNOUNCE
-    if getattr(args, "p1_setup_phase", "reply") == "call" and not args.pactor1_only:
-        raise SystemExit("--p1-setup-phase call requires a PACTOR-1-only arm")
+    if getattr(args, "p1_setup_phase", "reply") == "call":
+        _call_phase_arm(args)
+
+
+def _call_phase_arm(args) -> None:
+    """Refuse `--p1-setup-phase call` where the link can leave PACTOR-1 unacknowledged.
+
+    The call phase holds until the first payload ACK, and `_SessionRx._on`
+    retires it on that ACK, a grant settling the same packet, a role change or
+    a protocol change. A P4 entry follows that ACK (`--after-connect
+    p1-robust`) or that grant, so it keys on the peer-derived phase like any
+    other link. A robust answer taken as an entry, or a chirp off the connect
+    answer, leaves before any P1 payload is acknowledged.
+    """
+    after_robust = getattr(args, "after_robust", "listen")
+    early = ("--after-connect chirp" if getattr(args, "after_connect", "arq") == "chirp"
+             else f"--after-robust {after_robust}" if after_robust in ("p2", "p3", "p4-robust")
+             else None)
+    if early:
+        raise SystemExit(f"--p1-setup-phase call holds until the first P1 payload ACK, "
+                         f"and {early} leaves PACTOR-1 before one: drop {early}")
+    if args.pactor1_only or getattr(args, "p4_entry", False):
+        return
+    door = next((d for d in UPGRADE_DOORS if getattr(args, d, False)), None)
+    fix = (f"replace --{door.replace('_', '-')} with --pactor1-only" if door
+           else "add --pactor1-only")
+    raise SystemExit("--p1-setup-phase call runs on PACTOR-1-only and P4-entry arms: "
+                     f"{fix}, or enter P4 with --p4-entry")
 
 
 def _redact_argv(argv) -> tuple[str, ...]:
@@ -12124,8 +16362,58 @@ def _note_host_free(host) -> None:
               f"before start", flush=True)
 
 
+def _capture_output_lifetime(function):
+    """End the original capture and publish honest writer state on every exit."""
+    from functools import wraps
+
+    @wraps(function)
+    def owned(args):
+        args._capture_identity = None
+        completed = False
+        try:
+            result = function(args)
+            completed = True
+            return result
+        finally:
+            capture = args._capture_identity
+            if capture is not None:
+                # Keep an original driver exception if final journaling also fails.
+                # A successful run still raises its first journal failure.
+                import sys
+                primary = sys.exc_info()[1]
+                cleanup_error = None
+                try:
+                    capture.end()
+                except BaseException as exc:
+                    cleanup_error = exc
+                for writer in list(_CAPTURE_ROOTS.values()):
+                    if writer.capture.capture_id != capture.capture_id:
+                        continue
+                    if not completed or cleanup_error is not None:
+                        writer._status['failed'] = True
+                    try:
+                        if _WRITER is None:
+                            writer.update_status(state='finalized', component='session')
+                        else:
+                            _WRITER.publish_status(writer)
+                    except BaseException as exc:
+                        writer._status['failed'] = True
+                        writer._status['cleanup_error_type'] = type(exc).__name__
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                if cleanup_error is not None and primary is None:
+                    raise cleanup_error
+    return owned
+
+
 @progress_to_stdout()
+@_capture_output_lifetime
 def run(args) -> int:
+    try:
+        identity = identification.resolve(args.mycall, getattr(args, "idcall", None))
+    except ValueError as exc:
+        raise SystemExit(f"identification: {exc}") from None
+    identity.announce(optional=args.cwid_optional)
     # Written before any guard can refuse the arm, because a transcript whose
     # command line has to be reconstructed afterwards cannot settle what flew.
     # The password never reaches a transcript.
@@ -12133,8 +16421,12 @@ def run(args) -> int:
     print("  argv: " + (shlex.join(typed) if typed is not None else
                         "unavailable (run received a namespace)"), flush=True)
     args.tx_drive = config.tx_drive(args.tx_drive)
-    args.tx_latency_ms = config.tx_latency_ms(args.tx_latency_ms)
+    args.tx_timing_plan = resolve_tx_timing(
+        args.tx_latency_ms, rig=args.rig,
+        command_path=getattr(args, "tx_command_path", "generic"))
+    args.tx_latency_ms = args.tx_timing_plan.tx_latency_ms
     _p1_response_defaults(args)
+    _connect_defaults(args)
     _p4_entry_defaults(args)
     _p3_mail_defaults(args)
     _timing_trial_defaults(args)
@@ -12178,13 +16470,29 @@ def run(args) -> int:
             # holds it -- so the flag would be silently nothing rather than the
             # power it names.
             raise SystemExit(f"{flag} writes RFPOWER over CAT; pass --transmit")
-    outdir = Path(args.outdir).expanduser()
-    outdir.mkdir(parents=True, exist_ok=True)
+    from hfmodem.core import capture_identity
+    offline = bool(getattr(args, 'rx_wav', None)) or not any(
+        getattr(args, name, False) for name in ('transmit', 'listen_only', 'preflight', 'tune', 'answer'))
+    capture, capture_writer = capture_identity.prepare_output(
+        args.outdir, capture_id=getattr(args, 'capture_id', None),
+        root=getattr(args, 'capture_root', None), role=getattr(args, 'capture_role', None),
+        offline=offline)
+    outdir = capture_writer.root
+    if outdir in _CAPTURE_ROOTS:
+        raise capture_identity.IdentityError('Output root cannot be reassigned')
+    _CAPTURE_ROOTS[outdir] = capture_writer
+    args._capture_identity = capture
+    args.outdir = str(outdir)
     # The connect burst carries the CALLED station's callsign, so a default here
     # would put a real, uninvolved station on the air. Only the modes that render
     # a connect need one; a watch that just listens does not.
-    if not args.dxcall and not (args.listen_only or args.preflight or args.tune):
+    if not args.dxcall and not (args.listen_only or args.preflight or args.tune
+                                or args.answer):
         raise SystemExit("--dxcall is required: the station this will call")
+    if args.answer and args.dxcall:
+        raise SystemExit("--answer waits to be called; --dxcall places a call")
+    if args.answer and not args.hold:
+        args.hold = MAIL_HOLD_CYCLES
 
     # Only --transmit consumes a frequency -- the QSY before keying. A dry run
     # renders TX to WAV and tunes nothing, and bare --preflight/--listen-only
@@ -12199,6 +16507,10 @@ def run(args) -> int:
         dial = ota.center_to_dial(center)
 
     settle = RIGS[args.rig].get("settle", 0.10)
+    if args.answer and settle + 0.010 > ANSWER_D_S:
+        raise SystemExit(f"--answer keys {ANSWER_D_S * 1e3:.0f} ms after the caller's "
+                         f"frame and this rig needs {settle * 1e3:.0f} ms of PTT settle "
+                         f"in front of that -- it cannot answer a call")
     fits, budget = _budget(args.cycle, args.tx_offset, settle)
     print(budget, flush=True)
     if not fits and args.transmit:
@@ -12208,6 +16520,10 @@ def run(args) -> int:
         # while reporting that it stayed quiet -- so this hands the arithmetic to
         # the operator instead of quietly widening something to make the sum work.
         raise SystemExit("the cycle does not close at this offset -- not keying")
+
+    if args.transmit and not (args.listen_only or args.preflight or args.tune or args.reply_wav):
+        from ..core.launch_load import emit_load_advisory
+        emit_load_advisory()
 
     rig = None
     if args.transmit:
@@ -12274,7 +16590,10 @@ def run(args) -> int:
               f"  TX drive {args.tx_drive:.2f} peak, PTT settle "
               f"{RIGS[args.rig].get('settle', 0.10):.2f}s, "
               f"cycle {args.cycle:.2f}s, transmit latency correction "
-              f"{args.tx_latency_ms:.1f} ms")
+              f"{args.tx_latency_ms:.1f} ms; reference evidence: "
+              + ("FT-891 20 ms inferred from P3 witness correlation and P1 "
+                 "peer-answer timing on 2026-09-14, not a direct loopback measurement"
+                 if args.rig == "ft891" else "rig/audio chain unmeasured"))
         print(f"   P1 control signals sent "
               f"{'LSB' if args.p1_ack_lsb else 'MSB'}-first; which codeword goes "
               f"out is the protocol's alternation, not a setting", flush=True)
@@ -12307,6 +16626,7 @@ def run(args) -> int:
         sd.wait()
         audio = rec[:, 0]
         _save_capture(path, audio)
+        _store_capture(path)
         for ev in rxfront.decode_events(audio):
             print(f"  {ev.t:7.2f}  {ev.kind:8s} {ev.text}", flush=True)
         return 0
@@ -12334,7 +16654,7 @@ def run(args) -> int:
             rig.stop()
         return 0
     # Every mode that may run without a --dxcall has returned by here.
-    dx = args.dxcall.upper()
+    dx = (args.dxcall or "").upper()
     in_dev = find_device(args.audio_in, "in", required=True) if args.transmit else None
 
     tx = RadioTx(rig, transmit=args.transmit, out_dev=out_dev, outdir=outdir,
@@ -12356,6 +16676,11 @@ def run(args) -> int:
     tx.p3_control_tail = getattr(args, "p3_control_tail", "off")
     tx.p3_control_stagger = getattr(args, "p3_control_stagger", "off")
     tx.p3_follow_offset = getattr(args, "p3_follow_offset", "all")
+    offset_ms = getattr(args, "p3_irs_reply_offset_ms", 0.0)
+    tx.p3_irs_reply_offset_n = round(offset_ms * FS / 1000)
+    if offset_ms:
+        print(f"  --p3-irs-reply-offset-ms {offset_ms:+g}: our IRS controls key "
+              f"{offset_ms:+g} ms from the P3 mail reply clock.", flush=True)
     tx.p3_keep_slots = getattr(args, "p3_keep_slots", "all")
     print(f"  P3 control profile: waveform={tx.p3_control_waveform}, "
           f"placement={tx.p3_control_placement}, "
@@ -12367,17 +16692,31 @@ def run(args) -> int:
               "carrier alternates every ARQ cycle from this foot, generated "
               "rather than projected from the peer. Each burst prints the "
               "arrangement it went out on.", flush=True)
-    tx.p4_probe = (EntryProbe(args.p4_entry_attempts, args.p4_entry_timeout)
+    tx.p4_probe = (EntryProbe(args.p4_entry_attempts, args.p4_entry_timeout,
+                             counter_experiment=getattr(args, "p4_mail", False),
+                             schedule=tuple(getattr(args, "p4_probe_statuses", ()) or ()),
+                             chirp_field=getattr(args, "p4_probe_payload", None),
+                             packet=getattr(args, "p4_probe_packet", "chirp"),
+                             values=tuple(getattr(args, "p4_probe_values", ()) or ()),
+                             headers=tuple(getattr(args, "p4_probe_headers", ()) or ()),
+                             cadence=getattr(args, "p4_probe_cadence", "spaced"),
+                             listen_seconds=getattr(args, "p4_probe_listen", 4.0),
+                             replies=tuple(getattr(args, "p4_probe_reply", ()) or ()))
                    if getattr(args, "p4_entry", False) else None)
     host = PtcHost(peer=tx, mycall=args.mycall)
     _note_host_free(host)
     host.stay_in_pactor1 = args.pactor1_only
+    host.pactor2_only = getattr(args, "pactor2_only", False)
+    if host.pactor2_only:
+        print("  PACTOR-2 maximum: P1 setup/fallback, bits45=1, experimental "
+              "0x6A9 -> P2 SL1; P3/P4 disabled. P2 controls and negotiation "
+              "still need real-peer validation; transmit speed capped at SL3.", flush=True)
     host.stay_in_pactor3 = args.pactor3_only
     host.no_p3_fallback = args.no_p3_fallback
     host.p3_changeover_cs5 = getattr(args, "p3_changeover_cs5", False)
     host.p3_qrt_confirm = getattr(args, "p3_qrt_confirm", False)
     if host.p3_qrt_confirm:
-        print("  P3 QRT CONFIRM experiment: after the QRT ACK, send the stock "
+        print("  P3 close: after the QRT ACK, send the stock "
               "terminal pattern with opposite ACK parity; teardown remains bounded.")
     if host.p3_changeover_cs5:
         print("  --p3-changeover-cs5: experimental CS5 reply to decoded P3 "
@@ -12402,8 +16741,33 @@ def run(args) -> int:
               "selected entry response 0x6A9. Entry waveform and P1-only "
               "policy unchanged.", flush=True)
     host.p1_grant_only = args.p1_grant_only
+    if getattr(args, "after_connect", "arq") == "p1-robust":
+        host.p4_after_first_ack = True
+        host.p1_robust_stall = args.p1_robust_stall
+        host.p1_stall_goodbye = args.p1_robust_stall_then == "goodbye"
+        host.p1_stall_shorts = args.p1_robust_stall_then == "shorts"
+        tx.p4_probe.trigger_word = "P1 ACK"
     host.offer_pactor2 = args.offer_pactor2
     host.announce_lower = args.announce_lower
+    if args.p1_supervisor_every < 1:
+        raise SystemExit("--p1-supervisor-every counts acknowledged packets: 1 or more")
+    host.level_digit = args.p1_level_digit
+    host.supervisor_schedule = tuple(args.p1_supervisor)
+    host.supervisor_every = args.p1_supervisor_every
+    if args.p1_idle_id_every < 0:
+        raise SystemExit("--p1-idle-id-every counts idle packets: 0 (off) or more")
+    host.idle_id_every = args.p1_idle_id_every
+    if host.idle_id_every:
+        print(f"  IDLE ID: function B with {host.mycall} in every "
+              f"{host.idle_id_every}th idle PACTOR-1 packet.", flush=True)
+    if args.p1_level_digit != 1 or args.p1_supervisor:
+        print(f"  SUPERVISOR CHANNEL: announcement level digit "
+              f"{args.p1_level_digit}; "
+              + (f"{len(args.p1_supervisor)} function block(s) "
+                 f"{', '.join(args.p1_supervisor)}, one every "
+                 f"{args.p1_supervisor_every} acknowledged packet(s)"
+                 if args.p1_supervisor else "no function blocks") + ".",
+              flush=True)
     host.arq.cfg.entry_ladder = args.p3_entry
     host.arq.cfg.entry_sl = args.p3_entry_sl
     if args.p3_entry_sl != ArqConfig.entry_sl:
@@ -12413,17 +16777,23 @@ def run(args) -> int:
     host.arq.cfg.traffic_sl = args.p3_traffic_sl
     if args.p3_traffic_sl != ArqConfig.traffic_sl:
         print(f"  --p3-traffic-sl {args.p3_traffic_sl}: an answered entry "
-              f"packet runs traffic at SL{args.p3_traffic_sl}; the peer's CS4 "
-              "still climbs from there.", flush=True)
+              f"packet runs traffic at SL{args.p3_traffic_sl}; a CS4 answering "
+              "entry takes precedence and raises the actual entry level.", flush=True)
     host.arq.cfg.speed_up = args.p3_speed_up
     host.arq.cfg.p3_max_try = getattr(args, "p3_max_try", ArqConfig.p3_max_try)
     host.arq.cfg.p3_max_down = getattr(args, "p3_max_down", ArqConfig.p3_max_down)
+    host.arq.cfg.p3_speed_policy = getattr(args, "p3_speed_policy", "current")
+    host.arq.cfg.p3_cs4_parity = getattr(args, "p3_cs4_parity", False)
+    if host.arq.cfg.p3_cs4_parity:
+        print("  --p3-cs4-parity: a CS4 on an even counter asks for the packet "
+              "again; the counter keeps its bytes.", flush=True)
     print(f"  P3 adaptation: MAXTry={host.arq.cfg.p3_max_try} total speed-up "
           f"trial transmissions; MAXDown={host.arq.cfg.p3_max_down} consecutive "
-          "receive errors before CS5.", flush=True)
+          f"receive errors before CS5; speed policy {host.arq.cfg.p3_speed_policy}.",
+          flush=True)
     host.p3_tx_gear_hold = getattr(args, "p3_tx_gear_hold", False)
     if host.p3_tx_gear_hold:
-        print("  P3 TX GEAR HOLD trial: repeated CS4/CS5 retain the pending "
+        print("  P3 TX GEAR HOLD trial: a repeated CS5 retains the pending "
               "packet until an ACK or different command; MAXTry bounds "
               "the speed-up trial.", flush=True)
     if args.p3_speed_up == "hold":
@@ -12460,7 +16830,19 @@ def run(args) -> int:
         print("  --p3-data-flush reference: levels 2 to 6 end their trellis on "
               "the tail DL6MAA's own level-3 packets carry; speed level 1 keys "
               "zeros, which is what WS8EOC keys.", flush=True)
+    placement.CREST_LIMIT_DB = (None if args.p3_crest_limit == "off"
+                                else args.p3_crest_limit)
+    if placement.CREST_LIMIT_DB is not None:
+        print(f"  --p3-crest-limit {placement.CREST_LIMIT_DB:g}: every PACTOR-III "
+              "data packet and control burst is envelope-limited to that "
+              "peak-to-average ratio before the drive. Average power at the same "
+              "peak rises by the PAPR taken off -- watch ALC and PA temperature.",
+              flush=True)
     tx.entry_delay_n = round(args.p3_entry_delay / 1e3 * FS)
+    tx.p2_phase_delay_n = round(args.p2_phase_delay_ms / 1000 * FS)
+    if tx.p2_phase_delay_n:
+        print(f"  P2 MAIL PHASE TRIAL: +{args.p2_phase_delay_ms:.2f} ms "
+              "throughout native P2; P1 setup/fallback unchanged.", flush=True)
     tx.qrm_guard = args.qrm_guard
     tx.breakin_at_boundary = args.breakin_at_boundary
     # SAID AT THE TOP OF THE ARM, because both of these are settings whose whole
@@ -12535,23 +16917,35 @@ def run(args) -> int:
     # reached a break-in field and no further (`tests/shrike/test_holdbudget.py`).
     mail = None
     if _mail_arm(args):
-        from ..winlink import B2FSession, MailClient, load_outbound
+        from ..winlink import B2FSession, load_outbound
         outbox = [load_outbound(p, args.mycall, to=args.mail_to,
                                 subject=args.mail_subject)
                   for p in (args.mail_send or [])]
+        # Empty invitations cannot distinguish a delayed FS from a stalled
+        # proposal, even after free text. Let B2F detect refusals and the
+        # existing link limits bound a stall.
         mail = MailClient(
             B2FSession(args.mycall, role="calling", target=args.dxcall,
                        password=args.mail_password, outbox=outbox,
                        grid=config.grid(),
                        client_sid=config.client_sid(args.mail_sid)),
-            host.arq.on_host_data)
+            _mail_send_callback(host))
+        from .p3progress import MailProgress
+        mail.progress = MailProgress(mail, host.arq,
+                                     getattr(args, 'p3_mail_progress_seconds', 120.))
         host.app = mail
         print(f"mail: announcing as {mail.session.sid}", flush=True)
         if getattr(args, "mail_wait_greeting", False):
             print("mail: --mail-wait-greeting: ACK the greeting; defer automatic "
                   "break-in until the mail client has a reply", flush=True)
 
+    if not args.answer:
+        tx.prepare_p1_setup()
     reply = _load(args.reply_wav) if args.reply_wav else None
+    host.arq.p4_admitted = bool(tx.p4_probe)
+    tx.p4_link_options = args if getattr(args, 'p4_link', False) else None
+    tx.p4_link_host = host
+    tx.p4_link_mail = mail
     sessrx = _SessionRx(host)
     sessrx.p3_wideband_prekey = getattr(args, "p3_wideband_prekey", False)
     if sessrx.p3_wideband_prekey:
@@ -12568,7 +16962,8 @@ def run(args) -> int:
         # cannot be run again -- the far end and the band have both moved on.
         live = (_LiveInput(in_dev, out_dev, blocksize=args.audio_block,
                            record=outdir / "stream.wav",
-                           tx_latency_n=round(args.tx_latency_ms * FS / 1e3))
+                           tx_latency_n=args.tx_timing_plan.latency_samples,
+                           geometry_n=args.tx_timing_plan.geometry_samples)
                 if args.transmit else None)
     if live:
         tx.live = live
@@ -12586,18 +16981,36 @@ def run(args) -> int:
     # silence on the speaker; only this tells them apart.
     ended = "the cycle budget ran out"
     linked = False
+    identified = False
     # The rig's own power, moved at the link's protocol boundaries; the host
     # layer calls in from the transitions and this end owns the CAT.
     power = _phase_power(args, rig)
     host.phase_power = power
     try:
-        print(f"connecting {args.mycall} -> {dx} ...")
+        called = None
+        if args.answer:
+            print(f"listening {args.answer:.0f} s for a call to {args.mycall} ...",
+                  flush=True)
+            host.arq.on_host_listen(True)
+            called = live and _await_call(live, args.mycall, args.answer,
+                                          strict=host.arq.cfg.conintegrity == 1)
+            if not called:
+                ended = f"no call to {args.mycall} was heard in {args.answer:.0f} s"
+                print(f"  {ended}", flush=True)
+                return code
+        else:
+            print(f"connecting {args.mycall} -> {dx} ...")
         if power is not None:
             # BEFORE the call and not from `connect_burst`, which is the seam
             # that keys it: a level written a pipe write in front of the carrier
             # is a level the rig may not have taken yet when the carrier goes up.
             power.select(Protocol.PACTOR1, "before the first call")
-        host.arq.on_host_connect(args.mycall, dx)          # ISS: sends the connect
+        host.arq.connect_fallback_after = args.connect_fallback_after
+        # The operator's own `C` argument: the variant reaches the renderer the
+        # way a host's does, so the retries resend the call that was asked for.
+        if not called:
+            host.arq.on_host_connect(
+                args.mycall, ("%" if args.connect == "robust" else "") + dx)
         # THE RASTER IS COUNTED IN SAMPLES. Cycle n begins at capture-stream
         # sample `anchor + n * slot_n`, and cycle zero is where our connect
         # burst ended -- which is the instant the far end starts timing us from.
@@ -12636,10 +17049,18 @@ def run(args) -> int:
         anchor = (tx.tx_end - round(tx.last_dur * FS) if tx.tx_end is not None
                   else (live.samples if live is not None else 0))
         d_max_n = _d_max_n(args.cycle, tx.settle)
-        raster = _MasterGrid(anchor, slot_n, offset_n, packet_n=packet_n,
-                             cs_n=cs_burst_n, d_max_n=d_max_n)
+        if called:
+            host.arq.p4_admitted = True
+            sessrx.p4.admitted = True
+            raster = _called_grid(*called, tx.settle, offset_n=offset_n)
+            slot_n, d_max_n, args.cycle = (raster.slot_n, raster.d_max_n,
+                                           raster.slot_n / FS)
+        else:
+            raster = _MasterGrid(anchor, slot_n, offset_n, packet_n=packet_n,
+                                 cs_n=cs_burst_n, d_max_n=d_max_n)
+            raster.call_hush = args.call_hush
         raster.sessrx = sessrx
-        print(f"master grid: anchor @ sample {anchor}, cycle {args.cycle:.4f} s, "
+        print(f"master grid: anchor @ sample {raster.anchor}, cycle {args.cycle:.4f} s, "
               f"free-running; a turnaround up to "
               f"{d_max_n / FS * 1e3:.0f} ms is searchable", flush=True)
         onsets: list[int] = []             # the peer's bursts, from last cycle
@@ -12656,7 +17077,20 @@ def run(args) -> int:
         # to, and a floor that started again at CONNECTED would start again in the
         # cycles a peer is most likely to be filling.
         answer_band = _AnswerBand()
+        peer_spectrum = _PeerSpectrum()
         slot = 1
+        if called:
+            start, call = called
+            live = tx.live = _Retuned(live, call.offset_hz)
+            slot = _keyable_slot(live, raster, 0, settle_n, listen=False)
+            tx.aim(raster, slot)
+            print(f"CALLED: {call.report()} at {call.offset_hz:+g} Hz, frame from "
+                  f"sample {start}; answering in slot {slot}, "
+                  f"{(raster.boundary(0) - start - packet_n) / FS * 1e3:.0f} ms past "
+                  f"the caller's packet, on its {args.cycle:.2f} s cycle", flush=True)
+            host.on_rx_event(rxfront.Event(live.pos / FS, "connect", call.report(),
+                                           connect=call))
+            slot += 1
         # A last call still owns an answer window. Keep the decoder and the
         # CONNECTING state alive for two full receive-only cycles before CW or
         # close. The partial window after the last carrier plus those cycles
@@ -12685,16 +17119,9 @@ def run(args) -> int:
             # it: the window collected below sits after the PREVIOUS transmission,
             # and it is that one an answer in it would be answering.
             keyed_at = tx.tx_end if tx.tx_end is not None else 0
-            # THE ESCAPE FROM NEVER BEING ANSWERED. A master may not retime itself
-            # towards the peer, so when our own transmission is what covers the
-            # peer's burst there is nothing in the protocol that breaks the
-            # deadlock: both grids are stable, so a phase that hides the peer hides
-            # it forever. A grid that has spent BLIND_CYCLES hearing nothing stops
-            # transmitting for HUSH_CYCLES and only listens, and what it hears then
-            # is the one thing allowed to place the grid. Only meaningful with an
-            # input to listen with -- a dry run has no channel and no peer to find,
-            # and only while nothing has ever been heard on this grid, which is
-            # `_MasterGrid._blind`'s business and is where that rule lives.
+            # Unkeyed cycles in setup: the final listen, and with --call-hush the
+            # hush, whose rule lives in `_MasterGrid._blind`. Only meaningful with
+            # an input to listen with -- a dry run has no channel and no peer.
             final_listen = connect_tail is not None
             hush = live is not None and (raster.hush_left > 0 or final_listen)
             # Gate on having an INPUT, not on transmitting: a replay is a live
@@ -12766,8 +17193,8 @@ def run(args) -> int:
                     # Nothing keys, so nothing has to be early for the key: run
                     # the window right up to the boundary. With `slot += 1` below
                     # that makes the hush one unbroken recording across cycles,
-                    # which is what the provoked-listen procedure of `BLIND_CYCLES`
-                    # produces by hand.
+                    # which is what the provoked-listen procedure of
+                    # `_MasterGrid.call_hush` produces by hand.
                     want = boundary - live.pos
                 else:
                     # No floor here. The guard above has already established that
@@ -12859,6 +17286,26 @@ def run(args) -> int:
                          if live is not None else (None, None))
             if heard is not None:
                 _align_shift(raster, sessrx, tx, slot, at)
+            robust = (_robust_answer(seg, seg_start, keyed_at, boundary, raster,
+                                     d_max_n, final_listen or hush)
+                      if (heard is None and live is not None
+                          and host.arq.state == State.CONNECTING
+                          and host.arq.connect_variant == "robust") else None)
+            if robust is not None:
+                got = robust[0]
+                # Measured against the slot it was heard after: `_regrid` below
+                # can move `slot` on before the bridge is built, as it did by
+                # three slots at onair-0929-1913.
+                answer_slot = slot - 1
+                answer_phase = seg_start + round(got.at*FS) - raster.boundary(answer_slot)
+                args._robust_answer = dict(entry=got.entry, form="FSK",
+                    onset=seg_start/FS+got.at, phase=answer_phase/FS,
+                    offset_hz=got.offset_hz)
+                host.arq.on_rx_robust_answer(got.entry)
+                if args.after_robust == "p1":
+                    # SCS's engine takes the first text line after a
+                    # connect as the caller's call.
+                    host.arq.on_host_data(f"{args.mycall}\r".encode())
             seg = _receive_changeover(
                 live, raster, tx, host, sessrx, slot, seg, seg_start,
                 prev, prev_start, settle_n)
@@ -12871,6 +17318,15 @@ def run(args) -> int:
                 # LAST, so nothing below it can spend the slot it just checked.
                 slot, seg, seg_start = _regrid(live, raster, tx, host, sessrx,
                                                slot, seg, seg_start, settle_n)
+                if (getattr(tx, 'p4_link_options', None) is not None
+                        and getattr(tx.p4_probe, 'peer_breakin', False)
+                        and tx.p4_probe.requested):
+                    ended = _run_p4_probe(tx, live, raster,
+                                         heard=tx.p4_probe.handoff_slot)
+                    break
+                if getattr(getattr(tx, 'p4_hold_audio', None), 'pending', False):
+                    slot = raster.next_slot(slot)
+                    continue
                 boundary = tx.boundary
                 # The hand-back's own scan can yield too, and it ran after the
                 # check above.
@@ -12890,13 +17346,11 @@ def run(args) -> int:
                 # grid it stood exactly on -- onair-0811-1215 printed a walk to
                 # +133.8 ms that way, and it was read live as the grid
                 # drifting when every sample of it was settle plus decode time.
-                off = (live.sample_now()
-                       - (boundary if hush else boundary - settle_n)) / FS
                 print(f"    [grid] slot {slot} boundary @ sample {boundary}, "
                       f"CS due @ {raster.rx_due(slot)}"
                       f"{'' if raster.locked else ' (nominal, not acquired)'}; "
                       f"captured {seg.size / FS:.3f} s, bridged {bridge:.0f} ms, "
-                      f"off-grid {off * 1e3:+.1f} ms"
+                      f"{_off_grid(live, tx, slot, boundary if hush else boundary - settle_n)}"
                       f"{' -- HUSHED, not keying' if hush else ''}", flush=True)
             # Nothing to wait out: the listen above ran until the codec had
             # delivered the boundary, so we are already standing on it. Advance
@@ -12916,10 +17370,26 @@ def run(args) -> int:
             # roles backwards: the RESPONDER synchronises to the MASTER's clock, and we
             # are the master whenever we placed the call. Giving it a wider cadence
             # to aim at does not help a receiver that is aiming at ours.
-            slot += 1
-            if not hush:
-                host.tick()                                 # advance the cycle grid
-                tx.emit_pending_cs()
+            if robust is not None and args.after_robust == "p2":
+                from .robust import Bridge
+                got = robust[0]
+                bridge_state = Bridge(args.mycall, answer_phase,
+                    text=args.robust_call_text, max_cycles=max(1, args.robust_p2_max),
+                    force_after=args.robust_p3_without_grant, offset_hz=got.offset_hz,
+                    marker_flag=args.robust_p2_marker_flag, opening=args.robust_p2_opening,
+                    fsk_sense=got.sense, fsk_slot=answer_slot)
+                if host.enter_robust_bridge():
+                    tx.aim(raster, slot)
+                    _key_robust_bridge(tx, bridge_state)
+            elif robust is not None and args.after_robust == "p3":
+                slot += ROBUST_ENTRY_GAP
+                tx.aim(raster, slot)
+                host.take_robust_answer()
+            else:
+                slot += 1
+                if not hush and (robust is None or args.after_robust == "p1"):
+                    host.tick()                             # advance the cycle grid
+                    tx.emit_pending_cs()
             # ...and the other half of the reversal: taking the link is decided
             # inside the tick, by the changeover packet the tick just sent.
             line = _grid_reversal(raster, host)
@@ -13035,7 +17505,7 @@ def run(args) -> int:
                 # PACTOR-3 tones, where `p3acquire` is the instrument and a
                 # PACTOR-1 read would be reading the noise between them.
                 inlink = None
-                if (live is not None and seg is not None and seg.size
+                if (robust is None and live is not None and seg is not None and seg.size
                         and host.arq.state == State.CONNECTED
                         and host.protocol is Protocol.PACTOR1):
                     inlink = _grid_answer(sessrx, seg, seg_start,
@@ -13047,10 +17517,15 @@ def run(args) -> int:
                           f"(fixed ceiling {connect_tail.limit / FS:.3f}s)", flush=True)
                 if inlink is not None:
                     print(f"    {inlink}", flush=True)
+                elif robust is not None:
+                    got, d = robust
+                    print(f"    {sessrx.tag} {seg_start / FS + got.at:6.2f}  robust   "
+                          f"{got} at d = {d * 1e3:.0f} ms", flush=True)
+                    _drain_host_log(host)
                 elif found is None:
                     print(f"    RX (nothing decoded) -- {rxfront.cs_evidence(seg)}",
                           flush=True)
-                elif not evidence.offer(c, candidate_d):
+                elif not evidence.offer(c, candidate_d, level):
                     # SAY SO AND KEEP CALLING. A candidate is a codeword and not
                     # yet a station; the peer repeats its answer every cycle
                     # until our first data packet decodes, so the corroboration
@@ -13060,7 +17535,7 @@ def run(args) -> int:
                     # of them. A candidate holds that budget open exactly as a
                     # bare burst does -- twelve bits at a plausible turnaround is
                     # the stronger evidence of the two -- and without it the rule
-                    # can be waiting for a third accept the ARQ will not give it:
+                    # can be waiting for another accept the ARQ will not give it:
                     # `onair-0730-2036` answered on cycles 3, 5 and 7.
                     host.arq.note_peer_heard()
                     # ...and the grid is told, because the hush is decided there
@@ -13097,7 +17572,8 @@ def run(args) -> int:
                           evidence_of.record(f"rx_{c:02d}", seg, seg_start)]
                 _report_answer_band(answer_band, host, raster, seg,
                                     seg_start - keyed_at, d_max_n,
-                                    read=bool(onsets) or sessrx.count != before)
+                                    read=bool(onsets) or sessrx.count != before,
+                                    seg_start=seg_start)
             # ...and fold them into the grid HERE, in the same dead time, with the
             # audio they were found in still in hand -- the edge statistic has to
             # be taken on the burst itself.
@@ -13124,6 +17600,44 @@ def run(args) -> int:
             st = host.arq.state
             linked = linked or st in LINKED
             print(f"  cycle {c}: state {st}", flush=True)
+            after = _after_answer(args, host.arq)
+            if st == State.CONNECTED and after in ("listen", "chirp"):
+                print(f"** CONNECTED to {host.arq.dxcall or dx} **", flush=True)
+                if after == "chirp":
+                    # The answered call is the trigger the grant path normally
+                    # is, and the probe owns the clock from here.
+                    tx.p4_probe.trigger_word = (
+                        "connect answer" if host.arq.robust_answer is None
+                        else "robust answer")
+                    tx.send_p4_entry_packet(
+                        b"", spec.status_byte(0, data_type=spec.DataType.PMC_ENGLISH))
+                    continue
+                print(f"    [after-connect] listening "
+                      f"{args.after_connect_cycles} cycles; keying nothing",
+                      flush=True)
+                if live is not None:
+                    cycles_run += _observe_out_the_hold(
+                        live, raster, tx, sessrx, host, evidence_of,
+                        _HoldBudget(args.after_connect_cycles), 1, slot)
+                # A goodbye is an emission, and nothing keys one after this: a
+                # QRT queued here leaves the FSM CONNECTED and the summary
+                # reporting a link that is over.
+                host.arq.on_host_abort()
+                _drain_host_log(host)
+                ended = (f"the after-connect listen read "
+                         f"{args.after_connect_cycles} cycles without keying")
+                break
+            if st == State.CONNECTED and host.robust_bridge_active:
+                slot, granted = _run_robust_bridge(args, bridge_state, live, raster, tx,
+                                                   host, sessrx, outdir)
+                if not granted:
+                    print(f"** CONNECTED to {host.arq.dxcall or dx} ** bridge ended; listening", flush=True)
+                    if live is not None:
+                        cycles_run += _observe_out_the_hold(live, raster, tx, sessrx, host,
+                            evidence_of, _HoldBudget(args.after_connect_cycles), 1, slot)
+                    host.arq.on_host_abort()
+                    ended = "P2 bridge exhausted; receive-only observe window complete"
+                    break
             if st == State.CONNECTED and args.hold:
                 # Stay up and keep listening. The whole question after an
                 # acknowledgement is what the peer does NEXT, and disconnecting
@@ -13154,7 +17668,7 @@ def run(args) -> int:
                 whole = np.zeros(0, np.float32)
                 budget, goodbye = _HoldBudget(args.hold,
                     unbounded=getattr(args, "p3_timing_unbounded", False)), None
-                # The experiment adds a distinct bounded phase after the QRT
+                # P3 mail adds a distinct bounded phase after the QRT
                 # ACK. The outer loop must allow it to run; VE3KPG answered
                 # the QRT near the end of the original four-cycle allowance.
                 qrt_cycles = QRT_CYCLES + (GOODBYE_CYCLES if host.p3_qrt_confirm else 0)
@@ -13171,9 +17685,18 @@ def run(args) -> int:
                 stopped = None
                 listened_at = 0
                 previous_cycle_slot = tx.slot
+                next_slot_ticks = raster.ticks
                 for h in itertools.count(1):
+                    if host.robust_entry_exhausted:
+                        print("warning: robust P3 entry unanswered; listening for the observe window", flush=True)
+                        if live is not None:
+                            cycles_run += _observe_out_the_hold(live, raster, tx, sessrx, host,
+                                evidence_of, _HoldBudget(args.after_connect_cycles), 1, slot)
+                        host.arq.on_host_abort()
+                        ended = "robust P3 entry unanswered; observe window complete"
+                        break
                     if tx.p4_probe is not None and tx.p4_probe.requested:
-                        ended = _run_p4_probe(tx, live, raster)
+                        ended = _run_p4_probe(tx, live, raster, stalled=host.p1_stalled)
                         break
                     trial_end = _timing_trial_close(
                         tx, host, live.sample_now() if live is not None else 0)
@@ -13199,7 +17722,7 @@ def run(args) -> int:
                         # calling. The goodbye on this path belongs to the FSM,
                         # which owns the budget that ended the link and is still
                         # the ISS-or-IRS when it runs out -- `arq._give_up`.
-                        sent = ("the link was signed off with a QRT"
+                        sent = (f"the goodbye was {_goodbye_result(host.arq)}"
                                 if host.arq.said_goodbye else
                                 "goodbye could not be placed within its deadline"
                                 if host.arq.goodbye_unplaceable else
@@ -13212,6 +17735,7 @@ def run(args) -> int:
                         # never on the air either way: stop, or listen. See
                         # `_observe_out_the_hold` for what the second is for.
                         watch = args.observe_after_link_down and live is not None
+                        _drain_host_log(host)
                         print(f"** LINK DOWN ** {ended} -- "
                               + ("listening out the rest of the hold, "
                                  "transmitting nothing" if watch else
@@ -13252,16 +17776,16 @@ def run(args) -> int:
                             # whether or not anything came back, so reading the
                             # close as the acknowledgement credits the peer with
                             # a codeword it may never have sent.
-                            was = ("acknowledged" if host.arq.goodbye_acked else
-                                   f"unanswered, and the link closed on its own "
-                                   f"{GOODBYE_CYCLES}-cycle teardown")
+                            was = _goodbye_result(host.arq)
                             ended = (f"{stopped} in cycle {goodbye}; {heard}; "
                                      f"the goodbye was {was}")
                             break
                         if h > goodbye + qrt_cycles:
+                            result = (_goodbye_result(host.arq)
+                                      if host.arq.terminal_confirm_started else
+                                      f"unacknowledged for {qrt_cycles} cycles")
                             ended = (f"{stopped} in cycle {goodbye}; {heard}; "
-                                     f"the goodbye went unacknowledged for "
-                                     f"{qrt_cycles} cycles")
+                                     f"the goodbye was {result}")
                             break
                     # Listen for the REST of the cycle, not a whole one, and take
                     # it in slices so each turnaround's answer is decoded as it
@@ -13284,6 +17808,7 @@ def run(args) -> int:
                     cycles_run += 1
                     before = sessrx.count
                     receive_opportunity = host.arq.begin_receive_opportunity()
+                    host.arq._receive_opportunity.capture_lost = getattr(live, 'lost', 0)
                     sessrx._p3_stage_ms = {}
                     sessrx._p3_long_crc_reply = None
                     # What has crossed the link so far, against which this
@@ -13326,16 +17851,17 @@ def run(args) -> int:
                               f"changeover went unanswered, and a keyed cycle "
                               f"leaves less window than any reader needs "
                               f"({MIN_DECODE_S * 1e3:.0f} ms) to take the "
-                              f"peer's answer. This cycle keys nothing so its "
-                              f"packet can be read whole; the changeover goes "
-                              f"out again on the next one.", flush=True)
+                              f"peer's answer. Read the current control first; "
+                              f"if it is absent, give the rest of this cycle "
+                              f"to the receiver for the peer's full packet.", flush=True)
                     tx.listening = listen
+                    tx.cede_listening = cede
                     quiet = hush or listen
                     # Read before the aim: a changeover packet is placed against
                     # the peer's transmission rather than on our boundary, and
                     # everything in front of the key is measured from the
                     # earlier of the two. See `RadioTx.key_instant`.
-                    tx.breakin_due = host.breakin_due and not quiet
+                    tx.breakin_due = host.breakin_due and not (hush or (listen and not cede))
                     # ...and before the aim for a second reason: on the long
                     # cycle the next boundary is three slots on, the window in
                     # front of it is a whole 3.75 s turn, and the peer's packet
@@ -13351,7 +17877,8 @@ def run(args) -> int:
                                      and host.arq.role == IRS
                                      and host.arq.cycle_command_emitted)
                     slot, geared = _regear_next_slot(
-                        raster, slot, False if probing_cycle else host.arq.cycle_long)
+                        raster, slot, False if probing_cycle else host.arq.cycle_long,
+                        stepped_ticks=next_slot_ticks)
                     if geared:
                         print(f"    [grid] {geared}", flush=True)
                     boundary = tx.aim(raster, slot)
@@ -13366,11 +17893,13 @@ def run(args) -> int:
                         # same for every slot: asked without it, a slot whose
                         # boundary is placeable but whose key instant is not
                         # leaves the burst to `_tx`'s backstop and a whole cycle.
+                        evidence_of.input_loss(f"hold_{h:02d}")
                         # THE COMB FIRST OF ALL. Every number below is measured
                         # from `boundary`, and a PACTOR-3 IRS reply boundary is
                         # the answered packet's answer slot rather than whatever
                         # the last cycle left. See `_p3_place_reply`.
-                        _p3_place_reply(raster, tx, slot)
+                        tx.prepare_p3_breakin()
+                        slot = _p3_place_reply(raster, tx, slot)
                         early = raster.boundary(slot) - tx.key_instant(raster, slot)
                         slot = _keyable_slot(live, raster, slot, settle_n + early)
                         boundary = tx.aim(raster, slot)
@@ -13393,9 +17922,16 @@ def run(args) -> int:
                                 sessrx, whole, prev_start,
                                 sending=raster.sending, flowing=flowing)
                             flowing = flowing or found
-                        win = (boundary - live.pos if quiet else
+                        # Automatic cede listening is provisional until the
+                        # current answer is read. Leave time to honor a CS2;
+                        # explicit operator listening still owns the full slot.
+                        win = (boundary - live.pos if hush or (listen and not cede) else
                                key_at - settle_n - live.holdback
                                - round(PREKEY_RESERVE_S * FS) - live.pos)
+                        closed = _p3_window_close(live, sessrx, host, tx, raster,
+                                                  key_at, settle_n, flowing)
+                        if closed is not None and not (hush or (listen and not cede)):
+                            win = min(win, closed - live.pos)
                         n0 = live.samples
                         # The same listener the setup phase uses. Its early break
                         # is gated on CONNECTING, so on a held link it simply
@@ -13418,10 +17954,13 @@ def run(args) -> int:
                         # as a station going deaf. The frame the window holds is
                         # read by `deep_scan` below for single milliseconds, and
                         # the flush still re-decodes the tail behind our carrier.
+                        sessrx._p3_ahead = {}
                         whole = _listen_until_answer(
                             live, win, host, sessrx,
                             FEED_MAX_SLOTS * raster.slot_n if raster.sending
-                            else 0)
+                            else 0,
+                            ahead=lambda audio, origin: _read_ahead(
+                                sessrx, raster, audio, origin))
                         if not args.replay and win > 0:
                             # A zero-length window proves nothing about the
                             # stream -- and the scan above may have keyed,
@@ -13441,18 +17980,16 @@ def run(args) -> int:
                                 key_at - max(raster.d, settle_n),
                                 key_at - _prekey_lead(live, settle_n),
                                 max(live.pos, int(live.sample_now())), raster))
-                        if whole.size and raster.sending:
+                        if (whole.size and raster.sending
+                                and host.protocol != Protocol.PACTOR3):
                             _scan_frame(sessrx, whole, seg_start)
                         until = sessrx.control_collect_until(
                             key_at - _prekey_lead(live, settle_n),
                             max(live.pos, int(live.sample_now())), raster)
-                        if (host.protocol == Protocol.PACTOR3 and tx.defer_p3_cs
-                                and not raster.sending
-                                and (flowing or sessrx.wideband_prekey_active())):
-                            until = _p3_frame_ready(
-                                sessrx,
-                                _p3_decode_deadline(live, key_at, settle_n),
-                                live.holdback)
+                        closed = _p3_window_close(live, sessrx, host, tx, raster,
+                                                  key_at, settle_n, flowing)
+                        if closed is not None:
+                            until = closed
                         whole, seg_start, tailed = _collect(
                             live, sessrx, whole, seg_start, until)
                         bridge += tailed
@@ -13502,15 +18039,30 @@ def run(args) -> int:
                     # Before the key, for the setup loop's reason: a station that
                     # has just yielded owes the peer the rest of its packet, and
                     # reads it in the 840 ms the rotation has just bought.
-                    control_started = time.perf_counter()
-                    heard, at = (sessrx.control_signal_in(whole, seg_start, raster)
-                                 if live is not None
-                                 and not _p3_current_long_crc(sessrx, slot)
-                                 and not _p3_current_packet_crc(sessrx, raster, slot)
-                                 else (None, None))
-                    sessrx._p3_stage_ms["control"] = (time.perf_counter() - control_started) * 1e3
+                    heard, at, whole, seg_start = _read_held_window(
+                        live, raster, tx, sessrx, slot, whole, seg_start,
+                        boundary, cede=cede)
                     if heard is not None:
                         _align_shift(raster, sessrx, tx, slot, at)
+                    if (live is not None and getattr(tx, 'p4_link_options', None) is not None
+                            and host.p4_after_first_ack):
+                        # An IRS reads after its key instead: the word's answer
+                        # falls before our CS either way, and this read in front
+                        # of it pushed every CS2 of onair-0929-1240 out of the cycle.
+                        word_slot = (_p4_hold_word(tx, host, live, raster, whole,
+                                                   seg_start, held_at)
+                                     if raster.sending else None)
+                        if word_slot is not None:
+                            tx.p4_link_budget = budget
+                            ended = _run_p4_probe(tx, live, raster, heard=word_slot)
+                            break
+                        if tx.p4_probe.requested and not host.p1_stalled:
+                            tx.p4_link_budget = budget
+                            ended = _run_p4_probe(tx, live, raster)
+                            break
+                    listen = (tx.listening
+                              or getattr(tx, "_p3_entry_listen_slot", None) == slot)
+                    quiet = hush or listen
                     whole = _receive_changeover(
                         live, raster, tx, host, sessrx, slot, whole, seg_start,
                         prev, prev_start, settle_n, reserve_s=PREKEY_RESERVE_S)
@@ -13523,6 +18075,23 @@ def run(args) -> int:
                         slot, whole, seg_start = _regrid(
                             live, raster, tx, host, sessrx, slot, whole,
                             seg_start, settle_n)
+                        if (getattr(tx, 'p4_link_options', None) is not None
+                                and getattr(tx.p4_probe, 'peer_breakin', False)
+                                and tx.p4_probe.requested):
+                            tx.p4_link_budget = budget
+                            ended = _run_p4_probe(tx, live, raster,
+                                                 heard=tx.p4_probe.handoff_slot)
+                            break
+                        if getattr(getattr(tx, 'p4_hold_audio', None), 'pending', False):
+                            host.arq.finish_receive_opportunity(receive_opportunity)
+                            budget.spend(max(1, slot-previous_cycle_slot))
+                            budget.cycle(h, carried, _Link.of(host))
+                            previous_cycle_slot = slot
+                            if h > budget.deadline:
+                                ended = 'P1 hold ceiling during pending P4 receive work'
+                                break
+                            slot = raster.next_slot(slot)
+                            continue
                         boundary, key_at = tx.boundary, tx.key_instant(raster, slot)
                         if _reverse_before_key(raster, host, tx, slot):
                             boundary, key_at = tx.boundary, tx.key_instant(raster, slot)
@@ -13532,12 +18101,10 @@ def run(args) -> int:
                         # the changeover's key is not the boundary, which is what
                         # made this line read healthy on the one cycle it was
                         # 22 ms of settle short.
-                        off = (live.sample_now()
-                               - (boundary if quiet else key_at - settle_n)) / FS
                         print(f"    [grid] hold {h} slot {slot}, CS due @ "
-                              f"{raster.rx_due(slot)}; captured "
+                              f"{_p3_answer_due(sessrx, raster, slot)}; captured "
                               f"{whole.size / FS:.3f} s, bridged {bridge:.0f} ms, "
-                              f"off-grid {off * 1e3:+.1f} ms"
+                              f"{_off_grid(live, tx, slot, boundary if quiet else key_at - settle_n)}"
                               f"{' -- HUSHED, not keying' if hush else ''}"
                               f"{' -- LISTENING CYCLE, not keying' if listen else ''}",
                               flush=True)
@@ -13547,7 +18114,17 @@ def run(args) -> int:
                     # so stepping by one while long would key the next burst
                     # inside the packet it is supposed to follow.
                     elapsed_ticks = max(1, slot - previous_cycle_slot)
+                    _p3_qualify_presence(sessrx, raster, tx, whole, seg_start)
+                    if (host.protocol == Protocol.PACTOR3
+                            and not host.arq.settle_peer_presence(elapsed_ticks=elapsed_ticks)):
+                        host.arq.finish_receive_opportunity(receive_opportunity)
+                        ended = 'qualified peer absent; transfer unconfirmed'
+                        break
                     previous_cycle_slot = slot
+                    # Tick/emit below can commit CS6 after this advance. Retain
+                    # the period actually used so next iteration can reconcile
+                    # it even when the grid already has the new period.
+                    next_slot_ticks = raster.ticks
                     slot = raster.next_slot(slot)
                     # AFTER THE LISTENING AND BEFORE THE KEY. A decision taken at
                     # the top of the cycle cannot have the last thing the peer
@@ -13561,6 +18138,11 @@ def run(args) -> int:
                         tx, host, live.sample_now() if live is not None else 0)
                     if trial_end is not None and goodbye is None:
                         stopped, goodbye = trial_end, h
+                    if host.p1_stalled and goodbye is None and not tx.p4_probe.requested:
+                        stopped = (f"our first P1 packet drew {host.p1_stalled} "
+                                   "repeat requests")
+                        host.arq.on_host_disconnect()
+                        goodbye = h
                     if h > budget.deadline and goodbye is None:
                         # The QRT still has to be TRANSMITTED. Falling out of the
                         # loop straight to PTT-off queued it on a state machine
@@ -13593,37 +18175,37 @@ def run(args) -> int:
                         host.tick(elapsed_ticks=1 if closing_now else elapsed_ticks,
                                   cycle_ticks=raster.ticks)
                         tx.emit_pending_cs()
-                    if host.protocol == Protocol.PACTOR3:
-                        timings = ", ".join(f"{name}={ms:.2f}ms" for name, ms
-                                            in sessrx._p3_stage_ms.items())
-                        callbacks = getattr(tx, "_callback_at_admit", ())
+                        word_slot = (None if live is None else _p4_hold_word(
+                            tx, host, live, raster, whole, seg_start, held_at))
+                        if word_slot is not None:
+                            tx.p4_link_budget = budget
+                            ended = _run_p4_probe(tx, live, raster, heard=word_slot)
+                            break
+                        if host.p4_after_first_ack and tx.p4_probe.requested:
+                            tx.p4_link_budget = budget
+                            ended = _run_p4_probe(tx, live, raster, in_slot=True,
+                                                  stalled=host.p1_stalled)
+                            break
+                    if host.protocol in (Protocol.PACTOR1, Protocol.PACTOR3):
+                        callbacks = (tuple(getattr(live, "_callback_timing", ()))[-16:]
+                                     if live is not None else getattr(tx, "_callback_at_admit", ()))
                         delivery = [(n, frames, round((wall - callbacks[0][2]) * 1e3, 3),
                                      round((adc - callbacks[0][3]) * 1e3, 3))
                                     for n, frames, wall, adc in callbacks]
-                        print(f"    [p3 timing] hold {h}, RX end {seg_start + whole.size}; "
-                              f"{timings}; callbacks(sample,frames,wall_ms,adc_ms)={delivery}",
+                        timings = ", ".join(
+                            f"{name}={'+'.join(f'{ms:.2f}' for ms in reads)}ms"
+                            for name, reads in sessrx._p3_stage_ms.items()) + "; "
+                        tag = "p1" if host.protocol == Protocol.PACTOR1 else "p3"
+                        print(f"    [{tag} timing] hold {h}, RX end {seg_start + whole.size}; "
+                              f"{timings}callbacks(sample,frames,wall_ms,adc_ms)={delivery}",
                               flush=True)
                     if mail is not None and not hush:
                         _mail_app_turns(host, mail, wait_greeting=getattr(
                             args, "mail_wait_greeting", False))
-                        # A session writes the body and its close-out in the
-                        # one `feed` and sets `done` on the same call, so the
-                        # flag says the exchange is over and not that it is on
-                        # the air. `test_b2f_loopback_send_ws8eoc` scene 11
-                        # leaves the whole message in `_txbuf` behind it.
-                        if (mail.done and goodbye is None
-                                and (mail.session.failure or not host._txbuf)):
-                            # The exchange is over: spend none of the
-                            # remaining hold. Pulling the deadline in hands the
-                            # QRT to the path above, which is the one place a
-                            # goodbye is actually transmitted.
-                            failure = mail.session.failure
-                            verdict = (f"exchange failed: {failure}" if failure
-                                       else "exchange complete")
-                            print(f"    [mail] {verdict} -- closing", flush=True)
-                            budget.close(h)
-                            stopped = (f"the mail exchange failed: {failure}" if failure
-                                       else "the mail exchange completed")
+                        if goodbye is None:
+                            mail_stopped = _mail_close(host, mail, budget, h)
+                            if mail_stopped is not None:
+                                stopped = mail_stopped
 
                     line = _grid_reversal(raster, host)
                     if line:
@@ -13688,7 +18270,15 @@ def run(args) -> int:
                         _report_answer_band(
                             answer_band, host, raster, whole,
                             seg_start - held_at, d_max_n,
-                            read=bool(onsets) or sessrx.count != before)
+                            read=bool(onsets) or sessrx.count != before,
+                            seg_start=seg_start)
+                        if whole.size:
+                            # The floor, fed where the time is free.
+                            peer_spectrum.hear(whole[-raster.cycle_n:])
+                        if (host.protocol is Protocol.PACTOR3 and whole.size
+                                and sessrx.count != before):
+                            peer_spectrum.learn(whole)
+                            host.arq.note_peer_carrier()
                         # ...and only now, because the forecast rests on a
                         # codeword and the onset read is the last path that can
                         # deliver one.
@@ -13717,7 +18307,9 @@ def run(args) -> int:
                     # is due drops the onset it was holding and this is the
                     # reading that replaces it: while we hold the link there is
                     # no other, and the changeover's placement stands on it.
-                    reread = raster.note_peer_bursts(bursts)
+                    reread = (raster.note_peer_bursts(bursts)
+                              if host.protocol != Protocol.PACTOR3 or host.arq.peer_qualified
+                              else None)
                     if reread:
                         print(f"    [grid] {reread}", flush=True)
                         # ...and the ARQ, which cannot see the channel and is
@@ -13732,6 +18324,13 @@ def run(args) -> int:
                     where = raster.answer_position()
                     if where:
                         print(f"    [entry] {where}", flush=True)
+                if host.p1_stalled and not tx.p4_probe.requested:
+                    # `--p1-robust-stall-then goodbye`: the teardown is over,
+                    # and the probe's deadline runs from its end.
+                    tx.p4_probe.request(max(int(live.sample_now()), tx.tx_end or 0), b"", 0)
+                    ended += "; then " + _run_p4_probe(tx, live, raster,
+                                                       stalled=host.p1_stalled)
+                    tx.p4_probe.path = "stall after goodbye"
                 break
             if st == State.CONNECTED:
                 print(f"** CONNECTED to {host.arq.dxcall or dx} **")
@@ -13753,12 +18352,9 @@ def run(args) -> int:
                 ended = "the replay ran out of audio"
                 print("  (replay exhausted)"); break
     except KeyboardInterrupt:
-        # Caught so the summary is the last thing on the screen. Uncaught, the
-        # traceback prints AFTER the `finally` and scrolls the verdict away --
-        # and an operator who stops a run early wants the verdict most. The rig
-        # is still unkeyed below; nothing about the shutdown path changes.
         ended = "the operator interrupted it"
         print("\ninterrupted.", flush=True)
+        raise
     except PttError as exc:
         # The mid-session twin of the arm gate: the same silence begins with a
         # device unplugged, or a rigctl dying under a session already running,
@@ -13769,54 +18365,123 @@ def run(args) -> int:
         ended = f"KEYING FAILED -- {exc}"
         code = 1
         print(f"\n!! KEYING FAILED: {exc}", flush=True)
+    except Exception as exc:
+        ended = f"SESSION FAILED -- {type(exc).__name__}: {exc}"
+        raise
     else:
         # Only ordinary completion may start another transmission. SIGTERM,
         # Ctrl-C and failures go straight to unkeying and closing the devices.
-        if not linked:
-            tx.identify(args.mycall)
+        identified = True
+        if identity.closing_required("pactor", optional=args.cwid_optional, linked=linked):
+            tx.identify(identity.cw_call)
     finally:
+        unwinding = sys.exc_info()[1]
         try:
-            if live is not None:
-                # The last term in the error budget, reported rather than assumed.
-                # A sample-locked raster leaves only the mismatch between this codec
-                # and the far end's TNC; at 100 ppm each way that is ~250 us per
-                # cycle, and it sets how long a link holds before the raster needs
-                # re-syncing. It is also the one number that says whether the grid
-                # above is measuring seconds or measuring something else.
-                print(rates.host_report())
-                print(live.clock_report())
-                live.close()
-                print(live.stream_report())
+            try:
+                if rig is not None:
+                    rig.stop()
+                    print("PTT off.")
+                    if power is not None:
+                        power.restore()
+            finally:
+                if live is not None:
+                    # The last term in the error budget, reported rather than assumed.
+                    # A sample-locked raster leaves only the mismatch between this codec
+                    # and the far end's TNC; at 100 ppm each way that is ~250 us per
+                    # cycle, and it sets how long a link holds before the raster needs
+                    # re-syncing. It is also the one number that says whether the grid
+                    # above is measuring seconds or measuring something else.
+                    try:
+                        print(rates.host_report())
+                        print(live.clock_report())
+                    finally:
+                        live.close()
+                    print(live.stream_report())
+        except BaseException:
+            # A teardown failure cannot replace the operator's stop signal.
+            if unwinding is not None and not isinstance(unwinding, Exception):
+                raise unwinding
+            raise
         finally:
-            if rig is not None:
-                rig.stop()
-                print("PTT off.")
-                if power is not None:
-                    power.restore()
+            # Unwinding keys nothing more, but every flown session owes its ID.
+            if (not identified and tx.transmit and rig is not None
+                    and identity.closing_required("pactor", optional=args.cwid_optional,
+                                                  linked=linked)):
+                cwid.unsent(identity.cw_call, ended if unwinding is None else repr(unwinding))
         # AFTER the key is down and not one line before it. The captures are
         # analysed tomorrow and can wait the few hundred milliseconds; a
         # transmitter still asserted cannot wait for anything.
         if tx.timing_trial is not None:
             if tx.timing_trial.reason is None:
                 tx.timing_trial.finish(ended or "session ended before trial completed")
-            tx.timing_trial.write(outdir)
+            tx.timing_trial.write(outdir, capture_writer=capture_writer)
             print(f"P3 timing trial results: {outdir / tx.timing_trial.filename}",
                   flush=True)
         captures = _drain_captures()
+        if args.connect == "robust":
+            result = dict(getattr(args, '_robust_result', {}))
+            result.update(answer=getattr(args, '_robust_answer', None),
+                          robust_calls=getattr(tx, 'robust_calls', 0))
+            if result['answer'] is None:
+                print(f"warning: {result['robust_calls']} robust calls, no answer word; "
+                      "per-slot receive floors are recorded above", flush=True)
+            print("[robust result] " + json.dumps(result, sort_keys=True), flush=True)
         if tx.p4_probe is not None:
             if ("pending" in tx.p4_probe.reason or tx.p4_probe.emitting
                     or tx.p4_probe.reason == "probe interrupted"):
                 tx.p4_probe.reason = ended or "probe interrupted"
+            _resolve_p4_queries(tx.p4_probe)
             result = tx.p4_probe.result()
             result["mode"] = ("live" if args.transmit and rig is not None else
                               "replay" if args.replay else "dry-run")
-            (outdir / "p4-probe.json").write_text(json.dumps(result, indent=2) + "\n")
-            print(f"P4 probe: {len(result['emissions'])}/{result['burst_limit']} "
-                  f"chirps; {result['reason']}. Receive windows retained for offline analysis.",
-                  flush=True)
+            _capture_write_text(outdir / 'p4-probe.json', json.dumps(result, indent=2) + '\n')
+            if tx.p4_probe.counter_experiment:
+                from .p4experiment import write_report
+                experiment = write_report(tx.p4_probe, outdir, FS, result["mode"],
+                    context=dict(dxcall=args.dxcall, mycall=args.mycall,
+                                 p1_status_bits45=args.p1_status_bits45,
+                                 qrm_guard=args.qrm_guard), capture_writer=capture_writer)
+                for observed in experiment['observations']:
+                    candidate = observed['p4_candidate']
+                    print(f"    [p4 experiment] reply {observed['attempt'] + 1}: "
+                          f"P1={[c['word'] for c in observed['p1_controls']]}; "
+                          f"P4 candidate={candidate}; rms={observed['rms']:.5f}", flush=True)
+                print(f"P4 experiment: setup={experiment['setup_verdict']}; "
+                      f"counter={experiment['counter_verdict']}; "
+                      f"evidence: {outdir / 'p4-mail-experiment.json'}", flush=True)
+            if getattr(args, 'p4_link', False):
+                shorts = sum(e.get('value') is not None for e in result['emissions'])
+                words = sum(e.get('word') is not None for e in result['emissions'])
+                frames = sum('data' in row for row in tx.p4_probe.heard)
+                print(f"P4 link: {shorts} shorts, {words} words keyed; "
+                      f"{frames} peer frames decoded; {result['reason']}", flush=True)
+                for row in tx.p4_probe.heard:
+                    if row.get('responds_to') is not None and row.get('outcome') == 'new':
+                        at = row['onset_sample']
+                        target = row['responds_to']
+                        print(f"    [p4 link] {row.get('word') or row['kind']} at {at/FS:.3f} "
+                              f"responds to key {target/FS:.3f} (+{(at-target)/FS:.3f}s)", flush=True)
+            else:
+                print(f"P4 probe: {len(result['emissions'])}/{result['burst_limit']} "
+                      f"chirps; {result['reason']}. Receive windows retained for offline analysis.",
+                      flush=True)
+            if result["queries"] and not getattr(args, 'p4_link', False):
+                print("    [p4 query] table: " + "; ".join(
+                    f"{q['status_hex']}"
+                    f"{'' if q['counter'] is None else '/c' + str(q['counter'])}"
+                    f" -> {q['reply_class']}"
+                    for q in result["queries"]), flush=True)
         if raster is not None and tx.p4_probe is None:
             print(f"    [entry] {raster.entry_verdict()}", flush=True)
         # Last, so it survives a scrolling terminal.
+        if host.arq._mail_cs4_wait is not None:
+            host.arq.on_host_abort()
+        if host.arq.transfer_unconfirmed is not None:
+            ended = 'transfer unconfirmed'
+            code = 1
+            retained_path = _write_unconfirmed_transfer(outdir, host.arq)
+            print(f'transfer unconfirmed: outstanding field and suffix retained in {retained_path}',
+                  flush=True)
         if tx.p4_probe is None:
             _summary(sessrx.cs_log, tx.slots_used, cycles_run, tx.keyed, args.cycle,
                      tx.seq_sent, evidence, ended, captures,
@@ -13825,7 +18490,8 @@ def run(args) -> int:
             print(f"session ended: {ended}; {len(sessrx.cs_log)} controls decoded "
                   "before probe takeover", flush=True)
             print(captures, flush=True)
-            print("verdict: P4 probe capture only; acceptance not evaluated live", flush=True)
+            print("verdict: P4 link; " + str(ended) if getattr(args, 'p4_link', False)
+                  else "verdict: P4 probe capture only; acceptance not evaluated live", flush=True)
         if tx.timing_trial is not None:
             # Console selects the last verdict. A successful P1 connection is
             # not the outcome of an experiment about inbound P3 progression.
@@ -13835,7 +18501,21 @@ def run(args) -> int:
             print(summarize(mail.session), flush=True)
             for path in write_inbox(mail.session, args.mail_out):
                 print(f"mail: wrote {path}", flush=True)
+        if host.arq.transfer_unconfirmed is not None:
+            print('verdict: transfer unconfirmed', flush=True)
     return code
+
+
+def _crest_limit(text: str) -> str | float:
+    if text == "off":
+        return text
+    try:
+        db = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not 'off' or a dB target")
+    if db <= 0:
+        raise argparse.ArgumentTypeError("a crest target is a positive number of dB")
+    return db
 
 
 def _entry_ladder(spec_str: str) -> tuple[str, ...]:
@@ -13850,568 +18530,530 @@ def _entry_ladder(spec_str: str) -> tuple[str, ...]:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
-def main() -> int:
-    p = argparse.ArgumentParser(description="shrike operational PACTOR modem (RX in the loop)")
-    p.add_argument("--mycall", default="N0CALL")
-    p.add_argument("--dxcall", help="the station to call -- no default, this "
-                                    "callsign goes on the air")
-    p.add_argument("--band", default="40m")
-    p.add_argument("--center", type=int, help="channel centre Hz (dial = centre-1500)")
-    p.add_argument("--dial", type=int, help="explicit dial Hz (overrides --center/table)")
-    p.add_argument("--transmit", action="store_true", help="ARM the rig (licensed op only)")
-    p.add_argument("--rig", choices=list(RIGS), default="ft891")
+def _status_schedule(text: str) -> tuple[int, ...]:
+    """One to four status bytes, in the order the probe keys them."""
+    try:
+        schedule = tuple(int(v, 0) for v in text.split(",") if v.strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError("--p4-probe-statuses takes comma-separated "
+                                         "byte literals, e.g. 0x63,0x60") from None
+    if not 1 <= len(schedule) <= 4 or any(not 0 <= v <= 255 for v in schedule):
+        raise argparse.ArgumentTypeError("--p4-probe-statuses takes one to four "
+                                         "bytes in 0..255")
+    return schedule
+
+
+def _call_hush(text: str) -> tuple[int, int]:
+    """`N,M`: N calls heard by nothing, then M cycles off the air."""
+    try:
+        calls, quiet = (int(v) for v in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError("--call-hush takes N,M, e.g. 4,6") from None
+    if calls < 1 or quiet < 1:
+        raise argparse.ArgumentTypeError("--call-hush takes two positive counts")
+    return calls, quiet
+
+
+def _probe_values(text: str) -> tuple[int, ...]:
+    """One to four datablock values, in the order the probe keys them."""
+    try:
+        values = tuple(int(v, 0) for v in text.split(",") if v.strip())
+    except ValueError:
+        raise argparse.ArgumentTypeError("--p4-probe-values takes comma-separated "
+                                         "numbers, e.g. 6,9,8") from None
+    if not 1 <= len(values) <= 4 or any(not 0 <= v <= 63 for v in values):
+        raise argparse.ArgumentTypeError("--p4-probe-values takes one to four "
+                                         "values in 0..63")
+    return values
+
+
+def _probe_headers(text: str) -> tuple[str, ...] | str:
+    """The header word each packet opens on, or `alt` to alternate them."""
+    if text.strip().lower() == "alt":
+        return "alt"
+    words = tuple(w.strip().upper() for w in text.split(",") if w.strip())
+    if not 1 <= len(words) <= 4 or any(w not in ("A", "B") for w in words):
+        raise argparse.ArgumentTypeError("--p4-probe-headers takes 'alt' or one "
+                                         "to four of A,B")
+    return words
+
+
+def _probe_replies(text: str) -> tuple[str, ...]:
+    """One to four gateway answer words, X/Y or their bank names, in keying order."""
+    names = {name[0]: name for name in p4words.STEPS} | {n: n for n in p4words.STEPS}
+    words = tuple(names.get(w.strip().upper()) for w in text.split(",") if w.strip())
+    if not 1 <= len(words) <= 4 or None in words:
+        raise argparse.ArgumentTypeError("--p4-probe-reply takes one to four of "
+                                         + ",".join(sorted(names)))
+    return words
+
+
+def _supervisor_text(text: str) -> str:
+    """A function block's text, refused here rather than on the air."""
+    try:
+        compress.supervisor_block(text)
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise argparse.ArgumentTypeError(f"--p1-supervisor {text!r}: {exc}") from None
+    return text
+
+
+def _latin1_field(text: str) -> bytes:
+    try:
+        return text.encode("latin-1")
+    except UnicodeEncodeError:
+        raise argparse.ArgumentTypeError("--p4-probe-payload is a latin-1 field") from None
+
+
+def _peer_acks(text):
+    acks = {}
+    for item in text.split(','):
+        value, word = item.split('=')
+        word = word.strip().upper()
+        if word not in ('U27', 'X27', 'V27', 'T27', 'Z27'):
+            raise argparse.ArgumentTypeError(f'unknown word {word}')
+        acks[int(value)] = word
+    return acks
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        allow_abbrev=False,
+        description="shrike operational PACTOR modem (RX in the loop). Options are "
+                    "grouped by what they touch; experimental groups say so.",
+        usage="%(prog)s [options]",
+        formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=36, width=100))
+
+    station = p.add_argument_group("station and rig")
+    station.add_argument("--mycall", default="N0CALL", help="digital caller identity")
+    station.add_argument("--idcall", help="CW station callsign, independent of --mycall; "
+                         "default: IDCALL, [station] idcall, then --mycall")
+    station.add_argument("--dxcall", help="station to call; no default, this callsign goes on the air")
+    station.add_argument("--band", default="40m")
+    station.add_argument("--center", type=int, help="channel centre Hz (dial = centre-1500)")
+    station.add_argument("--dial", type=int, help="explicit dial Hz (overrides --center and the band table)")
+    station.add_argument("--rig", choices=list(RIGS))
     # No default on purpose: a shipped device path is right on one machine and
     # silently wrong at the next rig, and the placeholder that stood here was
     # what the 2026-08-10 arm-gate incident let through. Required under
     # --transmit only -- dry runs and --replay never open a port.
-    p.add_argument("--serial",
-                   help="CAT serial port, required with --transmit -- "
-                        "`ls /dev/cu.*` to find yours")
-    p.add_argument("--baud", type=int, default=0)
-    p.add_argument("--ptt-type", choices=["RTS", "DTR", "RIG"],
-                   help="how to key: a serial line, or a CAT command (default: "
-                        "the rig's own, RTS on the FT-891)")
-    p.add_argument("--ptt-port", help="the device whose RTS/DTR keys the rig "
-                                      "(default: derived from --serial)")
-    p.add_argument("--audio-out")
-    p.add_argument("--audio-in")
-    p.add_argument("--reply-wav", help="dry run: feed this WAV as the recorded reply")
-    p.add_argument("--message", help="send this text once connected")
-    p.add_argument("--mail-send", action="append", metavar="FILE",
-                   help="Winlink mail: a rendered .b2f message, or a body file "
-                        "with --mail-to (repeatable). Attaches a B2F session "
-                        "to the link in place of raw --message text")
-    p.add_argument("--mail-fetch", action="store_true",
-                   help="Winlink mail: collect whatever the gateway holds")
-    p.add_argument("--mail-wait-greeting", action=argparse.BooleanOptionalAction,
-                   default=None,
-                   help="defer automatic application break-in until the mail "
-                        "client has a reply to the gateway greeting; preserve "
-                        "queued bytes and normal teardown")
-    p.add_argument("--mail-to", default="",
-                   help="recipient for a --mail-send body file")
-    p.add_argument("--mail-subject", default="")
-    p.add_argument("--mail-password", default="",
-                   help=f"secure-login answer to the gateway's ;PQ: challenge. "
-                        f"Spelled out here it is in this process's argv, which "
-                        f"every `ps` can read: prefer --mail-password-file or "
-                        f"${config.PASSWORD_ENV}")
-    p.add_argument("--mail-password-file", default="",
-                   help="read the ;PQ: answer from this file instead, so it "
-                        "never reaches argv (default: "
-                        f"${config.PASSWORD_ENV})")
-    p.add_argument("--mail-sid", default="",
-                   help="the client type this station announces: the name and "
-                        "version half of the B2F SID, no brackets and no "
-                        "capability letters. Defaults to [station] client_sid "
-                        f"from the station file named by {config.STATION_ENV}, "
-                        f"else {CLIENT_SID}")
-    p.add_argument("--mail-out", default="logs/mail",
-                   help="where received messages are written")
-    p.add_argument("--over", action="store_true",
-                   help="hand the channel over once the message drains, so the "
-                        "peer can send data instead of only acknowledging")
-    p.add_argument("--preflight", action="store_true",
-                   help="check the audio path and, with --transmit, the T/R path "
-                        "against this rig; keys with NO modulation, so no RF")
-    # The escape hatch for a codec that will not run at 128 frames. Raising it
-    # costs keyed time and nothing else -- measured 2026-07-28, the excess over the
-    # audio is 4.5 ms at 128, 8.5 at 256, 18 at 512, against 250 ms of clear air --
-    # so a dongle that xruns is a --audio-block 256 away from working rather than a
-    # session lost to an edit at the radio.
-    p.add_argument("--audio-block", type=int, default=128, metavar="FRAMES",
-                   help="duplex stream blocksize (default 128; raise to 256 or 512 "
-                        "if --preflight reports capture loss)")
-    p.add_argument("--tune", type=float, default=0.0, metavar="SECONDS",
-                   help="key a steady low-power carrier for SECONDS so the ATU "
-                        "can match a new band, then exit without calling anyone")
-    p.add_argument("--listen-only", type=float, default=0.0, metavar="SECONDS",
-                   help="record SECONDS of UNBROKEN audio without transmitting, "
-                        "for analysis a cycle-by-cycle capture cannot support")
-    p.add_argument("--tune-drive", type=float, default=0.10,
-                   help="soundcard drive for --tune (default 0.10, about 5 W)")
-    p.add_argument("--hold", type=int, default=0, metavar="N",
-                   help="after connecting, stay up and listen instead of "
-                        "disconnecting -- what the peer does after our "
-                        "acknowledgement is the thing worth seeing. N is how "
-                        "many cycles with no payload either way to hold for, "
-                        "not the length of the session: every cycle that moves "
-                        "bytes buys another N, to a ceiling of "
-                        f"{HOLD_MAX_CYCLES} cycles "
-                        f"({HOLD_MAX_CYCLES * spec.CYCLE_SHORT_S / 60:.0f} "
-                        "minutes on a shared channel). It is a bound and not a "
-                        "promise: the ARQ gives up on a packet the peer stops "
-                        "answering, and the run stops with the link unless "
-                        "--observe-after-link-down is flown")
-    p.add_argument("--listen-every", type=int, default=0, metavar="N",
-                   help="on a held link, give every Nth cycle to the receiver: "
-                        "render the packet, key nothing, and take the whole "
-                        "1.25 s instead of the 0.24 s a keyed cycle leaves. Off "
-                        "unless flown, because it changes what goes on the air "
-                        "-- the peer gets a cycle with no packet in it. The "
-                        "cycle costs no retry (the burst is refused at the seam) "
-                        "and one slot of --hold")
-    p.add_argument("--observe-after-link-down", action="store_true",
-                   help="when the ARQ gives up mid-hold, spend what is left of "
-                        "--hold LISTENING: receive, decode and log, and key "
-                        "nothing at all. Off by default, because the ordinary "
-                        "answer to a link that is gone is to stop rather than "
-                        "to sit on a shared channel")
-    p.add_argument("--no-p3-fallback", action="store_true",
-                   help="after attempting P3, never return to P1 during this "
-                        "contact; preserve upgrade confirmation, hold and "
-                        "teardown limits (does not change when P3 is offered)")
-    p.add_argument("--max-cycles", type=int, default=8)
-    p.add_argument("--p3-mail", action="store_true",
-                   help="experimental mail starting at SL1: entry +603.125 ms initial reply "
-                        "pulse, retained through normal turn changes; fetch mail "
-                        "and optionally send --mail-send; no timing-trial stop")
-    p.add_argument("--p3-qrt-confirm", action="store_true",
-                   help="with --p3-mail, try the measured terminal marker after "
-                        "the QRT ACK and await opposite ACK parity within the teardown limit")
-    p.add_argument("--p3-changeover-cs5", action="store_true",
-                   help="experiment: reply CS5 to CRC-valid P3 changeovers, "
-                        "following observed SCS exchanges; retain ordinary "
-                        "packet ACKs, reply timing and final QRT ACKs")
-    p.add_argument("--p3-changeover-p1-cs", action="store_true",
-                   help="experiment: acknowledge a PACTOR-3 changeover packet "
-                        "with a PACTOR-1 codeword, in the PACTOR-3 answer slot "
-                        "and at nominal frequency. The link, the counter and "
-                        "the alternation stay PACTOR-3; only CS1/CS2 changes "
-                        "renderer, and only on the changeover cycle. Out of "
-                        "spec: a level-3 link answers DBPSK on channels 5 "
-                        "and 12")
-    p.add_argument("--p3-control-waveform", choices=("current", "historical"),
-                   default="historical", help="the synchronous waveform every "
-                   "arm that advanced a WS8EOC counter keyed; \"current\" is the "
-                   "staggered SCS-template experiment")
-    p.add_argument("--p3-timing-trial", choices=("A", "B"),
-                   help="bounded initial P3 receive experiment: A keeps peer-relative "
-                        "timing; B rotates the emitted entry phase by 600 ms. "
-                        "Holds speed, disables long cycles and ends after three "
-                        "ordinary counters, 12 opportunities or 20 seconds; no mail")
-    p.add_argument("--p3-entry-timing-trial", choices=("A", "B"),
-                   help="bounded entry acquisition experiment: A uses zero delay; "
-                        "B uses the default 4.875 ms delay to restore the trimmed pulse epoch. "
-                        "Stop on P3 acquisition or 20 seconds from first entry; no mail")
-    p.add_argument("--p3-timing-reply-delay", type=float, choices=(0.0, 3.125),
-                   help="with --p3-timing-trial B, deliberately delay the reply grid "
-                        "by this many ms; 3.125 targets entry +603.125 ms. RX/PTT "
-                        "deadlines follow the grid; entry timing is unchanged")
-    p.add_argument("--p3-timing-unbounded", action="store_true",
-                   help="with --p3-timing-trial A/B, remove the opportunity, elapsed-time, "
-                        "three-field and hold cutoffs for the initial receive turn. "
-                        "No mail; peer QRT/turn changes, link loss and operator stop still end it")
-    # 0909, 0911 and A5 advanced WS8EOC from audio-start; over the 43 controls
-    # those arms keyed, pulse-center advanced nothing.
-    p.add_argument("--p3-control-placement", choices=("pulse-center", "audio-start"),
-                   default="audio-start", help="put the trimmed audio start on "
-                   "the reply boundary, the placement that advanced WS8EOC; "
-                   "\"pulse-center\" aims the leading pulse there and is the "
-                   "experiment")
-    p.add_argument("--p3-control-tail", choices=("off", "repeat"),
-                   default="off", help="add the twenty-second symbol every "
-                   "measured SCS control sends -- a full-amplitude repeat of "
-                   "the twentieth -- to the synchronous default waveform; off "
-                   "keys the 21 symbols every arm that advanced a counter flew")
-    p.add_argument("--p3-control-stagger", choices=("off", "lead-5", "lead-12"),
-                   default="off", help="key the half-symbol (5 ms) carrier "
-                   "stagger real emitters send, alternating the leading carrier "
-                   "every ARQ cycle from the named starting foot; \"lead-5\" "
-                   "opens with channel 5 in front, \"lead-12\" with channel 12. "
-                   "Off keys both tones on one clock. THE FOOT IS THE RISK: the "
-                   "wrong arrangement puts one tone a FULL symbol out, which is "
-                   "worse than synchronous, so fly one arm on each and compare")
-    p.add_argument("--p3-follow-offset", choices=("all", "control", "none"),
-                   default="all", help="key PACTOR-3 on the carrier offset the "
-                   "peer's own PACTOR-3 arrives at, once a corroborated read "
-                   "has measured it; \"control\" moves codewords only and "
-                   "\"none\" keys everything at nominal, which left 31 WS8EOC "
-                   "changeovers and 38 VE3KPG data packets unread on 0913")
-    p.add_argument("--p3-wideband-prekey", action="store_true",
-                   help="experiment: bounded header-selected short SL3 "
-                        "receive before the IRS reply, including an explicitly "
-                        "limited partial tail; preserve transmit placement")
-    p.add_argument("--p3-keep-slots", choices=("all", "controls", "none"),
-                   default="all", help="which cycles the grid may leave a "
-                   "sub-symbol overrun to the emission path rather than "
-                   "handing the slot back: \"all\" keys nearly every slot and "
-                   "is what ships, \"controls\" gives a changeover cycle's "
-                   "slot away as v10 did, and \"none\" turns the forgiveness "
-                   "off entirely, which is v9 and every arm before it")
-    p.add_argument("--retries", type=int, default=0,
-                   help="cycles with no sign of the peer before a CONNECT "
-                        "attempt is abandoned (0 = FSM default). It governs "
-                        "nothing once the link is up -- --link-retries is that "
-                        "budget")
-    p.add_argument("--link-retries", type=int, default=0,
-                   help="unanswered cycles a LIVE link spends before the ARQ "
-                        "signs off with a QRT (0 = FSM default). This is the "
-                        "counter that ends sessions; several fallback budgets "
-                        "are calibrated to sit below it, so raising it lengthens "
-                        "the session and lowering it reorders them")
-    p.add_argument("--replay", metavar="WAV",
-                   help="drive the session from a recorded capture instead of "
-                        "the sound card -- exercises the whole loop and FSM on "
-                        "the corpus, with no radio")
-    p.add_argument("--replay-realtime", action="store_true",
-                   help="pace --replay at wall-clock speed, so the loop's timing "
-                        "is measured rather than assumed")
-    p.add_argument("--listen", type=float, default=0.0,
-                   help="RX window per cycle (s). 0 = the rest of the PACTOR "
-                        "cycle after the burst, which is what a peer expects.")
-    p.add_argument("--cycle", type=float, default=spec.CYCLE_SHORT_S,
-                   help="ARQ cycle length (s); the call repeats on this grid")
-    p.add_argument("--tx-offset", type=float, default=TX_OFFSET_S,
-                   help="seconds from a PEER burst starting to our RF starting, "
-                        "used ONCE to place the free-running grid when a hush "
-                        "finds a station to call on. It is 'cycle - packet - d' "
-                        "for the 105 ms turnaround this default implies, which "
-                        "is the one measured between two commercial modems; "
-                        "after the grid is "
-                        "placed nothing the peer does moves our transmit timing.")
-    p.add_argument("--max-key", type=float, default=40.0)
+    station.add_argument("--serial", help="CAT serial port, required with --transmit (`ls /dev/cu.*`)")
+    station.add_argument("--baud", type=int, default=0)
+    station.add_argument("--ptt-type", choices=["RTS", "DTR", "RIG"],
+                         help="serial line or CAT command (default: the rig's own, RTS on the FT-891)")
+    station.add_argument("--ptt-port", help="device whose RTS/DTR keys the rig (default: derived from --serial)")
+    station.add_argument("--transmit", action="store_true", help="ARM the rig (licensed op only)")
+    station.add_argument("--cwid-optional", action="store_true",
+                         help="skip the closing CW ID after link setup only when "
+                              "digital and CW callsigns are equal")
+    station.add_argument("--preflight", action="store_true",
+                         help="check the audio path and, with --transmit, the T/R path; keys with no modulation")
+    station.add_argument("--tune", type=float, default=0.0, metavar="SECONDS",
+                         help="key a steady low-power carrier for the ATU, then exit without calling anyone")
+    station.add_argument("--tune-drive", type=float, default=0.10,
+                         help="soundcard drive for --tune (default %(default)s, about 5 W)")
+
+    audio = p.add_argument_group("audio, capture and replay")
+    audio.add_argument("--audio-out")
+    audio.add_argument("--audio-in")
+    # Raising it costs keyed time and nothing else -- measured 2026-07-28, the
+    # excess over the audio is 4.5 ms at 128, 8.5 at 256, 18 at 512, against
+    # 250 ms of clear air -- so a dongle that xruns is a flag away from working.
+    audio.add_argument("--audio-block", type=int, default=128, metavar="FRAMES",
+                       help="duplex stream blocksize (default %(default)s; 256 or 512 if --preflight reports capture loss)")
+    audio.add_argument("--tx-drive", type=float, default=None,
+                       help="soundcard peak for TX, 0..1; sets RF power on a data interface. "
+                            f"Default: [audio] tx_drive in the {config.STATION_ENV} station file, else {TX_DRIVE}")
+    audio.add_argument("--tx-latency-ms", type=float, default=None,
+                       help="residual TX correction after the driver's ADC->DAC offset. "
+                            f"Precedence: flag, then [audio] tx_latency_ms in {config.STATION_ENV}, then rig profile")
+    audio.add_argument("--tx-command-path", choices=TX_COMMAND_PATHS, default="generic",
+                       help=argparse.SUPPRESS)
+    audio.add_argument("--outdir", default=None)
+    audio.add_argument('--capture-id', default=None, help=argparse.SUPPRESS)
+    audio.add_argument('--capture-root', default=None, help=argparse.SUPPRESS)
+    audio.add_argument('--capture-role', default=None, help=argparse.SUPPRESS)
+    audio.add_argument("--rx-assessment", help="fresh guarded-launcher RX/CCA receipt; readback-only startup")
+    audio.add_argument("--rx-claim-fd", type=int, default=9, help="inherited station claim descriptor")
+    audio.add_argument("--listen-only", type=float, default=0.0, metavar="SECONDS",
+                       help="record SECONDS of unbroken audio without transmitting")
+    audio.add_argument("--reply-wav", help="dry run: feed this WAV as the recorded reply")
+    audio.add_argument("--replay", metavar="WAV",
+                       help="drive the session from a recorded capture instead of the sound card")
+    audio.add_argument("--replay-realtime", action="store_true", help="pace --replay at wall-clock speed")
+
+    connect = p.add_argument_group("connect, hold and teardown")
+    connect.add_argument("--retries", type=int, default=0,
+                         help="cycles with no sign of the peer before a CONNECT attempt is abandoned "
+                              "(0 = FSM default); once linked, --link-retries governs")
+    connect.add_argument("--link-retries", type=int, default=0,
+                         help="unanswered cycles a LIVE link spends before the ARQ signs off with a QRT "
+                              "(0 = FSM default); this counter ends sessions")
+    connect.add_argument("--max-cycles", type=int, default=8)
+    connect.add_argument("--call-hush", type=_call_hush, metavar="N,M",
+                         help="while unanswered, go off the air for M cycles after every N calls "
+                              "(4,6 flew until 2026-09-23); default: call every cycle, as an SCS PTC does")
+    connect.add_argument("--answer", type=float, default=0.0, metavar="SECONDS",
+                         help="listen up to SECONDS for a PACTOR-1 call to --mycall, answer it and hold; "
+                              "keys only with --transmit, once called")
+    connect.add_argument("--after-connect", choices=("arq", "listen", "chirp", "p1-robust"),
+                         default="arq",
+                         help="after the answered call: arq runs the link; listen keys nothing; chirp starts "
+                              "the P4 entry probe from the answer; p1-robust keys the robust shorts after our "
+                              "first P1 ACK (see --p4-probe-values)")
+    connect.add_argument("--after-connect-cycles", type=int, default=6, metavar="N",
+                         help="with --after-connect listen, peer cycles to read before teardown (default %(default)s)")
+    connect.add_argument("--hold", type=int, default=0, metavar="N",
+                         help="after connecting, stay up and listen instead of disconnecting; N is the number of "
+                              "cycles with no payload to hold for (each payload cycle buys another N), "
+                              f"capped at {HOLD_MAX_CYCLES} cycles "
+                              f"({HOLD_MAX_CYCLES * spec.CYCLE_SHORT_S / 60:.0f} minutes)")
+    connect.add_argument("--observe-after-link-down", action="store_true",
+                         help="when the ARQ gives up mid-hold, listen out the rest of --hold, keying nothing")
+    connect.add_argument("--listen-every", type=int, default=0, metavar="N",
+                         help="on a held link, give every Nth cycle to the receiver and key nothing "
+                              "(the peer gets a cycle with no packet); costs one slot of --hold")
+    connect.add_argument("--over", action="store_true",
+                         help="hand the channel over once the message drains, so the peer can send data")
+    connect.add_argument("--message", help="send this text once connected")
+
+    timing = p.add_argument_group("cycle timing")
+    timing.add_argument("--cycle", type=float, default=spec.CYCLE_SHORT_S,
+                        help="ARQ cycle length in seconds; the call repeats on this grid")
+    timing.add_argument("--listen", type=float, default=0.0,
+                        help="RX window per cycle in seconds (0 = the rest of the PACTOR cycle after the burst)")
+    timing.add_argument("--tx-offset", type=float, default=TX_OFFSET_S,
+                        help="seconds from a peer burst starting to our RF starting; places the free-running "
+                            "grid once, when a hush finds a station to call on")
+    timing.add_argument("--max-key", type=float, default=40.0)
+
+    mail = p.add_argument_group("mail")
+    mail.add_argument("--mail-fetch", action="store_true", help="collect whatever the gateway holds")
+    mail.add_argument("--mail-send", action="append", metavar="FILE",
+                      help="a rendered .b2f message, or a body file with --mail-to (repeatable); "
+                           "attaches a B2F session in place of raw --message text")
+    mail.add_argument("--mail-to", default="", help="recipient for a --mail-send body file")
+    mail.add_argument("--mail-subject", default="")
+    mail.add_argument("--mail-password", default="",
+                      help=f"answer to the gateway's ;PQ: challenge. Visible to `ps`: prefer "
+                           f"--mail-password-file or ${config.PASSWORD_ENV}")
+    mail.add_argument("--mail-password-file", default="",
+                      help=f"read the ;PQ: answer from this file (default: ${config.PASSWORD_ENV})")
+    mail.add_argument("--mail-sid", default="",
+                      help="client name and version half of the B2F SID, no brackets or capability letters. "
+                           f"Default: [station] client_sid in {config.STATION_ENV}, else {CLIENT_SID}")
+    mail.add_argument("--mail-out", default="logs/mail", help="where received messages are written (default %(default)s)")
+    mail.add_argument("--mail-wait-greeting", action=argparse.BooleanOptionalAction, default=None,
+                      help="defer automatic break-in until the mail client has a reply to the gateway greeting")
+    mail.add_argument('--p3-mail-progress-seconds', type=float, default=120.,
+                      help='attached P3 mail response timeout after transport ACK (default %(default)s)')
+    mail.add_argument("--p2-mail", action="store_true",
+                      help="experimental: mail with a PTC-II-style PACTOR-2 ceiling (0x6A9 entry, +18.75 ms P2 phase, "
+                           "P1 fallback, no P3)")
+    mail.add_argument("--p3-mail", action="store_true",
+                      help="experimental: mail starting at SL1 with the +603.125 ms initial reply pulse, "
+                           "retained through turn changes")
+    mail.add_argument("--p4-mail", action="store_true",
+                      help="experimental: grant-to-chirp counter challenge (0x61,0x61,0x62); "
+                           "records setup/ARQ evidence, no completed mail transport")
+
     # ONE DECISION -- which door a session may reach a protocol above PACTOR-1
     # by -- so the parser takes one flag of the group. A session cannot both
     # refuse the upgrade and be pinned to it, it cannot hold the link in
     # PACTOR-1 and also key the waveform on a grant, and it cannot refuse the
     # uninvited upgrade and offer an uninvited PACTOR-2 rung behind it.
-    p.add_argument(
-        "--p1-setup-phase", choices=("reply", "call"), default="reply",
-        help="initial P1 transmit phase: reply adopts the peer CS sense "
-             "(normal); call experimentally preserves the alternating call "
-             "phase until first payload ACK or role change. Requires a "
-             "PACTOR-1-only arm; does not enable P3 or change packet bytes.")
-    level = p.add_mutually_exclusive_group()
+    door = p.add_argument_group("upgrade door", "at most one of these")
+    level = door.add_mutually_exclusive_group()
+    level.add_argument(
+        "--pactor2-only", action="store_true",
+        help="PTC-II-style level-2 ceiling: P1 setup, bits45=1, 0x6A9 entry into P2 SL1, speed capped at SL3; never P3")
     level.add_argument(
         "--pactor1-only", action="store_true",
-        help="never offer the PACTOR-3 upgrade, so the whole session stays on "
-             "the connect's 1400/1600 Hz. It is also what entitles the "
-             "launcher's channel sense to judge 1200-1800 Hz instead of the "
-             "380-2620 an upgraded link can fill (core.occupied), so the two "
-             "are set from one flag. A mail arm takes this by default; naming "
-             "any other flag of this group is how an operator opts out.")
+        help="never offer the upgrade; the session stays on 1400/1600 Hz and the channel sense judges only "
+             "1200-1800 Hz. A mail arm takes this by default; naming another flag of this group opts out")
     level.add_argument(
         "--pactor3-only", action="store_true",
-        help="take the upgrade on the first acknowledged packet, with or "
-             "without traffic behind it, and hold the link there: neither the "
-             "peer answering in PACTOR-1 nor a run of unanswered cycles brings "
-             "it back down. The link still OPENS in PACTOR-1, because a "
-             "connect burst is PACTOR-1. For a rig test that wants the upgrade "
-             "as its one variable rather than as emergent behaviour.")
+        help="take the upgrade on the first acknowledged packet and hold P3 there; the link still opens in P1")
     level.add_argument(
         "--p1-grant-only", "--p1-act-on-grant", action="store_true",
         dest="p1_grant_only",
-        help="make the peer's grant the ONLY door into PACTOR-3: the uninvited "
-             "upgrade off the next acknowledged packet is refused, so an arm "
-             "asking what a gateway does with an INVITED PACTOR-3 has one "
-             "variable. --pactor1-only cannot do this -- it declines the grant "
-             "too -- which is why the parser refuses that pair. Answering the "
-             "grant itself needs no flag: the old --p1-act-on-grant spelling "
-             "still names this restriction, which is the other half of what it "
-             "always meant. Pair with --p1-status-bits45, which is what asks.")
+        help="the peer's grant is the only door into P3 (no uninvited upgrade). "
+             "Pair with --p1-status-bits45, which is what asks")
     level.add_argument(
         "--p3-uninvited", action="store_true",
-        help="go up without being invited and advertise nothing: leave the "
-             "upgrade open so it is taken off the next acknowledged PACTOR-1 "
-             "packet with bytes behind it, and do not restore the announcement "
-             "a mail arm clears. It is the only door that asks whether a "
-             "gateway gates on a capability we DECLARE or simply reads what we "
-             "key, and it needs no flag on an upgrade arm -- that is the "
-             "default there. On a mail arm it does, because a mail arm holds "
-             "itself in PACTOR-1 unless a door is named, and dropping "
-             "--p1-grant-only without naming this one is what silently turned "
-             "three 2026-09-17 arms into PACTOR-1 runs. The PACTOR-3 phase it "
-             "opens starts at --p3-entry-sl carrying the host's own bytes, not "
-             "at the granted door's speed level 1 behind a template.")
+        help="go up uninvited and advertise nothing: upgrade on the next acknowledged P1 packet with bytes "
+             "behind it, opening at --p3-entry-sl. Needed on a mail arm, which otherwise holds in P1")
     level.add_argument(
         "--decline-grant", action="store_true",
-        help="DECLINE the peer's 0x59A -- name the upgrade grant in the log and "
-             "stay in PACTOR-1, refusing a capability the far end has just said "
-             "it has. The link otherwise goes as far as both ends allow, so this "
-             "is the opt-out and not the default: a gateway that grants may serve "
-             "nothing below PACTOR-2, and the grant is the only place our own "
-             "PACTOR-3 has ever been invited.")
+        help="decline the peer's 0x59A upgrade grant and stay in PACTOR-1")
     level.add_argument(
         "--offer-pactor2", action="store_true",
-        help="offer PACTOR-2 uninvited, AFTER a peer has answered our PACTOR-3 "
-             "in PACTOR-1 and ruled it out for the link. Off, because the "
-             "corpus holds no PACTOR-1-to-PACTOR-2 transition at all -- both "
-             "graded third-party completions go 1 -> 3 in one step -- and our "
-             "PACTOR-2 codeword keying is graded by nothing outside this "
-             "package. What it keys is a speed-level-1 short packet, DBPSK on "
-             "both carriers behind the frame marker that names it. FOLLOWING a "
-             "peer that leads into PACTOR-2 needs no flag: there the far end "
-             "has already keyed the waveform.")
-    p.add_argument("--p4-entry-attempts", type=int, default=2, metavar="N",
-                   help="P4 probe chirp cap, 1..4 (default 2); requires --p4-entry")
-    p.add_argument("--p4-entry-timeout", type=float, default=60.0, metavar="SECONDS",
-                   help="P4 probe deadline after grant, at most 60 seconds; requires --p4-entry")
-    p.add_argument("--p1-6a9", action="store_true",
-                   help="announce P1 bits45=1 and select 0x6A9 as the entry response; "
-                        "does not change the entry waveform or P1-only policy")
-    p.add_argument("--p4-entry", action="store_true",
-                   help="experimental PACTOR-4 SL1 chirp entry after a grant; "
-                        "off by default. Selects the p4chirp entry and grant-only "
-                        "upgrade. No connected P4 ARQ or frame-type selection. "
-                        "Keeps the QRM guard; --no-qrm-guard is a separate override.")
-    p.add_argument("--p3-entry", type=_entry_ladder, metavar="RUNGS",
-                   default=",".join(ArqConfig.entry_ladder),
-                   help="the entry packets a granted upgrade keys, in order, "
-                        "four cycles each: 'template' is DL6MAA's shape -- an "
-                        "empty field, so the walking template fills it, at the "
-                        "data type the reference declares, unswapped; 'burst' is "
-                        "the same packet behind the acquisition preamble; 'data' "
-                        "is the user text at type 0 this station keyed through "
-                        "2026-08-26 and no gateway took. A granted peer asks 13 "
-                        "to 17 times, so a ladder spends cycles it was already "
-                        "offering. 'burst' IS REFUSED: it renders 1.074 s and "
-                        "keys one slot in two against a 210 ms listen floor, so "
-                        "it is offered on half the cadence of 'template' and the "
-                        "two cannot be scored against each other until the rung "
-                        "or the cycle changes (arq.ENTRY_RUNGS_GROUNDED). "
-                        "'p4chirp' answers the grant with PACTOR-4 speed level "
-                        "1's two-tone chirp entry instead of any PACTOR-3 "
-                        "packet -- 3.3 s of audio keyed one slot in three, for "
-                        "a gateway whose grant may be commanding its own "
-                        "maximum rather than ours. Default template.")
-    p.add_argument("--p3-entry-sl", type=int, choices=range(1, 7),
-                   default=ArqConfig.entry_sl, metavar="SL",
-                   help="open an UNINVITED PACTOR-3 phase at this speed level "
-                        "instead of the default 3. A GRANTED one opens at "
-                        "ptc.GRANT_ENTRY_SL whatever this says: the peer that "
-                        "sent 0x59A is waiting for the entry packet and both "
-                        "reference recordings key that one at level 1, on tones "
-                        "5 and 12 -- the pair every level shares, which is what "
-                        "makes it acquirable off a PACTOR-1 raster. Uninvited it "
-                        "has gone out at 3 every time this station has keyed one: "
-                        "all 27 on record, at stations never shown to read even "
-                        "the level-1 entry behind a grant, which is why that null "
-                        "is void rather than negative. --p3-entry-sl 1 keys the "
-                        "acquirable packet at a peer that was not told to expect "
-                        "anything, which is the question the 27 were meant to ask.")
-    p.add_argument("--p3-traffic-sl", type=int, choices=range(1, 7),
-                   default=ArqConfig.traffic_sl, metavar="SL",
-                   help="run the traffic at this speed level once the peer has "
-                        "answered the entry packet, instead of the default 3. "
-                        "The entry packet is speed level 1 whatever this says, "
-                        "and a peer that reads it has proved it acquired THAT "
-                        "level: VE3KPG took the entry twice on 2026-09-13 and "
-                        "then answered 32 and 17 speed-level-3 packets with the "
-                        "same codeword, accepting none. --p3-traffic-sl 1 holds "
-                        "the traffic where the peer was last read and leaves the "
-                        "climb to the peer's own CS4, which is the only gear "
-                        "command the protocol gives it.")
-    p.add_argument("--p3-speed-up", choices=("auto", "hold"),
-                   default=ArqConfig.speed_up,
-                   help="whether this station may ask the peer for a higher "
-                        "speed level. 'auto' (the default) keys CS4 once three "
-                        "consecutive cycles have each delivered a new packet "
-                        "-- a repeat, or a cycle nothing was read in, ends the "
-                        "run; 'hold' keys none at all, from "
-                        "either gear seam, and the link stays at the level the "
-                        "entry opened it on. For a path already known to be "
-                        "marginal: WS8EOC on 80 m 2026-09-13 21:35 was asked "
-                        "for SL2 and went from 38%% of the peer's cycles read "
-                        "to 3%%, the gateway repeating one SL2 block 33 times "
-                        "while a witness heard every one of them.")
-    p.add_argument("--p3-tx-gear-hold", action="store_true",
-                   help="experimental outbound P3 gear handling: treat a held "
-                        "CS4/CS5 as a repeat request, preserving the pending "
-                        "bytes and counter until an ACK or different command; "
-                        "MAXTry still bounds the speed-up trial")
-    p.add_argument("--p3-max-try", type=int, choices=range(1, 10),
-                   default=ArqConfig.p3_max_try, metavar="N",
-                   help="SCS MAXTry: total transmissions at a trial speed before "
-                        "returning to the previous speed (1..9, default 2)")
-    p.add_argument("--p3-max-down", type=int, choices=range(2, 31),
-                   default=ArqConfig.p3_max_down, metavar="N",
-                   help="SCS MAXDown: consecutive receive errors before requesting "
-                        "one speed level down with CS5 (2..30, default 6)")
-    p.add_argument("--p3-repeat-gear", type=int, default=ArqConfig.repeat_gear,
-                   metavar="N",
-                   help="after N identical packets answered with one identical "
-                        "codeword, key CS4 -- the speed-up request, which also "
-                        "acknowledges -- instead of another alternation word, "
-                        "then resume the alternation. 0 (the default) is "
-                        "today's behaviour. The ordinary climb spends ACCEPTED "
-                        "traffic packets and a repeat is not one, so a peer "
-                        "that repeats produces no clean run and the link never "
-                        "leaves the level it stalled on: WS8EOC repeated "
-                        "status=0x21 seq=1 thirty-six times on 2026-09-13 and "
-                        "that arm keyed no CS4 at all, while both arms that "
-                        "delivered the greeting keyed one within three packets.")
-    p.add_argument("--p3-entry-stagger", action=argparse.BooleanOptionalAction,
-                   default=True,
-                   help="lead the entry and changeover packets' lower carrier "
-                        "by half a symbol, which is what DL6MAA keys: its "
-                        "channel 5 runs T/2 ahead of channel 12 and shrike put "
-                        "both on one clock, which is the render four granted "
-                        "arms keyed and none was ever acknowledged. It governs "
-                        "the two-carrier keyings only -- the entry packet and "
-                        "the changeover packet -- and nothing else on the link. "
-                        "--no-p3-entry-stagger is the one-clock control.")
-    p.add_argument("--p3-rise", "--p3-entry-rise",
-                   action=argparse.BooleanOptionalAction, default=True,
-                   help="shape every PACTOR-III keying with the protocol's own "
-                        "symbol pulse rather than the generic raised cosine, "
-                        "which put 40 ms of kernel in front of the first symbol "
-                        "where DL6MAA keys 18. Whole-waveform correlation "
-                        "against the reference entry 0.809 to 0.877. The data "
-                        "packets at speed levels 2 to 6 were the last keyings "
-                        "still on the generic filter, and it cost them 20 ms of "
-                        "energy ahead of the packet and a phase reference 27.8 "
-                        "ms past the boundary where the entry's is at 13.9. "
-                        "--no-p3-rise is the flown-kernel control; "
-                        "--p3-entry-rise is the old name for this flag.")
-    p.add_argument("--p3-data-flush", choices=("zeros", "entry", "reference"),
-                   default="zeros",
-                   help="what an ordinary data packet ends its trellis on. "
-                        "'zeros' is the terminated code every receiver assumes "
-                        "and every arm has flown; 'entry' keys the eight bits "
-                        "measured off DL6MAA's entry packet "
-                        "(placement.ENTRY_FLUSH) on the data packets as well, "
-                        "which is the remaining difference between the entry a "
-                        "peer read in five keyings and the speed-level-1 data "
-                        "packets the same peer answered CS1 thirty-five times; "
-                        "'reference' keys the six bits all six of that "
-                        "recording's clean level-3 data packets end on "
-                        "(placement.REFERENCE_FLUSH), levels 2 to 6 only. The "
-                        "entry packet keys its own either way.")
-    p.add_argument("--p3-entry-delay", type=float, nargs="?", metavar="MS",
-                   const=DEFAULT_ENTRY_DELAY_MS, default=DEFAULT_ENTRY_DELAY_MS,
-                   help="delay P3 entry audio after its slot boundary "
-                        f"(default, also with a bare flag: {DEFAULT_ENTRY_DELAY_MS:g} ms). "
-                        "Restores the leading time removed by the waveform trim. "
-                        "Use 0 for historical timing. Samples and transmit guards "
-                        "are unchanged.")
-    p.add_argument("--announce-lower", action=argparse.BooleanOptionalAction,
-                   default=True,
-                   help="send the callsign announcement lowercase (1w9ssj), "
-                        "as both completions on tape do. --no-announce-lower "
-                        "is the uppercase form every arm flew before "
-                        "2026-09-08.")
-    p.add_argument("--p1-drive", type=float, default=1.0,
-                   help="scale ONLY the PACTOR-1 legs (connect, data packets, "
-                        "control signals, break-in) to tx-drive times this, "
-                        "leaving PACTOR-3 at full drive. Both modems of the "
-                        "reference session key PACTOR-1 well below their "
-                        "PACTOR-3 -- DL6MAA's SL1 entry carries +7.0 dB over "
-                        "its own PACTOR-1 average, ours -5.8 dB under it at "
-                        "1.0, a 13 dB convention gap that cannot be closed "
-                        "upward (the amplifier is at its rail). 0.35 "
-                        "reproduces the reference ratio. Default 1.0: "
-                        "unchanged behaviour.")
-    p.add_argument("--p1-watts", type=float, default=None,
-                   help="RF POWER, in watts, for the PACTOR-1 phase -- written "
-                        "to the rig as RFPOWER over the arm's own CAT "
-                        "connection, before the first call and again whenever "
-                        "the link falls back or ends. The audio drive cannot "
-                        "set this: the ALC holds the two-tone PACTOR-3 entry "
-                        "down by its crest and passes a constant-envelope FSK "
-                        "packet at whatever RFPOWER allows. Default: the level "
-                        "the rig is already on, untouched.")
-    p.add_argument("--p3-watts", type=float, default=None,
-                   help="RF POWER, in watts, for the PACTOR-3 phase -- written "
-                        "the instant the peer's 0x59A grant is read, a "
-                        "turnaround ahead of the entry packet and never inside "
-                        "a pre-key window. The level the rig read back at arm "
-                        "start comes back at teardown. See --p1-watts.")
-    p.add_argument("--p1-status-bits45", type=int, default=None,
-                   choices=(0, 1, 2, 3),
-                   help="announcement status bits 4-5, as a 2-bit value: 0 none, "
-                        "1 bit 4 only (0x11), 2 bit 5 only (0x21), 3 both (0x31). "
-                        "Default 3 on an upgrade arm: the value both recorded "
-                        "PACTOR-3 completions' callers announced (W4DNA 0x31, "
-                        "DL6MAA 0x35) and the only one that has ever drawn a "
-                        "0x59A grant here -- every granted session on record "
-                        "announced at 3, and none at 0, 1 or 2. Default 0 on a "
-                        "mail arm, where the measured cost of 3 is the data path "
-                        "itself: the peer's counter freezes at #1 and nothing is "
-                        "acknowledged either way.")
-    p.add_argument("--qrm-guard", action=argparse.BooleanOptionalAction,
-                   default=True,
-                   help="refuse to key where the peer's last DECODED codeword, "
-                        "projected one cycle on its own raster, would still be "
-                        "on the air or would start inside our own burst. This "
-                        "is the SENDING side's guard and there was none: on "
-                        "2026-08-26 this station transmitted over WS8EOC 20 "
-                        "times in one session and its own capture could not "
-                        "show it, because the rig mutes the receiver while we "
-                        "key. It rests on a twelve-bit word read at zero "
-                        "errors, never on an energy forecast; its band is "
-                        "`_d_max_n`, so it refuses no turnaround the grid would "
-                        "acquire; and it stands down for one burst after 3 "
-                        "refusals in a row, so it cannot deadlock a link. "
-                        "--no-qrm-guard turns it off mid-slot and every line it "
-                        "prints names that flag.")
-    p.add_argument("--p1-status-from", type=int, default=1, metavar="K",
-                   help="hold --p1-status-bits45 back until the Kth data packet "
-                        "of the session, 1-based; the packets before it go out "
-                        "with bits 4-5 clear. Default 1, from the first packet. "
-                        "Every station on record sets them on the FIRST packet "
-                        "of a link and never mid-link, so whether a peer reads "
-                        "them once at connect or on every packet is untested -- "
-                        "switching on an established, advancing link is the arm "
-                        "that tells the two apart. A retransmission is the same "
-                        "packet and does not count towards K.")
-    p.add_argument("--long-cycle", "--long-cycles", action=argparse.BooleanOptionalAction,
-                   default=True,
-                   help="let the link climb onto the 3.75 s cycle -- status "
-                        "bit 5 while more than a long field is queued, and CS6 "
-                        "granting a peer's ask. It is the sustained exchange "
-                        "rather than an optimisation: the reference session "
-                        "spends 17.9-51.6 s of its traffic phase there and its "
-                        "IRS reaches for CS6 on the seventh data cycle. "
-                        "--no-long-cycle declines it for the slot, which is one "
-                        "raster and one packet length for the whole session; a "
-                        "CS6 that arrives anyway is still followed, because a "
-                        "station holding the short raster through one "
-                        "desynchronises the link. Sending CS6 records a pending "
-                        "change; a fresh decoded packet determines the peer's "
-                        "actual length. Unreadable answers retain possible-long "
-                        "receive protection.")
-    p.add_argument("--breakin-lead-72", dest="breakin_at_boundary",
-                   action="store_false", default=True,
-                   help="THE CONTROL. Key the changeover packet "
-                        f"{BREAKIN_LEAD_S * 1e3:.0f} ms after the peer's packet "
-                        "ends -- where the reference modems key THEIRS at us "
-                        "(71.3-71.9 ms off WS8EOC, both arms of 2026-08-30) -- "
-                        "instead of where this station's codewords are read. "
-                        "Flown on 2026-09-04 it put 18 keyings at +68 to +70 ms "
-                        "against a reader whose acknowledged window is "
-                        "88.5-98.0, and drew nothing. Default is 170 ms less "
-                        "the tracked turnaround, past the peer's packet, which "
-                        "is our own boundary and is where the one accepted "
-                        "changeover on record sat (+94.9 ms, KB5LZK, "
-                        "2026-08-22).")
-    p.add_argument("--p1-ack-lsb", action=argparse.BooleanOptionalAction, default=True,
-                   help="send the CS least-significant-bit first, which is what "
-                        "the air carries -- WS8EOC's answer train reads CS1 then "
-                        "CS4 this way round and CS2 then CS3 the other, and "
-                        "neither of those is a legal connect answer. "
-                        "--no-p1-ack-lsb is for comparison only.")
-    p.add_argument("--tx-latency-ms", type=float, default=None,
-                   help="key every burst this many milliseconds early, for the "
-                        "part of the ADC->DAC loop the driver does not report. "
-                        "Measured by keying into a loopback and reading where "
-                        "our own burst lands in our own capture; this station "
-                        "measures 20. It is the audio path's, not any "
-                        "protocol's, so it applies to every emission and PTT "
-                        "moves with it. Defaults to [audio] tx_latency_ms from "
-                        f"the station file named by {config.STATION_ENV}, else "
-                        "0 -- unset, nothing moves.")
-    p.add_argument("--tx-drive", type=float, default=None,
-                   help="soundcard peak for TX (0..1); the audio level sets RF "
-                        "power on a data interface. Raise against a watched "
-                        f"meter. Defaults to [audio] tx_drive from the station "
-                        f"file named by {config.STATION_ENV}, else {TX_DRIVE}.")
-    p.add_argument("--outdir", default="captures/onair")
+        help="offer PACTOR-2 uninvited after a peer has answered our P3 in P1 and ruled it out")
+
+    p1 = p.add_argument_group("PACTOR-1 link")
+    p1.add_argument(
+        "--p1-setup-phase", choices=("reply", "call"), default="reply",
+        help="initial P1 transmit phase: reply adopts the peer CS sense; call keeps the alternating call phase "
+             "until the first payload ACK. Needs a PACTOR-1-only or P4-entry arm")
+    p1.add_argument("--p1-status-bits45", type=int, default=None, choices=(0, 1, 2, 3),
+                    help="announcement status bits 4-5: 0 none, 1 bit 4, 2 bit 5, 3 both. "
+                         "Default 3 on an upgrade arm (the only value that has drawn a 0x59A grant), 0 on a mail arm")
+    p1.add_argument("--p1-status-from", type=int, default=1, metavar="K",
+                    help="hold --p1-status-bits45 back until the Kth data packet (default %(default)s, from the first)")
+    p1.add_argument("--p1-level-digit", type=int, choices=(1, 2, 3, 4), default=1,
+                    help="leading digit of the announcement, the 1990 maximum software level (default %(default)s)")
+    p1.add_argument("--announce-lower", action=argparse.BooleanOptionalAction, default=True,
+                    help="send the callsign announcement lowercase (1w9ssj), as both tape completions do; "
+                         "--no-announce-lower is the uppercase form flown before 2026-09-08")
+    p1.add_argument("--p1-6a9", action="store_true",
+                    help="announce P1 bits45=1 and select 0x6A9 as the entry response")
+    p1.add_argument("--p1-ack-lsb", action=argparse.BooleanOptionalAction, default=True,
+                    help="send the CS least-significant-bit first, as the air carries it; "
+                         "--no-p1-ack-lsb is for comparison only")
+    p1.add_argument("--p1-supervisor", nargs="+", default=[], metavar="BLOCK",
+                    type=_supervisor_text,
+                    help="function blocks to send after the announcement, each a code and parameters ('A 3' 'B'), "
+                         "one per --p1-supervisor-every acknowledged packets")
+    p1.add_argument("--p1-supervisor-every", type=int, default=3, metavar="N",
+                    help="acknowledged packets between --p1-supervisor blocks (default %(default)s)")
+    p1.add_argument("--p1-idle-id-every", type=int, default=0, metavar="N",
+                    help="put function B with our call in every Nth idle P1 packet (try 10; default 0, off)")
+    p1.add_argument("--p1-drive", type=float, default=1.0,
+                    help="scale only the PACTOR-1 legs to tx-drive times this (default %(default)s; 0.35 matches "
+                         "the reference ratio)")
+    p1.add_argument("--p1-watts", type=float, default=None,
+                    help="RF watts for the P1 phase, written to the rig as RFPOWER; "
+                         "default: leave the rig's level alone")
+
+    entry = p.add_argument_group("PACTOR-3 entry and changeover")
+    entry.add_argument("--p3-entry", type=_entry_ladder, metavar="RUNGS",
+                       default=",".join(ArqConfig.entry_ladder),
+                       help="entry packets a granted upgrade keys, in order, four cycles each: template, data, "
+                            "p4chirp ('burst' is refused: it keys one slot in two). Default %(default)s")
+    entry.add_argument("--p3-entry-sl", type=int, choices=range(1, 7),
+                       default=ArqConfig.entry_sl, metavar="SL",
+                       help="speed level an UNINVITED P3 entry opens at (default %(default)s); a granted one "
+                            "always opens at 1. 1 keys the acquirable packet at a peer that was not told to expect one")
+    entry.add_argument("--p3-entry-delay", type=float, nargs="?", metavar="MS",
+                       const=DEFAULT_ENTRY_DELAY_MS, default=DEFAULT_ENTRY_DELAY_MS,
+                       help="delay P3 entry audio after its slot boundary "
+                            f"(default, also with a bare flag: {DEFAULT_ENTRY_DELAY_MS:g} ms); 0 is historical timing")
+    entry.add_argument("--p3-watts", type=float, default=None,
+                       help="RF watts for the P3 phase, written when the 0x59A grant is read; "
+                            "the arm-start level returns at teardown. See --p1-watts")
+    entry.add_argument("--breakin-lead-72", dest="breakin_at_boundary",
+                       action="store_false", default=True,
+                       help="control: key the changeover packet "
+                            f"{BREAKIN_LEAD_S * 1e3:.0f} ms after the peer's packet ends, as the reference modems do, "
+                            "instead of at our own boundary (170 ms less the tracked turnaround)")
+    entry.add_argument("--p3-changeover-cs5", action="store_true",
+                       help="experiment: reply CS5 to CRC-valid P3 changeovers, following observed SCS exchanges")
+    entry.add_argument("--p3-changeover-p1-cs", action="store_true",
+                       help="experiment: acknowledge a P3 changeover with a PACTOR-1 codeword in the P3 answer slot. "
+                            "Out of spec")
+    entry.add_argument("--p3-entry-stagger", action=argparse.BooleanOptionalAction, default=True,
+                       help="lead the entry and changeover packets' lower carrier by half a symbol, as DL6MAA keys; "
+                            "--no-p3-entry-stagger is the one-clock control")
+    entry.add_argument("--p3-rise", "--p3-entry-rise",
+                       action=argparse.BooleanOptionalAction, default=True,
+                       help="shape every P3 keying with the protocol's own symbol pulse; "
+                            "--no-p3-rise is the generic raised-cosine control")
+    entry.add_argument("--p3-wideband-prekey", action="store_true",
+                       help="experiment: bounded header-selected short SL3 receive before the IRS reply")
+
+    traffic = p.add_argument_group("PACTOR-3 traffic and speed")
+    traffic.add_argument("--p3-traffic-sl", type=int, choices=range(1, 7),
+                         default=ArqConfig.traffic_sl, metavar="SL",
+                         help="experimental post-entry speed override; default keeps the acquired speed (SL1 after "
+                              "a grant). A CS4 answering entry takes precedence")
+    traffic.add_argument("--p3-speed-up", choices=("auto", "hold"),
+                         default=ArqConfig.speed_up,
+                         help="auto asks the peer for a higher speed (CS4) after three consecutive cycles that "
+                              "each delivered a new packet; hold never asks (default %(default)s)")
+    traffic.add_argument("--p3-speed-policy", choices=("current", "stock"),
+                         default="current",
+                         help="ISS speed and cycle policy: current is the flown ladder; stock follows the SCS "
+                              "manual's ISS as measured. Stock is unflown (default %(default)s)")
+    traffic.add_argument("--p3-max-try", type=int, choices=range(1, 10),
+                         default=ArqConfig.p3_max_try, metavar="N",
+                         help="SCS MAXTry: transmissions at a trial speed before returning (1..9, default %(default)s)")
+    traffic.add_argument("--p3-max-down", type=int, choices=range(2, 31),
+                         default=ArqConfig.p3_max_down, metavar="N",
+                         help="SCS MAXDown: consecutive receive errors before asking one level down with CS5 "
+                              "(2..30, default %(default)s)")
+    traffic.add_argument("--p3-repeat-gear", type=int, default=ArqConfig.repeat_gear, metavar="N",
+                         help="after N identical packets answered with one codeword, key CS4 instead "
+                              "(default %(default)s, off)")
+    traffic.add_argument("--p3-cs4-parity", action="store_true",
+                         help="unflown: a CS4 acknowledges only an odd packet counter, as PIII_Complete_1's IRS answers")
+    traffic.add_argument("--p3-tx-gear-hold", action="store_true",
+                         help="experiment: treat a held CS5 as a repeat request, preserving pending bytes and counter")
+    traffic.add_argument("--p3-irs-reply-offset-ms", type=float, default=0.0, metavar="N",
+                         help="unflown, with --p3-mail: key IRS control signals N ms later than the reply clock "
+                              "(negative is earlier; default %(default)s)")
+    traffic.add_argument("--p3-qrt-confirm", action="store_true",
+                         help="on by --p3-mail: send the terminal marker after the QRT ACK and await opposite ACK parity")
+    traffic.add_argument("--no-p3-fallback", action="store_true",
+                         help="after attempting P3, never return to P1 during this contact")
+    traffic.add_argument("--long-cycle", "--long-cycles", action=argparse.BooleanOptionalAction,
+                         default=True,
+                         help="let the link climb onto the 3.75 s cycle (status bit 5, CS6); "
+                              "--no-long-cycle declines it, though a CS6 that arrives is still followed")
+    traffic.add_argument("--qrm-guard", action=argparse.BooleanOptionalAction, default=True,
+                         help="refuse to key where the peer's last decoded codeword would still be on the air or "
+                              "start inside our burst; stands down after 3 refusals in a row. "
+                              "--no-qrm-guard turns it off")
+
+    keying = p.add_argument_group("PACTOR-3 keying experiments",
+                                  "waveform variants; each is a control or unflown")
+    keying.add_argument("--p3-control-waveform", choices=("current", "historical"),
+                        default="historical",
+                        help="historical is the synchronous waveform every counter-advancing arm keyed; "
+                             "current is the staggered SCS-template experiment")
+    keying.add_argument("--p3-control-placement", choices=("pulse-center", "audio-start"),
+                        default="audio-start",
+                        help="audio-start puts the trimmed audio start on the reply boundary, the placement that "
+                             "advanced WS8EOC; pulse-center aims the leading pulse there")
+    keying.add_argument("--p3-control-tail", choices=("off", "repeat"),
+                        default="off",
+                        help="repeat adds the 22nd symbol every measured SCS control sends; off keys the 21 "
+                             "that every counter-advancing arm flew")
+    keying.add_argument("--p3-control-stagger", choices=("off", "lead-5", "lead-12"),
+                        default="off",
+                        help="half-symbol (5 ms) carrier stagger, alternating from the named foot. "
+                             "The wrong foot is worse than off: fly one arm on each")
+    keying.add_argument("--p3-follow-offset", choices=("all", "control", "none"),
+                        default="all",
+                        help="key P3 on the carrier offset the peer arrives at: all, control codewords only, "
+                             "or none (everything at nominal)")
+    keying.add_argument("--p3-keep-slots", choices=("all", "controls", "none"),
+                        default="all",
+                        help="which cycles may leave a sub-symbol overrun to the emission path: all (ships), "
+                             "controls, or none")
+    keying.add_argument("--p3-data-flush", choices=("zeros", "entry", "reference"),
+                        default="zeros",
+                        help="what a data packet ends its trellis on: zeros (terminated code, flown), "
+                             "entry (the DL6MAA entry's flush bits) or reference (level-3 data flush bits)")
+    keying.add_argument("--p3-crest-limit", type=_crest_limit, default="off", metavar="off|DB",
+                        help="hold every P3 data packet and control burst to this peak-to-average ratio in dB; "
+                             "6 is the reviewed point and raises average power 4-6 dB (watch ALC). Unflown")
+
+    robust = p.add_argument_group("Robust connect and the PACTOR-2 bridge")
+    robust.add_argument("--connect", choices=("normal", "robust"), default="normal",
+                        help="which call to key; robust is the host's `C %%CALL` Robust Connect, never on the "
+                             "longpath cycle")
+    robust.add_argument("--connect-fallback-after", type=int, metavar="N",
+                        help="after N unanswered robust calls, key the remaining retries as an ordinary connect")
+    robust.add_argument("--after-robust", choices=tuple(AFTER_ROBUST), default="listen",
+                        help="after a Robust Connect answer: listen keys nothing; p1 keys a P1 packet opening with "
+                             "our call; p2 bridges through the caller callsign and a P2 grant; p3 keys the SL1 "
+                             "entry and the P3 ARQ; p4-robust keys the robust shorts")
+    robust.add_argument("--robust-call-text", choices=("pmc", "ascii"), default="pmc")
+    robust.add_argument("--robust-p2-max", type=int, default=10)
+    robust.add_argument("--robust-p2-marker-flag", choices=("parity", "inverted"),
+                        default="parity",
+                        help="bit 0 of the bridge's P2 marker: the packet counter's parity, or its complement "
+                             "(keys k=2 as K4MCK's did). Bridge frames only")
+    robust.add_argument("--robust-p2-opening", choices=("none", "k9"), default="none",
+                        help="k9 keys K4MCK's counter-0 frame before the first callsign packet, "
+                             "counting as one of --robust-p2-max's slots")
+    robust.add_argument("--robust-p3-without-grant", type=int, metavar="K")
+
+    p4 = p.add_argument_group("PACTOR-4 link and ACK policy", "experimental")
+    p4.add_argument('--p4-link', action='store_true', help='run the experimental P4 turn machine after the entry shorts')
+    p4.add_argument('--p4-ladder', choices=('long','chirp','none'), default='long',
+                    help='none: body then normal frames, never a v13/v60 ladder after the turn (needs --p4-data body)')
+    p4.add_argument('--p4-data', choices=('none','body','chirp'), default='none')
+    p4.add_argument('--p4-train-policy', choices=('repeat', 'passive'), default='repeat')
+    p4.add_argument('--p4-normal-ack', choices=('v27', 'x27', 'parity', 'x27-u27', 'alternate-packet'),
+                    default='v27', help='ack policy for peer normal frames (default %(default)s)')
+    p4.add_argument('--p4-word-render', choices=('off', 'stock'), default='off',
+                    help='control-word carrier placement: off (legacy zero offsets), stock (measured offsets from body); default off.')
+    p4.add_argument('--p4-long-ack', choices=('fixed-x27', 'alternate-packet', 'counter-odd-t27', 'counter-even-t27'),
+                    default='fixed-x27', help='experimental ack policy for peer robust long frames (default %(default)s)')
+    p4.add_argument('--p4-peer-ack', type=_peer_acks, default={}, metavar='V=WORD,...',
+                    help="override the word answering the peer's ladder short value V, e.g. 51=U27,61=U27")
+    p4.add_argument('--p4-chirp-ack', choices=('parity', 'alternate', 'x27'), default='parity',
+                    help="parity answers odd chirp counters with X27 and even with V27; "
+                         "alternate is a parity alias; x27 is a diagnostic override")
+    p4.add_argument('--p4-ack-53', choices=('U27', 'X27'), default='U27', type=str.upper,
+                    help="word answering the peer's v53 ladder short (default %(default)s)")
+    p4.add_argument('--p4-v59-answer', choices=('current', 'w27'), default='current',
+                    help='experimental associated IRS robust v59 answer (default %(default)s)')
+    p4.add_argument('--p4-breakin', choices=('body', 'y27'), default='body',
+                    help="how the IRS asks for the turn: an idle 0x40 body, or a bare Y27 at +0.920 that waits "
+                         "for the peer's Y27 + idle 0x40 grant")
+    p4.add_argument('--p4-text', help='Latin-1 text after our SID, only with --no-mail')
+    p4.add_argument('--p4-hold-cycles', type=int, default=6)
+    p4.add_argument('--p4-irs-silent-cycles', type=int, default=0, metavar='N',
+                    help='key nothing for N peer cycles from the first IRS greeting body or ladder short, '
+                         'still receiving (default %(default)s, off)')
+    p4.add_argument('--p4-answer-offset', type=float, default=.920, metavar='SECONDS')
+    p4.add_argument('--p4-link-timeout', type=float, default=600.)
+    p4.add_argument('--p4-rx-scan', choices=('legacy', 'incremental'), default='legacy',
+                    help='P4 free word acquisition: legacy or bounded idle blocks (default %(default)s)')
+    p4.add_argument('--p4-rx-timing-trace', action='store_true',
+                    help='record P4 reader/capture stage timestamps in stream samples')
+
+    probe = p.add_argument_group("PACTOR-4 entry probe", "experimental")
+    probe.add_argument("--p4-entry", action="store_true",
+                       help="PACTOR-4 SL1 chirp entry after a grant; selects the p4chirp entry and grant-only "
+                            "upgrade, no connected ARQ. Keeps the QRM guard")
+    probe.add_argument("--p4-entry-attempts", type=int, default=2, metavar="N",
+                       help="probe chirp cap, 1..4 (default %(default)s); requires --p4-entry")
+    probe.add_argument("--p4-entry-timeout", type=float, default=60.0, metavar="SECONDS",
+                       help="probe deadline after grant, at most 120 (default %(default)s); requires --p4-entry")
+    probe.add_argument("--p4-probe-packet", choices=("chirp", "short", "robust"),
+                       default="chirp",
+                       help="what the probe keys: chirp (SL1 3.3 s two-tone entry), short (normal-mode short, "
+                            "793 ms) or robust (the setup tape's caller packet, 759 ms)")
+    probe.add_argument("--p4-probe-statuses", type=_status_schedule, metavar="BYTES",
+                       help="status bytes to key, one chirp each: one to four, comma separated; replaces "
+                            "--p4-entry-attempts. Not for --p4-mail")
+    probe.add_argument("--p4-probe-payload", type=_latin1_field, metavar="TEXT",
+                       help="latin-1 text keyed in the chirp field (default: the entry template)")
+    probe.add_argument("--p4-probe-values", type=_probe_values, metavar="N[,N...]",
+                       help="with --p4-probe-packet robust, datablock values 0..63, one packet each (one to four); "
+                            "replaces --p4-entry-attempts. Default: the tape's own packet")
+    probe.add_argument("--p4-probe-headers", type=_probe_headers, metavar="A|B[,...]",
+                       help="header word per value; 'alt' alternates A,B (default all A)")
+    probe.add_argument("--p4-probe-cadence", choices=("spaced", "consecutive"),
+                       default="spaced",
+                       help="spaced waits a full receive window per packet; consecutive keys them back to back, "
+                            "as the setup tape's caller did")
+    probe.add_argument("--p4-probe-reply", type=_probe_replies, metavar="WORD[,WORD...]",
+                       help="with robust packets, gateway answer words (X or Y) keyed one per slot after the last short")
+    probe.add_argument("--p4-probe-listen", type=float, default=4.0, metavar="SECONDS",
+                       help="listen this long after the last packet, within --p4-entry-timeout (default %(default)s)")
+    probe.add_argument("--p1-robust-stall", type=int, default=0, metavar="N",
+                       help="with --after-connect p1-robust, when our first P1 packet draws N repeat requests, key "
+                            "nothing more and read for the peer's X27/Y27 until --p4-entry-timeout (default 0, off)")
+    probe.add_argument("--p1-robust-stall-then", choices=("silent", "goodbye", "shorts"),
+                       default="silent",
+                       help="what the stall keys before listening: silent; goodbye (the ordinary QRT teardown); "
+                            "shorts (robust shorts on a repeat request that repeats the cycle before)")
+
+    trials = p.add_argument_group("timing trials", "bounded experiments, no mail")
+    trials.add_argument("--p3-timing-trial", choices=("A", "B"),
+                        help="initial P3 receive: A keeps peer-relative timing; B rotates the entry phase by 600 ms. "
+                             "Ends after three counters, 12 opportunities or 20 s")
+    trials.add_argument("--p3-entry-timing-trial", choices=("A", "B"),
+                        help="entry acquisition: A uses zero delay; B the default 4.875 ms. "
+                             "Stops on P3 acquisition or 20 s from first entry")
+    trials.add_argument("--p3-timing-reply-delay", type=float, choices=(0.0, 3.125),
+                        help="with --p3-timing-trial B, delay the reply grid by this many ms "
+                             "(3.125 targets entry +603.125 ms)")
+    trials.add_argument("--p3-timing-unbounded", action="store_true",
+                        help="with --p3-timing-trial, drop the opportunity, elapsed-time, three-field and hold "
+                             "cutoffs for the initial receive turn")
+    return p
+
+
+def main() -> int:
+    p = build_parser()
     typed = sys.argv[1:]
-    p.add_argument("--rx-assessment", help="Fresh guarded-launcher RX/CCA receipt; readback-only startup")
-    p.add_argument("--rx-claim-fd", type=int, default=9, help="Existing inherited station claim descriptor")
-    args = p.parse_args(typed)
+    args = flight_defaults(p.parse_args(typed))
     _p1_response_defaults(args)
+    _connect_defaults(args)
     _p4_entry_defaults(args)
     _p3_mail_defaults(args)
     args._typed_argv = _redact_argv(typed)
@@ -14460,11 +19102,8 @@ def _unkey_on_signal() -> None:
 
     SIGINT is answered with `KeyboardInterrupt` and the other two with
     `SystemExit`, because Ctrl-C is the one that has a reader waiting. CPython's
-    own SIGINT handler raises `KeyboardInterrupt`, `run` catches it so the
-    summary is the last thing on the screen rather than the first thing a
-    traceback scrolls away, and the exit status stays the session's own. A
-    `SystemExit` here would walk past that clause and spend the verdict to buy a
-    backstop the operator already gets underneath it.
+    own SIGINT handler raises `KeyboardInterrupt`; `run` unkeys and reports the
+    owed identification before re-raising it, just as it does for `SystemExit`.
 
     SIGKILL cannot be caught and never will be. The only defence left against it
     is the hardware side -- a serial line that falls when the port closes -- and
@@ -14485,6 +19124,17 @@ def _unkey_on_signal() -> None:
             pass            # not the main thread, or the platform lacks it
 
 
+def main_refusing() -> int:
+    """`main`, with a refusal said as a warning the terminal view keeps."""
+    try:
+        return main()
+    except SystemExit as refusal:
+        if not isinstance(refusal.code, str):
+            raise
+        print(f"!! {refusal.code}", file=sys.stderr, flush=True)
+        return 2
+
+
 if __name__ == "__main__":
     _unkey_on_signal()
-    sys.exit(main())
+    sys.exit(main_refusing())

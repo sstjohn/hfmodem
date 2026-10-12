@@ -52,6 +52,7 @@ import numpy as np
 import pytest
 
 from hfmodem.shrike import onair, p1rx, pactor1
+from hfmodem.tests.evidence import require_input
 
 FS = p1rx.FS
 REPO = Path(__file__).resolve().parents[5]
@@ -203,7 +204,8 @@ def a_rendered_burst() -> None:
                   (pactor1.CS_CHANGEOVER, sense) not in now,
                   str(now.get((pactor1.CS_CHANGEOVER, sense))))
             check(f"{tag}: ...while every anchor that read the CS4 still does",
-                  now.get((pactor1.CS_SPEED, sense)) == was.get((pactor1.CS_SPEED, sense)),
+                  set(was.get((pactor1.CS_SPEED, sense), []))
+                  <= set(now.get((pactor1.CS_SPEED, sense), [])),
                   f"{len(now.get((pactor1.CS_SPEED, sense), []))} against "
                   f"{len(was.get((pactor1.CS_SPEED, sense), []))}")
 
@@ -308,14 +310,23 @@ def the_arm_that_gave_the_channel_away() -> None:
           _cs_line(a, ARM1_ANCHOR) or "(nothing)")
 
 
+def _corpus_files():
+    counts = ((34, 6), (21, 5), (12, 24), (0, 21),
+              (0, 21), (0, 21), (0, 21), (12, 4))
+    required = [directory / f"{kind}_{index:02d}.wav"
+                for directory, pair in zip(CORPUS, counts)
+                for kind, count in zip(("hold", "rx"), pair)
+                for index in range(1, count + 1)]
+    extra = [path for directory in CORPUS
+             for path in sorted(directory.glob("hold_*.wav")) + sorted(directory.glob("rx_*.wav"))
+             if path not in required]
+    return required + extra
+
+
 def the_corpus() -> int:
     """Every listen window of eight named sessions, both ways."""
     print("\nThe corpus: eight sessions, every window, every anchor")
-    files = [f for d in CORPUS for f in sorted(d.glob("hold_*.wav"))
-             + sorted(d.glob("rx_*.wav"))]
-    if not files:
-        print(f"  [SKIP] no on-air sessions under {REPO / 'captures'}")
-        return 2
+    files = _corpus_files()
 
     def tally():
         seen: dict[int, int] = {}
@@ -387,10 +398,9 @@ def test_the_arm_that_gave_the_channel_away() -> None:
 
 
 def test_the_corpus() -> None:
-    rc = _run((the_corpus,))
-    if rc == 2:
-        pytest.skip(f"no on-air sessions under {REPO / 'captures'}")
-    assert rc == 0
+    for path in _corpus_files():
+        require_input(path)
+    assert _run((the_corpus,)) == 0
 
 
 if __name__ == "__main__":

@@ -176,7 +176,7 @@ def main():
         f" wall {s.wall_s:.0f} s (virtual)",
         f"  callsign-bearing transmissions at t = connect,"
         f" {[f'{t:.0f}s' for t in ids]}, disconnect;"
-        f" max gap {gaps.max():.0f} s (§97.119 limit 600 s)",
+        f" max gap {gaps.max():.0f} s (600 s comparison interval)",
         f"  byte-exact: {s.ok}",
         ""]
 

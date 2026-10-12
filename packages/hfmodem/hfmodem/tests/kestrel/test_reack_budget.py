@@ -19,11 +19,35 @@ Nothing here opens a device or keys a radio.
 """
 from __future__ import annotations
 
+import pytest
+
 from hfmodem.kestrel.arq import phy as _phy
 from hfmodem.kestrel.tx import varahf2300_tx as tx
 from hfmodem.kestrel.vara import vara_arq as VA
+from hfmodem.kestrel.vara import vara_mfsk as MK
 from hfmodem.tests.kestrel.test_reack_over import (_mid_delivery, answering,
                                                    idle, keyed, over)
+
+
+class _Clock:
+    t = 1000.0
+
+    @classmethod
+    def monotonic(cls) -> float:
+        return cls.t
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    monkeypatch.setattr(VA, 'time', _Clock)
+    return _Clock
+
+
+def _tick(hs, clock):
+    """[see test_vara_levels_arq, the idle tick keys nothing while the expected
+    over may be on the air]"""
+    clock.t += VA._EXPECT_WINDOW[hs.bw] / MK.FS + 0.1
+    hs.idle_keepalive()
 
 
 def test_the_ladder_fits_inside_the_give_up_budget():
@@ -59,39 +83,39 @@ def test_a_spent_ladder_asks_for_the_turn_when_the_host_is_waiting():
     assert hs.turn == VA._TURN_ASKED
 
 
-def test_the_cadence_carries_the_ladder_when_the_peer_says_nothing():
+def test_the_cadence_carries_the_ladder_when_the_peer_says_nothing(clock):
     """A peer whose cadence this build cannot name still owes an answer, and a
     keepalive is not what asks for one: a stock responder answers the keepalives
     0 of 6."""
     hs, io = _mid_delivery()
-    hs.idle_keepalive()
+    _tick(hs, clock)
     assert keyed(io) == hs._reack_frame, io.msgs
     assert hs._reacks == 1
     assert hs._since_progress == 1, "the rung was not charged to the give-up budget"
 
 
-def test_a_rung_keyed_in_the_peers_gap_is_not_keyed_again_on_the_cadence():
+def test_a_rung_keyed_in_the_peers_gap_is_not_keyed_again_on_the_cadence(clock):
     """One burst per turnaround. The cadence comes round on its own clock and the
     ladder has already spoken in the gap the peer opened."""
     hs, io = _mid_delivery()
     hs.on_rx_audio(idle())
     assert hs._reacks == 1
     at = len(io.sent)
-    hs.idle_keepalive()
+    _tick(hs, clock)
     assert hs._reacks == 1, io.msgs
     assert len(io.sent) == at, io.msgs
     assert not hs._keyed_on_peer_burst
-    hs.idle_keepalive()
+    _tick(hs, clock)
     assert hs._reacks == 2, "a quiet peer must not freeze the cadence fallback"
 
 
-def test_the_ladder_does_not_hold_a_dead_link_open():
+def test_the_ladder_does_not_hold_a_dead_link_open(clock):
     """The whole reason the ladder is bounded. A peer that keys its idle cadence
     and nothing else is what a stalled session looks like, and the give-up budget
     closes it on the same tick it always did  [see test_vara_giveup]."""
     hs, io = _mid_delivery()
     for tick in range(1, 200):
-        hs.idle_keepalive()
+        _tick(hs, clock)
         hs.on_rx_audio(idle())
         if hs.state is not VA.VaraState.CONNECTED:
             break

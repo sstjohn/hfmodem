@@ -35,7 +35,9 @@ import pytest
 
 from . import corpora
 from .fake_rigctld import serving
-from hfmodem.core.occupied import FILTER_HZ
+from .test_station_id import _decode
+from hfmodem.core import cwid, levels
+from hfmodem.core.occupied import FILTER_HZ, occupied_hz
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
 
@@ -172,7 +174,24 @@ def test_the_onair_mail_argv_runs_every_stage_to_an_honest_no_connect(
     assert srv.seen("T 1") >= 1, "the connect-request never keyed"
 
     bursts = _emitted(tmp_path)
-    assert bursts, "the transmitter was keyed and no audio went out under it"
+    assert len(bursts) >= 2, "the connect-request and closing ID did not both reach the card"
+    closing = bursts[-1]
+    bursts = bursts[:-1]
+    assert _decode(closing, cwid.WPM) == "W9SSJ", (
+        "the unanswered mail attempt did not close with the whole callsign")
+    spectrum = np.abs(np.fft.rfft(closing))
+    tone = np.fft.rfftfreq(len(closing), 1 / cwid.FS)[spectrum.argmax()]
+    assert tone == pytest.approx(sum(occupied_hz("vara", "2300")) / 2, abs=2)
+    data_rms = levels.sounding_rms(bursts[-1])
+    closing_rms = levels.sounding_rms(closing)
+    data_peak = float(np.abs(bursts[-1]).max())
+    closing_peak = float(np.abs(closing).max())
+    assert closing_peak <= data_peak + 1e-6
+    assert closing_rms <= data_rms * 1.01
+    # Morse's ramps can make RMS matching demand more than the data's peak.
+    # A quieter ID is valid only when that peak cap is actually binding.
+    assert (closing_rms == pytest.approx(data_rms, rel=.01)
+            or closing_peak == pytest.approx(data_peak, rel=.001))
     n_sym = len(VF.CR.preamble) + VF.CR.n_payload
     for x in bursts:
         at = MK.lock_preamble(x, VF.CR)
@@ -225,7 +244,7 @@ def test_a_radio_that_stops_answering_cat_is_a_named_refusal(rigctld, tmp_path):
     srv = rigctld(answer=False)
     r = _run(_mail_argv(tmp_path, srv.port), tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
-    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.returncode == 7, r.stdout + r.stderr
     assert "RIG NOT ANSWERING" in r.stdout
     assert "not answering CAT" in r.stdout
     assert srv.seen("T 1") == 0 and srv.ptt == 0
@@ -238,7 +257,7 @@ def test_no_daemon_at_all_is_a_named_refusal(tmp_path):
     s.close()
     r = _run(_mail_argv(tmp_path, port), tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
-    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.returncode == 7, r.stdout + r.stderr
     assert "CANNOT REACH rigctld" in r.stdout
 
 
@@ -249,7 +268,7 @@ def test_a_qsy_the_rig_did_not_take_is_never_keyed_over(rigctld, tmp_path):
     srv = rigctld(refuse=("F",))
     r = _run(_mail_argv(tmp_path, srv.port), tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
-    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.returncode == 7, r.stdout + r.stderr
     assert "TUNE DID NOT TAKE" in r.stdout
     assert srv.seen("T 1") == 0
 
@@ -265,7 +284,7 @@ def test_a_filter_too_narrow_for_the_emission_is_never_keyed_through(
     srv = rigctld(passbands=(500,))
     r = _run(_mail_argv(tmp_path, srv.port), tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
-    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.returncode == 7, r.stdout + r.stderr
     assert "TUNE DID NOT TAKE" in r.stdout
     assert "filter is 500 Hz" in r.stdout and "1810 Hz" in r.stdout, r.stdout
     assert srv.seen("T 1") == 0
@@ -289,7 +308,7 @@ def test_a_mail_file_that_cannot_load_is_refused_before_the_rig_is_touched(
     argv[argv.index("--mail-send") + 1] = str(tmp_path / "absent.txt")
     r = _run(argv, tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
-    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.returncode == 7, r.stdout + r.stderr
     assert "MAIL REFUSED before anything keys" in r.stdout
     assert srv.commands == [], "the rig was touched for a run that could never send"
 
@@ -301,7 +320,7 @@ def test_a_body_file_with_nowhere_to_go_is_refused_the_same_way(rigctld, tmp_pat
     del argv[i:i + 2]
     r = _run(argv, tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
-    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.returncode == 7, r.stdout + r.stderr
     assert "MAIL REFUSED before anything keys" in r.stdout
     assert srv.commands == []
 
@@ -363,7 +382,7 @@ def test_the_channel_actually_called_decides_reachability(rigctld, tmp_path):
     ``test_tools_cli.test_the_connect_tool_offers_only_the_bandwidth_it_speaks``."""
     srv = rigctld()
     r = _run(_mail_argv(tmp_path, srv.port, freq="7103.2"), tmp_path)
-    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.returncode == 7, r.stdout + r.stderr
     assert "only as VARA 500" in r.stdout
     assert "NOT calling a channel that cannot answer" in r.stdout
     assert srv.commands == [], "refused after the rig was already touched"

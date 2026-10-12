@@ -167,8 +167,11 @@ def test_following_recorded_data_gets_current_counter_ack(tmp_path):
     onair._p3_place_reply(g, tx, 6)
     tx.emit_pending_cs()
     assert not tx.refused and tx.slots_used == [0, 6]
-    assert abs(tx.tx_audio_start + row['origin']
-               - row['first_ack_audio'] - 6 * 60000) <= 1
+    # The recording's seq1 packet came 120 samples early of a whole six cycles.
+    # The reply rides the peer's measured raster now, taking up `RASTER_GAIN`
+    # of that reading, where it used to hold the free-running rotation.
+    assert abs(tx.tx_audio_start + row['origin'] - row['first_ack_audio']
+               - 6 * 60000 + round(onair.RASTER_GAIN * 120)) <= 1
 
 
 def test_diagnostic_exposes_whole_cycle_delay(tmp_path, capsys):

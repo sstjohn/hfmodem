@@ -230,6 +230,7 @@ class _FakeCodec:
         live._duplex, live._blk = True, BLK
         live._lat = round((in_lat + out_lat) * FS)
         live.tx_latency_n = 0     # the whole loop is modelled here already
+        live.geometry_n = 0
         live.holdback = BLK + round(in_lat * FS)
         live._tx, live._tx_at = None, 0
         live._tx_done = threading.Event()

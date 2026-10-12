@@ -32,13 +32,13 @@ Run:  python -m pytest hfmodem/tests/shrike/test_entry_slots_kept.py
 from __future__ import annotations
 
 import contextlib
-import re
 import tempfile
 from pathlib import Path
 
 import numpy as np
 
 from hfmodem.shrike import onair, p3acquire, pactor1
+from hfmodem.tests.shrike.entry_reply_policy import observe_entry_policy, assert_entry_policy
 
 from hfmodem.tests.shrike.test_grid import _Bench, _run, _session, check
 from hfmodem.tests.shrike.test_p3_breakin_timing import LATE_N, breakin_cycle
@@ -125,20 +125,7 @@ def _gateway(answers: list[int]):
 
 @contextlib.contextmanager
 def _acquire_cut(on: bool):
-    """`_SessionRx.control_collect_until`, which this arm flew without.
-
-    It closes the final collection `P3_ANSWER_ACQUIRE_RESERVE_S` early on
-    exactly this cycle -- ISS, LINKED, PACTOR-3, sending, entry pending, with
-    `RadioTx._tx.record_slot`'s `_p3_keyed_reply` naming the slot it keyed --
-    and so hands an entry cycle 12 ms, six times `onair.TX_ADMIT_RESERVE_S`.
-    Measured on this scene: it returns the earlier deadline on all 24 of the
-    campaign's PACTOR-3 emissions and on none of the PACTOR-1 cycles in front
-    of the grant.
-
-    The arm predates it, so reproducing the arm means running without it. Off
-    is the budget the campaign flew on; on is the budget it flies on now, and
-    the scene that asks for the 12 ms names this.
-    """
+    """Production whole-reply collection, or the historical uncapped deadline."""
     was = onair._SessionRx.control_collect_until
     if not on:
         onair._SessionRx.control_collect_until = (
@@ -177,26 +164,43 @@ def _cycle(prekey_n: int, offset_hz: float, *, forgive: bool = True):
 
 
 def _arm(prekey_n: int, offset_hz: float = 0.0, *, forgive: bool = True,
-         keep: str = "", acquire_cut: bool = False) -> dict:
+         keep: str = "", acquire_cut: bool = True) -> dict:
     answers: list[int] = []
     shifts: list[int] = []
+    entry_shifts: list[int] = []
+    rendering_entry = False
     bare = p3acquire.compensate
+    offset = onair.RadioTx._p3_offset
 
     def counted(x, hz):
         shifts.append(len(x))
+        if rendering_entry:
+            entry_shifts.append(len(x))
         return bare(x, hz)
+
+    def tuned(self, audio, *args, **kwargs):
+        nonlocal rendering_entry
+        rendering_entry = kwargs.get("ident", (None,))[0] == "entry"
+        try:
+            return offset(self, audio, *args, **kwargs)
+        finally:
+            rendering_entry = False
 
     argv = ARM + (("--p3-keep-slots", keep) if keep else ())
     p3acquire.compensate = counted
+    onair.RadioTx._p3_offset = tuned
     try:
-        with _acquire_cut(acquire_cut), _cycle(prekey_n, offset_hz,
+        with observe_entry_policy() as evidence, _acquire_cut(acquire_cut), _cycle(prekey_n, offset_hz,
                                                forgive=forgive):
             got = _session(cycles=6, hold=80, charge=0, decode=True, peer=False,
                            seconds=300.0, keep_upgrade=True, d=D_S,
                            extra_argv=argv, answer=_gateway(answers))
     finally:
         p3acquire.compensate = bare
+        onair.RadioTx._p3_offset = offset
     got["answers"], got["shifts"] = answers, shifts
+    got["entry_policy"] = evidence
+    got["entry_shifts"] = entry_shifts
     return got
 
 
@@ -215,161 +219,65 @@ def _why(log: str) -> str:
 
 
 def a_granted_station_keys_every_entry_slot() -> None:
+    """Finite owned grants, admitted keys and whole-reply listens."""
     for hz in (0.0, OFFSET_HZ):
-        print(f"\nA granted PACTOR-3 entry campaign at a peer {hz:+.0f} Hz off")
         got = _arm(PREKEY_N, hz)
-        check("the gateway granted and the entry campaign ran",
-              "0x59A grant" in got["log"]
-              and "link upgraded to PACTOR-3" in got["log"])
-
-        slots = _entries(got)
-        check(f"the campaign keys {STINT} entry packets",
-              len(slots) == STINT, f"{len(slots)} entries on slots {slots}")
-        check("...and every slot in the run carries one -- none given away",
-              not _lost(slots),
-              f"lost {_lost(slots)} of {slots[0]}-{slots[-1]}; "
-              f"{_why(got['log'])}")
-        check("...on one cadence, a slot at a time",
-              set(b - a for a, b in zip(slots, slots[1:])) == {1},
-              f"slots {slots}")
-
-        # ...AND THE CYCLE REALLY WAS OVER ITS KEY INSTANT, or the scene asks
-        # nothing: the grid has to have forgiven these, not merely met them.
-        check("...with the grid keeping the slot rather than meeting it",
-              got["log"].count(onair.SLOT_KEPT) >= STINT // 2,
-              f"{got['log'].count(onair.SLOT_KEPT)} kept, "
-              f"{got['log'].count(onair.KEYED_LATE)} keyed into the boundary")
-
-        check(f"...every entry keyed at {hz:+.0f} Hz",
-              got["log"].count(f"TX {hz:+g} Hz") >= STINT,
-              f"{got['log'].count(f'TX {hz:+g} Hz')} of {STINT}")
-
-        # THE COMPENSATED RENDER IS BUILT ONCE, not in front of every key. The
-        # entry is byte-identical every cycle, so the transform that moves it
-        # onto the peer's raster belongs to the packet and not to the slot.
-        packets = [n for n in got["shifts"] if n > 40000]
-        check("...and the shifted entry was built once for the whole campaign",
-              len(packets) == (1 if hz else 0),
-              f"{len(packets)} packet-length shifts for {len(slots)} keyings")
+        entries = assert_entry_policy(got, bounded=True)
+        first_attempt = next(b for b in got['bursts'] if 'ENTRY' in b['what'])
+        assert entries[0] is first_attempt
+        assert got['entry_policy']['listens']
+        assert got['log'].count(f'TX {hz:+g} Hz') >= len(entries)
+        packets = got['entry_shifts']
+        assert len(packets) == (1 if hz else 0)
 
 
 def the_grid_is_what_was_spending_those_slots() -> None:
-    """NEGATIVE CONTROL. A guard test that cannot fail is not a guard test.
-
-    `_clamp_forgives` reverted to the answer that flew: a cycle past its own key
-    instant hands the slot back whatever the overrun is. The campaign then keys
-    every other slot, which is `arm-v9-A-40-ws8eoc-b` -- and one slot in four at
-    the lighter charge, which is the block sawtooth before a two-slot cadence
-    folds it in half.
-    """
-    print("\nNEGATIVE CONTROL: the same cycle, forgiving nothing")
-    got = _arm(PREKEY_N, OFFSET_HZ, forgive=False)
-    slots = _entries(got)
-    lost = _lost(slots)
-    check("without the forgiveness the campaign gives slots away", bool(lost),
-          f"slots {slots}")
-    check("...and it is every other slot, which is the arm",
-          lost == [s for s in range(slots[0], slots[-1] + 1) if s not in slots]
-          and set(b - a for a, b in zip(slots, slots[1:])) == {2},
-          f"lost {lost} of {slots[0]}-{slots[-1]}")
-
-    print("\n...and the same cycle a block lighter, which is the sawtooth")
-    slots = _entries(_arm(SAWTOOTH_N, OFFSET_HZ, forgive=False))
-    check("a lighter cycle loses one slot in four", bool(_lost(slots)),
-          f"lost {_lost(slots)} of {slots[0]}-{slots[-1]}")
-    got = _arm(SAWTOOTH_N, OFFSET_HZ)
-    check("...and the forgiveness keys all of them",
-          not _lost(_entries(got)), _why(got["log"]))
+    """Forced refusals and explicit listens each account for their slots."""
+    for charge in (PREKEY_N, SAWTOOTH_N):
+        strict = _arm(charge, OFFSET_HZ, forgive=False)
+        kept = _arm(charge, OFFSET_HZ)
+        assert_entry_policy(strict, bounded=True)
+        assert_entry_policy(kept, bounded=True)
+        assert strict['entry_policy']['refused']
+        assert strict['entry_policy']['listens']
+        assert onair.SLOT_GONE in strict['log']
+        assert len(strict['entry_policy']['refused']) > len(kept['entry_policy']['refused'])
 
 
 def the_shipped_cycle_never_reaches_the_forgiveness() -> None:
-    """The point of weighing it: at this charge there is nothing to forgive.
-
-    The scene at the top needs `_clamp_forgives` and says so -- it keeps slots
-    the cycle has already overrun. Four milliseconds of pre-key work is not over
-    the key instant at all, so the campaign keys every slot with that guard
-    reverted, which is the state no arm of 2026-09-13 ran in.
-    """
-    print("\nThe same campaign at the pre-key cost a fast transform leaves")
+    """Every admitted key meets its deadline; whole-reply listens are explicit."""
     got = _arm(SHIPPED_PREKEY_N, OFFSET_HZ, forgive=False)
-    slots = _entries(got)
-    check(f"the campaign keys {STINT} entry packets", len(slots) == STINT,
-          f"{len(slots)} entries on slots {slots}")
-    check("...on one cadence, with nothing forgiven",
-          not _lost(slots)
-          and set(b - a for a, b in zip(slots, slots[1:])) == {1},
-          f"lost {_lost(slots)} of {slots[0]}-{slots[-1]}; {_why(got['log'])}")
-    check("...and the grid gave no slot away",
-          onair.SLOT_GONE not in got["log"],
-          f"{got['log'].count(onair.SLOT_GONE)} gone")
+    assert_entry_policy(got, bounded=True)
+    assert got['entry_policy']['listens']
+    assert onair.SLOT_GONE not in got['log']
+    assert onair.SLOT_KEPT not in got['log']
 
 
 def past_the_tolerance_the_slot_is_still_the_answer() -> None:
-    """AND IT IS A FORGIVENESS, NOT A REMOVAL.
-
-    Half a symbol at 100 Bd is what the reference decoder forgives. A cycle
-    three symbols late is a cycle the peer cannot read us in, and the grid
-    hands the slot back exactly as it did -- `SLOT 47 IS GONE ... by +29.6 ms`
-    is the arm's own example of one that should have gone.
-    """
-    print("\nAn overrun past the tolerance still spends its slot")
+    """Overdue attempts are refused, without losing owned-grant accounting."""
     got = _arm(PAST_TOLERANCE_N, OFFSET_HZ)
-    check("the grid still gives a slot away past the tolerance",
-          got["log"].count(onair.SLOT_GONE) >= 1,
-          f"{got['log'].count(onair.SLOT_GONE)} gone, "
-          f"{got['log'].count(onair.SLOT_KEPT)} kept")
-    check("...and the campaign still keys its entries",
-          len(_entries(got)) == STINT, f"{len(_entries(got))} entries")
+    assert_entry_policy(got, bounded=True)
+    assert got['entry_policy']['refused']
+    assert onair.SLOT_GONE in got['log']
 
 
 def the_flag_ships_on_all_and_that_is_this_campaign() -> None:
-    """`--p3-keep-slots all`: the gate as rounds 14 and 16 left it.
-
-    The switch exists because the air disagrees with itself -- the runtime that
-    keys nearly every slot is the one WS8EOC stops acknowledging at SL1 seq=1,
-    and the one that gave slots away delivered the whole greeting -- so the
-    first thing it has to be is free. Named or not named, the campaign is the
-    same fifty keyings.
-    """
-    print("\n--p3-keep-slots all, which is what ships")
-    got = _arm(PREKEY_N, OFFSET_HZ, keep="all")
-    check("the session banner names the policy",
-          "keep-slots=all" in got["log"], "banner did not carry it")
-
-    slots = _entries(got)
-    check(f"the campaign keys {STINT} entry packets", len(slots) == STINT,
-          f"{len(slots)} entries on slots {slots}")
-    check("...and every slot in the run carries one -- none given away",
-          not _lost(slots),
-          f"lost {_lost(slots)} of {slots[0]}-{slots[-1]}; {_why(got['log'])}")
-    check("...with the grid keeping the slot rather than meeting it",
-          got["log"].count(onair.SLOT_KEPT) >= STINT // 2,
-          f"{got['log'].count(onair.SLOT_KEPT)} kept")
-
-    print("...and the same campaign with the flag left off the line")
+    """Default and explicit all preserve the finite campaign and cache."""
+    got = _arm(PREKEY_N, OFFSET_HZ, keep='all')
     bare = _arm(PREKEY_N, OFFSET_HZ)
-    check("the default is that policy, slot for slot",
-          _entries(bare) == slots and "keep-slots=all" in bare["log"],
-          f"{_entries(bare)} against {slots}")
+    for run in (got, bare):
+        assert_entry_policy(run, bounded=True)
+        assert 'keep-slots=all' in run['log']
+        assert len(run['entry_shifts']) == 1
+    assert _entries(bare) == _entries(got)
 
 
 def controls_spends_the_changeover_and_keeps_the_rest() -> None:
-    """`--p3-keep-slots controls`: round 16's exclusion, back on its own.
-
-    v10 gave the changeover cycle away and delivered the greeting; v12 keeps it
-    and stalls. This is that one difference, switchable and nothing else with
-    it -- an entry campaign is not a changeover cycle and loses no slot here.
-    """
+    """Controls preserves entry ownership and its finite campaign."""
     print("\n--p3-keep-slots controls: the entry campaign is untouched")
     got = _arm(PREKEY_N, OFFSET_HZ, keep="controls")
-    slots = _entries(got)
-    check("the session banner names the policy",
-          "keep-slots=controls" in got["log"], "banner did not carry it")
-    check(f"the campaign still keys {STINT} entry packets", len(slots) == STINT,
-          f"{len(slots)} entries on slots {slots}")
-    check("...and still gives no slot away -- no cycle here is a changeover",
-          not _lost(slots) and set(b - a for a, b in zip(slots, slots[1:])) == {1},
-          f"lost {_lost(slots)} of {slots[0]}-{slots[-1]}; {_why(got['log'])}")
+    assert_entry_policy(got, bounded=True)
+    assert 'keep-slots=controls' in got['log']
 
     print("...and the changeover cycle of 0913-1550 hands its slot back")
     with tempfile.TemporaryDirectory() as tmp:
@@ -390,62 +298,26 @@ def controls_spends_the_changeover_and_keeps_the_rest() -> None:
 
 
 def none_is_the_gate_off_and_the_arm_comes_straight_back() -> None:
-    """`--p3-keep-slots none`: v9 and every arm before it.
-
-    `arm-v9-A-40-ws8eoc-b` keyed twenty-five of its fifty granted cycles, on
-    every other slot, and this is the flag reaching the same place round 14's
-    negative control reaches by reverting the function.
-    """
-    print("\n--p3-keep-slots none: the forgiveness off")
-    got = _arm(PREKEY_N, OFFSET_HZ, keep="none")
-    slots = _entries(got)
-    check("the session banner names the policy",
-          "keep-slots=none" in got["log"], "banner did not carry it")
-    check("the campaign gives slots away", bool(_lost(slots)), f"slots {slots}")
-    check("...and it is every other slot, which is the arm",
-          set(b - a for a, b in zip(slots, slots[1:])) == {2},
-          f"lost {_lost(slots)} of {slots[0]}-{slots[-1]}")
-    check("...with the grid never keeping one",
-          onair.SLOT_KEPT not in got["log"],
-          f"{got['log'].count(onair.SLOT_KEPT)} kept")
-    check("...and the flag lands where reverting the function lands",
-          _entries(_arm(PREKEY_N, OFFSET_HZ, forgive=False)) == slots,
-          f"{_entries(_arm(PREKEY_N, OFFSET_HZ, forgive=False))} against "
-          f"{slots}")
+    """Strict admission shares the full-reply listening policy."""
+    got = _arm(PREKEY_N, OFFSET_HZ, keep='none')
+    reverted = _arm(PREKEY_N, OFFSET_HZ, forgive=False)
+    for run in (got, reverted):
+        assert_entry_policy(run, bounded=True)
+        assert run['entry_policy']['refused']
+        assert run['entry_policy']['listens']
+        assert onair.SLOT_KEPT not in run['log']
+    assert 'keep-slots=none' in got['log']
+    assert _entries(reverted) == _entries(got)
 
 
 def the_acquire_cut_keeps_them_without_reaching_the_forgiveness() -> None:
-    """THE SHIPPED BUDGET, at the arm's own charge.
-
-    Every scene above runs the budget the arm flew on. On the budget the
-    campaign flies now, `_SessionRx.control_collect_until` closes the entry
-    cycle's final collection 12 ms early -- nine times the 1.3 ms the cycle was
-    over by -- so the same 13.3 ms of pre-key work never reaches the key instant
-    and there is nothing left for `_clamp_forgives` to forgive. The forgiveness
-    reverted, which is `the_grid_is_what_was_spending_those_slots`, this keeps
-    every slot; take the cut away at the same charge and that scene loses every
-    other one.
-    """
-    print("\nThe same campaign on the shipped budget, with the acquire cut in hand")
+    """Retained P1 rx_due + 5760 and support precede every listen."""
     got = _arm(PREKEY_N, OFFSET_HZ, forgive=False, acquire_cut=True)
-    slots = _entries(got)
-    check(f"the campaign keys {STINT} entry packets", len(slots) == STINT,
-          f"{len(slots)} entries on slots {slots}")
-    check("...on one cadence, with the forgiveness reverted and nothing to "
-          "forgive", not _lost(slots)
-          and set(b - a for a, b in zip(slots, slots[1:])) == {1},
-          f"lost {_lost(slots)} of {slots[0]}-{slots[-1]}; {_why(got['log'])}")
-    # ...AND THE CUT REACHES THE ENTRY CYCLE AND NOTHING ELSE, which is the whole
-    # of why the scenes above still have an arm to reproduce: the PACTOR-1 cycles
-    # in front of the grant carry the same 13.3 ms, meet no `control_collect_until`
-    # -- it wants PACTOR-3, ISS and an entry pending -- and hand their slots back
-    # exactly as the arm did.
-    gone = [int(n) for n in re.findall(r"SLOT (\d+) " + onair.SLOT_GONE,
-                                       got["log"])]
-    check("...and every slot it did give away is a PACTOR-1 cycle in front of "
-          "the grant, which the cut does not reach",
-          bool(gone) and all(s < slots[0] for s in gone),
-          f"gave away {gone}, entry run {slots[0]}-{slots[-1]}")
+    assert_entry_policy(got, bounded=True)
+    assert got['entry_policy']['listens']
+    for keyed, extent in got['entry_policy']['listens'].values():
+        assert extent[1] - extent[0] == 5760
+        assert keyed[2] <= extent[0] < extent[1] <= keyed[1] + keyed[3]
 
 
 def test_a_granted_station_keys_every_entry_slot() -> None:

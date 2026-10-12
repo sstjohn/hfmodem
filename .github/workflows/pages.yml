@@ -25,8 +25,20 @@ jobs:
       # The page is rendered from the same script the suite tests, so what deploys
       # cannot drift from what was reviewed.
       - run: python -m pip install pytest
-      - run: python -m pytest site/test_build.py -q
+      - run: python -m pytest site/test*.py -q
+      - run: node --test site/test_secret_desk.mjs site/test_public_qsos.mjs
       - run: python site/build.py --output _site
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install accessibility test tools
+        run: |
+          npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/site-a11y" playwright@1.64.0 axe-core@4.14.0
+          "$RUNNER_TEMP/site-a11y/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Check generated routes against WCAG 2.2 AA
+        run: |
+          python site/preview.py --directory _site --port 8767 > "$RUNNER_TEMP/site-preview.log" 2>&1 &
+          node site/audit_accessibility.mjs _site http://127.0.0.1:8767 "$RUNNER_TEMP/site-a11y"
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

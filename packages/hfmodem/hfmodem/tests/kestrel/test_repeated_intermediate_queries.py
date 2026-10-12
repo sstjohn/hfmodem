@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
 """Distinct pending frames get distinct bounded recovery opportunities."""
+import numpy as np
 import pytest
-from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF
+from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as MK
 from hfmodem.tests.kestrel.test_intermediate_query_probe import pending
 from hfmodem.tests.kestrel.test_intermediate_query_answer import native, timely
 from hfmodem.tests.kestrel.test_final_ack_recovery import stream, is_burst
@@ -19,6 +20,7 @@ def test_three_lost_answers_can_recover_without_repeating_data(monkeypatch):
         assert not hs._intermediate_query_attempted
         assert hs.intermediate_query_due_in() == pytest.approx(1.8)
         clock[0] += 1.81
+        stream(hs, np.zeros(int(1.81 * MK.FS)))
         assert hs.query_intermediate_answer()
         assert is_burst(io.sent[-1], VF.SESSION_INTERMEDIATE_ANSWER_QUERIES[index % 2])
         assert not hs.query_intermediate_answer()

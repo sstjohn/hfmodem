@@ -34,6 +34,8 @@ PACKAGES = REPO / "packages"
 #: Runnable with `python -m` but not declared as console scripts. Named here so
 #: the union of covered entry points cannot silently shrink.
 MODULE_ENTRY_POINTS = [
+    "hfmodem.brubru.rx",
+    "hfmodem.brubru.tx",
     # The station itself. At the radio the venv is addressed by path rather
     # than activated, so this and the console script must agree.
     "hfmodem",
@@ -49,6 +51,7 @@ MODULE_ENTRY_POINTS = [
     "hfmodem.sabir.offair",
     "hfmodem.sabir.onair",
     "hfmodem.sabir.host.run_server",
+    "hfmodem.bateleur.offair",
     "hfmodem.kestrel.host.run_server",
 ]
 

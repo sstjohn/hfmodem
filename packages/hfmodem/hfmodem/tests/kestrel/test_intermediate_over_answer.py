@@ -91,11 +91,11 @@ def _answer(hs, io, payload: bytes, index: int = 0) -> list[tuple[int, int]]:
 
 
 def _captured_burst() -> list[tuple[int, int]]:
-    return [tuple(sorted(p)) for p in VF.OVER_CONTINUE_CALLER_2300]
+    return [tuple(sorted(p)) for p in VF.over_continue(CALLED, "2300")[0]]
 
 
 def _control_burst() -> list[tuple[int, int]]:
-    return [tuple(sorted(p)) for p in VF.CONTROL_BURST_CALLER_2300]
+    return [tuple(sorted(p)) for p in VF.control_bursts(MYCALL, "2300")[0]]
 
 
 def _generated_answer(hs, io) -> bool:
@@ -114,7 +114,7 @@ def _generated(io=None):
 
 
 def _captured(io=None):
-    return _connected(io=io, over_continue=VA.OVER_CONTINUE_CAPTURED)
+    return _connected(io=io, over_continue=VA.OVER_CONTINUE_BURST)
 
 
 def _peer_control() -> np.ndarray:
@@ -174,11 +174,11 @@ def test_an_intermediate_over_draws_the_short_frame_by_default():
 
 def test_the_default_answer_follows_the_bandwidth():
     """BW2300/BW2750 use short16 after the exact KC9GHZ greeting tests;
-    BW500 retains captured8. Explicit selection still overrides the default.
+    BW500 retains the burst. Explicit selection still overrides the default.
     """
     assert _connected()[0].over_continue == VA.OVER_CONTINUE_SHORT
     assert _generated()[0].over_continue == VA.OVER_CONTINUE_GENERATED
-    assert _connected(bw="500")[0].over_continue == VA.OVER_CONTINUE_CAPTURED
+    assert _connected(bw="500")[0].over_continue == VA.OVER_CONTINUE_BURST
     assert _connected(bw="2750")[0].over_continue == VA.OVER_CONTINUE_SHORT
     hs, _ = _connected(bw="500", over_continue=VA.OVER_CONTINUE_GENERATED)
     assert hs.over_continue == VA.OVER_CONTINUE_GENERATED
@@ -225,13 +225,13 @@ def test_the_answer_after_a_handover_is_its_own_setting():
     """Two phases with separate evidence get separate choices: the first delivery
     keeps whatever it was given while the post-handover answer changes."""
     hs, io = _connected(over_continue=VA.OVER_CONTINUE_GENERATED,
-                        over_continue_after=VA.OVER_CONTINUE_CAPTURED)
+                        over_continue_after=VA.OVER_CONTINUE_BURST)
     _answer(hs, io, b"A" * 89)
     assert _generated_answer(hs, io)
     _answer(hs, io, b"the rest of the greeting", 1)
     _handed_over(hs, io)
     assert _answer(hs, io, b"A" * 89, 2) == _captured_burst()
-    assert "captured 8-symbol" in io.msgs[-1] and "after a handover" in io.msgs[-1]
+    assert "8-symbol continue burst" in io.msgs[-1] and "after a handover" in io.msgs[-1]
     hs, io = _connected(over_continue_after=VA.OVER_CONTINUE_GENERATED)
     _answer(hs, io, b"the whole greeting")
     _handed_over(hs, io)
@@ -332,16 +332,15 @@ def test_the_turn_is_not_taken_anywhere_inside_the_peers_delivery(setting):
 @pytest.mark.parametrize("setting", VA.OVER_CONTINUE_ANSWERS)
 def test_the_ask_goes_out_in_the_peers_own_cadence(setting):
     """Where the deferred ask ends up: the peer's idle burst opens the only gap
-    wide enough for a 1.37 s frame, and the rung before it is the acknowledgement
-    the peer may simply have missed."""
+    wide enough for a 1.37 s frame. Until 2026-09-29 the acknowledgement went
+    again first; stock's caller asks at the first idle instead and never re-keys
+    it (bench-745owed m4, f4)."""
     io = _HostIO(b"a reply the host queued early")
     hs, _ = _connected(io=io, over_continue=setting)
     _answer(hs, io, b"the whole greeting")
-    idle = MK.synth_burst(CALLED, VF.SESSION_RESPONDER_OVER_IDLE)
-    hs.on_rx_audio(idle)
     assert _control_burst() == [tuple(sorted(p)) for p in
                                 MK.demod_tone_pairs(io.sent[-1], 11)], io.msgs
-    hs.on_rx_audio(idle)
+    hs.on_rx_audio(MK.synth_burst(CALLED, VF.SESSION_RESPONDER_OVER_IDLE))
     assert MK.demod_tones(io.sent[-1], 32) == VF.handshake_tones(
         MYCALL, VF.SESSION_TURN_REQUEST), io.msgs
     assert hs.turn == VA._TURN_ASKED
@@ -359,7 +358,7 @@ def test_the_log_names_the_frame_that_went_out():
     assert any("generated 32-symbol" in m for m in io.msgs), io.msgs
     hs, io = _captured()
     _answer(hs, io, b"A" * 89)
-    assert any("captured 8-symbol" in m for m in io.msgs), io.msgs
+    assert any("8-symbol continue burst" in m for m in io.msgs), io.msgs
 
 
 def test_the_four_answers_are_four_different_bursts():
@@ -390,11 +389,11 @@ def test_the_generated_answer_is_keyed_to_the_station_we_called():
 def test_the_continue_burst_is_two_tone_throughout():
     """Every symbol lights two carriers, as the 11-symbol burst's do — which is
     what keeps it out of the single-tone session family."""
-    assert all(a != b for a, b in VF.OVER_CONTINUE_CALLER_2300)
+    assert all(a != b for a, b in VF.over_continue(CALLED, "2300")[0])
 
 
 def test_the_continue_burst_renders_and_reads_back():
-    x = MK.synth_tone_pairs(VF.OVER_CONTINUE_CALLER_2300)
+    x = MK.synth_tone_pairs(VF.over_continue(CALLED, "2300")[0])
     heard = [tuple(sorted(p)) for p in
              MK.demod_tone_pairs(x, VF.OVER_CONTINUE_NSYM)]
     assert heard == _captured_burst()
@@ -403,7 +402,7 @@ def test_the_continue_burst_renders_and_reads_back():
 def test_the_continue_burst_is_shorter_than_an_over_the_receiver_would_answer():
     """It is keyed into a turnaround, and a burst that reached ``_DATA_OVER_MIN``
     would come back through the receiver as something to answer."""
-    x = MK.synth_tone_pairs(VF.OVER_CONTINUE_CALLER_2300)
+    x = MK.synth_tone_pairs(VF.over_continue(CALLED, "2300")[0])
     assert len(x) < VA._DATA_OVER_MIN
 
 

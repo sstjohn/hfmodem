@@ -34,6 +34,7 @@ end-to-end that reached it would be a test of the renderer.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -133,6 +134,40 @@ def test_an_arms_log_is_found_from_a_window_it_never_names(arm):
     grid = R.sessionlog.shrike_grid(log.path, FS)
     assert len(grid.aimed) == 2, grid.aimed
     assert [w.what for w in grid.words] == ["cs CS2", "cs CS3"], grid.words
+
+
+def test_an_august_arm_is_found_by_the_captures_line_it_printed(arm):
+    """Before `stream.wav`, an arm named its windows' directory and nothing else.
+
+    Every PACTOR transcript of August says `  captures: DIR`, and a matcher that
+    knew only `session stream:` replayed each of their windows deaf.
+    """
+    log = arm / "arm.log"
+    log.write_text(re.sub(r"^session stream: .*$",
+                          f"  captures: {arm / 'onair-fixture'}",
+                          log.read_text(), count=1, flags=re.M))
+    found = R.sessionlog.find(arm / "onair-fixture" / "hold_01.wav", [log])
+    assert found is not None and found.path == log
+
+    r = R.rehear(arm / "onair-fixture" / "hold_02.wav", [log])
+    assert r.deaf == "" and r.verdicts is not None, r.deaf
+
+
+def test_a_captures_line_claims_only_its_own_directory(arm, tmp_path):
+    other = tmp_path / "onair-fixture-2"
+    other.mkdir()
+    log = tmp_path / "old.log"
+    log.write_text(f"  captures: {other}\n")
+    assert R.sessionlog.find(arm / "onair-fixture" / "hold_01.wav", [log]) is None
+
+
+def test_named_windows_are_replayed_and_their_neighbours_are_not(arm, tmp_path):
+    """Two arms can share one captures directory, so the windows are named instead."""
+    out = tmp_path / "rehear.json"
+    R.main([str(arm / "onair-fixture" / "hold_02.wav"), "--log", str(arm / "arm.log"),
+            "--json", str(out), "--quiet"])
+    got = json.loads(out.read_text())["rehearings"]
+    assert [Path(r["recording"]).name for r in got] == ["hold_02.wav"]
 
 
 def test_the_anchored_read_reproduces_what_the_station_reported(arm):

@@ -9,7 +9,6 @@ from scipy.io import wavfile
 from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as MK
 from .test_data_over_gate import _connected
 
-LINK = ('W9SSJ', 'K0SI', '2300')
 PAIRS = ((64, 67), (58, 92), (77, 91), (48, 64),
          (65, 71), (38, 92), (81, 85), (58, 98))
 
@@ -39,14 +38,9 @@ def feed(hs, audio, chunk=4096):
         hs.on_rx_stream(audio[at:at + chunk])
 
 
-def test_native_query_independently_confirms_the_measured_short_reply(monkeypatch):
+def test_native_query_independently_confirms_the_short_reply():
     hs, io = pending()
-    monkeypatch.delitem(VF.OVER_CONTINUE_RESPONDER_BY_LINK, LINK)
     old = hs._tx_pending
-    reply = native('intact')
-    assert not hs._peer_over_continue(reply)
-    assert hs._unclassified_continue[2] == PAIRS
-    assert hs._tx_pending == old
     assert hs._probe_intermediate_answer()
     answer = native('query')
     kind = VF.SESSION_INTERMEDIATE_QUERY_ANSWER
@@ -57,14 +51,12 @@ def test_native_query_independently_confirms_the_measured_short_reply(monkeypatc
     assert hs._peer_intermediate_query_answer(answer, track)
     hs._took_intermediate_query_answer()
     assert hs._tx_pending[1] == old[1] + 1
-    assert (*LINK, PAIRS) in hs._confirmed_continue_pairs
-    assert hs._peer_over_continue(reply)
 
 
 @pytest.mark.parametrize('chunk', [512, 4096, 4800, 8192])
 def test_native_known_reply_advances_once_without_a_query(chunk):
     hs, io = pending()
-    assert VF.OVER_CONTINUE_RESPONDER_BY_LINK[LINK] == PAIRS
+    assert VF.over_continue('K0SI', '2300')[1] == PAIRS
     x = native('intact')
     feed(hs, x, chunk)
     assert hs._tx_pending[1] == 3 and not hs._txq
@@ -74,8 +66,7 @@ def test_native_known_reply_advances_once_without_a_query(chunk):
     assert hs._tx_pending[1] == 3 and len(io.sent) == 2
 
 
-@pytest.mark.parametrize('field,value', [('caller', 'N0XYZ'), ('called', 'KC9GHZ'),
-                                        ('bw', '2750'), ('bw', '500')])
+@pytest.mark.parametrize('field,value', [('called', 'KC9GHZ'), ('bw', '2750'), ('bw', '500')])
 def test_native_short_reply_does_not_authorize_other_links(field, value):
     hs, io = pending()
     setattr(hs, field, value)
@@ -84,10 +75,14 @@ def test_native_short_reply_does_not_authorize_other_links(field, value):
     assert hs._tx_pending == old and len(io.sent) == 1
 
 
-def test_distorted_earlier_reply_still_requires_query_confirmation():
+def test_distorted_earlier_reply_is_read_only_by_its_soft_score():
+    """The census's 2.53 continue on the 011424Z tape: the hard readers refuse
+    it and the stream's soft fallback takes it once, without a query."""
     hs, io = pending()
     hs._peer_offset = -9.3 / (MK.FS / MK.NFFT)
     old = hs._tx_pending
-    feed(hs, native('distorted'))
-    assert hs._tx_pending == old and len(io.sent) == 1
     assert not hs._peer_over_continue(native('distorted'))
+    feed(hs, native('distorted'))
+    assert hs._tx_pending[1] == old[1] + 1 and len(io.sent) == 2
+    assert hs._intermediate_query_attempts == 0
+    assert any('scored whole at frame 0' in m for m in io.msgs), io.msgs

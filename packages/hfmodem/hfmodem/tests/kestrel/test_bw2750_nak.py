@@ -4,8 +4,8 @@
 """Measured BW2750 unread-over recovery: silence, peer idle, generated request.
 
 Stock caller W9SSJ asked called station KC9GHZ with SESSION_OVER_NAK after an
-unread greeting. These state tests do not invent an eight-pair NAK or a responder
-role. Native measurement and stock recovery qualify the waveform separately.
+unread greeting. Native measurement and stock recovery qualify the waveform
+separately; a station outside that measurement keys the link's eight-pair NAK.
 """
 import numpy as np
 import pytest
@@ -53,13 +53,10 @@ def assert_request(audio, called="KC9GHZ"):
     assert MK.demod_burst(audio, kind, MK.band_for("2750")) == VF.handshake_tones(called, kind)
 
 
-def test_generated_recovery_does_not_invent_an_eight_pair_nak():
+def test_the_peer_idle_is_not_an_eight_pair_nak():
     hs, io = waiting()
     assert hs._has_idle_over_nak()
-    assert VF.nak("W9SSJ", "2750") is None
-    assert not hs._tx_nak()
-    assert not io.sent and not io.keys
-    assert not hs._peer_nak(idle())
+    assert hs._peer_nak_at(idle()) is None
 
 
 @pytest.mark.skipif(not STOCK_NAK.exists(),
@@ -138,24 +135,24 @@ def test_stale_raw_idle_is_not_a_current_transmit_gap():
     assert hs._owed_block
 
 
-@pytest.mark.parametrize("role,caller", [("responder", "W9SSJ"), ("initiator", "N0XYZ")])
-def test_unmeasured_local_role_or_caller_stays_unsupported(role, caller):
-    hs, io = waiting(role=role, caller=caller)
+def test_a_responder_answers_an_unread_over_with_its_taped_nak():
+    hs, io = waiting(role="responder", caller="W9SSJ")
     assert not hs._has_idle_over_nak()
-    assert not hs._tx_nak()
-    assert not io.sent and not io.keys
+    assert hs._undecoded_over()
+    heard = MK.demod_tone_pairs(io.sent[-1], 8, MK.band_for("2750"))
+    assert [tuple(sorted(p)) for p in heard] == list(VF.nak("KC9GHZ", "2750")[1])
+    assert hs._owed_block and not hs._owed_recovery and hs._reacks == 1
+
+
+def test_a_caller_outside_idle_recovery_keys_no_untaped_nak():
+    hs, io = waiting(role="initiator", caller="N0XYZ")
+    assert not hs._has_idle_over_nak()
     assert hs._undecoded_over()
     assert not io.sent and not io.keys
     assert hs._owed_block and not hs._owed_recovery and hs._reacks == 0
-    assert any("no NAK is measured" in msg for msg in io.msgs)
+    assert any("no caller's NAK is on tape" in msg for msg in io.msgs)
     assert not hs._reack()
-    if role == "initiator":
-        assert hs.state == VA.VaraState.DISCONNECTED
-    else:
-        # Existing disconnect waveforms are initiator-only too; do not invent
-        # responder behavior merely to satisfy a broader close assertion.
-        assert not io.sent and not io.keys and hs._owed_block
-    assert hs._reacks == 0
+    assert hs.state == VA.VaraState.DISCONNECTED
 
 
 def test_refused_generated_request_preserves_debt_and_does_not_spend_budget():

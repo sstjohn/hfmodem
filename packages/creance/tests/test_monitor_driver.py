@@ -6,21 +6,25 @@
 The stub stands in for a modem's runner: it reads s16le on stdin and emits
 detection JSON on stdout, exactly the contract the real runners honour, so the
 subprocess plumbing, JSON parsing, fan-out and merge are all tested without
-numpy or a modem present.
+numpy or a modem present. One test starts the real lanner runner to check the
+startup probe.
 """
 
 import io
 import queue
+import shutil
 import struct
 import sys
 import threading
 import time
 import wave
 
+import pytest
+
 from hfhost.audio import FS, AudioSource
 
 from creance.monitor import default_specs
-from creance.monitor.activity import CONFIRMED, Detection
+from creance.monitor.activity import CONFIRMED, Detection, format_detection
 from creance.monitor.aggregate import run
 from creance.monitor.driver import ModemMonitor, MonitorSpec, _Clock
 
@@ -169,6 +173,26 @@ def test_end_to_end_fan_out_and_merge(tmp_path):
     assert s["overall"] == CONFIRMED.replace("confirmed", "active_confirmed")
     text = out.getvalue()
     assert "HEADER" in text and "CR" in text
+
+
+def test_every_detection_reaches_every_sink_and_the_log_is_the_default(tmp_path):
+    from hfhost.audio import WavReplaySource
+
+    wav = tmp_path / "cap.wav"
+    _write_wav(wav, 1.0)
+    specs = [_stub_spec(tmp_path, "shrike"), _stub_spec(tmp_path, "kestrel")]
+    one, two, out = [], [], io.StringIO()
+    view = run(WavReplaySource(wav, realtime=False), specs, summary_every_s=1000,
+               out=out, sinks=[one.append, two.append])
+    assert one == two and {d.kind for d in one} == {"HEADER", "CR"}
+    assert set(view.summary(1.0)["protocols"]) == {"PACTOR-3", "VARA"}
+    assert "HEADER" not in out.getvalue()
+
+    default = io.StringIO()
+    run(WavReplaySource(wav, realtime=False), specs, summary_every_s=1000,
+        out=default)
+    lines = [ln for ln in default.getvalue().splitlines() if not ln.startswith(("#", "  =="))]
+    assert sorted(lines) == sorted(format_detection(d) for d in one)
 
 
 def test_a_lagging_runner_keeps_its_tail(tmp_path):
@@ -344,11 +368,21 @@ def test_the_clock_carries_dropped_audio_across_to_the_source_position():
 
 def test_default_specs_are_named_and_share_one_interpreter(tmp_path):
     specs = {s.name: s for s in default_specs(tmp_path)}
-    assert set(specs) == {"kestrel", "shrike", "besra"}
-    # one interpreter for all three, since one distribution carries them all
+    assert set(specs) == {"kestrel", "shrike", "besra", "p4", "lanner"}
+    # one interpreter for all of them, since one distribution carries them all
     assert len({s.interpreter for s in specs.values()}) == 1
     # a base that is not there -> nothing available
     assert not any(s.available() for s in default_specs(tmp_path / "empty"))
+
+
+@pytest.mark.parametrize('deep', [False, True])
+def test_default_specs_only_change_lanner_for_no_rtty_usos(deep):
+    defaults = {s.name: s for s in default_specs(deep=deep)}
+    asked = {s.name: s for s in default_specs(deep=deep, no_rtty_usos=True)}
+    assert defaults['lanner'].args == ()
+    assert asked['lanner'].args == ('--no-rtty-usos',)
+    assert defaults['kestrel'].args == (('--deep',) if deep else ())
+    assert all(asked[name] == spec for name, spec in defaults.items() if name != 'lanner')
 
 
 def test_a_runner_that_cannot_import_is_not_available(tmp_path):
@@ -379,3 +413,92 @@ def test_a_runner_that_cannot_import_is_named_rather_than_dropped(tmp_path, caps
             if "not listening" in ln]
     assert len(said) == 1 and "ghost" in said[0]
     assert "a_module_this_tree_does_not_have" in said[0]
+
+
+STALLED = r'''
+import sys, time
+time.sleep(1.5)
+n = 0
+stdin = sys.stdin.buffer
+while True:
+    raw = stdin.read(9600)
+    if not raw:
+        break
+    n += len(raw)
+print('{"t": 0.0, "modem": "shrike", "protocol": "PACTOR-3", "kind": "HEADER", '
+      '"grade": "confirmed", "detail": "%d"}' % n, flush=True)
+'''
+
+
+def test_a_replay_waits_out_a_stalled_runner_and_drops_nothing(tmp_path):
+    """A runner that stops reading for a while, as one on a loaded machine does:
+    with a backlog far shorter than the stall, a lossless feed waits the stall
+    out, and every byte reaches the runner."""
+    out: "queue.Queue[Detection]" = queue.Queue()
+    m = ModemMonitor(_stub_spec(tmp_path, "shrike", STALLED), out,
+                     backlog_s=0.05, lossy=False)
+    m.start()
+    began = time.monotonic()
+    for i in range(20):
+        m.feed(i * 4800, b"\x00" * 9600)
+    assert time.monotonic() - began > 0.5
+    assert m.stop(10.0)
+    assert m.dropped_samples == 0
+    assert out.get(timeout=5).detail == str(20 * 9600)
+
+
+SESSION = r'''
+import os, sys
+sys.stdin.buffer.read()
+print('{"t": 0.0, "modem": "shrike", "protocol": "UNKNOWN", "kind": "SID", '
+      '"grade": "tentative", "detail": "%d %d"}' % (os.getsid(0), os.getpgid(0)), flush=True)
+'''
+
+
+def test_a_runner_is_out_of_reach_of_the_terminals_interrupt(tmp_path):
+    """A terminal's ^C goes to its foreground process group. A runner in it died
+    on the operator's first ^C with a traceback, before the console could turn
+    the interrupt into a drain; in its own session it only sees EOF."""
+    import os
+
+    out: "queue.Queue[Detection]" = queue.Queue()
+    m = ModemMonitor(_stub_spec(tmp_path, "shrike", SESSION), out, lossy=False)
+    m.start()
+    assert m.stop(10.0)
+    sid, pgid = map(int, out.get(timeout=5).detail.split())
+    assert sid != os.getsid(0) and pgid != os.getpgid(0)
+
+
+@pytest.mark.skipif(shutil.which("flac") is None, reason="no flac on PATH")
+def test_a_tap_stored_as_flac_is_monitored_on_the_same_clock(tmp_path):
+    """`creance monitor --wav` over an arm's tap after the station stored it:
+    named as the WAV it was or as the FLAC it is, every detection lands where
+    it did on the recording as written."""
+    import subprocess
+
+    from hfhost.audio import WavReplaySource
+
+    tap = tmp_path / "tap.wav"
+    _write_wav(tap, 1.0)
+
+    def lines(path):
+        out = io.StringIO()
+        run(WavReplaySource(path, realtime=False),
+            [_stub_spec(tmp_path, "shrike", TICKER)], summary_every_s=1000, out=out)
+        return [ln for ln in out.getvalue().splitlines() if ln.startswith("[")]
+
+    before = lines(tap)
+    subprocess.run(["flac", "-s", "--keep-foreign-metadata", "-o",
+                    str(tap.with_suffix(".flac")), str(tap)], check=True)
+    tap.unlink()
+
+    assert len(before) == 10
+    assert lines(tap) == before
+    assert lines(tap.with_suffix(".flac")) == before
+
+
+def test_lanner_default_spec_passes_the_actual_startup_probe(tmp_path):
+    spec = next(s for s in default_specs(tmp_path, deep=True) if s.name == 'lanner')
+    assert spec.args == ()
+    assert spec.runner.endswith('/lanner_runner.py')
+    assert spec.unavailable() == ''

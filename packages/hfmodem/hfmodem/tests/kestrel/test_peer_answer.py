@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import collections
 import itertools
+from functools import lru_cache
 
 import numpy as np
 import pytest
@@ -34,6 +35,7 @@ def _awaiting(called: str) -> VaraStationHandshake:
     return hs
 
 
+@lru_cache(maxsize=8)
 def _drive(called: str, path) -> VaraStationHandshake:
     hs = _awaiting(called)
     x = _load_48k(path)
@@ -83,9 +85,8 @@ def test_the_connect_response_is_frame_seventeen_and_this_route_leaves_it_alone(
 
 # --------------------------------------------------------------------------- #
 # The four attempts.
-@pytest.mark.parametrize("path,called,count,positions", corpora.ONAIR_PEER_ANSWERS,
+@pytest.mark.parametrize("path,called,count,positions", corpora.A1_PEER_ANSWERS,
                          ids=lambda v: getattr(v, "stem", ""))
-@corpora.requires_onair_peer_answers
 def test_an_attempt_reported_unanswered_was_answered(path, called, count, positions):
     """Driven over the live path exactly as the radio drives it."""
     hs = _drive(called, path)
@@ -95,11 +96,12 @@ def test_an_attempt_reported_unanswered_was_answered(path, called, count, positi
     assert all(a.tones >= 10 for a in hs.answers)
 
 
-@corpora.requires_onair_peer_answers
 def test_every_answer_is_the_dialled_stations_own_payload():
     """The tones the receiver read, put back through the generator."""
-    for path, called, _count, _positions in corpora.ONAIR_PEER_ANSWERS:
-        for a in _drive(called, path).answers:
+    for path, called, _count, _positions in corpora.A1_PEER_ANSWERS:
+        answers = _drive(called, path).answers
+        assert len(answers) == _count
+        for a in answers:
             assert VF.payload_position(a.payload, called, RESP) == a.position, (
                 f"{path.name} at {a.at:.2f}s no longer belongs to {called}")
 
@@ -115,7 +117,6 @@ def _reached(state: int, span: int = 1200) -> list[tuple[int, int]]:
     return out
 
 
-@corpora.requires_onair_peer_answers
 def test_the_only_callsign_these_answers_can_belong_to_is_the_one_dialled():
     """The reading against the whole callsign space rather than a panel, which is
     what a panel search cannot do and what said "nobody" for two years of tapes.
@@ -127,7 +128,7 @@ def test_the_only_callsign_these_answers_can_belong_to_is_the_one_dialled():
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
     reachable_g = {VF._g_hash("".join(t))
                    for t in itertools.product(alphabet, repeat=3)}
-    for path, called, _count, _positions in corpora.ONAIR_PEER_ANSWERS:
+    for path, called, _count, _positions in corpora.A1_PEER_ANSWERS:
         a = _drive(called, path).answers[0]
         states = VF.payload_states(a.payload, RESP)
         assert len(states) == 1, states
@@ -142,7 +143,6 @@ def test_the_only_callsign_these_answers_can_belong_to_is_the_one_dialled():
             f"{((crc + RESP.seed_off) & 0x7FFF, VF._g_hash(called))}")
 
 
-@corpora.requires_onair_peer_answers
 def test_the_two_kb3ac_bursts_are_that_gateways_own_frames():
     """What used to say the two arms were "one generator stream 60 draws apart"
     without being able to say whose. They are frames 16 and 14 of KB3AC-10's, and
@@ -159,46 +159,45 @@ def test_the_two_kb3ac_bursts_are_that_gateways_own_frames():
         assert found == position
 
 
-@corpora.requires_onair_peer_answers
 def test_frame_seventeen_still_brings_the_link_up():
     """The 2026-08-26 01:17z arm answers three times off the connect-response's
     frame and then keys the connect-response itself. Reading the three must not
     cost the fourth."""
-    path, called, count, _positions = corpora.ONAIR_PEER_ANSWERS[0]
+    path, called, count, _positions = corpora.A1_PEER_ANSWERS[0]
     hs = _drive(called, path)
     assert any("tx link-setup" in line for line in hs.io.log_lines)
     # KB3AC-10 keys its turn-request 5.6 s behind that link-setup, six times over
     # the arm, and the stream route takes the first of them  [_stream_connect_ask].
-    assert hs.step in (_I_LINKSETUP_SENT, _I_CONNECTED)
-    assert hs.answers
+    assert hs.step == _I_CONNECTED
+    assert len(hs.answers) == count
+    assert any(line.startswith(f"rx connect-response for {called} found on the receive stream")
+               for line in hs.io.log_lines)
 
 
-@corpora.requires_onair_peer_answers
 def test_lower_speed_offer_starts_setup_but_needs_confirmation():
     """Lower-speed offers send setup; they alone cannot confirm a connection."""
-    for path, called, _count, _positions in corpora.ONAIR_PEER_ANSWERS[1:]:
+    for path, called, _count, _positions in corpora.A1_PEER_ANSWERS[1:]:
         hs = _drive(called, path)
         assert hs.answers
         assert hs.step == _I_LINKSETUP_SENT and hs.state is VaraState.CONNECTING
         assert any("link-setup" in line for line in hs.io.log_lines)
 
 
-@corpora.requires_onair_peer_answers
 def test_lower_offers_are_not_reported_as_rejections():
-    path, called, _count, _positions = corpora.ONAIR_PEER_ANSWERS[1]
+    path, called, _count, _positions = corpora.A1_PEER_ANSWERS[1]
     hs = _drive(called, path)
     assert hs.answers and not hs.answer_retry
     assert any("connect-response" in line and "level" in line for line in hs.io.log_lines)
     assert not any("could not read" in line for line in hs.io.log_lines)
 
 
-@corpora.requires_onair_peer_answers
 def test_the_arms_of_that_slot_nobody_answered_report_nothing():
-    """Two more calls from the same slot on the same instrument, one on each band.
+    """Each whole unanswered call, heard by the Kiwi witness.
     An absence has to read as an absence or the count above says nothing."""
-    for path, called in corpora.ONAIR_UNANSWERED_ARMS:
+    for path, called in corpora.A1_UNANSWERED_ARMS:
         hs = _drive(called, path)
         assert hs.answers == [], [(a.at, a.position) for a in hs.answers]
+        assert hs.step == _I_CR_SENT
 
 
 @corpora.requires_regress_fixtures

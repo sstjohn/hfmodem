@@ -32,21 +32,12 @@ from pathlib import Path
 
 import pytest
 
+from hfmodem.tests.gates.publication import MARKERS
+
 PKG = Path(__file__).resolve().parents[2]
 ROOT = PKG.parents[2]
 PACKAGE = "sabir"
 DOCS = ROOT / "docs" / "protocols" / PACKAGE
-
-# Vocabulary describing how a protocol was learned rather than what it is. That
-# is a working record: different audience, different lifetime, stays private.
-#
-# One letter of each term is bracketed, so the pattern text is not itself an
-# instance of what it matches and this file does not answer to a scan of the
-# whole distribution.
-MARKERS = re.compile(
-    r"\[pro[v]:|\bPMON\b|\boracle\b|\bdecompi[l]|\bdisassembl|\bclean[- ]?room\b"
-    r"|\bquarantin[e]\b|reverse[- ]engineer|\bIDA Pro\b|\bGhidra\b",
-    re.IGNORECASE)
 
 # Deliberately NOT "any hex literal": a protocol is full of legitimate wide
 # constants -- `host/cbor.py`'s `0x100000000` is a CBOR width bound. What leaks

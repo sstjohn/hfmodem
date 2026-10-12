@@ -21,9 +21,7 @@ from __future__ import annotations
 
 import os
 import queue
-import socket
 import tempfile
-import threading
 import time
 
 import pytest
@@ -39,30 +37,12 @@ def _transcript() -> Transcript:
     return Transcript(os.path.join(tempfile.mkdtemp(), "seam.jsonl"), "seam")
 
 
-def _free_ports(n: int) -> list[int]:
-    """Ports nobody is listening on, from the ephemeral range.
-
-    This fixture used to count up from a fixed 18960. Two copies of the suite
-    then served each other's clients: the second bind lost with EADDRINUSE, its
-    server thread died, and its tests passed anyway by talking to the first
-    copy's modem. A stale process holding one of those ports fails the fixture
-    outright, which is the same defect wearing its other face.
-    """
-    socks = [socket.socket() for _ in range(n)]
-    for s in socks:
-        s.bind(("127.0.0.1", 0))
-    ports = [s.getsockname()[1] for s in socks]
-    for s in socks:
-        s.close()
-    return ports
-
-
 @pytest.fixture
 def besra_link():
     from hfmodem.besra.host.server import HostServer
-    cmd_port, data_port = _free_ports(2)
-    srv = HostServer(control_port=cmd_port, data_port=data_port, quiet=True)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    # Keep the listeners bound instead of selecting ports and reopening them.
+    srv = HostServer(control_port=0, data_port=0, quiet=True)
+    cmd_port, data_port = srv.start()
     deadline = time.monotonic() + 5.0
     cfg = ModemConfig(name="besra", cmd_port=cmd_port, data_port=data_port,
                       dialect="ardop")

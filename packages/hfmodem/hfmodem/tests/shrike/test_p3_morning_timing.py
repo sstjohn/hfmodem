@@ -99,13 +99,13 @@ def test_recorded_fallback_changes_protocol_before_render_and_rotates_before_key
     # The staggered control ends 11000 samples after its leading pulse
     # (independent SCS waveform), rather than after its trimmed audio onset.
     assert end == tx.boundary + min(tx.tx_pulse_offsets) + 11000
-    # 44 samples wider than the rotation alone left it: the comb is held on the
+    # 916 samples narrower than the rotation alone left it: the comb is held on the
     # answer slot of the packet it is acknowledging, not on the connect train's
     # phase carried through the reversal.
-    assert peer + 60000 - end == 6280
+    assert peer + 60000 - end == 5320
     assert grid.boundary(48) - phase == 60000 + round(onair.P3_REPLY_S * onair.FS)
     assert onair._grid_reversal(grid, host) is None
-    assert grid.anchor == 31476
+    assert grid.anchor == 32436
 
 
 @pytest.mark.parametrize('name', ['ve3-m02-grant.wav', 've3-m08-grant.wav'])
@@ -136,7 +136,7 @@ def test_repeated_recorded_changeovers_keep_one_payload_and_one_rotation(tmp_pat
         assert not tx.refused
         # ONE rotation, still: the comb only ever moves by the answer slot's own
         # residual off the packet it is acknowledging, never by another 600 ms.
-        assert abs(grid.anchor - 31432) <= round(onair.MAX_PULL_S * onair.FS)
+        assert abs(grid.anchor - 32392) <= round(onair.MAX_PULL_S * onair.FS)
         at = grid._peer_raster_position(grid._p3_peer[0], 60000) or grid._p3_peer[0]
         assert (grid.boundary(slot) - at) % 60000 == round(onair.P3_REPLY_S * onair.FS)
         assert host.arq._clean_run == 0

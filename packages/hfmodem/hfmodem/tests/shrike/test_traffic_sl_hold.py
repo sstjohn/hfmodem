@@ -83,11 +83,12 @@ def _answer(host: PtcHost, cs: int | None = None) -> None:
     host.tick()
 
 
-def test_the_default_arm_runs_traffic_at_three():
+def test_the_default_arm_retains_the_acquired_level():
     host, tx = _granted()
     _answer(host)
-    assert host.arq.speed_level == host.arq.cfg.traffic_sl == 3
-    assert tx.p3[1:] == [("packet", 3)]
+    assert host.arq.cfg.traffic_sl is None
+    assert host.arq.speed_level == GRANT_ENTRY_SL
+    assert tx.p3[1:] == [("packet", GRANT_ENTRY_SL)]
 
 
 def test_p3_traffic_sl_one_holds_the_level_the_peer_read():

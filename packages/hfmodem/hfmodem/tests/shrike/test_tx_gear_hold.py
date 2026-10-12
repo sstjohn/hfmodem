@@ -73,13 +73,12 @@ def test_recorded_climb_does_not_spend_two_extra_fields_in_hold_trial(enabled):
     host,seam = sender(enabled)
     for ev in recorded_controls():
         host.on_rx_event(ev)
+    # CS4 acknowledges under the trial too (VE3KPG 0924-0033); only the
+    # repeated CS5 is held, so the trial keeps SL3 where the ladder walks down.
     if enabled:
-        # The hold trial still preserves bytes/counter; the MAXTry
-        # limit now bounds the time it can keep an unread packet at SL2.
-        assert [sl for sl,_,_ in seam.frames] == [2,2,1,1,1,1,1,1]
-        assert {status for _,status,_ in seam.frames} == {1}
-        assert host.arq._buffer_raw == len(BODY)
-        assert host.arq._inflight.payload + bytes(host.arq._outbuf) == BODY
+        assert [sl for sl,_,_ in seam.frames] == [2,3,4,4,3,3,3,3]
+        assert [status for _,status,_ in seam.frames] == [1,2,3,3,3,3,3,3]
+        assert host.arq._buffer_raw == len(BODY)-23-59
     else:
         assert [sl for sl,_,_ in seam.frames] == [2,3,4,4,3,2,1,1]
         assert [status for _,status,_ in seam.frames] == [1,2,3,3,3,3,3,3]
@@ -87,42 +86,48 @@ def test_recorded_climb_does_not_spend_two_extra_fields_in_hold_trial(enabled):
         assert host.arq._inflight.payload + bytes(host.arq._outbuf) == BODY[23+59:]
 
 
-def test_ack_releases_hold_and_the_next_speedup_can_advance():
+def test_a_repeated_cs4_acknowledges_under_the_trial():
     host,seam = sender()
     control(host,4)
-    lines = traffic.TrafficLog().control('RX',3,host.arq)
-    assert 'HELD SPEED-UP / REPEAT seq=1 (trial)' in lines[0]
-    assert 'no additional bytes acknowledged' in lines[1]
+    assert host.arq.tx_seq == 1 and host.arq._p3_tx_gear_command is None
     control(host,4)
-    first = host.arq._inflight.payload
-    assert len(first) == 23
+    assert host.arq.tx_seq == 2 and host.arq._buffer_raw == len(BODY)-23
+
+
+def test_ack_releases_a_held_cs5():
+    host,seam = sender()
+    control(host,4)
+    control(host,5)
+    lines = traffic.TrafficLog().control('RX',4,host.arq)
+    assert 'HELD NAK / REPEAT seq=1 (trial)' in lines[0]
+    control(host,5)
+    assert host.arq.speed_level == 1 and host.arq.tx_seq == 1
     control(host,2)  # Actual matching ACK for counter 1.
-    assert host.arq.tx_seq == 2
-    assert host.arq._p3_tx_gear_command is None
-    control(host,4)
-    assert host.arq.tx_seq == 3 and host.arq.speed_level == 3
-    assert host.arq._buffer_raw == len(BODY)-46
+    assert host.arq.tx_seq == 2 and host.arq._p3_tx_gear_command is None
 
 
 def test_refused_retransmission_retains_bytes_and_held_command():
     host,seam = sender()
     control(host,4)
+    control(host,5)
     pending = host.arq._inflight
+    frames = len(seam.frames)
     seam.refuse = True
     for _ in range(3):
-        control(host,4)
-    assert host.arq._inflight is pending and len(seam.frames) == 1
-    assert host.arq._buffer_raw == len(BODY)
+        control(host,5)
+    assert host.arq._inflight is pending and len(seam.frames) == frames
     seam.refuse = False
-    control(host,4)
-    assert seam.frames[-1] == seam.frames[0]
+    control(host,5)
+    assert seam.frames[-1] == seam.frames[frames-1]
+    assert host.arq._p3_tx_gear_command == arq.CS_NAK
 
 
 @pytest.mark.parametrize('transition', ['_give_link','_take_link','_enter_connected'])
 def test_gear_hold_cannot_leak_across_turn_or_connection(transition):
     host,_ = sender()
     control(host,4)
-    assert host.arq._p3_tx_gear_command == arq.CS_SPEED_UP
+    control(host,5)
+    assert host.arq._p3_tx_gear_command == arq.CS_NAK
     getattr(host.arq,transition)()
     assert host.arq._p3_tx_gear_command is None
 

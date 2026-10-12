@@ -39,10 +39,11 @@ step where we are waiting for it, and from nobody else: dialled at the four othe
 callsigns of that slot the same recording carries the handshake nowhere, and
 neither does a call nobody answered.
 
-The replay feeds the whole recording, this station's own eight transmissions
-included. The live path skips them — ``AudioVaraIO.tx`` takes its cursor past
-everything it played — so this is strictly the harder input, and the negative
-arms are scored over it too.
+The fixture is the same event's Kiwi witness, cropped from nominal witness
+48..114 s and resampled to 48 kHz. Payload-tone plateaus independently locate
+its four burst starts at 1.096, 13.239, 25.315 and 63.836 s in the excerpt.
+The replay includes our transmissions between those answers, so the wrong-call
+and wrong-bandwidth controls face the same recorded traffic.
 """
 from __future__ import annotations
 
@@ -63,7 +64,7 @@ CHUNK = 4800                      # the device read size AudioVaraIO feeds the g
 MYCALL = "W9SSJ"
 GATEWAY = "K5FIT"
 #: When K5FIT answered, in the recording's own clock.
-ANSWERS_AT = (35.977, 48.127, 60.196, 98.732)
+ANSWERS_AT = (1.096, 13.239, 25.315, 63.836)
 #: The other stations this station dialled in the same slot. None of them was on
 #: this channel, and none of them may take this recording anywhere.
 STRANGERS = ("KE8LVA", "N5MDT", "WB4ULT", "W6IDS")
@@ -126,7 +127,7 @@ def _replay(x: np.ndarray, gateway: str, bw: str = "500"):
 
 @pytest.fixture(scope="module")
 def recording() -> np.ndarray:
-    x = corpora.wav_mono(corpora.ONAIR_BW500_ANSWER)
+    x = corpora.a1_samples(corpora.A1_BW500_ANSWER)
     return x / (np.abs(x).max() or 1.0)
 
 
@@ -144,7 +145,6 @@ def test_the_handshake_waits_for_the_bandwidth_it_called_on():
             f"at BW{bw} the initiator waits for {hs._expected_kind().name}")
 
 
-@corpora.requires_onair_bw500_answer
 def test_the_answer_carries_the_handshake_to_the_link_setup(recording):
     """K5FIT's answer has to leave ``I_CR_SENT`` and put step 4 on the air.
 
@@ -166,7 +166,6 @@ def test_the_answer_carries_the_handshake_to_the_link_setup(recording):
     assert sum(m.startswith("tx link-setup") for m in io.logs) >= 1
 
 
-@corpora.requires_onair_bw500_answer
 @pytest.mark.parametrize("stranger", STRANGERS)
 def test_the_same_recording_answers_nobody_else(recording, stranger):
     """Dialled at a station that is not on this channel, nothing is accepted.
@@ -180,7 +179,6 @@ def test_the_same_recording_answers_nobody_else(recording, stranger):
     assert not [m for m in io.logs if m.startswith("rx connect-response for")]
 
 
-@corpora.requires_onair_bw500_answer
 def test_the_wide_alphabet_finds_nothing_in_it(recording):
     """The same audio, the same callsign, read as BW2300 — and no answer in it.
 
@@ -192,14 +190,13 @@ def test_the_wide_alphabet_finds_nothing_in_it(recording):
     assert not [m for m in io.logs if m.startswith("rx connect-response for")]
 
 
-@corpora.requires_onair_bw500_answer
-def test_a_call_nobody_answered_stays_unanswered(recording):
-    """The control the positive needs: 70 s of the same rig calling and no reply.
+def test_a_call_nobody_answered_stays_unanswered():
+    """The whole KC9GHZ tap, including our TX, with no reply.
 
     Scored at BW500 for the station that was dialled and for the one that
     answered a different call on a different day.
     """
-    x = corpora.wav_mono(corpora.ONAIR_UNANSWERED_CALL)
+    x = corpora.a1_samples(corpora.A1_UNANSWERED_CALL)
     x = x / (np.abs(x).max() or 1.0)
     for call in ("KC9GHZ", GATEWAY):
         io, hs, _ = _replay(x, call)

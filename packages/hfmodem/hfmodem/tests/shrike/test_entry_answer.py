@@ -171,9 +171,8 @@ def test_the_changeover_answers_the_entry_packet(swapped: bool) -> None:
 
     `arq.PactorArq.on_rx_packet` yields on a break-in, and `ptc.PtcHost`
     spends `entry_pending` on the same frame (`_entry_answered`) -- so a peer
-    that reads our entry packet and takes the channel with it moves this
-    station off speed level 1 and onto the level the entry asked for, in one
-    event and not two.
+    that reads our entry packet and takes the channel completes entry in one
+    event. A changeover does not command a speed increase: retain SL1.
     """
     audio = _rendered(swapped, 20.0)
     _, _, head = _head_at(audio, int(0.45 * FS))
@@ -181,7 +180,7 @@ def test_the_changeover_answers_the_entry_packet(swapped: bool) -> None:
     sess.host.arq.speed_level = 1
     assert sess.changeover(audio, head) == CS_BREAKIN
     assert not sess.host.arq.entry_pending
-    assert sess.host.arq.speed_level == sess.host.arq.entry_level
+    assert sess.host.arq.speed_level == 1
     assert sess.host.arq.role == IRS
 
 
@@ -328,8 +327,11 @@ def test_a_straddle_reads_a_codeword_and_is_refused_for_where_it_lies() -> None:
     syms = modem.differential_encode(bits, 1)
     burst = modem.modulate_tones({5: syms, 12: syms},
                                 modem.ModConfig(sample_rate=FS, matched_pulse=True))
-    audio = np.concatenate([np.zeros(FS), burst,
-                            np.zeros(FS)]).astype(np.float32)
+    # Nine DBPSK bits read off digital silence are FFT roundoff, 1e-30 products
+    # that differ between platforms' FFT builds; a noise floor makes the pad
+    # bits a property of the stimulus. This seed's pad spells BREAK-IN.
+    audio = np.concatenate([np.zeros(FS), burst, np.zeros(FS)])
+    audio = (audio + np.random.default_rng(496).normal(0, 1e-3, audio.size)).astype(np.float32)
     pulse = rx._pulse(SPS)
     delay = (pulse.size - 1) // 2
     Z = {cn: rx._baseband(audio, cn, FS, pulse) for cn in rxfront.HDR_TONES}

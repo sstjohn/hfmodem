@@ -19,6 +19,7 @@ AUDIT = ROOT / 'working/pactor3-pattern-2029-0919'
 
 def receiver(phase, level=None):
     s = _Session(role=arq.IRS)
+    s.host.arq.cfg.long_cycle = False  # This fixture tests short-frame ACK counters.
     s.rx.p3_wideband_prekey = True
     s.rx.p3_receive_offset_hz = 1.8
     s.rx._seed_p3_changeover_clock(phase)

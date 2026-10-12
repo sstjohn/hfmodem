@@ -37,8 +37,9 @@ from hfmodem.shrike import p2rx, pactor2
 FS = 12000
 PATH = pactor2.PATHS[2]                      # SL3 short: the level proven off-air
 SIGMA = 0.8
-"""Noise sigma against a unit-peak render: past the single-shot cliff (0 of 6
-seeded copies of field A decode alone) and inside combining's reach."""
+"""Noise sigma against a unit-peak render: at the single-shot cliff (seeds 2, 4
+and 6 of field A decode alone; 1, 3 and 5, the ones used here, do not) and inside
+combining's reach."""
 
 A = pactor2.build_field(bytes(range(1, 34)), PATH)
 B = pactor2.build_field(bytes(range(200, 233)), PATH)
@@ -74,7 +75,7 @@ def _failing(field: bytes, seed: int, **kw):
 def test_copies_that_fail_alone_decode_summed():
     mem = p2rx.BurstMemory()
     assert mem.add(_failing(A, 1), PATH) is None      # one copy: nothing to sum
-    got = mem.add(_failing(A, 2, render_swapped=True, read_swapped=True), PATH)
+    got = mem.add(_failing(A, 5, render_swapped=True, read_swapped=True), PATH)
     assert got == A, "two marginal copies, one per arrangement, must sum to the field"
     # a delivered field clears the memory: the next lone copy stands alone again
     assert mem.add(_failing(A, 3), PATH) is None
@@ -91,7 +92,7 @@ def test_the_arrangement_mapping_is_load_bearing():
     # the same swapped-cycle copy that combines in test 1, read at home
     mem = p2rx.BurstMemory()
     mem.add(_failing(A, 1), PATH)
-    wrong = _windows(A, 2, render_swapped=True, read_swapped=False)
+    wrong = _windows(A, 5, render_swapped=True, read_swapped=False)
     assert wrong is not None
     assert mem.add(wrong, PATH) is None, \
         "a swapped-cycle copy read in the home arrangement must not combine"
@@ -100,6 +101,6 @@ def test_the_arrangement_mapping_is_load_bearing():
 def test_intercopy_rotation_is_absorbed():
     mem = p2rx.BurstMemory()
     mem.add(_failing(A, 1), PATH)
-    turned = [w * np.exp(2j * np.pi / 3) for w in _failing(A, 2)]
+    turned = [w * np.exp(2j * np.pi / 3) for w in _failing(A, 5)]
     assert mem.add(turned, PATH) == A, \
         "a constant rotation between copies is what the alignment is for"

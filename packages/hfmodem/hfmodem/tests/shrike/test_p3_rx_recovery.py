@@ -191,12 +191,15 @@ def test_two_consecutive_cycles_deliver_through_the_hold_loop_seam(tmp_path):
     window and a tracked read of this one, and that choice is what lost the
     repeat. Cycle 5 arrives in the sweep at the top of the second iteration --
     the position every one of the arm's eleven deliveries came from -- and cycle
-    6 in the same iteration's pre-key read, which is why its instant is the
-    pre-key estimator's.
+    6 in the same iteration's pre-key read. This seam keys no control, so the
+    tracked read retains the nominal-frequency estimator's thirty-sample bias.
+    The later free acquisition still nominates the carrier without redelivery.
     """
     session, tx, grid = benched(tmp_path, seeded_at=3408867, slot=62)
     hold_seam(session, tx, grid, ["5", "6"], slot=62, prekey_room_s=.060)
     assert [ev.packet[:3] for ev in session.packets] == [FIELD, FIELD]
+    assert session.rx._p3_offset_fixed
+    assert session.rx.p3_receive_offset_hz == pytest.approx(-1.4, abs=.2)
     assert (session.rx._p3_delivered_at
             == META["cycles"]["6"]["cs3_head_sample"] + PREKEY_STEP_N)
     assert grid._p3_raster_run == 2

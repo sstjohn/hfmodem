@@ -1,4 +1,4 @@
-# 01 — Physical layer (OFDM parameters)
+# 01 — Physical layer
 
 This section specifies the transmitted waveform: symbol geometry, carrier layout,
 cell values and burst structure, one block per bandwidth mode. The coding chain
@@ -6,10 +6,37 @@ that feeds it — whitening, FEC, interleaving, CRC — is [`03`](03-coding.md);
 frame layouts are [`04`](04-frame-block-formats.md); the per-level ladder is
 [`06`](06-speed-gearshift.md).
 
-In the 500 Hz mode the two directions carry different waveforms. The initiator
-sends long DATA bursts, the responder sends only short control/ACK bursts of
+In the original 500 Hz capture described below, the two directions carried
+different waveforms. The initiator sent long DATA bursts, while the responder
+sent only short control/ACK bursts of
 roughly 0.34–0.68 s; §1.1 through §1.4 describe the DATA waveform and §1.5
 separates the two populations. Fields left empty are not specified here.
+
+## 1.0 Waveform families
+
+Every speed level of every bandwidth belongs to one of three waveform families.
+Levels are host `BITRATE (N)` numbers throughout; level L is record L − 1 of the
+bandwidth's own interleaver chain (`tablegen.BW500`, `BW2300`, `BW2750`).
+
+| family | levels | symbol | carriers | cell law |
+|---|---|---|---|---|
+| index | BW2300 and BW2750 L1–4, BW500 L1–3 | 2048 / 1024 / 512 samples, no CP | one lit bin per symbol | the lit bin's position carries the coded value |
+| tone | BW2300 L5–9, BW2750 L5–10, BW500 L4–6 | 512 samples (93.75 Bd), no CP | 2–13 bands centred on 1500 Hz, on no FFT grid | differential per band: BPSK at BW500 L4, QPSK elsewhere |
+| OFDM | BW2300 L10–16, BW2750 L11–17, BW500 L7–13 | 1024 + 128 CP = 1152 samples (41.67 Bd) | 49 / 59 / 11 on 1024-point bins 8..56 / 3..61 / 27..37 | differential QPSK and 8PSK; coherent 16QAM and 32-cross on pilots |
+
+The three share one coding chain ([`03`](03-coding.md)) and one frame shape:
+payload, a control byte, CRC-16/GENIBUS ([`04 §4.2B`](04-frame-block-formats.md)).
+The index levels are specified per bandwidth in §1.1. The tone and OFDM
+families differ between bandwidths only in a handful of per-row integers and
+have their own sections at the end of §1.1, as does the session lead stream
+every lead is drawn from. Per-level tables are in [`06`](06-speed-gearshift.md).
+
+The tone and OFDM families were measured on high speed capable bench tapes of two stock
+VARA HF 4.9.0 installations, and every row decodes byte-exact from them
+(`evidence/KPA-*.md`). They agree with the sigidwiki
+VARA HF level table on carrier count, baud rate and modulation at every level;
+the tape adds the scramble, leads, pilots and gap cells, which that table does
+not list.
 
 ## 1.1 Global / per-bandwidth parameters
 
@@ -44,6 +71,11 @@ level shows two humps with a notch at 1500 Hz, and its coding half is
 keyable, the 4 training columns not — those carry a per-over draw whose
 stream this bandwidth gives no way to locate, and nothing reads them for
 correctness.
+
+**Above the base level** BW500 runs the tone family at L5–6 (DQPSK on two bands at
+1350/1650 Hz, then three at 1320/1500/1680 Hz) and the OFDM family at L7–13 on
+bins 27..37 (§"Tone family", §"OFDM family" below). The base level shares the tone
+family's pilot law, grid rows and 9-per-band lead count.
 
 **A 256-point analysis window misreads this mode.** On a 256-point FFT the
 waveform presents as a 187.5 Hz carrier grid — 5.333 ms symbols at 187.5 baud, an
@@ -177,18 +209,14 @@ same three lines render rec2's preamble (below).
 
 **The PRNG is payload-independent and session-deterministic.** It is the VB6 `Rnd`
 generator, a 24-bit LCG `state ← (state·0x43FD43FD + 0xC39EC3) mod 2²⁴`,
-advance-then-read, with `Int(Rnd()·16) = state ≫ 20`. `Randomize` is never called,
-so the stream is identical on every run: sessions with different payloads and
-different connect timing produce byte-identical preambles for every over. The
-overs draw from one continuous stream — 12 consecutive draws per over,
-back-to-back, with a single extra draw between over 0 and over 1. Over 0 begins at
-LCG state **4107106**, which is the state left by the fixed connect and link-setup
-`Rnd` consumption of this ARQ scenario. A licensed peer, or different pre-data
-traffic, shifts that starting state; the per-over draw structure and the bin law
-are invariant, and this document does not fix the starting state for other
-scenarios.
+advance-then-read, with `Int(Rnd()·16) = state ≫ 20`, and the stream is the
+session lead stream (§"Session lead stream" below): reseeded at every session from
+the caller's callsign, 12 draws per base-level over. The caller's link-setup over
+is keyed at the stream's start state E1; a station's first data over costs one
+extra draw. **4107106 is E1 for caller `AAAA1` at BW2300**, so every `AAAA1`
+session opens on the vectors below, whatever its payload.
 
-**Reference vectors** (canonical for implementers):
+**Reference vectors**, caller `AAAA1` at BW2300:
 
 | over | 12 preamble bins (blocks 2–13) |
 |---|---|
@@ -237,6 +265,10 @@ six allocations falling out of both:
 |---|---|---|
 | a2b | 43 48 43 20 47 44 | 2767643 (2 base overs ahead of it) |
 | b2a | 17 38 43 32 17 20 | 3653944 (1 base over ahead of it) |
+
+Both states are session lead stream values: 2767643 is `W9SSJ`'s caller E1 at
+BW2300 and 3653944 its responder E1 on the six-value (BW2750) alphabet, which is
+not explained (`evidence/LEAD-GENERATORS.md`).
 
 **Synthesis** is the base level's with rec2's geometry: `X[b] = −1j·|cell|`,
 `X[1024−b] = +1j·|cell|`, length-1024 IFFT, six symbols, then the 228 data columns.
@@ -441,111 +473,12 @@ f32, indexed `[bin + col·513]`, dimensions 513 × 469, where `513 = 1024/2 + 1`
 accumulate a level, form `norm = level/(2^e − 1.0)`, then divide per bin. It
 carries no payload.
 
-#### High-throughput levels rec9–rec16
+#### Levels 5–16
 
-Records 9–16 are the high-throughput DATA levels, emitted by the constellation
-modulator, whose value law is a **dense constellation** rather than the base index
-modulation. Link setup does not use them: the caller-identity burst is an ordinary
-rec3 burst — the 175 bps level of the speed ladder above — and not a record of its
-own.
-
-| Stage | Law |
-|---|---|
-| bits → coded (Gray) | `v` = `bpc` on-air bits; `coded = clsparm_gray[(bpc−2)·16 + v]` (rows 0/1/2 = standard **2/3/4-bit Gray**) |
-| coded → constellation | `cell = LUT[pos + 6·coded]`, `pos` = the record's constellation column |
-| twiddle | `cell ·= twiddle[469·bin + (sym − block_start)]` = `exp(j·2π·S/128)` |
-| placement | `grid[(sym−1) + 100·bin] = cell` (identity in sym, bin) |
-| OFDM symbol | `dw50 = 1152` = **1024-pt IFFT + 128-sample cyclic prefix** |
-
-**Constellation ladder** (LUT column per `pos`; the LUT interleaves six standard
-constellations with period 6):
-
-- `pos=1` **QPSK** (bpc 2): `(1,0)(1,90)(1,−90)(1,180)` (`(‖z‖, deg)`, coded order)
-- `pos=2` **8-PSK** (bpc 3): unit circle, Gray order
-- `pos=3` **16-QAM square** (bpc 4): corner modulus 1.1, moduli `{0.367, 0.82, 1.1}`
-- `pos=4` **32-QAM cross** (bpc 5): corner modulus 1.5 — the 6×6 grid of odd
-  multiples of `u = 0.3/√2` minus the four `(±5,±5)` corners; mean power 0.900,
-  `d_min = 0.424264`, moduli `{0.3, 0.671, 0.9, 1.082, 1.237}`
-- `pos=5` **64-QAM square** (bpc 6): corner modulus 1.6 (selected by no BW2300
-  record)
-
-Each column is a complete `2^bpc` alphabet; the 512-byte LUT is a
-**truncated prefix** of the raster (column `pos` present only up to
-`coded = ⌊(63−pos)/6⌋`), which is why an earlier revision read the `pos ≥ 3`
-columns as sparse "APSK rings" with a bpc of 3. `bpc` is **4** at rec14 and **5**
-at rec15/rec16; the divisibility of each record's coded-bit count by its column
-count settles it, and the full columns, the QAM label law and the marking of the
-pos=4 labels inferred beyond the table are in
-[`06 §6.1c/§6.1e`](06-speed-gearshift.md) and the constant-table generator
-`hfmodem/kestrel/rx/tablegen.py`.
-
-**Coding chain** — same (13,15) turbo core throughout, interleaver column = record
-index, whitened with the shared PN:
-
-`rec9` QPSK r1/2 (N=7197, coded=14406) · `rec10` QPSK r2/3 · `rec11` QPSK r4/5 ·
-`rec12` 8-PSK r2/3 (N=14398) · `rec13` 8-PSK r4/5 · `rec14` **16-QAM** r5/6 ·
-`rec15` **32-QAM cross** r4/5 · `rec16` **32-QAM cross** r4/5. Rates follow from `N` and
-`coded` (`2N+12` = r1/2, and so on).
-
-> **Implementation note — this ladder is not validated against VARA.** No level
-> above the base has been demodulated from a VARA transmission or accepted by a
-> VARA receiver. What has been shown is that the chain above is *invertible*
-> against this repository's own encoder, which is not the same as matching VARA:
-> payload (897 B) + CRC-16 → whiten → turbo r1/2 (turbo interleaver column 9) →
-> channel interleave (column 9) → 2-bit Gray → QPSK `LUT[1 + 6·coded]` → 7203
-> cells → 226 OFDM symbols (1024-point IFFT + 128-sample CP) → audio → receive
-> (strip CP, 1024-point FFT, nearest point, de-interleave, turbo, de-whiten) →
-> CRC-clean, payload byte-identical. The per-cell `(sym, bin)` carrier schedule is
-> derived rather than observed, and the round trip above substitutes a
-> self-consistent sequential grid for it. See [`06 §6.1c`](06-speed-gearshift.md).
-
-#### Cell raster, twiddle and overlap-add (records 4–16)
-
-The constellation modulator lays modulated cells onto an internal
-`128 (bin) × 940 (col)` complex grid, then applies a position-keyed twiddle. The
-raster constants (**940**, **469**, twiddle divisor **128**) are geometry shared
-with the 500 Hz mode; only the tables differ by bandwidth. `bin` is the **slow**
-axis (stride 940), `col` the **fast** axis (0..939). **469 is the twiddle-grid
-stride; 940 is the placement-grid stride** — they are different grids.
-
-| Quantity | Value |
-|----------|-------|
-| Forward (TX) cell placement | `grid[(col−1) + 940·bin] = constellationLUT[sym] ⊗ twiddle[469·bin + col_rel]` |
-| Grid axes | **bin = slow (stride 940), col = fast (0..939)**; the grid reshapes `(128, 940)` with `row = bin` |
-| Twiddle / de-rotation index | `idx(bin,col) = 469·bin + col_rel`, `col_rel = col − block_start` (per emission block: block A starts at col 2; block B starts one past the block-A end) |
-| Twiddle definition | `twiddle[k] = exp(j·2π·S[k]/128)`, `S[k]` a fixed per-position phase sequence (`twiddle_phase_S.u8`); the RX de-rotation reference is its conjugate partner on the same raster |
-| Reference-sequence table | `128 × 469` unit-modulus, phases quantized to `2π/128`; values in `derotation_reference.c64` (use table values directly — not index-aligned to `exp(±j2π·S/128)`) |
-| Twiddle grid | per-burst complex64 grid, `grid[469·bin + col] = exp(j·2π·m/128)`; **pure unit-modulus** (60032 cells all \|z\|=1.0000, phase/(2π/128) residual RMS **1.8e‑6**) |
-| Twiddle grid shape/stride | **[128 bin][469 col]**, row-major stride **469** (60032 = 128·469 = 480256 B / 8) |
-| Twiddle divisor | **128** exactly — `θ = m·2π/128` |
-| Phase index `m` | `m = S[k]` (uint8), from a 65000-byte table read as a **flat stream** by a running counter, the grid filled in raster emission order; a conjugate-mirror column is filled alongside. The table's values span 0..254; the phase indices realised in the grid are `m ∈ {0..127}` |
-
-`derotation_reference.c64` is exactly `exp(j2π·n/128)`, `n∈ℤ`
-(phase·128/2π fractional RMS = 1.8e-6).
-
-**RX de-rotation:** `cell ⊗ reference[469·bin + col_rel]`, then nearest-point
-demap against the 64-entry constellation LUT. The forward chain (index law above +
-interleave/whiten/turbo/CRC) is specified in [`03 §3.5.3`](03-coding.md).
-
-**Overlap-add.** This path applies a raised-cosine overlap-add per output symbol.
-The window is `w1[i] = (cos θ + 1)·0.5` with `w2` its complementary half, and a
-previous-symbol state buffer supplies the overlap memory; the per-symbol blend is
-`out[k] = w2[k]·cur[k] + w1[k]·prev[k]`. Neither window applies on the base DATA
-path.
-
-The BW2300 coding assets (interleave map, used-carrier map, whitening PN,
-twiddle-phase sequence `S`) are **bandwidth-dependent** and differ from the 500 Hz
-set; the constellation LUT and the reference sequence are bandwidth-independent.
-The numeric constant tables are produced in code by the companion
-implementation's generator, `hfmodem/kestrel/rx/tablegen.py`, which records how
-each is known; they are not shipped as data files. Full coding-chain facts are
-in [`03 §3.5.4`](03-coding.md).
-
-For these levels the per-carrier modulation follows the constellation ladder
-above — unit-circle PSK at pos ≤ 2 and non-uniform-magnitude QAM at pos ≥ 3
-(outermost moduli 1.1 / 1.5 / 1.6), not plain unit-circle QPSK — whitened by a
-unit-modulus reference sequence and a per-cell twiddle `exp(j·2π·S/128)`. Records
-9–16 use `span = 32` and `dw50 = 1152` with a 128-sample cyclic prefix.
+Above the base, BW2300 runs the tone family at L5–9 and the OFDM family at
+L10–16, both specified below (§"Tone family", §"OFDM family"). Neither uses the
+index law, the 16-bin comb or the base level's reference columns; the link-setup
+never uses them.
 
 #### Reading the 2300 Hz waveform through a 2048-point window
 
@@ -588,7 +521,8 @@ FFT per block recovers one column per block in time order directly.
 
 ### 2750 Hz mode
 
-The 2750 Hz mode is specified here at the base level and only partly above it.
+The 2750 Hz base level is specified here; above it BW2750 runs the tone and OFDM
+families (below).
 
 **The base level is fixed.** Host `BITRATE (4)`, and it is the 2300 Hz base level's
 index law on a wider comb — nothing else about it differs:
@@ -602,7 +536,7 @@ index law on a wider comb — nothing else about it differs:
 | Bin-allocation table | `9 + Int(Rnd*16)`, 395 draws | **`6 + Int(Rnd*20)` — the same 395 draws of the same stream** |
 | Reference-cell class map / channel + turbo interleavers / whitener | rec3's | **rec3's, unchanged** |
 | Training preamble | 12 symbols, `Int(Rnd*16)` offsetting the record's own columns | **the same law on the 2750 columns, reduced into the 20-bin span** |
-| Preamble draws before the session's first over | 0 | **5** |
+| Preamble draws before the session's first over | 0 | **5**: BW2750's E1 sits 5 draws after BW2300's for the same caller (§"Session lead stream") |
 | Burst length | 4.363 s | **4.363 s** |
 
 A 20-bin comb carries 16 values, so **four bins of every column carry nothing**; a
@@ -629,35 +563,202 @@ carrying continuous B2F greeting text that was not known in advance.
 rather than generated, so there is no stream to re-quantise, and no recording held
 here carries a BW2750 one.
 
-Above the base level:
+Above the base level BW2750 runs the tone family at L5–10 and the OFDM family at
+L11–17 (below). The OFDM symbol is BW2300's, 1024 + 128 CP = 1152 samples, on 59
+carriers at bins 3..61 (140.6–2859.4 Hz, 2.81 kHz edge to edge); correlation at
+lag 1280 is 0.00 (`evidence/RASTER-bw2750.md`). An earlier
+reading here put BW2750's high-level symbol near 1280 samples and held that 1152
+does not carry over. It does carry over: all 69 BW2750 OFDM frames on the
+high speed capable tapes decode byte-exact on it (`KPA-bw2750-const.md`).
 
-| Parameter | Value | Unit |
-|-----------|-------|------|
-| Occupied bandwidth | **~2.7 k** (2742 / 2713, ±30) | Hz |
-| High-SL waveform has a cyclic prefix | **YES** (non-coherent block autocorrelation, peak/median 1.5–1.9×) | — |
-| High-SL CP repetition period | **Not determined.** A control-validated correlator puts the peak anywhere in 1258–1394 depending on window, at a metric of 0.5–0.63 against 0.975 on a known-geometry synthetic. Consistent with ≈1280, not resolved to it; see [`06 §6.1b`](06-speed-gearshift.md). Observed near 1280 (26.7 ms), centre stable 1266–1284 | samples |
-| High-SL symbol stride `Ts` | ≈ 1400–1450 (~33–34 baud) — **not** on the 23/42/47/94 grid | samples |
-| Base / low-SL layer | **same no-CP structure as BW2300** (autocorrelation null at 1024/2048, no CP peak) | — |
-| Useful symbol `Tu` | **Not determined** — the split between useful symbol and CP is unresolved. Observed near 1280 (37.5 Hz grid), favoured over the `Tu=1024, CP≈256` reading. Replicated across two stations, two bands and two receivers: two further long bursts score the CP correlation highest at lag 1280 (1.40 and 1.33 over a wide-baseline floor) against 1.12 and 1.03 at lag 1024. **Not a power of two — do not assume a 1024/2048 IFFT.** 1280 = 256·5 is a valid mixed-radix size | samples / Hz |
-| CP length and exact `Ts` | **Not determined.** The carrier-comb test that would separate them — symbol-synchronous FFT accumulation scored against a random-offset baseline — scores 4.2× on a synthetic control and 1.0×, no gain at all, on every observed burst, even after removing the fractional CFO. `Ts` and the CP length are therefore not fixed here; only `Tu` is | samples |
-| Modulation order / constellation / FEC rate / level index | Not specified here | — |
+### Tone family (BW2300 L5–9, BW2750 L5–10, BW500 L4–6)
 
-**One falsification.** BW2300's high-SL symbol is
-`dw50 = 1152` (1024 + 128 CP). BW2750's is **≈ 1280 — about 11 % longer — so
-`dw50 = 1152` does not carry over to 2750.** Anything that assumes it does is
-wrong.
+Each band carries one complex cell per 512-sample symbol (93.75 Bd), shaped by a
+real pulse and mixed up to the band's centre. There is no cyclic prefix and no
+FFT grid: centres sit at `1500 + step·(b − (nb − 1)/2)` Hz, and adjacent bands
+are staggered in time. Per band `b`:
 
-`Tu ≈ 1280` rests on two stations, two receivers and two bands, measured by a
-method that recovers the geometry of a synthesised BW2300 rec9 burst exactly.
-Everything else in this block rests on a single observation. Two properties of the
-measurement matter to anyone repeating it:
+```
+t 0..7    lead
+t 8       reference
+t 9..     data and pilot columns: cell(t) = cell(t−1) · i^g, g = Gray[0,1,3,2] of the
+          next two on-air bits, MSB first; a pilot column repeats cell(t−1)
+on air    x_b(t) = cell(t) · conj(G_b[t − 8])     (the lead at t 0..7 reads G_b[t])
+audio     Re Σ_b Σ_t x_b(t) · p(n − n0 − stagger_b − 512·t) · exp(j2π·f_b·n / 48000)
+```
 
-- The CP correlation peak is *triangular with half-width equal to the CP length.*
-  Normalising it against a nearby lag divides the peak out and makes a real CP
-  look absent — the floor has to come from several hundred samples away.
-- The discrimination margin is ~1.3×, against 1.6× on the control. It is
-  directionally consistent across bursts, but it is not a margin that settles the
-  question. A `rec` table from a BW2750 session would end it outright.
+`G_b` is grid row `b` in units of 2π/128 (`tablegen.grid_row`). Rows 0 and 1 are
+the BW500 base level's `grid480` reference at indices 0.. and 471.., each with
+one measured tail column; rows 2–12 are measured literals with no generator
+found. Every band of every row reads its own row by band index, so one table
+serves all three bandwidths. BW2300 L7's last three columns on rows 4 and 5 are
+unmeasured; a transmitter keys those six cells unrotated.
+
+Coded bits fill band 0's data columns in time order, then band 1's, and so on.
+The coding is rate 1/2 at every tone row (`coded = 2N + 12`), so no puncture is
+involved, and data columns × bands × 2 = `coded` exactly.
+
+**Pilots** are drawn per band, band after band, as `t = 13 + Int(Rnd·(ncols − 6))`
+with rejection until the band holds its count of distinct values, where
+`ncols = nsym − 9`. The draws come from the record's interleaver gap, after its
+two permutations, and close exactly on the next record's stage-1 seed
+(`tablegen.tone_pilots`). BW500 L4's 36 pilots are the same law.
+
+**Lead and reference.** The lead is `Int(Rnd·4)` from the session lead stream,
+9 × bands draws, time-major (9 rows of `nb`), Gray-mapped to quarter turns. Row 0
+is the reference's phase at t = 8, rows 1..8 are the lead at t = 0..7, and every
+cell is multiplied by `conj(G_b[t])`. Read cell for cell off BW2300 L5–9 (52 of 55
+overs); at BW2750 and BW500 only the draw count is confirmed. No receiver reads
+the lead; the reference only anchors the differential chain.
+
+| bw | L | bands | step Hz | centres Hz | stagger (samples) | nsym | pilots / band | pulse |
+|---|---|---|---|---|---|---|---|---|
+| 2300 | 5 | 3 | 600 | 900, 1500, 2100 | 0, 176, 336 | 383 | 12 | P500 |
+| 2300 | 6 | 4 | 500 | 750 … 2250 | 0, 256 alternating | 372 | 9 | P500 |
+| 2300 | 7 | 6 | 320 | 700 … 2300 | 0, 256 alternating | 362 | 6 | P8 |
+| 2300 | 8 | 8 | 228 | 702 … 2298 | 0, 256 alternating | 359 | 5 | P8 |
+| 2300 | 9 | 10 | 210 | 555 … 2445 | 0, 256 alternating | 356 | 4 | P9 |
+| 2750 | 5 | 3 | 900 | 600, 1500, 2400 | 0, 176, 336 | 383 | 12 | P500 |
+| 2750 | 6 | 4 | 660 | 510 … 2490 | 0, 256 alternating | 372 | 9 | P500 |
+| 2750 | 7 | 6 | 420 | 450 … 2550 | 0, 256 alternating | 362 | 6 | P8 |
+| 2750 | 8 | 8 | 320 | 380 … 2620 | 0, 256 alternating | 359 | 5 | P8 |
+| 2750 | 9 | 10 | 250 | 375 … 2625 | 0, 256 alternating | 356 | 4 | P9 |
+| 2750 | 10 | 13 | 210 | 240 … 2760 | 0, 256 alternating | 356 | 3 | P9 |
+| 500 | 5 | 2 | 300 | 1350, 1650 | 0, 256 | 402 | 18 | P500 |
+| 500 | 6 | 3 | 180 | 1320, 1500, 1680 | 0, 176, 336 | 383 | 12 | P8 |
+
+BW500 L4, the base level, is this family's differential-BPSK member on L5's two
+bands; its demodulation is [`03 §3.6`](03-coding.md). `nsym = 9 + data columns +
+pilots` per band. BW2750 L5–9 and BW2300 L5–9 carry the same records (seeds,
+lengths and pilot draws); BW2750 L10 is a record of its own, and BW500 L5–6 are
+BW500's records 4 and 5.
+
+**Pulses** are measured taps, not a closed form: P500 is BW500's 513-tap pulse
+(`tx/bw500_pulse.py`), P8 and P9 are 2049-tap fits over offsets −1024..1024
+(`tx/tone_pulse.py`). Crossed, P8 and P9 read each other's rows at −27 dB, so they
+are two pulses and not two fits of one.
+
+**Burst edges** are the pulses' own: the burst rises and falls with its first and
+last pulses and carries no extra ramp. L5 at BW2300 runs 383·512 + 336 samples
+between the outer pulse half-widths.
+
+**Carrier offsets.** Each band carries a fixed offset of ±0.01 to ±0.7 mHz from its
+nominal centre, the same across sessions. No receiver can see it (0.7° over a
+4 s over). A render at the nominal centres matches the tape to −50.7 dB (L5) and
+−52.1 dB (L9); with the offsets, −64.6 and −73.4 dB
+(`evidence/TAPER-WINDOW.md`).
+
+### OFDM family (BW2300 L10–16, BW2750 L11–17, BW500 L7–13)
+
+One law on three carrier sets. A symbol is a 1024-point IFFT behind a 128-sample
+cyclic prefix, 1152 samples (41.667 Bd); cells sit on FFT bins 46.875 Hz apart.
+
+| bw | levels | bins | carriers | band |
+|---|---|---|---|---|
+| 2300 | 10–16 | 8..56 | 49 | 375.0–2625.0 Hz |
+| 2750 | 11–17 | 3..61 | 59 | 140.6–2859.4 Hz |
+| 500 | 7–13 | 27..37 | 11 | 1265.6–1734.4 Hz |
+
+**Over structure.** Symbols count from the burst's first.
+
+- **PSK rows** (QPSK, 8PSK): symbols 0–3 lead, symbol 4 the reference (+1),
+  symbols 5–152 data. 153 symbols, 176256 samples. Each carrier is
+  time-differential from the reference: `cell[s] = cell[s − 1] · LUT[v]`.
+- **QAM rows** (16QAM, 32-cross): symbols 0–4 lead, then one or two 154-symbol
+  frames, 159 or 313 symbols (183168 / 360576 samples); a second frame has no lead
+  of its own. Frame row `r` carries a +1 pilot on every absolute-even bin at
+  `r = 8j` and every absolute-odd bin at `r = 8j + 1`, j = 0..19: 20 per carrier.
+  Data cells are coherent, `cell = LUT[v]`.
+- **Gap cells**, per carrier: one at BW2300 and BW2750, four at BW500. At PSK a
+  gap cell is a repeat (a +1 step) at symbol `7 + Int(Rnd·142)`; at QAM it is an
+  extra +1 on the row right after pilot row `Int(Rnd·19)`. The draws run bin-major
+  from the record's interleaver gap, a repeat within a carrier is drawn again, and
+  they close exactly on the next record's stage-1 seed (`tablegen.gap_cells`).
+  That leaves 147 / 147 / 144 data cells per carrier at PSK and 133 / 133 / 130 at
+  QAM (BW2300 / BW2750 / BW500), and carriers × cells × bpc = `coded` at every row.
+
+**Fill and constellation.** Coded bits are taken `bpc` at a time, MSB first, as a
+value `v`, and cell `n` goes to carrier `n // cells_per_carrier`, in symbol order
+within the carrier, skipping the reference, pilots and gap cells. `LUT[v]` is
+column `pos` of the constellation LUT indexed directly by `v`, with no Gray pass
+in front (`tablegen._column(pos, v)`): pos 1 QPSK, 2 8PSK, 3 16QAM (corner 1.1),
+4 32-cross. Pilots and gap cells are +1 in LUT units.
+
+**Scramble.** Every cell after the lead goes on air as
+`value · exp(−j2π·S[k][c]/128)`, `S = tablegen.scramble()`:
+
+```
+S[k][c] = Int(Rnd·129), drawn row-major from seed 29318 (the whitener's seed),
+          409 columns per FFT-bin row from bin 0: bin k column c is draw 1 + 409·k + c
+c       = s − 4 at PSK (column 0 is the reference)
+        = s − 5 − 154·f at QAM (restarting in each frame f)
+```
+
+One table serves every level and bandwidth, which is why the 2π/128 lattice
+shows through at every OFDM level. The lead is not scrambled.
+
+**Lead.** `LUT[Int(Rnd·2^bpc)]` per cell, bin-major with symbol fastest, from the
+session lead stream: lead × carriers draws per frame. A two-frame over draws two
+blocks and keys the second. No receiver reads it.
+
+**Symbol shape** (`evidence/TAPER-WINDOW.md`). Let `o` be
+symbol s's IFFT origin, the first sample of the phase-exact FFT window. The symbol
+is the IFFT output extended cyclically over `[o − 128, o + 1056)`: a 128-sample
+prefix and a 32-sample suffix. Both 32-sample ends are shaped by
+`w[i] = sin²(π(i + 0.5)/64)`, i = 0..31, and symbols overlap-add at a 1152 stride,
+so the suffix of symbol s and the first 32 prefix samples of s + 1 share one
+complementary blend and 96 prefix samples, `[o − 96, o)`, are ISI-free. The burst
+starts at `o₀ − 128` on the first symbol's own rise and ends at `o_last + 1024`,
+its last 32 samples falling by the same ramp inside the last symbol's FFT window,
+with no suffix. It is exactly `nsym × 1152` samples, and nothing differs by
+bandwidth or level. Rendered this way from the transcript's bytes, six tape overs
+(BW2300 L10 and L16, BW500 L8 and L13, BW2750 L11 and L17) match to −84.1 to
+−85.2 dB, each its own 16-bit quantisation floor, at a fitted delay of 0.0000
+samples. A 28- or 36-sample ramp, a half-sample shift of the ramp's phase, or a
+plain prefix all score −47 dB or worse.
+
+kestrel's receiver opens its FFT window 48 samples ahead of `o`, in the middle of
+the 96 clean prefix samples, so a grid estimate off by a few dozen samples reads
+no neighbouring symbol.
+
+### Session lead stream
+
+Every lead — the index levels' training preamble, the tone family's lead and
+reference phase, the OFDM lead rows — is drawn from one VB6 `Rnd` stream per
+station per session (`evidence/LEAD-GENERATORS.md`):
+
+```
+E1(station) = the station's control-burst stream, keyed to the CALLER at both ends:
+              Randomize((crc16(caller) + {caller: 852, responder: 1080}) & 0x7FFF),
+              advanced by G(caller) + carry, then past preadv 1 and control frames 0
+              and 1 on the bandwidth's alphabet (n_p = 5 at BW2300, 6 at BW2750, 2 at BW500)
+s = E1
+for each keying of this station, in order:
+    if it is the station's first data over with a nonzero cost: s += 1
+    this over's lead starts at s (a two-frame OFDM over: one lead block later)
+    s += cost(keying)
+```
+
+| keying | cost (draws) |
+|---|---|
+| acks, connect frames, disconnect, anything under 3 s | 0 |
+| index L4, BW2300 and BW2750 | 12 |
+| tone level | 9 × bands: 27 / 36 / 54 / 72 / 90 at L5–9, 117 at BW2750 L10, 18 / 18 / 27 at BW500 L4–6 |
+| OFDM level | lead × carriers × frames: 196 / 245 at BW2300, 236 / 295 at BW2750, 44 / 55 at BW500 (PSK / QAM per frame) |
+
+The caller's link-setup over is keyed at E1 itself; the responder's first data
+over sits at E1 + 1. Nothing carries over between sessions: sessions keyed 45 s
+apart start from the same E1. 269 leads on the high speed capable tapes equal the rule's
+draws cell for cell and 59 noisy ones agree best at the predicted position,
+across three bandwidths, both roles and three callers. BW2750 E1 sits 5 draws
+after BW2300's for the same caller, because control-frame pair draws reject over
+six values there instead of five; that is the "5 preamble draws before the first
+over" of §2750. `vara_frames.lead_state(caller, responder, bw)` computes E1.
+
+Not fixed: what the first-data-over draw is, why a two-frame over keys its second
+block, the lead cells at BW2750 and BW500 tone levels (their counts are confirmed
+by the OFDM leads after them), how the full-length disconnect over draws, and
+callsigns with an SSID.
 
 > **§1.2–§1.5 below describe the 500 Hz waveform as seen through a 256-point
 > analysis window.** That model locks and produces coherent constellations but

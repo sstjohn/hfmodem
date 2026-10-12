@@ -12,9 +12,11 @@ that followed went out on our ~10 s clock — two of them across the peer's
 transmissions, and the one it heard clean drew the grant 0.19 s later.
 
 So the over draws the frame it asks for, and the ask waits for the peer's own
-listening gap: the control burst again first, because the likeliest reason no
-release came is that the acknowledgement was lost, and then the turn-request,
-which takes the channel rather than waiting for it.
+listening gap. Two stock 4.9s, 2026-09-29 (bench-745owed m4, m8, m12, f4, d3):
+with the ack lost and a queue waiting, the caller answers every one of the
+callee's idles with the turn-request, never the control burst again and with no
+cap, and the callee releases to the first it hears. With nothing queued the
+control burst is still what goes again.
 
 Nothing here opens a device or keys a radio.
 """
@@ -66,45 +68,33 @@ def test_an_unasked_release_ends_it_with_nothing_asked():
     assert any("tx DATA over" in m for m in io.msgs), io.msgs
 
 
-def test_the_first_rung_is_the_acknowledgement_again():
-    """No release in the peer's cadence: the likeliest reason is the burst that
-    draws one, so that is what goes out — into the gap the idle just opened."""
+def test_with_a_queue_the_first_rung_is_the_ask():
+    """Until 2026-09-29 the first rung was the control burst again and the ask
+    came second. Stock's caller never re-keys the control burst here: it asks at
+    the callee's first idle, 0.08-0.14 s behind it (bench-745owed m4, d3)."""
     hs, io = _awaiting_release()
-    hs.on_rx_audio(idle())
-    assert keyed(io) == "control", io.msgs
-    assert hs.turn == VA._TURN_PEER, "the channel was taken on the first rung"
-    assert any("re-keying the 11-symbol control burst" in m for m in io.msgs), io.msgs
-
-
-def test_the_ask_follows_in_the_next_gap():
-    """And then the channel is taken rather than waited for. 21 of 21 grants at a
-    stock responder came from an ask that ended inside the peer's own gap; every
-    one of the 14 ignored asks was still on the air when it keyed."""
-    hs, io = _awaiting_release()
-    hs.on_rx_audio(idle())
     hs.on_rx_audio(idle())
     assert keyed(io) == "ask", io.msgs
     assert hs.turn == VA._TURN_ASKED
     assert hs._asked == 1
-    assert any("asking for the turn (1/3)" in m for m in io.msgs), io.msgs
+    assert not any("re-keying the 11-symbol control burst" in m for m in io.msgs)
 
 
-def test_the_asks_are_charged_to_the_one_budget():
-    """The turn-request is the same burst whichever clock keys it, so a ladder
-    that asked on its own account would spend a budget twice over."""
+def test_every_idle_draws_the_ask_past_the_turn_budget():
+    """This pinned the asks to ``_TURN_MAX_ASK`` until 2026-09-29. Stock asked
+    twelve times in a row with no cap (bench-745owed m12); a peer that stops
+    keying is still closed by the give-up budget  [see _MAX_WITHOUT_PROGRESS]."""
     hs, io = _awaiting_release()
-    for _ in range(VA._REACK_MAX + 2):
+    for n in range(1, VA._TURN_MAX_ASK + 4):
         hs.on_rx_audio(idle())
-    assert hs._asked <= VA._TURN_MAX_ASK, io.msgs
-    assert hs._answer_owed is None, "the ladder ran on past its own budget"
-    assert any("never released the turn" in m for m in io.msgs), io.msgs
+        assert keyed(io) == "ask" and hs._asked == n, io.msgs
+    assert not any("never released the turn" in m for m in io.msgs), io.msgs
 
 
 def test_a_grant_ends_the_ladder():
     """The peer answering the ask is the end of the whole question: the turn is
     ours and there is nothing left to be owed."""
     hs, io = _awaiting_release()
-    hs.on_rx_audio(idle())
     hs.on_rx_audio(idle())
     assert hs.turn == VA._TURN_ASKED
     hs.on_rx_audio(np.concatenate([np.zeros(MK.FS // 4),

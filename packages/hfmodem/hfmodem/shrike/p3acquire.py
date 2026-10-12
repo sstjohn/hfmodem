@@ -94,6 +94,36 @@ def compensate(audio: np.ndarray, hz: float) -> np.ndarray:
     return (analytic * np.exp(-2j*np.pi*hz*np.arange(len(x))/FS)).real
 
 
+def packet_offset(audio: np.ndarray, ev: rxfront.Event) -> float | None:
+    """Qualify an SL2 carrier from the CRC-known field's coherent phase slope."""
+    if (ev.packet is None or ev.packet[0] != 2 or not ev.packet[3]
+            or ev.cycle_long or ev.information is None
+            or ev.carrier_swapped is None):
+        return None
+    path = placement.SPEED_PATHS[2]
+    steps = placement.grid_steps(placement.build_grid(
+        ev.information, path, flush=placement.DATA_FLUSH), path)
+    tones = tuple(spec.CARRIER_SWAP[c] if ev.carrier_swapped else c
+                  for c in path.tones)
+    offsets = path.clock_offsets(SPS)
+    idx = ev.start + np.arange(path.n_symbols) * SPS + rxfront.MATCHED_DELAY_N
+    if idx[0] < 0 or idx[-1] + max(offsets) >= audio.size:
+        return None
+    z = rxfront._sampled_baseband(
+        audio, tones, np.unique(np.add.outer(idx, offsets).ravel()))
+    wiped = np.stack([z[c][idx + off] * np.exp(-1j * np.cumsum(steps[home]))
+                      for c, home, off in zip(tones, path.tones, offsets)])
+    hz = np.arange(-40., 40.01, .1)
+    corr = wiped @ np.exp(-2j * np.pi * np.arange(path.n_symbols)[:, None]
+                         / 100 * hz)
+    score = np.sum(np.abs(corr) ** 2, axis=0)
+    best = int(score.argmax())
+    energy = path.n_symbols * np.sum(np.abs(wiped) ** 2)
+    if energy == 0 or score[best] / energy < .55 or best in (0, hz.size - 1):
+        return None
+    return float(hz[best])
+
+
 @dataclass
 class Candidate:
     event: rxfront.Event
@@ -116,7 +146,8 @@ def changeover(audio: np.ndarray, *, offsets=OFFSETS_HZ) -> Candidate | None:
 
 
 def control_signal(audio: np.ndarray, *, offsets=CONTROL_OFFSETS_HZ,
-                   preferred_hz: float | None = None) -> Candidate | None:
+                   preferred_hz: float | None = None,
+                   preferred_at: int | None = None) -> Candidate | None:
     """Acquire any P3 answer during entry, including a bare acknowledgement.
 
     VE3KPG and KB5LZK on 2026-09-10 answered entry with CS1, not a
@@ -126,7 +157,7 @@ def control_signal(audio: np.ndarray, *, offsets=CONTROL_OFFSETS_HZ,
     cannot lower the coherent, adjacent-alignment or whole-burst requirements.
     """
     return _acquire(audio, offsets, range(len(rx._CS_TABLE)),
-                    preferred_hz=preferred_hz)
+                    preferred_hz=preferred_hz, preferred_at=preferred_at)
 
 
 def _bands(analytic: np.ndarray, clock: np.ndarray, offsets,
@@ -186,7 +217,8 @@ def _refined(diffs: np.ndarray, trial_signs: np.ndarray, trial: int, k: int,
 
 
 def _acquire(audio: np.ndarray, offsets, codes, *,
-             preferred_hz: float | None = None) -> Candidate | None:
+             preferred_hz: float | None = None,
+             preferred_at: int | None = None) -> Candidate | None:
     if len(audio) < round(.23*FS) or not np.any(audio):
         return None
     # A caller passing a long recording must slice it into receive windows.
@@ -282,8 +314,9 @@ def _acquire(audio: np.ndarray, offsets, codes, *,
     # continuity only among hypotheses which already passed every soft/bit
     # gate, and still validate each one's physical extent below. Without a
     # retained frequency, keep the original quality ordering.
-    ordering = (None if preferred_hz is None else
-                lambda row: (abs(row[4] - preferred_hz) <= 25.0, *row))
+    ordering = (None if preferred_hz is None and preferred_at is None else
+                lambda row: (preferred_hz is not None and abs(row[4]-preferred_hz) <= 25.0,
+                             preferred_at is not None and abs(row[2]-preferred_at) <= round(.020*FS), *row))
     for quality, hz, at, ci, fine in sorted(ranked, key=ordering, reverse=True):
         if hz not in full_cache:
             shifted = compensate(audio, hz)

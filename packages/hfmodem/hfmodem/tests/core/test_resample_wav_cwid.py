@@ -102,8 +102,7 @@ def test_reading_a_missing_file_says_so(tmp_path):
 
 
 def test_over_twenty_wpm_is_refused_not_clamped():
-    """§97.119(b)(1). A caller asking for 25 has a wrong idea of what it may
-    send; quietly sending 20 leaves it holding that idea."""
+    """The encoder refuses speeds above its 20 WPM ceiling rather than silently clamping."""
     cwid.keying("W1AW", wpm=20.0)
     for fast in (20.1, 25.0, 40.0):
         with pytest.raises(ValueError):

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "scope": "recorded metadata only; model stops at first divergence",
+  "recording_log_sha256": "60609f29967ae7edb3b0889bd7f2cc1eef2eb71ab1750e1051e4aa10d8aaf814",
+  "old_ticks": 8,
+  "field_bytes": 23,
+  "suffix_bytes": 79,
+  "outer_hold_unbounded": true,
+  "mail_deadline_unarmed": true,
+  "wait_entry_line": 964,
+  "retention_line": 1004,
+  "link_down_line": 1008,
+  "source_report_sha256": "3fbba7dfb7080a7e708f0040d6b5f7f8ed251c3f93b7c6d0c1749fbd6c60b312"
+}

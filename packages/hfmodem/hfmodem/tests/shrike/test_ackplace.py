@@ -30,8 +30,8 @@ AND THE OTHER END OF THAT SENTENCE IS A GUARD. This station can be the called
 one -- `arq.on_rx_connect` answers a burst naming us -- and there the peer is
 the caller and reads `2d - (slot - data - cs)` from where this grid keys. The
 placement a called station needs is the same free-running one anchored at the
-caller's connect instead of our own call, and nothing places that anchor, so
-`RadioTx.answered_refusal` keys nothing at all on a link we answered.
+caller's connect instead of our own call: `onair._called_grid` places it, and
+`RadioTx.answered_refusal` keys nothing on a link answered on any other grid.
 
 THE READ HAS NO SLACK, and that is the other half of this file. Twelve bit
 periods are read for a twelve-bit word, so a word that starts outside
@@ -273,8 +273,8 @@ def _answering(tmp_path) -> tuple:
 
 
 def test_a_link_we_answered_puts_nothing_on_the_air(capsys, tmp_path):
-    """The station that called us reads at ITS latched instant, and this grid
-    is the caller's -- so an acknowledgement keyed off it lands
+    """The station that called us reads at ITS latched instant, and a grid not
+    placed from its call is a caller's -- so an acknowledgement keyed off it lands
     `2d - (slot - data - cs)` from the read, seven bit periods at a typical
     turnaround, which the reference decoder refuses at any level.
 
@@ -287,6 +287,24 @@ def test_a_link_we_answered_puts_nothing_on_the_air(capsys, tmp_path):
     assert not list(tmp_path.glob("tx_*.wav"))
     assert (tx.n, tx.keyed, tx.p1_seq, tx.tx_end) == (0, [], [], None)
     assert "NOT KEYING" in capsys.readouterr().out
+
+
+def test_a_call_answered_on_its_own_grid_keys(capsys, tmp_path):
+    """...and the grid placed from the call is the one it may key on: the
+    answer goes out `ANSWER_D_S` past the caller's 960 ms, in the call's shift."""
+    call = p1rx.Connect("Normal", "W9SSJ", True)
+    g = onair._called_grid(5 * SLOT_N, call, 0.040, offset_n=0)
+    assert g.boundary(0) == 5 * SLOT_N + DATA_N + round(onair.ANSWER_D_S * FS)
+    assert g.shift(0) and not g.shift(1) and not g.sending
+    tx = onair.RadioTx(rig=None, transmit=False, outdir=tmp_path, settle=0.040)
+    tx.live = _Live()
+    tx.live.pos = g.boundary(0) - round(0.2 * FS)
+    tx.aim(g, 0)
+    host = ptc.PtcHost(peer=tx, mycall="W9SSJ")
+    host.arq.on_host_listen(True)
+    host.on_rx_event(rxfront.Event(1.0, "connect", "", connect=call))
+    assert host.arq.answering and "NOT KEYING" not in capsys.readouterr().out
+    assert len(list(tmp_path.glob("tx_*.wav"))) == 1
 
 
 def test_a_call_we_placed_ourselves_still_keys(capsys, tmp_path):

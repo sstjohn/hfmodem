@@ -23,8 +23,17 @@ it fixes something the description leaves implicit.
 The callsign is at most 8 bytes, ASCII: "Diese Pakete enthalten das
 SLAVE-Rufzeichen (max. 8 Byte, **ASCII-Codiert**) als 100 Baud- und
 200-Baud-Bitmuster. Bei kuerzeren Rufzeichen werden Leerbytes mit 0F(HEX)
-aufgefuellt." A receiver validates the address characters as uppercase letters
-and digits.
+aufgefuellt." Our transmitter and receiver validate address characters in the
+ASCII range `(0x2C, 0x5A]`, including the literal hyphen used for an SSID.
+
+The eight-byte limit includes any literal hyphen and SSID: `N3HYM-10` fills
+`T[1:9]` and has no `0x0F` terminator; its redundancy is `N3HYM-`. Shorter
+addresses terminate in fill, and a full address ends at the fixed field boundary.
+The transmitter rejects nine- and ten-character addresses, including base calls
+with SSIDs that exceed eight characters. This frame has no extension field for
+them. A monitor accepting a full field must check its six-byte redundancy copy
+against the primary address (allowing the Longpath first-character complement),
+rather than treating a missing terminator alone as a lock.
 
 **Neither section is transformed.** Both are LSB-first, continuous phase, with
 MARK(1) = 1400 Hz and SPACE(0) = 1600 Hz, and the 200 Bd section begins at the

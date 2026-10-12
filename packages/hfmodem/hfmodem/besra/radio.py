@@ -44,6 +44,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -53,6 +54,7 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
+from .arq.session import peer_quality
 from .phy.demodulator import SAMPLE_RATE, Demodulator, RxFunnel, frame_span  # 12000
 from ..core import band, levels, rates
 from ..core.audio import play_drained, warm_output
@@ -60,7 +62,7 @@ from ..core.occupied import FILTER_HZ
 from ..core.ptt import Keyer, LineKeyer, OneShotRigctl
 from ..core.resample import from_card, to_card
 from ..core.rigs import RIGS
-from ..core.wav import CaptureRecorder
+from ..core.wav import CaptureRecorder, stored
 
 FS_RADIO = rates.CARD_RATE_HZ               # sound-card rate
 
@@ -497,6 +499,8 @@ class RollingDecoder:
         self._lock = threading.Lock()
         self._buf = np.empty(0, dtype=np.float32)
         self._n = 0                              # capture samples taken
+        self._pushed = 0                         # ...and queued, not yet taken
+        self.keyed_at = -1                       # stream position of our last key-down
         self._decoded_to = 0
         self._seen: list[tuple[int, bool]] = []   # positions reported, and their verdict
         self._frames = 0
@@ -512,6 +516,11 @@ class RollingDecoder:
         """The sound-card callback. Queue only — never decode on the audio thread."""
         with self._lock:
             self._q.append(np.asarray(block, dtype=np.float32))
+            self._pushed += len(block)
+
+    def key_down(self) -> None:
+        with self._lock:
+            self.keyed_at = self._span(self._pushed)
 
     def pump(self) -> np.ndarray:
         with self._lock:
@@ -633,21 +642,26 @@ class RadioLink:
         self._rec_fault: str | None = None
         self._rx = RollingDecoder(Demodulator(expect_session=modem.expected_session,
                                               rx_epoch=modem.rx_epoch),
-                                  lambda pos, frame: modem.receive_frames([frame]))
+                                  self._heard)
         self._stream = None
         self._pump: threading.Thread | None = None
         self._running = False
+        self.bursts_sent = 0                     # a refused key-up plays none
+        self.burst_level: tuple[float, float] | None = None   # (sounding RMS, peak drive)
         modem.audio_out = self._transmit
 
-    def _transmit(self, samples: np.ndarray) -> None:
+    def _transmit(self, samples: np.ndarray, drive: float | None = None, *,
+                  identification: bool = False) -> None:
         # AFTER the rate conversion, because that is where the samples past the
         # rail come from: ardopcf's own soft clip leaves the 12 kHz arrays at
         # 0.9979 and the interpolation to 48 kHz overshoots it, with nothing
         # downstream limiting. Composed scale is no protection either -- it is
         # whatever the modulator happened to sum to, which is the one path here
         # that had no drive at all.
-        audio = levels.at_drive(to_card(samples, SAMPLE_RATE), self.drive)
+        peak = self.drive if drive is None else drive
+        audio = levels.at_drive(to_card(samples, SAMPLE_RATE), peak)
         self.muted = True
+        self._rx.key_down()
         stop = threading.Event()
 
         def watchdog():
@@ -702,17 +716,37 @@ class RadioLink:
             # Returns on Pa_StopStream, once the device has played what was
             # written — so the unkey below cannot cut the tail.
             play_drained(audio, FS_RADIO, self.out_device)
+            self.bursts_sent += 1
+            if not identification:
+                self.burst_level = (levels.sounding_rms(audio), peak)
         finally:
+            unwinding = sys.exc_info()[1]
             # The verdict, read at the one moment False means a stuck
             # transmitter: through hamlib it is proof T 0 never left, and CAT
             # PTT latches at the rig, so the ladder — one-shot, drop_rts,
             # alarm, retire — is what stands between here and going back to
             # listening keyed. The line path has already alarmed and retired
             # itself inside `_key_line`.
-            if self.rig and self.rig.ptt(False) is False and not self.rig.line_ptt:
-                self.rig.unkey("the persistent pipe did not take the key-up")
-            stop.set()
-            self.muted = False
+            try:
+                if self.rig and self.rig.ptt(False) is False and not self.rig.line_ptt:
+                    self.rig.unkey("the persistent pipe did not take the key-up")
+            except BaseException:
+                if unwinding is not None and not isinstance(unwinding, Exception):
+                    raise unwinding
+                raise
+            finally:
+                stop.set()
+                self.muted = False
+
+    def _heard(self, pos: int, frame) -> None:
+        # A DATAACK/DATANAK names no frame, so the session applies it to whatever is
+        # outstanding. One heard before our last key-down cannot answer that
+        # transmission, however late the rolling window surfaces it.
+        if pos < self._rx.keyed_at and peer_quality(frame.type) is not None:
+            log.info("RX %s theirq=%d predates our last transmission -- not an answer to it",
+                     frame.name or hex(frame.type), peer_quality(frame.type))
+            return
+        self.modem.receive_frames([frame])
 
     def _capture(self, block: np.ndarray) -> None:
         # Recorded ahead of the mute, so the file keeps a continuous timebase across
@@ -771,7 +805,7 @@ class RadioLink:
                     f"missing is everything after that.")
         return (f"session stream: {self.recorder.path} -- "
                 f"{self.recorder.seconds:.1f} s, "
-                f"{self.recorder.path.stat().st_size / 1e6:.1f} MB, on the sample "
+                f"{stored(self.recorder.path).stat().st_size / 1e6:.1f} MB, on the sample "
                 f"clock every index this session logged is an offset into")
 
     def start(self) -> None:
@@ -784,11 +818,13 @@ class RadioLink:
     def close(self) -> None:
         self._running = False
         try:
-            if self._stream is not None:
-                self._stream.stop()
-                self._stream.close()
-            if self.rig:
-                self.rig.stop()
+            try:
+                if self.rig:
+                    self.rig.stop()
+            finally:
+                if self._stream is not None:
+                    self._stream.stop()
+                    self._stream.close()
         finally:
             # In the finally because this is the half of teardown that has to happen:
             # a session that ends by failing to unkey is exactly one worth listening

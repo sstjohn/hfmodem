@@ -61,3 +61,117 @@ CAPTURES = RECORD / "captures"
 CORPUS = Path(os.environ.get("HFMODEM_CORPUS")
               or os.environ.get("KESTREL_RF_CORPUS")
               or RECORD.parent / "rf-corpus")
+
+
+def private_source_tree(*roots: Path) -> bool:
+    """Whether code or evidence comes from a tree promising private records.
+
+    The publication manifest belongs to development checkouts and never ships.
+    Git, operator tools and incidental working directories can exist publicly.
+    """
+    return any((root / "publish" / "manifest.toml").is_file() for root in roots)
+
+
+def _sweep_floor(tree: Path, record: Path | None = None) -> tuple[int, int]:
+    roots = (tree,) if record is None else (tree, record)
+    return (500, 20) if private_source_tree(*roots) else (250, 10)
+
+
+#: Fewest brackets tried and words found before a sweep over every fixture
+#: recording counts, for the private checkout or the public recording subset.
+SWEEP_FLOOR = _sweep_floor(TREE, RECORD)
+
+
+def require_input(path: Path | str, *, allow_module_level: bool = False) -> Path:
+    """Require an optional recording or its replay support before using it.
+
+    Call only for inputs that do not ship, never for tracked evidence that the
+    distribution promises to include (use ``checked_record`` for that). This
+    checks absence only: decode errors, damaged metadata and failed assertions
+    with an input present remain failures. Module-scope callers must opt into
+    skipping collection with ``allow_module_level=True``.
+    """
+    import pytest
+
+    path = Path(path)
+    if path.suffix in {".wav", ".flac"}:
+        from hfmodem.core.wav import stored
+
+        path = stored(path)
+    try:
+        path.stat()
+    except FileNotFoundError as exc:
+        if exc.filename != os.fspath(path):
+            raise
+        pytest.skip(f"unavailable recording input: {path}",
+                    allow_module_level=allow_module_level)
+    return path
+
+
+def manifest_rows(manifest: Path):
+    """Read a group manifest or an existing single-recording sidecar."""
+    import json
+
+    data = json.loads(manifest.read_text())
+    return data["files"] if "files" in data else [data]
+
+
+def checked_record(path: Path, manifest: Path):
+    """Verify one audio or transcript file and return its manifest row.
+
+    Only rows in ``external.json`` may skip missing files. Missing tracked
+    files, manifests and ambiguous rows fail. A published tree may omit a whole
+    group (both manifest and file).
+    """
+    import hashlib
+
+    import pytest
+
+    context = f"{path}; manifest: {manifest}"
+    if not manifest.is_file():
+        if not private_source_tree(TREE, RECORD) and not path.exists():
+            pytest.skip(f"MISSING DISTRIBUTED EVIDENCE: {context}")
+        raise AssertionError(f"Missing evidence manifest: {context}")
+    rows = [r for r in manifest_rows(manifest) if r["file"] == path.name]
+    assert len(rows) == 1, (
+        f"Evidence manifest needs exactly one row for {context}; found {len(rows)}")
+    row, = rows
+    # Check before open: an optional path may traverse a self-pointing logs link.
+    if not path.is_file():
+        if manifest.name == "external.json":
+            pytest.skip(f"MISSING EVIDENCE: {context}")
+        raise AssertionError(f"Missing tracked evidence: {context}")
+    with path.open("rb") as stream:
+        size = os.fstat(stream.fileno()).st_size
+        if "rate" not in row or "bytes" in row:
+            assert size == row["bytes"], (
+                f"Evidence size mismatch: {context}; expected {row['bytes']}, got {size}")
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    assert digest == row["sha256"], (
+        f"Evidence SHA-256 mismatch: {context}; expected {row['sha256']}, got {digest}")
+    return row
+
+
+def checked_samples(path: Path, manifest: Path):
+    """Read checked PCM16 mono evidence in PCM units through the shared decoder.
+
+    Published single-file sidecars use ``rate`` and ``samples`` instead of the
+    group schema's sample metadata; both formats pin the complete file hash.
+    """
+    import numpy as np
+    from scipy.io import wavfile
+
+    from hfmodem.core.wav import source
+
+    row = checked_record(path, manifest)
+    context = f"{path}; manifest: {manifest}"
+    sidecar = "rate" in row and "samples" in row
+    sr, samples = wavfile.read(source(path))
+    assert samples.ndim == 1 and samples.dtype == np.int16, (
+        f"Evidence must be PCM16 mono: {context}")
+    assert (sr, len(samples), 1, 16) == (
+        row["rate"] if sidecar else row["sample_rate"],
+        row["samples"] if sidecar else row["sample_count"],
+        1 if sidecar else row["channels"], 16 if sidecar else row["bits_per_sample"]
+    ), f"Evidence sample metadata mismatch: {context}"
+    return samples.astype(float)

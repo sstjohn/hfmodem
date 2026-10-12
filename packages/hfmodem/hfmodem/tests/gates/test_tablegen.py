@@ -215,7 +215,7 @@ _DERIVATIONS_DOC = _REPO / "docs" / "protocols" / "table-derivations.md"
 
 
 #: The supported category for measured binary assets.
-_CATEGORIES = ("measured",)
+_CATEGORIES = ("measured", "replay swaps")
 
 #: Source vocabulary for the measured-asset inventory.
 _OWN_SOURCES = ("loopback", "off-air", "audio", "recording")
@@ -281,14 +281,12 @@ def test_every_shipped_binary_is_filed_and_sourced():
         + "\n  ".join(faults))
 
 
-def test_the_symbol_pulse_is_generated_and_shrike_ships_no_data_at_all():
-    """The generated kernel used for transmit shaping and receive matching.
+def test_symbol_pulse_is_generated_and_only_named_c2_replay_data_ships():
+    """Generated pulse plus the explicitly approved replay data inventory.
 
-    The absence is asserted too, and it is now the whole of shrike rather than two
-    filenames. Naming `tx_pulse.npz` and `p2_acquisition.npz` caught the two files
-    that had gone and nothing that might arrive next to them; every table shrike
-    needs is computed by `tablegen.py`, so any data file anywhere under the package
-    is a regression whatever it is called."""
+    Offline CML source and LGPL license are text; every binary other than the
+    named C2 replay resources remains a regression. Export gates pin their bytes.
+    """
     from hfmodem.shrike import tablegen
 
     mf = tablegen.symbol_pulse()
@@ -300,9 +298,11 @@ def test_the_symbol_pulse_is_generated_and_shrike_ships_no_data_at_all():
     shrike_pkg = pathlib.Path(tablegen.__file__).parent
     data = sorted(p.relative_to(shrike_pkg).as_posix()
                   for p in shrike_pkg.rglob("*")
-                  if p.is_file() and p.suffix not in (".py", ".md")
-                  and "__pycache__" not in p.parts)
-    assert not data, f"shrike carries data files again: {data}"
+                  if p.is_file() and p.suffix not in (".py", ".md", ".c", ".h")
+                  and p.name != "COPYING.LESSER" and "__pycache__" not in p.parts)
+    expected = sorted(f"assets/c2-{n}.swaps.z" for n in
+                      (280,348,352,704,1056,1160,1408,1656,4140,8280,12420,16560,20700))
+    assert data == expected, f"unexpected shrike binary inventory: {data}"
 
 
 def test_the_acquisition_window_is_not_the_symbol_pulse():
@@ -326,3 +326,146 @@ def test_the_acquisition_window_is_not_the_symbol_pulse():
     assert not w[27:].any()
     assert abs(float(w.sum()) - 1.0) < 1e-6
     assert np.allclose(w[[3, 7, 19, 23]], 0.0, atol=1e-15)
+
+
+def _draw_number(n: int, span: int, seed: int = 29318) -> int:
+    s = seed
+    for _ in range(n):
+        s = vara.step(s)
+    return vara.draw(s, span)
+
+
+def test_scramble_is_the_whitener_stream_row_major_by_bin():
+    s = vara.scramble()
+    assert s.shape == (62, 409)
+    assert s[8, 0] == _draw_number(3273, 129) == 75      # BW2300's first carrier
+    assert s[27, 0] == _draw_number(11044, 129) == 89    # BW500's
+    assert s[61, 408] == _draw_number(62 * 409, 129)
+    assert s.min() == 0 and s.max() == 128
+
+
+def _gap_length(bw: str, rec: int) -> int:
+    """LCG steps from the record's gap to the next record's seed."""
+    s, target, n = vara._gap(bw, rec), vara._next_seed(bw, rec), 0
+    while s != target:
+        s, n = vara.step(s), n + 1
+        assert n < 100
+    return n
+
+
+#: Gap lengths in draws, as the closures measured them on the high speed capable tapes.
+_OFDM_GAPS = {("bw2300", r): 49 for r in range(9, 16)} | {
+    ("bw2750", r): 59 for r in range(10, 17)} | {
+    ("bw500", 6): 46, ("bw500", 7): 44, ("bw500", 8): 44, ("bw500", 9): 45,
+    ("bw500", 10): 44, ("bw500", 11): 46, ("bw500", 12): 49}
+
+
+@pytest.mark.parametrize("bw, rec", sorted(_OFDM_GAPS))
+def test_gap_cells_close_on_the_next_seed(bw, rec):
+    cells = vara.gap_cells(bw, rec)
+    carriers, per, qam = {"bw2300": (49, 1, (14, 15)), "bw2750": (59, 1, (15, 16)),
+                          "bw500": (11, 4, (11, 12))}[bw]
+    assert cells.shape == (carriers, per)
+    assert _gap_length(bw, rec) == _OFDM_GAPS[bw, rec]
+    qam = rec in qam
+    lo, hi = (0, 18) if qam else (7, 148)
+    assert cells.min() >= lo and cells.max() <= hi
+    assert all(len(set(row)) == per for row in cells.tolist())
+
+
+def test_gap_cell_values():
+    assert vara.gap_cells("bw2300", 9)[:3, 0].tolist() == [57, 59, 61]
+    assert vara.gap_cells("bw2300", 14)[:3, 0].tolist() == [2, 10, 0]
+    assert vara.gap_cells("bw500", 6)[0].tolist() == [134, 146, 117, 31]
+    with pytest.raises(ValueError):
+        vara.gap_cells("bw2300", 8)
+
+
+#: (draws, bands, pilots per band, columns) per tone record.
+_TONE_GAPS = {("bw500", 3): (37, 2, 18, 392), ("bw500", 4): (38, 2, 18, 393),
+              ("bw500", 5): (36, 3, 12, 374), ("bw2750", 9): (39, 13, 3, 347)} | {
+    (bw, rec): row
+    for rec, row in {4: (37, 3, 12, 374), 5: (36, 4, 9, 363), 6: (36, 6, 6, 353),
+                     7: (40, 8, 5, 350), 8: (41, 10, 4, 347)}.items()
+    for bw in ("bw2300", "bw2750")}
+
+
+@pytest.mark.parametrize("bw, rec", sorted(_TONE_GAPS))
+def test_tone_pilots_close_on_the_next_seed(bw, rec):
+    draws, bands, npil, ncols = _TONE_GAPS[bw, rec]
+    pilots = vara.tone_pilots(bw, rec)
+    assert _gap_length(bw, rec) == draws
+    assert len(pilots) == bands
+    for band in pilots:
+        assert len(band) == npil == len(set(band))
+        assert list(band) == sorted(band)
+        assert 5 <= band[0] and band[-1] <= ncols - 2
+
+
+def test_tone_pilots_reproduce_the_bw500_level4_table():
+    """The 36 (column, sub-band) pilots the BW500 L4 receiver was built on, when
+    they were a literal read off the air."""
+    measured = {
+        (7, 1), (24, 0), (26, 1), (30, 1), (32, 1), (38, 0), (42, 0), (48, 0),
+        (62, 1), (107, 0), (108, 1), (139, 1), (154, 0), (158, 0), (161, 1),
+        (177, 0), (177, 1), (184, 0), (188, 1), (200, 0), (212, 1), (226, 0),
+        (227, 0), (243, 1), (251, 1), (284, 1), (292, 1), (302, 0), (316, 1),
+        (323, 0), (323, 1), (331, 0), (334, 0), (335, 0), (336, 0), (374, 1),
+    }
+    got = {(co, s) for s, cols in enumerate(vara.tone_pilots("bw500", 3)) for co in cols}
+    assert got == measured
+    assert vara.tone_pilots("bw2300", 4)[0][:3] == (30, 39, 90)
+
+
+def test_grid_rows_are_lattice_integers_long_enough_for_their_levels():
+    lengths = [len(vara.grid_row(b)) for b in range(13)]
+    assert lengths == [394, 394, 375, 364, 354, 354, 351, 351, 348, 348, 348, 348, 348]
+    for b in range(13):
+        row = vara.grid_row(b)
+        assert row.min() >= 0 and row.max() < 128
+    cells = dict(vara._GRID480_CELLS)
+    assert vara.grid_row(0).tolist() == [cells[i] for i in range(393)] + [109]
+    assert vara.grid_row(1).tolist() == [cells[471 + i] for i in range(393)] + [82]
+    assert vara.grid_row(10)[:3].tolist() == [81, 86, 18]
+    assert vara.grid_row(12)[:3].tolist() == [96, 50, 102]
+    # Level 7's last three columns, read off BW2750 L7's clean overs.
+    assert vara.grid_row(4)[-3:].tolist() == [32, 93, 122]
+    assert vara.grid_row(5)[-3:].tolist() == [100, 105, 5]
+    # Every tone row reads columns 0..ncols of each band's row.
+    for (bw, rec), (bands, _, ncols) in vara._TONE.items():
+        assert all(len(vara.grid_row(b)) > ncols for b in range(bands)), (bw, rec)
+
+
+@pytest.mark.parametrize("name, half, taps", [("P8", 1024, 2049), ("P9", 1024, 2049)])
+def test_tone_pulses_are_the_measured_fits(name, half, taps):
+    from hfmodem.kestrel.tx import tone_pulse
+
+    p = np.array(getattr(tone_pulse, name))
+    assert p.shape == (taps,) and p[half] == 1.0
+    a = (p[half:] + p[half::-1]) / 2
+    assert int(np.argmax(a < 0.5)) == 211
+    assert int(np.argmax(a < 0)) == 385
+    assert int(a.argmin()) == 481 and -0.071 < a.min() < -0.070
+    tail = np.sum(p[np.abs(np.arange(taps) - half) > 512] ** 2) / np.sum(p ** 2)
+    assert (1e-3 < tail < 3e-3) if name == "P8" else (5e-5 < tail < 1e-4)
+
+
+def test_bw2750_chain_continues_bw2300_and_closes_on_every_seed():
+    assert vara.BW2750[:9] == vara.BW2300[:9]
+    assert vara.BW2750[9][0] == vara.BW2300[9][0] == 15908083
+    assert _gap_length("bw2750", 9) == 39                # level 10's pilots, 13 x 3
+    assert vara.tone_pilots("bw2750", 9)[0] == (218, 240, 284)
+    assert vara.BW2750[10][0] == 11548315
+    assert vara._next_seed("bw2750", 16) == 4061299
+    assert [n for _, _, n in vara.BW2750[10:]] == [8667, 11556, 13864, 17338, 20804, 26145, 31376]
+
+
+def test_bw2750_interleaver_holds_its_longest_permutation():
+    one, two = vara.interleaver("bw2750", 1), vara.interleaver("bw2750", 2)
+    assert len(one) == 39235 * 17 and len(two) == 31376 * 17
+    col = one[16::17]
+    assert sorted(col.tolist()) == list(range(39235))
+    ref = vara.interleaver("bw2300", 1)
+    for rec in range(9):
+        n = vara.BW2300[rec][1]
+        assert np.array_equal(one[rec::17][:n], ref[rec::17][:n])

@@ -6,7 +6,9 @@
 # them.
 
 [tool.pytest.ini_options]
-testpaths = ["packages"]
+testpaths = ["packages", "tools/consolelib/test_operator.py", "tools/consolelib/test_hflink.py",
+             "tools/logbook_view/test_tx_timing.py", "tools/logbook_view/test_vara_packets.py",
+             "tools/logbook_view/test_vara_timing.py"]
 norecursedirs = ["working", "perf", ".venv", "*.egg-info", "build"]
 markers = [
     "realtime: depends on the machine keeping up -- a rendezvous between spawned processes, a wall-clock deadline, an elapsed time asserted on; deselect with -m 'not realtime' on a busy machine",

@@ -99,21 +99,31 @@ def entry_limit(host):
 
 
 def test_repeated_grants_keep_entry_and_retry_monitoring_past_twice_the_limit():
-    host, tx, mark = entered(payload=b"application data")
-    pending = host.arq._inflight
-    queued = bytes(host.arq._outbuf)
-    repeats = 2 * entry_limit(host) + 3
-    for _ in range(repeats):
+    """Fourteen owned grants end entry; current P1 permits terminal QRT only."""
+    host, tx, mark = entered(payload=b'application data')
+    pending, queued = host.arq._inflight, bytes(host.arq._outbuf)
+    for n in range(arq.ENTRY_GRANT_CYCLES):
         grant(host)
         host.tick()
-        assert host.arq.state is arq.State.CONNECTED
-        assert host.arq.entry_pending and host.arq._inflight is pending
-        assert host.arq.upgrade_unanswered and pending.retries == 1
-    assert host.arq._upgrade_requests == repeats
-    assert bytes(host.arq._outbuf) == queued
-    assert len(tx.emissions[mark:]) == repeats + 1
-    assert all(row[1] == "entry" for row in tx.emissions[mark:])
+        assert host.arq._upgrade_requests == n + 1
+        if n + 1 < arq.ENTRY_GRANT_CYCLES:
+            assert host.arq.state is arq.State.CONNECTED
+            assert host.arq.entry_pending and host.arq._inflight is pending
+            assert host.arq.upgrade_unanswered and pending.retries == 1
+            assert bytes(host.arq._outbuf) == queued
+    assert host.arq.state is arq.State.CONNECTED and host.arq.terminal_pending
+    assert len(tx.emissions[mark:]) == arq.ENTRY_GRANT_CYCLES
+    assert all(row[1] == 'entry' for row in tx.emissions[mark:])
     only_p3(tx, mark)
+    assert host.arq.transfer_unconfirmed['suffix'] == queued
+    assert not host.arq.entry_pending and host.protocol is spec.Protocol.PACTOR1
+    host.tick()
+    assert host.arq.said_goodbye and host.arq.state is arq.State.DISCONNECTING
+    assert tx.emissions[-1][0] is spec.Protocol.PACTOR1
+    assert len(host.arq.unconfirmed_transfers) == 1
+    host.tick(elapsed_ticks=arq.GOODBYE_CYCLES + 1)
+    assert host.arq.state is arq.State.DISCONNECTED and not host.arq.goodbye_acked
+    assert host.arq.transfer_unconfirmed['suffix'] == queued
 
 
 def test_silent_unconfirmed_entry_ends_without_p1_even_during_teardown():
@@ -278,3 +288,24 @@ def test_option_off_preserves_existing_p1_fallback(reason):
             host.tick()
     assert host.protocol is spec.Protocol.PACTOR1
     assert any(row[0] is spec.Protocol.PACTOR1 for row in tx.emissions[mark:])
+
+
+def test_a_cs5_train_on_the_first_packet_holds_the_link():
+    """KB5LZK-30 0924-1348: the entry drew CS5 six times and then CS1, and our
+    first empty bit-6 packet (0x5b) drew CS5 seventeen times at zero bit errors.
+    CS5 is the IRS asking for the packet again; the unread-rung bound hung up on
+    it. Elsewhere the same train ended in the peer's own CS3."""
+    host, tx, mark = entered()
+    host.arq.on_host_over()
+    for _ in range(6):
+        host.on_rx_event(cs(arq.CS_NAK))
+        host.tick()
+    acknowledge(host)
+    first = tx.emissions[-1]
+    assert first[1] == "packet" and first[3] == 0x5b
+    for _ in range(3 * arq.UNREAD_RUNG_REPEATS):
+        host.on_rx_event(cs(arq.CS_NAK))
+        host.tick()
+        assert host.arq.state is arq.State.CONNECTED
+        assert tx.emissions[-1] == first
+    only_p3(tx, mark)

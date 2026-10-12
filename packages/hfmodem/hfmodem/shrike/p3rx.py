@@ -247,6 +247,8 @@ class P3Packet:
     """Physical frame geometry, independent of the status bit requesting it."""
     carrier_swapped: bool | None = None
     """Physical carrier order of the CRC-valid decode, when measured."""
+    phase_rotation: float = 0.0
+    combined: bool = False
 
     @property
     def seq(self) -> int:
@@ -445,7 +447,7 @@ def decode_at(audio: np.ndarray, start: int, sl: int, *,
         if chan is None:
             return None
         field, ok = rx.decode_frame_softs(placement.deinterleave(chan, path), path)
-    return packet_of(field, path, start) if ok else None
+    return dataclasses.replace(packet_of(field, path, start), phase_rotation=rot) if ok else None
 
 
 def _case0_at(audio: np.ndarray, start: int, rot: float, *,
@@ -654,20 +656,55 @@ def header_of(Z: dict, starts: Iterable[int], path: placement.Path, *,
     """
     sps = fs // 100
     delay = (rx._pulse(sps).size - 1) // 2
+    starts = np.asarray(list(starts), dtype=int)
+    if not starts.size:
+        return None
     offsets = path.clock_offsets(sps)
-    arrangements = [path.tones,
-                    tuple(spec.CARRIER_SWAP[c] for c in path.tones)]
-    best = None
-    for start in starts:
-        at = start - p3frame.DATA_OFFSET * sps
-        for tones in arrangements:
-            diffs = _header_diffs(Z, at, tones, offsets, sps, delay)
-            if diffs is None:
-                continue
-            vh, fit, rot, swapped = p3frame.read_header_arrangement(diffs)
-            if best is None or fit > best.fit:
-                best = p3frame.PacketHeader(at, vh, fit, rot, swapped)
-    return best
+    arrangements = [path.tones]
+    if len(set(offsets)) > 1:
+        arrangements.append(tuple(spec.CARRIER_SWAP[c] for c in path.tones))
+    ats = np.repeat(starts - p3frame.DATA_OFFSET * sps, len(arrangements))
+    clocks = {c: np.tile([offsets[tones.index(c)] for tones in arrangements],
+                         starts.size) for c in path.tones}
+    idx = ats[:, None] + np.arange(p3frame.HEADER_SYMBOLS + 1) * sps + delay
+    valid = np.ones(ats.size, bool)
+    for c in path.tones:
+        j = idx + clocks[c][:, None]
+        valid &= (j[:, 0] >= 0) & (j[:, -1] < Z[c].size)
+    if not valid.any():
+        return None
+    ats, idx = ats[valid], idx[valid]
+    diffs = {}
+    for c in path.tones:
+        y = Z[c][idx + clocks[c][valid, None]]
+        d = y[:, 1:] * np.conj(y[:, :-1])
+        diffs[c] = d / (np.abs(d) + 1e-12)
+    best = np.zeros(ats.size, complex)
+    vh = np.zeros(ats.size, int)
+    swapped = np.zeros(ats.size, bool)
+    for order in (p3frame.VH_ORDER, p3frame.VH_ORDER[::-1]):
+        v = np.stack([diffs[c] for c in order], axis=2).reshape(ats.size, -1)
+        corr = v @ p3frame.VARIABLE_TEMPLATES.conj().T / v.shape[1]
+        i = np.abs(corr).argmax(1)
+        c = corr[np.arange(ats.size), i]
+        take = np.abs(c) > np.abs(best)
+        best = np.where(take, c, best)
+        vh = np.where(take, i, vh)
+        swapped = np.where(take, order != p3frame.VH_ORDER, swapped)
+    constants = []
+    for c in p3frame.CH_CHANNELS:
+        if c in diffs:
+            corr = diffs[c] @ p3frame.CONSTANT_TEMPLATES.conj().T
+            constants.append(corr[np.arange(ats.size), np.abs(corr).argmax(1)])
+    if constants:
+        corrs = np.stack(constants, axis=1)
+        fit = np.abs(corrs).mean(1) / p3frame.HEADER_SYMBOLS
+        rot = np.angle((corrs / (np.abs(corrs) + 1e-12)).mean(1))
+    else:
+        fit, rot = np.abs(best), np.angle(best)
+    k = int(fit.argmax())
+    return p3frame.PacketHeader(int(ats[k]), int(vh[k]), float(fit[k]),
+                                float(rot[k]), bool(swapped[k]))
 
 
 def header_anchors(Z: dict, span: int, *, fs: int = FS,
@@ -1201,7 +1238,8 @@ def decode_headed(audio: np.ndarray, lo: int, hi: int, *,
                 field = memory.add(cells, path)
                 if field is not None:
                     scan.packets.append(
-                        packet_of(field, path, lo + row0, scan.trials))
+                        dataclasses.replace(packet_of(field, path, lo + row0, scan.trials),
+                                            phase_rotation=h.rot, combined=True))
     return scan, len(heads)
 
 
@@ -1279,7 +1317,11 @@ def decode_changeover_details(audio: np.ndarray, head_at: int, *, fs: int = FS,
                 return None
             field, ok = rx.decode_case0_softs(softs, path)
             return field if ok else None
-        for k in range(-CHANGEOVER_SEARCH, CHANGEOVER_SEARCH + 1):
+        # The decoded/tracked head is our best alignment. Start there rather
+        # than spending eight failed Viterbi trials at the negative edge before
+        # reaching it. Keep the same search and neighbour-CRC confirmation.
+        offsets = sorted(range(-CHANGEOVER_SEARCH, CHANGEOVER_SEARCH + 1), key=abs)
+        for k in offsets:
             pos = base + k * CONFIRM_STEP
             field = at(pos)
             if field is not None and confirmed(at, pos, field):

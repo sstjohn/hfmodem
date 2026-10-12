@@ -60,13 +60,11 @@ def test_native_wrong_link_does_not_advance(over):
     assert hs._tx_pending == old and len(io.sent) == 1
 
 
-@pytest.mark.parametrize('link,pairs', list(F.DATA_NAK_RESPONDER_BY_LINK.items()))
+@pytest.mark.parametrize('bw', ['2300', '2750', '500'])
 @pytest.mark.parametrize('weak', [(), (0,), (3, 5)])
-def test_known_nak_with_weak_pairs_never_becomes_ack(link, pairs, weak):
-    caller, called, bw = link
-    hs, io = pending(bw=bw, called=called)
-    hs.caller = caller
-    x = M.synth_tone_pairs(pairs)
+def test_known_nak_with_weak_pairs_never_becomes_ack(bw, weak):
+    hs, io = pending(bw=bw, called='KC9GHZ')
+    x = M.synth_tone_pairs(F.nak('KC9GHZ', bw)[1])
     for i in weak:
         x[i*M.HOP:(i+1)*M.HOP] *= .02
     x = np.pad(x, (4800, 4800))

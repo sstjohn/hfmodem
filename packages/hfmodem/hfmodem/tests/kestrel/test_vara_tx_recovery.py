@@ -10,25 +10,41 @@ from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as
 from .test_vara_giveup import _connected
 
 
-def _nak():
+def _nak(called="KC9GHZ"):
     return np.concatenate((np.zeros(12000),
-                           MK.synth_tone_pairs(VF.NAK_RESPONDER_2300),
+                           MK.synth_tone_pairs(VF.nak(called, "2300")[1]),
                            np.zeros(12000)))
 
 
 def _sending():
+    """A short over with a second host write behind it. A NAK of it is a DATA
+    NACK like a full over's, and the short over is its own delivery boundary
+    [doc 28]."""
     hs, io = _connected()
     hs.turn = VA._TURN_OURS
-    hs.send(b"A" * phy.payload_size("2300") + b"second block")
+    hs.send(b"first block")
+    hs.send(b"second block")
     return hs, io
 
 
+def _unconfirmed(hs):
+    body = hs._tx_pending[0]
+    return (phy.vara_payload(body, caller=hs.caller, body_len=len(body))
+            + b"".join(hs._txq))
+
+
+def _resent_a_record_lower(hs):
+    body, over, level = hs._tx_pending
+    return (over == 1 and level == phy.lower_level("2300", phy.base_level("2300"))
+            and phy.vara_payload(body, caller=hs.caller, body_len=len(body))
+            == b"first block")
+
+
 @pytest.mark.parametrize("stream", (False, True))
-def test_nak_repeats_the_same_over_before_the_next_mail_block(stream):
+def test_a_nak_resends_the_over_a_record_lower_before_the_next_mail_block(stream):
     hs, io = _sending()
-    original = io.sent[0].copy()
     audio = _nak()
-    assert hs._peer_nak(audio)
+    assert hs._peer_nak_at(audio) is not None
     assert not hs._peer_over_continue(audio)
     if stream:
         for i in range(0, len(audio), VA._STREAM_BLOCK):
@@ -36,8 +52,7 @@ def test_nak_repeats_the_same_over_before_the_next_mail_block(stream):
         hs.on_rx_audio(audio)  # The bracket must not retry the stream's NAK twice.
     else:
         hs.on_rx_audio(audio)
-    assert len(io.sent) == 2
-    np.testing.assert_array_equal(io.sent[-1], original)
+    assert len(io.sent) == 2 and _resent_a_record_lower(hs)
     assert hs._over == 1 and hs._txq == [b"second block"]
     hs._took_control_burst()
     assert hs._over == 2 and not hs._txq
@@ -56,19 +71,37 @@ def test_a_missing_final_answer_queries_without_repeating_the_block():
     assert hs.turn == VA._TURN_OURS and hs._over == 1
 
 
+def _damaged_nak(hs, damaged):
+    hs.turn = VA._TURN_OURS
+    hs.send(b"A" * phy.payload_size("2300") + b"second block")
+    pairs = list(VF.nak("KC9GHZ", "2300")[1])
+    for i in damaged:
+        pairs[i] = (40, 90)
+    return np.concatenate((np.zeros(12000), MK.synth_tone_pairs(pairs),
+                           np.zeros(12000)))
+
+
 def test_a_damaged_nak_is_not_promoted_to_a_continue():
-    hs, io = _sending()
-    pairs = list(VF.NAK_RESPONDER_2300)
-    pairs[3] = (40, 90)
-    audio = np.concatenate((np.zeros(12000), MK.synth_tone_pairs(pairs),
-                            np.zeros(12000)))
-    assert not hs._peer_nak(audio)
+    hs, io = _connected()
+    audio = _damaged_nak(hs, (3, 5))
+    assert hs._peer_nak_at(audio) is None and hs._held_nak_at(audio) is None
     assert not hs._peer_over_continue(audio)
     hs.on_rx_audio(audio)
     assert len(io.sent) == 1 and hs._over == 1
     hs.idle_keepalive()
     assert hs._intermediate_query_for == hs._tx_pending and hs._tx_retries == 0
     assert not np.array_equal(io.sent[0], io.sent[1])
+
+
+def test_a_nak_with_one_pair_off_is_read_whole_as_the_nak():
+    # K5FIT 2026-09-27: seven of eight pairs exact, soft 2.75
+    hs, io = _connected()
+    audio = _damaged_nak(hs, (3,))
+    assert hs._peer_nak_at(audio) is None and hs._held_nak_at(audio) is not None
+    assert not hs._peer_over_continue(audio)
+    hs.on_rx_audio(audio)
+    assert len(io.sent) == 2 and hs._over == 1 and hs._tx_retries == 1
+    assert hs._tx_pending[2] == phy.lower_level("2300", phy.base_level("2300"))
 
 
 def test_host_writes_wait_behind_the_unacknowledged_block():
@@ -80,15 +113,14 @@ def test_host_writes_wait_behind_the_unacknowledged_block():
 
 def test_refused_retry_preserves_the_frame_and_retry_budget():
     hs, io = _sending()
-    original = io.sent[0].copy()
+    original = hs._tx_pending
     io.transmits = False
     hs.on_rx_audio(_nak())
     assert hs._tx_retries == 0 and hs._over == 1
-    assert hs._txq == [b"second block"]
+    assert hs._tx_pending == original and hs._txq == [b"second block"]
     io.transmits = True
     hs.on_rx_audio(_nak())  # A newly decoded NAK licenses the retry.
-    assert hs._tx_retries == 1
-    np.testing.assert_array_equal(io.sent[-1], original)
+    assert hs._tx_retries == 1 and _resent_a_record_lower(hs)
 
 
 @pytest.mark.parametrize("nak", (False, True))
@@ -101,8 +133,8 @@ def test_unanswered_retries_are_bounded(nak):
             hs._intermediate_query_at -= 4.6
             hs.idle_keepalive()
     assert hs.state == VA.VaraState.DISCONNECTED
-    assert hs._over == 1 and hs._txq == [b"second block"]
-    assert hs._tx_pending is not None  # No acknowledgment was invented.
+    assert hs._over == 1 and hs._tx_pending is not None
+    assert _unconfirmed(hs) == b"first block" + b"second block"
 
 
 @pytest.mark.parametrize("turn", (VA._TURN_OURS, VA._TURN_PEER))
@@ -146,10 +178,8 @@ def test_mail_finishes_byte_exact_after_an_outbound_fault(fault):
             overs.append(samples.copy())
             if len(overs) == 3:
                 rejected.append(samples.copy())
-                transport._to_station.append(_nak())
+                transport._to_station.append(_nak("K7ABC"))
                 return
-            if len(overs) == 4:
-                np.testing.assert_array_equal(samples, rejected[0])
         on_air(samples)
 
     transport.peer.on_air = reject_once

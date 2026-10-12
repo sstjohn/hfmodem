@@ -129,16 +129,16 @@ def test_the_control_burst_of_an_off_grid_peer_answers_our_over():
 def test_the_continue_of_an_off_grid_peer_asks_for_the_next_over(bw):
     hs, _ = _off_grid_session(bw=bw)
     burst = _off_frequency(MK.synth_tone_pairs(
-        VF.over_continue(_MYCALL, bw)), HALF_BIN)
+        VF.over_continue(hs.called, bw)[1]), HALF_BIN)
     assert hs._peer_over_continue(np.pad(burst, (4800, 4800)))
 
 
 def test_an_off_grid_nak_is_still_a_nak():
     hs, _ = _off_grid_session()
-    burst = _off_frequency(MK.synth_tone_pairs(VF.nak(_MYCALL, "2300")[1]),
+    burst = _off_frequency(MK.synth_tone_pairs(VF.nak(hs.called, "2300")[1]),
                            HALF_BIN)
     x = np.pad(burst, (4800, 4800))
-    assert hs._peer_nak(x) and not hs._peer_over_continue(x)
+    assert hs._peer_nak_at(x) is not None and not hs._peer_over_continue(x)
 
 
 # --- what it must not turn into ----------------------------------------------- #
@@ -165,15 +165,40 @@ def test_a_peer_on_our_grid_is_measured_there_and_reads_unchanged():
     assert not [m for m in io.msgs if "off our grid" in m]
     assert hs._peer_control_burst(np.pad(_peer_control(), (4800, 4800)))
     assert hs._peer_over_continue(np.pad(
-        MK.synth_tone_pairs(VF.over_continue(_MYCALL, "2300")), (4800, 4800)))
+        MK.synth_tone_pairs(VF.over_continue(hs.called, "2300")[1]), (4800, 4800)))
 
 
 def test_the_grid_never_reaches_a_whole_carrier():
     """Past half a bin the tone is in the next bin and ``_peer_shift`` owns it."""
     hs, _ = _off_grid_session()
+    total = hs._peer_shift + hs._peer_offset
     for _ in range(8):
-        hs._note_peer_offset(np.full(64, -0.9), np.arange(32), hs._grid)
-    assert hs._peer_offset == -0.5
+        hs._note_peer_offset(np.full(64, -0.4), np.arange(32),
+                             hs._peer_shift + hs._grid)
+        assert abs(hs._peer_offset) <= 0.5
+    assert hs._peer_shift + hs._peer_offset == pytest.approx(total - 1.6)
+    assert hs._peer_shift == round(total - 1.6)
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_a_peer_drifting_through_half_a_bin_moves_the_shift(sign):
+    """AA5AF sat at +0.44 on shift -1: a total at -0.56 drifting up crosses -0.5
+    into shift 0, and the transcript names the whole offset."""
+    hs, io = _dialled()
+    hs._peer_shift, hs._peer_offset = -sign, sign * 0.44
+    hs._note_peer_offset(np.full(64, sign * 0.2), np.arange(32), -sign * 0.56)
+    assert hs._peer_shift == 0
+    assert hs._peer_offset == pytest.approx(-sign * 0.46)
+    assert io.msgs[-1].endswith(
+        f"{MK.carrier_to_hz(-sign * 0.46):+.1f} Hz off our grid — reading it there")
+
+
+def test_the_transcript_names_the_whole_offset():
+    """N0LCR-1 at -1 bin -0.17 printed the fraction alone, -4.0 Hz."""
+    hs, io = _dialled()
+    hs._note_peer_offset(np.full(64, -0.17), np.arange(32), -1.0)
+    assert (hs._peer_shift, hs._peer_offset) == (-1, pytest.approx(-0.17))
+    assert f"{MK.carrier_to_hz(-1.17):+.1f} Hz off our grid" in io.msgs[-1]
 
 
 # --- the two gateways this was written for ------------------------------------ #
@@ -227,7 +252,7 @@ def test_k0si_on_our_own_grid_is_the_silence_two_sessions_read():
     assert hs._peer_offset is None
     burst = _recorded("k0si-post-over-control")
     assert VA._ack_plateau(burst, 0, None, hs._band) < VA._ACK_PLATEAU
-    assert VA._burst_match(burst, VF.CONTROL_BURST_RESPONDER_2300,
+    assert VA._burst_match(burst, VF.control_bursts(hs.caller, "2300")[1],
                            hs._band) >= VA._BURST_MATCH
 
 

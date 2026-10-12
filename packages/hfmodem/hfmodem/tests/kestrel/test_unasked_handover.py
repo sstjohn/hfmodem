@@ -31,7 +31,8 @@ from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
 from hfmodem.tests.kestrel import corpora
-from hfmodem.tests.kestrel.test_response_by_stream import _load_48k
+from hfmodem.tests.kestrel import turns_evidence as E
+from hfmodem.tests.kestrel.test_response_by_stream import band_limit, _norm
 from hfmodem.tests.kestrel.test_rx_segmenter import _record, _transport
 from hfmodem.tests.kestrel.test_turn_law import _IO
 
@@ -50,12 +51,17 @@ _LEAD, _TRAIL = 1.5, 1.5
 #: `play_drained` came back — 0.58-0.62 s later, all of it channel. The audio in
 #: between is the gateway keying the release, and the cursor was set at the second
 #: number rather than the first.
-_TURNAROUND = {"20260829T141915Z-W9SSJ-KB5LZK": (72.580, 73.200),
-               "20260829T143002Z-W9SSJ-N5TW": (110.640, 111.220),
-               "20260829T144437Z-W9SSJ-KB5LZK": (98.540, 99.160)}
+_TURNAROUND = {"kb5lzk-0829-141915-session": (72.580, 73.200),
+               "n5tw-0829-143002-session": (110.640, 111.220),
+               "kb5lzk-0829-144437-session": (98.540, 99.160)}
 
 #: The control burst's audio, first sample to last  [vara_frames, 11 symbols].
 _CONTROL_S = 0.470
+
+
+def _load_48k(name):
+    """Same-session taps, excerpted to preserve the old clock and full null scan."""
+    return band_limit(_norm(E.samples(name)))
 
 
 def _window(path, at: float) -> np.ndarray:
@@ -87,9 +93,8 @@ def test_the_release_sits_where_its_pre_advance_says_it_does():
 
 
 @pytest.mark.parametrize("path,called,at,tones,state",
-                         corpora.ONAIR_UNASKED_HANDOVER,
+                         E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_the_burst_is_the_responders_release_at_its_own_lattice_position(
         path, called, at, tones, state):
     x = _window(path, at)
@@ -106,13 +111,12 @@ def test_the_burst_is_the_responders_release_at_its_own_lattice_position(
             == corpora.UNASKED_HANDOVER_POSITION)
 
 
-@corpora.requires_onair_unasked_handover
 def test_the_second_callsign_is_what_separates_the_state_from_the_identity():
     """Both gateways key one state at one position; neither reproduces the other's
     tones. A pair derived from a single recording would prove neither."""
-    calls = {called for _, called, *_ in corpora.ONAIR_UNASKED_HANDOVER}
+    calls = {called for _, called, *_ in E.UNASKED}
     assert len(calls) > 1
-    for path, called, at, _tones, _state in corpora.ONAIR_UNASKED_HANDOVER:
+    for path, called, at, _tones, _state in E.UNASKED:
         x = _window(path, at)
         heard = [int(t) for t in VA._payload_alignment(
             x, RELEASE, np.array(VF.handshake_tones(called, RELEASE), np.int32))]
@@ -122,9 +126,8 @@ def test_the_second_callsign_is_what_separates_the_state_from_the_identity():
             assert not VF.recognize(heard, other, RELEASE)
 
 
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_no_other_frame_in_the_family_answers_to_these_tones(
         path, called, at, _t, _s):
     x = _window(path, at)
@@ -139,9 +142,8 @@ def test_no_other_frame_in_the_family_answers_to_these_tones(
 
 # --------------------------------------------------------------------------- #
 # What the cursor leaves in front of it.
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_the_live_cursor_leaves_the_release_in_front_of_it(
         monkeypatch, path, called, at, _t, _s):
     """The frames above are read from a window cut around them. This one is read
@@ -154,7 +156,7 @@ def test_the_live_cursor_leaves_the_release_in_front_of_it(
     until the gateway timed out.
     """
     x = _load_48k(path)
-    end, back = _TURNAROUND[path.stem]
+    end, back = _TURNAROUND[path]
     io = _transport(monkeypatch)
 
     def _slow_drain(block, fs, device):
@@ -178,9 +180,8 @@ def test_the_live_cursor_leaves_the_release_in_front_of_it(
 
 # --------------------------------------------------------------------------- #
 # What the station owes it.
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_the_release_is_read_while_the_turn_is_the_peers(path, called, at, _t, _s):
     hs, io = _connected(called)
     _feed(hs, _window(path, at))
@@ -188,9 +189,8 @@ def test_the_release_is_read_while_the_turn_is_the_peers(path, called, at, _t, _
     assert hs.turn == VA._TURN_PEER, "the channel was taken and never given back"
 
 
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_a_handover_with_nothing_queued_puts_the_channel_straight_back(
         path, called, at, _t, _s):
     """The whole of the failure: a release that goes no further than a variable
@@ -203,9 +203,8 @@ def test_a_handover_with_nothing_queued_puts_the_channel_straight_back(
         "nothing went on the air, so the gateway heard no handover back")
 
 
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_a_handover_with_a_payload_queued_keys_the_over(path, called, at, _t, _s):
     hs, io = _connected(called)
     hs._txq = [b"x" * 89]
@@ -216,9 +215,8 @@ def test_a_handover_with_a_payload_queued_keys_the_over(path, called, at, _t, _s
 
 # --------------------------------------------------------------------------- #
 # The negative population is the recordings themselves.
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_nothing_else_in_these_recordings_is_this_frame(path, called, at, _t, _s):
     """1.87 s windows every 0.5 s across the whole session, clear of the burst."""
     x = _load_48k(path)
@@ -248,9 +246,9 @@ def test_nothing_else_in_these_recordings_is_this_frame(path, called, at, _t, _s
 #: The gateway's greeting over, located at 24 of 24 reference columns by
 #: `_rec3_alignment` swept across the eight seconds in front of our control burst.
 #: It ends 1.03-1.11 s before that burst's last sample on all three arms.
-_OVER_AT = {"20260829T141915Z-W9SSJ-KB5LZK": 67.340,
-            "20260829T143002Z-W9SSJ-N5TW": 105.340,
-            "20260829T144437Z-W9SSJ-KB5LZK": 93.220}
+_OVER_AT = {"kb5lzk-0829-141915-session": 67.340,
+            "n5tw-0829-143002-session": 105.340,
+            "kb5lzk-0829-144437-session": 93.220}
 
 #: `kestrel_connect.TX_IDLE_HOLD_S + RX_ECHO_GUARD_S` — where `tx` leaves the
 #: receive cursor past our own last transmitted sample, and so where the buffer
@@ -284,9 +282,8 @@ def _answered_at(x, cursor: float, called: str, queued: bytes | None = None):
     return ((a + fed) / FS if io.sent else None), hs, io
 
 
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_the_release_is_answered_inside_the_turnaround_it_opened(
         path, called, at, _t, _s):
     """1.11-1.18 s before this, on all three arms, and 1.31-1.36 s on the air once
@@ -299,7 +296,7 @@ def test_the_release_is_answered_inside_the_turnaround_it_opened(
     the buffer for a second before anything looked at it.
     """
     x = _load_48k(path)
-    keyed, _hs, io = _answered_at(x, _TURNAROUND[path.stem][0] + _CURSOR, called)
+    keyed, _hs, io = _answered_at(x, _TURNAROUND[path][0] + _CURSOR, called)
     assert keyed is not None, io.msgs
     late = keyed - (at + VA._span(RELEASE) / FS)
     assert late < _BENCH_TURNAROUND + _BLOCK / FS, (
@@ -310,15 +307,14 @@ def test_the_release_is_answered_inside_the_turnaround_it_opened(
         "the handover was answered with something that is not the release")
 
 
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_a_caller_with_payload_answers_the_release_just_as_promptly(
         path, called, at, _t, _s):
     """The case that already worked has to keep the schedule too: a queue turns the
     answer into a DATA over and must not turn it into a late one."""
     x = _load_48k(path)
-    keyed, hs, io = _answered_at(x, _TURNAROUND[path.stem][0] + _CURSOR, called,
+    keyed, hs, io = _answered_at(x, _TURNAROUND[path][0] + _CURSOR, called,
                                  queued=b"x" * 89)
     assert keyed is not None, io.msgs
     assert keyed - (at + VA._span(RELEASE) / FS) < _BENCH_TURNAROUND + _BLOCK / FS
@@ -326,9 +322,8 @@ def test_a_caller_with_payload_answers_the_release_just_as_promptly(
     assert len(io.sent[0]) > 4 * FS, "no DATA over reached the air"
 
 
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_the_over_is_answered_wherever_the_cursor_fell_in_front_of_it(
         path, called, at, _t, _s):
     """The per-over control burst, and the same defect one buffer over.
@@ -350,7 +345,7 @@ def test_the_over_is_answered_wherever_the_cursor_fell_in_front_of_it(
     It is the offset's own spread this measures, and that is unmoved.
     """
     x = _load_48k(path)
-    on = _OVER_AT[path.stem]
+    on = _OVER_AT[path]
     for ahead in (0.00, 0.10, 0.15, 0.20, 0.30, 0.45):
         keyed, _hs, io = _answered_at(x, on - ahead, called)
         assert keyed is not None, (ahead, io.msgs)
@@ -385,9 +380,8 @@ def test_the_fine_grid_is_the_turnaround_and_the_steady_state_is_the_block():
     assert VA._OVER_TURNAROUND_STEP < VA._TURNAROUND_STEP
 
 
-@pytest.mark.parametrize("path,called,at,_t,_s", corpora.ONAIR_UNASKED_HANDOVER,
+@pytest.mark.parametrize("path,called,at,_t,_s", E.UNASKED,
                          ids=lambda v: getattr(v, "stem", None))
-@corpora.requires_onair_unasked_handover
 def test_the_shorter_buffers_take_nothing_the_longer_ones_did_not(
         path, called, at, _t, _s):
     """The first scans now run on 0.73-1.23 s of audio where they used to run on

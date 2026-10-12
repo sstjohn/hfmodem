@@ -314,16 +314,12 @@ class _VaraPeer:
         self._clean = self._clean + 1 if self._full else 0
 
     def _is_nak(self, pairs) -> bool:
-        pair = self._vf.nak(self.caller, "2300")
-        return pair is not None and all(
-            tuple(sorted(a)) == tuple(sorted(b))
-            for a, b in zip(pairs, pair[0]))
+        return all(tuple(sorted(a)) == tuple(sorted(b))
+                   for a, b in zip(pairs, self._vf.nak(self.mycall, "2300")[0]))
 
     def _is_control_burst(self, pairs) -> bool:
-        pair = self._vf.control_bursts(self.caller, "2300")
-        return pair is not None and all(
-            tuple(sorted(a)) == tuple(sorted(b))
-            for a, b in zip(pairs, pair[0]))
+        return all(tuple(sorted(a)) == tuple(sorted(b)) for a, b in
+                   zip(pairs, self._vf.control_bursts(self.caller, "2300")[0]))
 
     def _release_turn(self) -> None:
         """The release a stock responder keys UNASKED, 0.08-0.15 s behind the
@@ -381,19 +377,19 @@ class _VaraPeer:
         vf, mk = self._vf, self._mk
         n_sym = max(1, round((len(samples) - mk.STRIDE) / mk.HOP) + 1)
         if n_sym == vf.OVER_CONTINUE_NSYM:
-            # *Keep sending*, in the captured 8-symbol copy of it: a sender
+            # *Keep sending*, in the 8-symbol continue: a sender
             # that waits for the control burst here stops after one over with its
             # queue full. That is the shape seven gateways returned, and a bench
             # responder reproduced it from a queue we controlled  [vara_frames,
-            # OVER_CONTINUE_CALLER_2300].
+            # over_continue].
             pairs = mk.demod_tone_pairs(samples, vf.OVER_CONTINUE_NSYM)
             if all(tuple(sorted(a)) == tuple(sorted(b)) for a, b in
-                   zip(pairs, vf.OVER_CONTINUE_CALLER_2300)):
+                   zip(pairs, vf.over_continue(self.mycall, "2300")[0])):
                 self._acknowledged()
                 self._next_over()
             elif self._is_nak(pairs) and self._last_tx is not None:
                 # A stock sender answers the NAK by re-sending the over, one
-                # speed level down [vara_frames, NAK_BY_CALLER]. The same
+                # speed level down [vara_frames, nak]. The same
                 # record goes out here: the drop is the sender's own choice,
                 # and this end holds no other rendering of the over.
                 self.naks += 1

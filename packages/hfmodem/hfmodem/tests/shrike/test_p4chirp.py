@@ -4,25 +4,24 @@
 """The PACTOR-4 chirp entry: the spec's own numbers, read back off the render.
 
 The demodulator here is the TEST'S, transcribed from [SCS-P4] section 11 rather
-than imported from `p4chirp`: it de-chirps at 294.0 Hz/s from the instant 11.7.2
-names, mixes at 550 and 1530 Hz, takes the lower carrier T/2 late as 11.7 says,
+than imported from `p4chirp`: it de-chirps at 294.0 Hz/s from the calibrated 12.25 T
+origin, mixes at 550 and 1530 Hz, takes the lower carrier T/2 late as 11.7 says,
 matched-filters with 11.8's printed taps and unwinds 11.6's printed pointer walk
 -- so a render that got any of those wrong fails the CRC here rather than
 agreeing with itself.
 
 Two things here are no longer the document's, both off the sigidwiki recording
 `Pactor_IV_chirps` (four chirp packets, one station, 2026-09-16): the header's
-codeword-to-carrier assignment, crossed against PACTOR-2's, and the CRC's
-`p4chirp.CHIRP_CRC_XOR`. `REAL_FIELDS` below carries those four packets' fields
+codeword-to-carrier assignment, crossed against PACTOR-2's, and the whitened
+CRC residual `p4chirp.CHIRP_CRC_XOR`. Dewhitening restores ordinary X-25;
+the residual is not an alternative CRC convention. `REAL_FIELDS` carries the fields
 as literals -- each is an exact codeword of `coding.CODE_K9` under 11.6's
 pointer walk, so the coding chain under the field is a station's and not ours.
 
-Two of the four carry marker codeword 8 and two carry 9, which is the same
-codeword with P2's `flag` bit set, AND THE FLAG IS THE CARRIER SWAP: at k=8
-channel rank 0 is the upper carrier, at k=9 the lower, four for four.
-`pactor2.marker_index` records that the flag is not the swap in PACTOR-2, and
-that measurement stands -- this is a PACTOR-4 chirp fact. The render is fixed at
-k=8 and arranges its lanes accordingly.
+The four captures include marker codewords 8 and 9. PACTOR-4 renders marker
+identity and lane order independently; the captures do not establish that the
+marker flag selects the carrier swap. Repeat marker 9 is supported by the
+renderer.
 """
 from __future__ import annotations
 
@@ -31,7 +30,7 @@ import sys
 import numpy as np
 from scipy.signal import resample_poly
 
-from hfmodem.shrike import coding, onair, p4chirp, pactor1, pactor2, placement, spec
+from hfmodem.shrike import coding, onair, p4chirp, p4frame, pactor1, pactor2, placement, spec
 from hfmodem.shrike import arq as arq_mod
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.tests.shrike.test_p3_offer import MESSAGE, Keyed, cs_event
@@ -72,7 +71,7 @@ def _demod(audio: np.ndarray) -> tuple[bytes, float, float, float]:
     T, rate, sps8 = 0.015, 294.0, 8
     n_data, depth = 208, 16
     step90 = round(FS * T / sps8)                      # 90 at 48 kHz
-    chirp_at = (12.5 * sps8 + (p4chirp.QUASI_RRC.size - 1) / 2 - sps8 / 2) * step90
+    chirp_at = (12.25 * sps8 + (p4chirp.QUASI_RRC.size - 1) / 2 - sps8 / 2) * step90
 
     i = np.arange(audio.size)
     t_past = np.maximum(i - chirp_at, 0.0) / FS
@@ -178,7 +177,8 @@ def main() -> int:
           abs(lo - 550) < 25 and abs(hi - 1530) < 25, f"{lo:.0f}, {hi:.0f}")
 
     print("\nread back through the section-11 demodulator:")
-    field, hdr_err, dmin, crossed = _demod(audio)
+    wire_field, hdr_err, dmin, crossed = _demod(audio)
+    field = p4frame.whiten(wire_field)
     want = placement.field_info(payload, 22, 0x1A)
     check("the header differentials are the P2 codeword's eight steps, on both "
           "carriers", hdr_err < 0.35, f"worst {hdr_err:.2f} rad")
@@ -191,10 +191,12 @@ def main() -> int:
         return (int.from_bytes(f[-2:], "little")
                 == coding.crc16(f[:-2]) ^ p4chirp.CHIRP_CRC_XOR)
 
-    check("the field comes back byte-exact: payload, status, and a CRC-16 "
-          "that checks", field[:-2] == want and crc_ok(field), field.hex())
+    check("the dewhitened field comes back byte-exact with ordinary X-25",
+          field[:-2] == want and coding.crc16(field[:-2]) == int.from_bytes(field[-2:], "little"),
+          field.hex())
 
     empty, *_ = _demod(p4chirp.entry_packet(b"", 0x1A))
+    empty = p4frame.whiten(empty)
     check("an empty payload takes the template fill, the one convention the "
           "document does not carry",
           empty[:-3] == spec.field_fill(22), empty.hex())
@@ -207,10 +209,9 @@ def main() -> int:
     check("...and X-25 alone checks none of them, which is what the constant is",
           not any(int.from_bytes(f[-2:], "little") == coding.crc16(f[:-2])
                   for f in REAL_FIELDS))
-    check("the status byte counts transmissions: f5, f6, f7, then f5 again "
-          "where the wideband packet restarts the run",
-          tuple(f[22] for f in REAL_FIELDS) == (0xF5, 0xF6, 0xF7, 0xF5),
-          " ".join(f"{f[22]:02x}" for f in REAL_FIELDS))
+    check("dewhitened SPUG statuses carry counters 3, 0, 1, 3",
+          tuple(p4frame.whiten(f)[22] for f in REAL_FIELDS) == (0x63, 0x60, 0x61, 0x63),
+          " ".join(f"{p4frame.whiten(f)[22]:02x}" for f in REAL_FIELDS))
 
     print("\nthe wiring, and the default it must not move:")
     check("the shipped ladder is still exactly ('template',)",

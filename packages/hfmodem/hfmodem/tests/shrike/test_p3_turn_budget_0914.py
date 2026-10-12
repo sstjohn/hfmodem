@@ -58,9 +58,9 @@ def recovered_host():
     """...and what a slot handed back asks the FSM that a kept one does not."""
     host = host_stub()
     host.arq.state = arq.State.CONNECTED
-    host.arq.cycle_request = None
-    host.arq.cycle_command_emitted = False
-    host.arq.cycle_long = False
+    host.arq._cycle_request = None
+    host.arq._cycle_command_emitted = False
+    host.arq._cycle_long = False
     return host
 
 
@@ -217,11 +217,12 @@ def test_a_tracked_read_transforms_only_the_cycle_it_aims_at(monkeypatch):
     sizes = transforms(monkeypatch)
     onair._scan_frame(rx, recovered, 3 * CYCLE_N, tracked_only=True)
     assert sizes and max(sizes) == keep < recovered.size
-    # The one-slot cycle is untouched: its window is already shorter than this.
+    # A one-slot window the bounded SL1 read cannot reach is declined, not
+    # swept: a bounded miss opens no ladder on either cycle length.
     del sizes[:]
     short = np.zeros(round(.95 * FS), np.float32)
     onair._scan_frame(rx, short, 3 * CYCLE_N, tracked_only=True)
-    assert sizes and max(sizes) == short.size
+    assert not sizes
 
 
 @pytest.mark.parametrize("state", ["cycle_long", "_cycle_command_emitted"])

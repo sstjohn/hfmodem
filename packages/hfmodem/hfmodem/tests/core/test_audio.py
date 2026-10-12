@@ -270,6 +270,143 @@ def test_an_underrun_outside_the_emitted_range_does_not_invalidate(monkeypatch):
     sa.finish_burst()                            # no raise
 
 
+# --- an open-ended transmission ------------------------------------------------
+
+def _streaming(monkeypatch):
+    sa, _ = station(monkeypatch)
+    s = FakeStream(sa._callback, lat=1152)
+    sa._stream = s
+    s.run(audio._LAT_MEDIAN_N)
+    s.out_history.clear()
+    return sa, s
+
+
+def test_a_stream_goes_out_in_order_from_its_index(monkeypatch):
+    sa, s = _streaming(monkeypatch)
+    start = sa.samples
+    tx = sa.arm_stream(start + 3000, capacity=48000)
+    ramp = np.arange(1, 2001, dtype=np.float32) / 4000
+    tx.write(ramp[:700])
+    tx.write(ramp[700:])
+    tx.close()
+    while not sa.burst_done():
+        s.run(1)
+    out = np.concatenate(s.out_history)
+    first = int(np.flatnonzero(out)[0])
+    assert tx.at - (start + first) == 1152
+    np.testing.assert_array_equal(out[first:first + 2000], ramp)
+    assert not np.any(out[first + 2000:])
+    assert sa.finish_burst() == tx.at + 2000
+
+
+def test_a_stream_is_bounded(monkeypatch):
+    sa, _ = _streaming(monkeypatch)
+    tx = sa.arm_stream(sa.samples, capacity=1000)
+    tx.write(np.zeros(1000, np.float32))
+    with pytest.raises(AudioError, match="full"):
+        tx.write(np.zeros(1, np.float32))
+    tx.close()
+    with pytest.raises(AudioError, match="closed"):
+        tx.write(np.zeros(1, np.float32))
+
+
+def test_a_stream_that_runs_dry_while_open_is_invalid_and_says_where(monkeypatch):
+    sa, s = _streaming(monkeypatch)
+    tx = sa.arm_stream(sa.samples, capacity=48000)
+    tx.write(np.full(600, .1, np.float32))
+    while tx.emitted < 600:
+        s.run(1)
+    s.run(4)
+    assert tx.starved_at is not None and not sa.burst_done()
+    assert sa.samples - tx.starved_at <= 5 * 128
+    tx.write(np.full(300, .1, np.float32))
+    s.run(1)
+    assert tx.starved_at is None
+    with pytest.raises(BurstInvalidated):
+        sa.finish_burst()
+
+
+def test_a_stream_waiting_for_its_index_is_not_starved(monkeypatch):
+    sa, s = _streaming(monkeypatch)
+    tx = sa.arm_stream(sa.samples + 48000, capacity=48000)
+    s.run(10)
+    assert tx.starved_at is None and tx.emitted == 0
+    tx.close()
+    assert sa.finish_burst() == tx.at
+
+
+def test_finishing_a_stream_flushes_every_lane_and_drops_the_rest(monkeypatch):
+    sa, s = _streaming(monkeypatch)
+    a = sa.subscribe(CycleLane(48000))
+    b = sa.subscribe(RollingLane(48000, decode=lambda buf: []))
+    tx = sa.arm_stream(sa.samples, capacity=48000)
+    tx.write(np.full(4800, .2, np.float32))
+    while tx.emitted < 1000:
+        s.run(1)
+    end = sa.finish_burst()
+    assert end == tx.at + tx.emitted < tx.at + 4800
+    assert a.pos >= end and b._buf.size == 0
+    s.out_history.clear()
+    s.run(40)
+    assert not any(np.any(blk) for blk in s.out_history)
+    assert sa.burst_done()
+
+
+def test_an_underrun_mid_stream_invalidates_it(monkeypatch):
+    sa, s = _streaming(monkeypatch)
+    tx = sa.arm_stream(sa.samples, capacity=48000)
+    tx.write(np.zeros(4800, np.float32))
+    while tx.emitted == 0:
+        s.run(1)
+    s.run(1, status=_Status(underflow=True))
+    with pytest.raises(BurstInvalidated):
+        sa.finish_burst()
+
+
+def test_a_reader_mid_callback_never_sees_a_stream_drained_before_its_end(monkeypatch):
+    sa, s = _streaming(monkeypatch)
+    tx = sa.arm_stream(sa.samples, capacity=48000)
+    tx.write(np.full(300, .1, np.float32))
+    while tx.emitted < 300:
+        s.run(1)
+    s.run(3)
+    tx.write(np.full(200, .1, np.float32))
+    tx.close()
+    seen, read = [], tx._read
+
+    def watched(n):
+        got = read(n)
+        seen.append((tx.drained, tx.end))
+        return got
+
+    monkeypatch.setattr(tx, '_read', watched)
+    while not sa.burst_done():
+        s.run(1)
+    assert all(end >= tx.end for drained, end in seen if drained)
+
+
+def test_the_card_index_of_every_sample_counts_the_holes_before_it(monkeypatch):
+    sa, s = _streaming(monkeypatch)
+    start = sa.samples
+    tx = sa.arm_stream(start + 500, capacity=48000)
+    tx.write(np.arange(1, 301, dtype=np.float32) / 1000)
+    while tx.emitted < 300:
+        s.run(1)
+    s.run(3)
+    tx.write(np.arange(301, 501, dtype=np.float32) / 1000)
+    tx.close()
+    while not sa.burst_done():
+        s.run(1)
+    out = np.concatenate(s.out_history)
+    progress = tx.progress
+    assert len(progress.runs) == 2
+    for position in (1, 150, 300, 301, 450, 500):
+        at = int(np.flatnonzero(np.isclose(out, position / 1000))[0])
+        assert progress.card_end(position) == start + at + 1 + sa.loop_lat
+    assert progress.card_end(500) == tx.end
+    assert progress.card_end(0) is None and progress.card_end(501) is None
+
+
 # --- xrun -------------------------------------------------------------------
 
 def test_an_overflow_resyncs_every_lane(monkeypatch):
@@ -659,3 +796,19 @@ def test_an_unstarved_stream_loses_nothing(monkeypatch):
         sa._callback(indata, outdata, frames,
                      _Times(adc, adc + 1152 / audio.CARD_RATE_HZ), _Status())
     assert sa.lost == 0
+
+
+@pytest.mark.parametrize('queued', [False, True])
+def test_stream_flush_never_delivers_empty_chunks_or_loses_faults(queued):
+    lane = audio.StreamLane(audio.CARD_RATE_HZ)
+    if queued:
+        lane.push(Block(0, 0, np.zeros(128, np.float32)))
+    lane.flush_to(128)
+    assert lane.poll() == []
+    assert lane.poll() == []
+    lane.push(Block(0, 128, np.ones(128, np.float32)))
+    chunk, = lane.poll()
+    assert chunk.at == 128
+    assert chunk.samples.dtype == np.float32 and len(chunk.samples) == 128
+    assert [(f.index, f.cause) for f in chunk.faults] == [(128, 'flush')]
+    assert lane.poll() == []

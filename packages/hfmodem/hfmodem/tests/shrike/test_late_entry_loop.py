@@ -80,6 +80,11 @@ class LatePeer(_Bench):
 
 
 def run_late(monkeypatch, tmp_path, entry_number, lose_first, *, scan_cost=.006):
+    outdir = tmp_path / "out"
+    number = 1
+    while outdir.exists():
+        outdir = tmp_path / f"out-{number}"
+        number += 1
     peer = LatePeer(entry_number, lose_first)
     hosts = []
     receivers = []
@@ -93,7 +98,7 @@ def run_late(monkeypatch, tmp_path, entry_number, lose_first, *, scan_cost=.006)
             hosts.append(self)
 
         def tick(self, **kwargs):
-            if not self.queued and self.arq.state in onair.LINKED:
+            if not self.queued and self.arq.entry_pending:
                 self.arq.on_host_data(MESSAGE)
                 self.queued = True
             return super().tick(**kwargs)
@@ -130,7 +135,7 @@ def run_late(monkeypatch, tmp_path, entry_number, lose_first, *, scan_cost=.006)
     monkeypatch.setattr(sys, "argv", [
         "shrike.onair", "--transmit", "--hold", "12", "--max-cycles", "8",
         "--mycall", "W9SSJ", "--dxcall", "K7ABC", "--dial", "7100000",
-        "--serial", "/dev/null", "--outdir", str(tmp_path),
+        "--serial", "/dev/null", "--outdir", str(outdir),
         "--p1-grant-only", "--p1-status-bits45", "3", "--p3-entry", "template",
         # THIS PEER IS A HYBRID AND ONLY A HYBRID CAN BE ASKED THIS. Its
         # transmissions are recorded WS8EOC PCM, kept with the real -50 Hz
@@ -145,15 +150,15 @@ def run_late(monkeypatch, tmp_path, entry_number, lose_first, *, scan_cost=.006)
     with contextlib.redirect_stdout(output):
         onair.main()
     log = output.getvalue()
-    (tmp_path / "session.log").write_text(log)
-    (tmp_path / "result.json").write_text(json.dumps(dict(
+    (outdir / "session.log").write_text(log)
+    (outdir / "result.json").write_text(json.dumps(dict(
         respond_after_entries=entry_number, first_response_lost=lose_first,
         emitted_entries=peer.entries, peer_phase=peer.p3_phase,
         controls=peer.controls,
         delivered=bytes(hosts[0].channel(hosts[0].ptchn).rx).decode("ascii"),
         pending_at_changeover=None if hosts[0].entry_result is None else
         [part.hex() for part in hosts[0].entry_result]), indent=2) + "\n")
-    return dict(peer=peer, host=hosts[0], rx=receivers[0], log=log)
+    return dict(peer=peer, host=hosts[0], rx=receivers[0], log=log, outdir=outdir)
 
 
 @requires_ws8eoc_p3

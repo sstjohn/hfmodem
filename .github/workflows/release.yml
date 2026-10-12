@@ -1,0 +1,129 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Check package versions and release tag
+        run: |
+          python - <<'EOF'
+          import os, sys, tomllib
+          versions = {}
+          for name in ("hfhost", "hfmodem", "creance"):
+              with open(f"packages/{name}/pyproject.toml", "rb") as f:
+                  versions[name] = tomllib.load(f)["project"]["version"]
+          if len(set(versions.values())) != 1:
+              sys.exit(f"package versions disagree: {versions}")
+          if os.environ["GITHUB_REF_TYPE"] == "tag":
+              tag = os.environ["GITHUB_REF_NAME"]
+              if not tag.startswith("v"):
+                  sys.exit(f"release tag must start with v: {tag!r}")
+              if next(iter(versions.values())) != tag[1:]:
+                  sys.exit(f"tag {tag} disagrees with {versions}")
+          EOF
+      - name: Install build tools
+        run: python -m pip install build twine
+      - name: Build sdists and wheels
+        run: |
+          for p in hfhost hfmodem creance; do
+            python -m build "packages/$p" --outdir "dist/$p"
+          done
+      - name: Check distribution metadata
+        run: python -m twine check --strict dist/*/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        python: ['3.13']
+    env:
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install audio file tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flac ffmpeg libportaudio2
+      - name: Install editable packages and test tools
+        run: >-
+          python -m pip install
+          -e 'packages/hfhost[dev]'
+          -e 'packages/hfmodem[dev]'
+          -e 'packages/creance[dev]'
+          pytest-xdist
+      - name: Run release tests
+        run: >-
+          nice -n 19 python -m pytest -c pyproject.toml -q -n auto --dist loadfile
+          -m "not slow and not realtime and not corpus and not hardware and not ardopcf"
+          packages
+      - name: Run wall-clock cost checks without competing test workers
+        run: >-
+          nice -n 19 python -m pytest -c pyproject.toml -q -n 0
+          packages/hfmodem/hfmodem/tests/shrike/test_offset_fine_estimate.py::test_an_awkward_window_length_is_what_the_pad_is_for
+          packages/hfmodem/hfmodem/tests/shrike/test_offset_fine_estimate.py::test_the_refinement_is_not_a_cost_the_cycle_can_feel
+
+  publish:
+    needs: [build, test]
+    # A branch dispatch rehearses build and test; a tag dispatch can recover a
+    # partially uploaded release, after every required check passes again.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish hfhost
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/hfhost/
+          skip-existing: true
+      - name: Publish creance
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/creance/
+          skip-existing: true
+      - name: Publish hfmodem
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/hfmodem/
+          skip-existing: true

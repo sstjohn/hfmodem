@@ -1,0 +1,37 @@
+{
+  "file": "n9vc-0802-chirps.wav",
+  "source": "logs/onair/20260802T230833Z-W9SSJ-K5DAT-13.wav",
+  "source_start": 82723200,
+  "samples": 537600,
+  "rate": 48000,
+  "header_rate": 48000,
+  "source_start_s": 1723.4,
+  "sha256": "fba8991522ab8e3ac06a5896ff48519898128df8d6793d64d82eb950e831c1a5",
+  "link": "N9VC (BPQ32, EN54BH) answering a P1 Normal connect at 1690.5 s, robust shorts A13 B13 A49 B49 A53 at 1717.41-1722.41 s, then twelve P4 SL1 chirp packets every 3.75 s from 1723.66 s, CW-ID at 1768.8 s; the whole link sits +400 Hz up the passband",
+  "chirps": [
+    {
+      "start_s": 0.2595,
+      "offset_hz": 400,
+      "crc": true,
+      "data": "[BPQ-6.0.25.1-B2FWIHJM",
+      "counter": 1,
+      "protocol": "SPEED_UP"
+    },
+    {
+      "start_s": 4.0105,
+      "offset_hz": 400,
+      "crc": true,
+      "data": "[BPQ-6.0.25.1-B2FWIHJM",
+      "counter": 1,
+      "protocol": "SPEED_UP"
+    },
+    {
+      "start_s": 7.7635,
+      "offset_hz": 400,
+      "crc": true,
+      "data": "[BPQ-6.0.25.1-B2FWIHJM",
+      "counter": 1,
+      "protocol": "SPEED_UP"
+    }
+  ]
+}

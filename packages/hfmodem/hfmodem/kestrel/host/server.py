@@ -158,6 +158,13 @@ class HostSession(ModemObserver):
     def modem_data_received(self, blob: bytes) -> None:
         self._send_data(blob)
 
+    def modem_warning(self, message: str) -> None:
+        self._send_cmd(message)
+
+    def modem_disconnect_refused(self, message: str) -> None:
+        self.state = SessionState.CONNECTED
+        self.modem_warning(message)
+
     def modem_busy(self, on: bool) -> None:
         self._send_cmd("BUSY ON" if on else "BUSY OFF")
 

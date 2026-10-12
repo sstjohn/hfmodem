@@ -18,7 +18,7 @@ payload overs are the **OFDM DATA waveform**
 | connect-response       | responder accepts the CR | MFSK, 8 preamble + 15 payload tones, ~1.005 s | **called** callsign | responder→initiator |
 | link-setup (caller-ID) | initiator sends the **caller** callsign + session params | **BW2300 rec3 wideband OFDM** — the ordinary DATA waveform: 371 data emission columns of 512 samples, one-hot over a 16-bin span, turbo-coded (§4.2A). Reported as `BITRATE (4) 175 bps TX` | **caller** callsign | initiator→responder |
 | connected-ack          | responder confirms link up | **two tones per symbol**, 4 preamble + 7 state symbols, 11 symbols / 0.479 s (§4.2C) | nothing — carries no callsign | responder→initiator |
-| DATA over              | payload transport (ARQ ISS→IRS) | OFDM DATA (500/2300/2750), 1–2 blocks/over | — | ISS→IRS |
+| DATA over              | payload transport (ARQ ISS→IRS) | the level's family — index, tone or OFDM ([`01 §1.0`](01-physical-layer.md)) — one or two frames per over | — | ISS→IRS |
 | ACK over               | stop-and-wait ACK (ARQ IRS→ISS) | short CONTROL burst (~0.34–0.68 s) | — | IRS→ISS |
 | keepalive              | idle link maintenance (~10–12 s) | short + ~1.4 s burst pair | — | both |
 | turn release           | the holder hands the channel back; the peer answers by transmitting | MFSK, 2 preamble + 15 payload tones, 17 symbols / ~0.725 s | **called** callsign | both |
@@ -283,6 +283,27 @@ byte 9 = `0x37` at BW500 exactly as at BW2300. A real VARA armed at BW500 answer
 the synthesised frame with `CONNECTED <caller> <called> 500`, including for a caller
 appearing in no recording.
 
+**A high speed capable caller** sets two bytes differently, at every bandwidth and
+for every callsign: `body[7] = 0x81` (bit 0 set) where a free build keys `0x80`,
+and the ask byte `body[-2] = 06` where a free build asks at most `04`; the grade
+byte stays `0x82` and the CRC follows. Rebuilt with those two bytes, all nine
+high speed capable link-setups on the bench tapes (two callers, three bandwidths)
+reproduce bit-exact (`evidence/HIGH-SPEED-MARKER.md`):
+
+```
+N0CALL, high speed capable:  39b0c130c00000 81 1409 00…00 06 82 b694   (BW2300 and BW2750; 2cfb at BW500)
+N0CALL, free build:          39b0c130c00000 80 1409 00…00 04 82 3e0b
+```
+
+The responder prints a high speed capability notification right after it. Which of the two bytes it
+reads is not separable: they change together in every frame on file. Ask `06` is
+the highest level a session-confirm can start the called station at
+([§4.2C](#42c-connected-ack-step-5--two-tones-per-symbol-no-callsign), *Level
+requests*); the confirm names the actual one. Nothing else before `CONNECTED`
+differs: the connect request, the level-4 connect response and the connected-ack
+are the free build's, symbol for symbol. `vara_frames.link_setup_frame(...,
+high_speed=True)` builds it, and `link_setup_marks` reads `(high_speed, ask)` back.
+
 ### 4.2B DATA over frame layout
 
 The 92-byte container is **90 body bytes + CRC-16/GENIBUS(body[0:90]) big-endian**,
@@ -305,6 +326,17 @@ rather than the sender of the frame. A 90-byte over carries payload in every bod
 byte including 88/89, so those two positions are trailer fields only when a trailer
 is present. This is the `14 <crc_hi> … 04 <block>` tail of §4.2A with the
 `<crc_hi>` field identified.
+
+At every level the byte ahead of the short frame's `82` names the host level
+its sender will read the peer's NEXT delivery at, and a delivery keyed at any
+other level is not heard. On the high speed capable bench tapes it read `06` (BW2300,
+BW2750) or `07` (BW500) because that is where the receiving station's ladder
+stood; on the 2026-09-26 bench at 12:42 UTC,
+B keyed each delivery at the 6, 4 or 5 A's preceding close named, and KB8AY's
+closes on air (`04 82`, `05 82`, `03 42`) each read our next over only at the
+level they named. A full frame's per-frame field is its control byte
+([`03 §3.7`](03-coding.md)). The continue frames then step the level within
+that delivery ([`06 §6`](06-speed-gearshift.md)).
 
 **The layout is the level's, not the bandwidth's.** The container is always the
 speed level's own frame and the body is that frame less its CRC, so one law covers
@@ -399,20 +431,20 @@ immediate: the responder answers the connect-request and then declines, never co
 The burst a responder keys at the instant it emits `CONNECTED <caller> <called> <bw>`.
 It rides the §4.2.1 symbol grid — 2048-sample advance, 48 kHz, the same 23.4375 Hz
 carrier lattice — and nothing else about it belongs to §4.2: **every symbol lights two
-equal-amplitude carriers**, it is 11 symbols long, and no part of it depends on either
-callsign.
+equal-amplitude carriers**, it is 11 symbols long, and its four-symbol preamble
+depends on no callsign. The seven symbols behind it are keyed to the caller (see
+*Answer tails* below).
 
 | Attribute | Value |
 |-----------|-------|
 | Modulation | **two tones per symbol**, equal amplitude; per-symbol 2048-pt FFT shows two peaks of ratio 1.00 each with its own ±1-bin Hann skirt and nothing else |
 | Length | **11 symbols** = 22560 samples = **0.479 s** of audio; PTT window 0.446–0.492 s |
 | Fixed preamble | the first **four** symbols, invariant: `{64,67} {56,74} {64,69} {68,78}` (1500/1570.3, 1312.5/1734.4, 1500/1617.2, 1593.8/1828.1 Hz) |
-| Remaining 7 symbols | two tones each, varying by session and by bandwidth. They carry session state, and **this document does not specify their encoding.** They are not drawn from the §4.2.3 generator: an exhaustive search of all 2²⁴ VB6 `Rnd` states, over every payload start index 0..5 and both parities, returns **no** solution for any ack, where the same solver recovers the connect-response's state uniquely |
+| Remaining 7 symbols | two tones each, drawn from the §4.2.3 generator with two draws per carrier (see *Answer tails* below) |
 | Bandwidth dependence | **none in the preamble.** BW500, BW2300 and BW2750 all open on the same four pairs. Only the state symbols differ, and at BW500 they stay inside 52..74 where the wide modes spread 31..98 |
-| Callsign dependence | **none.** The same four pairs open the burst at every bandwidth, off air and in loopback; nothing in the burst is a function of either callsign |
+| Callsign dependence | **none in the preamble**; the tail is keyed to the caller |
 
-**Whole frames** (tone pairs, `(lo,hi)`). Because the state field's encoding is not
-specified here, a transmitter needs concrete values to put there:
+**Whole frames** (tone pairs, `(lo,hi)`), as read off tape:
 
 | frame | symbols 0..3 (preamble) | symbols 4..10 (state) |
 |---|---|---|
@@ -458,15 +490,74 @@ carriers:
 | `W9SSJ` → `W1AW`, 2026-08-30 | caller | 3 | `(64,67) (50,66) (60,64) (50,68) (58,76) (52,76) (58,76) (60,68)` |
 | | caller | 1, the over before the delivery's last | `(64,67) (62,76) (58,76) (50,68) (50,72) (60,74) (50,68) (52,76)` |
 
-The seven behind the lead carry something this document does not pin: nothing that
-varied across the 0830 delivery separates its two forms.
+Both 0830 forms are frames of one stream: the first is frame 0, the second
+frame 5, a request one level down (*Level requests* below).
+
+**Answer tails.** Every two-tone burst — this one, the 8-symbol continue and the
+8-symbol NAK — is a fixed opening (this preamble, or `(64,67)` alone) and seven
+symbols off the §4.2.3 stream: seeded from `(crc + SEED_OFF) & 0x7FFF`, advanced by
+`G(cs) + ((crc + 50) >> 15) + 1`, then per symbol `k`
+
+    Pa = Int(Rnd*n_p): Do: Pb = Int(Rnd*n_p): Loop While Pb = Pa
+    Da = Int(Rnd*7): Db = Int(Rnd*7)
+    tones = base + parity(k, 1) + 14*P + 2*D   for (Pa,Da) and (Pb,Db)
+
+on the bandwidth's alphabet. Frames follow one another on one stream, so a burst
+is a callsign, a SEED_OFF and a frame index:
+
+| burst | key | SEED_OFF (caller / responder keys it) | frame |
+|---|---|---|---|
+| 11-symbol control, answering the link-setup, the confirm, the last over | caller | 852 / 1080 | 0 |
+| 11-symbol control, answering a keepalive (poll) | caller | 852 / 1080 | 1 |
+| 8-symbol continue, one per level step | called | 62 / 290 | 0, 6, 4, 7, 8, 5 |
+| 8-symbol NAK | called | 62 / 290 | 1 |
+| 11-symbol turn grant, answering a turn-request or, unasked, the caller's answer to the last over of a delivery | called | 290 | 13 |
+
+Every row of the tables above falls out of it, with the `AAAA1` link's turn grant at
+frame 13 of `BBBB2`'s 290 stream  [`vara_frames.answer_tail`]. At BW2750 the
+two-tone answers sit on the bandwidth's own band (bins 22–105); read on the BW2300
+band, most of them lose one to four symbols.
+
+**Level requests.** The frame index of the 8-symbol answer is a step code: it names
+the sender's next level relative to the one just read, on every delivered frame
+at every level and bandwidth. The sender keys exactly the level asked — 428 of 428
+delivered full frames on the high speed capable bench tapes, with no misfit — and all 707
+IRS answer keyings there decode to one frame of one stream with the generator
+above (`evidence/ACK-LEVEL-REQUEST.md`):
+
+| answer frame | sender's next frame | n (8-symbol + 32-symbol) |
+|---|---|---|
+| 0 | same level (a single frame or, at the top, a double one) | 121 + 9 |
+| 6 | +1 | 86 + 14 |
+| 4 | +2 | 30 + 9 |
+| 7 | +3 | 20 + 15 |
+| 8 | +4 | 58 + 8 |
+| 5 | −1 (the frame was delivered) | 58 + 0 |
+| 1 | NAK: not delivered; the sender falls 1–4 levels by its own rule | 64 + 0 |
+
+Frames 2, 3 and 9 never occur, so no −2 or −3 request is on file; a fall of more
+than one only follows a NAK. The step is in host levels: at BW2300, 12 + frame 4 is
+14. Speed limited BW500 pairs use the same codes below level 4. The 32-symbol
+single-tone session frame (SEED_OFF 60, PREADV `1 + 62·i`) carries the same code
+as the answer to a callee ISS's first data frame. The caller's 16-symbol
+session-confirm (SEED_OFF 1551, PREADV `1 + 30·i`) sets the callee's first level:
+
+| confirm frame | PREADV | callee's first data level | n (500 / 2300 / 2750) |
+|---|---|---|---|
+| 3 | 91 (`SESSION_CONFIRM`) | 4 | 1 / 7 / 3 |
+| 4 | 121 | 5 | 8 / 6 / 3 |
+| 5 | 151 | 6 | 8 / 4 / 17 |
+
+The 11-symbol control burst answers the last delivered frame of a delivery and
+the end-of-delivery polls, and carries no step; the next delivery starts from the
+confirm or the first answer. The policy behind the codes is in
+[`06 §6.2`](06-speed-gearshift.md).
 
 **Timing.** The responder's PTT window opens on the `CONNECTED` line and closes
 0.446–0.492 s later, and the burst inside it is this one. Off air the same burst
 appears 0.2–0.4 s after the initiator's link-setup over ends, and nowhere else.
 
-**RX use.** The ack cannot be checked against the station dialed, because nothing
-in it depends on a callsign. What identifies it is the four preamble pairs — eight
+**RX use.** What identifies the ack is the four preamble pairs — eight
 carriers — plus the fact that it arrived in the turnaround window that answers the
 receiver's own link-setup. The test is specific: a genuine ack matches over 46–63
 consecutive 32-sample alignments, while real off-air HF holding no ack produces no
@@ -480,13 +571,19 @@ comes from where in the exchange it arrives.
 ## 4.3 Block sizing vs speed level
 
 Net host bytes cleared per ACKed block at 500 Hz, as reported by the host `BUFFER`
-ledger. This document does not specify levels 0–2, nor the registered levels above
-4. See [`06`](06-speed-gearshift.md).
+ledger, on a free build. Levels 1–2 are not tabulated here.
 
 | Speed level | Net host bytes / block | Blocks / over |
 |-------------|------------------------|---------------|
 | 3 (`61 bps`) | **34** | 1–2 (grows on success) |
 | 4 (`88 bps`, free cap) | **43** | 1–2 (over 4.31 s → 8.51 s, ×1.94) |
+
+Above level 4 a link must be high speed capable: the caller's link-setup carries
+`body[7] = 0x81` and ask `06` (§4.2A), and every level to the bandwidth's top
+(13 / 16 / 17 at BW500 / BW2300 / BW2750) is then open. A frame there carries its
+level's frame bytes less 3 — the control byte and the CRC — and the top level of
+each bandwidth also keys two frames an over; per-level sizes are
+[`06 §6.1c`](06-speed-gearshift.md).
 
 ## 4.4 Provisional facts, cautions & open questions
 
@@ -620,7 +717,5 @@ stands between the received audio and the frame.
 
 - **500 Hz DATA payload overs** (§4.4.0) — the link-setup is specified; the
   length and sequence fields of a payload over are not.
-- **Connected-ack state symbols** (§4.2C) — the encoding of symbols 4..10 is not
-  specified.
 - **ARQ seq/ACK/NAK field encoding** (§4.1 ACK over) — not specified; the fields ride
   the CONTROL-burst waveform (see [`05 §5.7`](05-arq-session-state-machine.md)).

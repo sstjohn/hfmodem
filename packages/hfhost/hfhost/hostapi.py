@@ -172,19 +172,19 @@ class HostApiClient:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             with self._lock:
                 self._sock, self._closing, self.attached = sock, False, True
-            self._reader = threading.Thread(target=self._read_loop,
+            self._reader = threading.Thread(target=self._read_loop, args=(sock,),
                                             name=f"hostapi-{self.name}", daemon=True)
             self._reader.start()
             self._handshake(deadline)
             self._replay()
         except Incompatible:
             self.attach_failures += 1
-            self._teardown()
+            self._teardown(expected_sock=sock)
             raise
         except Exception as exc:
             self.attach_failures += 1
-            self._teardown()
             if sock is not None:
+                self._teardown(expected_sock=sock)
                 try:
                     sock.close()
                 except OSError:
@@ -245,8 +245,11 @@ class HostApiClient:
     def close(self) -> None:
         self._teardown()
 
-    def _teardown(self) -> None:
+    def _teardown(self, *, expected_sock: socket.socket | None = None) -> None:
         with self._lock:
+            # An earlier reader or attach failure must not retire a replacement.
+            if expected_sock is not None and self._sock is not expected_sock:
+                return
             self._closing, self.attached = True, False
             sock, self._sock = self._sock, None
             self._rx.clear()
@@ -454,13 +457,12 @@ class HostApiClient:
 
     # -- reader ------------------------------------------------------------
 
-    def _read_loop(self) -> None:
+    def _read_loop(self, sock: socket.socket) -> None:
         buf = bytearray()
         try:
             while True:
                 with self._lock:
-                    sock = self._sock
-                    if sock is None or self._closing:
+                    if self._sock is not sock or self._closing:
                         return
                 try:
                     chunk = sock.recv(65536)
@@ -470,21 +472,27 @@ class HostApiClient:
                     return
                 buf += chunk
                 while len(buf) >= 4:
-                    size = int.from_bytes(buf[:4], "big")
-                    if size > MAX_FRAME:
-                        self._note_error(f"frame length {size} exceeds the limit")
-                        return
-                    if len(buf) < 4 + size:
-                        break
-                    body, buf = bytes(buf[4:4 + size]), buf[4 + size:]
-                    try:
-                        self._dispatch(unpack(body))
-                    except Exception as exc:                     # a fault, not a crash
-                        self._note_error(f"undecodable frame: {exc!r}")
+                    with self._lock:
+                        # Keep ownership and every resulting mutation atomic
+                        # against close/reattach, including malformed frames.
+                        if self._sock is not sock or self._closing:
+                            return
+                        size = int.from_bytes(buf[:4], "big")
+                        if size > MAX_FRAME:
+                            self._note_error(f"frame length {size} exceeds the limit")
+                            return
+                        if len(buf) < 4 + size:
+                            break
+                        body, buf = bytes(buf[4:4 + size]), buf[4 + size:]
+                        try:
+                            self._dispatch(unpack(body))
+                        except Exception as exc:                     # a fault, not a crash
+                            self._note_error(f"undecodable frame: {exc!r}")
         finally:
             # A reader that dies without detaching leaves a modem that looks
             # attached and is deaf; the station would report healthy forever.
-            self._teardown()
+            # Its EOF belongs to this socket, even after a replacement attaches.
+            self._teardown(expected_sock=sock)
 
     def _dispatch(self, msg: dict[str, Any]) -> None:
         m = msg.get("m")

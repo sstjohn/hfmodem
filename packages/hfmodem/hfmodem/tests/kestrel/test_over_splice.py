@@ -60,29 +60,24 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.kestrel import corpora, turns_evidence as E
 from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_mfsk as MK
 
 FS = MK.FS
-MYCALL, GATEWAY = "W9SSJ", "KC9GHZ"
+MYCALL, GATEWAY = "W9SSJ", "VE3KPG"
 
 kc = corpora.harness("kestrel_connect")
 
-#: The two overs of the greeting, as `vara_payload` delivers them to the host.
-#: They join at "has 11" + "8 daily minutes" — one banner, sent in two.
-GREETING = (b"RMS Trimode 1.4.2.0 Wadsworth IL - NVIS inverted V at 25 feet "
-            b"with 50 watts\r\nW9SSJ has 11")
-CHALLENGE = (b"8 daily minutes remaining with KC9GHZ (EN62BK)\r"
-             b"[WL2K-5.0-B2FWIHJM$]\r;PQ: 74237263\rCMS via")
-
-#: Where each over sits in the recording, off the frame alignment that decodes it.
-_GREETING_AT = (63.693, 67.907)
-_CHALLENGE_AT = (70.174, 74.388)
-
-#: Where the mail loop takes over: the far side of our session-confirm's receiver
-#: blackout, 0.07 s before the gateway starts the greeting.
-_RESUME = 63.62
+# The original KC9GHZ recording is lost. This is VE3KPG on 09-03, source
+# 3895–4200 s. The windows below are decode-time estimates, not precise
+# frame alignments. The same splice, scheduling and stall findings are tested.
+GREETING = (b"RMS Trimode 1.4.3.0\r\nW9SSJ has 118 daily minutes remaining "
+            b"with VE3KPG (FN04VE)\r[WL2K-5.0")
+CHALLENGE = b"-B2FWIHJM$]\r;PQ: 92894510\rCMS via VE3KPG >\r"
+_GREETING_AT = (102.8, 107.2)
+_CHALLENGE_AT = (108.9, 113.3)
+_RESUME = 102.7
 
 #: What `AudioVaraIO.tx` discards beyond the transmission itself — the keyed idle
 #: hold and the codec-latency margin behind it.
@@ -185,14 +180,12 @@ def _connected(io):
 
 
 def _naked_over():
-    return corpora.wav_mono(corpora.ONAIR_NAKED_OVER) / 32768.0
+    return E.samples("ve3kpg-0903-two-overs-session") / 32768.0
 
 
-@corpora.requires_onair_naked_over
 def test_the_over_that_drew_the_nak_decodes_off_the_recording():
-    """The measurement the verdict rests on: fed the stream unbroken, both halves
-    of the greeting come out, and the second is the one the modem said it could
-    not read."""
+    """Repeat the historical KC9GHZ diagnosis on the VE3KPG substitute:
+    an unbroken stream delivers both halves of its greeting."""
     io = _Transport(_naked_over(), _RESUME)
     hs = _connected(io)
     while io.cursor < len(io.x):
@@ -207,38 +200,49 @@ def test_the_over_that_drew_the_nak_decodes_off_the_recording():
     assert not [m for m in io.msgs if "tx NAK" in m], io.msgs
 
 
-@corpora.requires_onair_naked_over
 def test_a_keying_across_an_arriving_over_is_never_scored_as_an_unreadable_one():
-    """The splice, isolated: key in the middle of the second over, exactly where
-    the keepalive went, and the search must come back with nothing.
+    """The splice, isolated: key across either over and never spend a NAK on it.
+
+    The substitute's short challenge does not expose the old carry defect at
+    3.7 s. Its full 89-byte first over does at 3.2 s: retaining samples across
+    that keying produces a NAK. Keep both collisions, including the old timing.
 
     Missing an over costs a retry. Claiming one and NAKing it costs the peer a
     repeat of a frame it already sent correctly, and spends a budget whose whole
     purpose is to bound a decoder that cannot read what the channel delivered.
     """
-    io = _Transport(_naked_over(), _RESUME)
-    hs = _connected(io)
-    interrupted = False
-    while io.cursor < len(io.x):
-        if not interrupted and io.clock >= _CHALLENGE_AT[0] + 3.7:
-            interrupted = True
-            hs.idle_keepalive()
-        chunk = io.x[io.cursor:io.cursor + _FEED]
-        io.cursor += len(chunk)
-        hs.on_rx_stream(chunk)
+    x = _naked_over()
+    for window, into, prior in ((_GREETING_AT, 3.2, []),
+                                (_CHALLENGE_AT, 3.7, [GREETING])):
+        io = _Transport(x, _RESUME)
+        hs = _connected(io)
+        interrupted = False
+        while io.cursor < len(io.x):
+            if not interrupted and io.clock >= window[0] + into:
+                interrupted = True
+                assert io.payloads == prior, "the interrupted over was already delivered"
+                at, keys = io.clock, len(io.keyed)
+                assert window[0] < at < window[1]
+                # Today's turn law may suppress an idle keepalive here; inject
+                # the historical collision through the real key/transmit path.
+                hs._tx_control_burst()
+                assert io.keyed[keys:] == [at], "the collision never keyed"
+            chunk = io.x[io.cursor:io.cursor + _FEED]
+            io.cursor += len(chunk)
+            hs.on_rx_stream(chunk)
 
-    assert interrupted, "the replay never reached the keying under test"
-    assert not [m for m in io.msgs if "tx NAK" in m], (
-        "an over spliced across our own transmission was claimed and NAKed",
-        io.msgs)
-    assert hs._undecoded == 0, "the NAK budget was spent on a frame we broke"
+        assert interrupted, "the replay never reached the keying under test"
+        assert not [m for m in io.msgs if "tx NAK" in m], (
+            "an over spliced across our own transmission was claimed and NAKed",
+            io.msgs)
+        assert hs._undecoded == 0, "the NAK budget was spent on a frame we broke"
 
 
-@corpora.requires_onair_naked_over
 def test_the_session_reads_the_whole_greeting_and_then_closes_itself(monkeypatch):
     """The whole failure, end to end, through the real mail loop.
 
-    Live this delivered 89 bytes, NAKed the next over, and then sat for 102 s
+    The original KC9GHZ arm delivered 89 bytes, NAKed the next over, then sat for
+    102 s
     without keying or logging anything while the gate handed it 42 brackets it
     could not name. Both halves of that are here: the greeting arrives whole, and
     when the gateway stops saying anything the session recognises, the link is
@@ -261,7 +265,8 @@ def test_the_session_reads_the_whole_greeting_and_then_closes_itself(monkeypatch
     assert hs._undecoded == 0, "the NAK budget was spent on a frame we broke"
     assert hs.state is not VA.VaraState.CONNECTED, (
         "the link was still held after the gateway stopped answering", io.msgs)
-    assert any("closing the link" in m for m in io.msgs), io.msgs
+    assert any(f"closing the stalled link to {hs.called}" in m
+               for m in io.msgs), io.msgs
 
 
 def test_the_idle_budget_is_spent_by_time_and_not_by_whatever_the_gate_brackets(
@@ -302,12 +307,11 @@ def test_the_idle_budget_is_spent_by_time_and_not_by_whatever_the_gate_brackets(
     assert io.now < 600.0, "the loop sat out the whole mail timeout"
 
 
-#: Where the mail loop takes over in `ONAIR_STANDING_LINK` — the far side of that
-#: session's session-confirm, 0.3 s before its gateway starts the one over it sent.
-_STANDING_RESUME = 17.60
+#: KB5LZK 08-29 14:44Z substitute, 0.3 s before its one greeting over.
+_STANDING_RESUME = 92.92
 
 #: That over, as the gate brackets it.
-_STANDING_OVER = (17.90, 22.85)
+_STANDING_OVER = (93.22, 97.8)
 
 #: A cadence short enough to fall due while a gateway over is still on the air,
 #: which is where the live one fell: the loop resumed at `_RESUME` and its first
@@ -342,12 +346,11 @@ def _run(io, hs, keepalive_s, monkeypatch):
                     keepalive_s=keepalive_s)
 
 
-@corpora.requires_onair_naked_over
 def test_no_keepalive_is_keyed_into_an_over_the_gateway_is_still_sending(monkeypatch):
-    """The collision itself, on the recording that produced it.
+    """The historical collision, replayed against VE3KPG's two intact overs.
 
-    Live this station keyed 3.7 s into `_CHALLENGE_AT` and lost the half of the
-    greeting it needed most. `next_rx_burst` hands back only regions that have
+    On the lost KC9GHZ recording this station keyed 3.7 s into over 2 and lost
+    the half of the greeting it needed most. `next_rx_burst` hands back only regions that have
     CLOSED, so a loop reading nothing but its own arrivals is deaf for exactly as
     long as the peer is transmitting — the cadence comes due into an open carrier
     and keys.
@@ -367,20 +370,20 @@ def test_no_keepalive_is_keyed_into_an_over_the_gateway_is_still_sending(monkeyp
         f"{len(io.payloads)} payload(s) of the two the gateway sent", io.msgs)
 
 
-@corpora.requires_onair_standing_link
 @pytest.mark.parametrize("keepalive_s", (10.0, _CADENCE_INTO_AN_OVER))
 def test_the_session_that_stood_answers_its_over_and_then_closes(
         keepalive_s, monkeypatch):
-    """The same ending on the same evening's earlier call, with no NAK on it.
+    """One answered over then a stall, now on KB5LZK 08-29 14:44Z.
 
-    That log stops at `tx per-over response` while its recording runs on for
-    another 213 s: one over answered, and then a held link nobody was talking on.
+    The original KC9GHZ log stopped at `tx per-over response`. The substitute
+    preserves that ending: one over answered, then a held link.
     At the cadence it ran at nothing of ours falls anywhere near that over; at one
     that falls due inside it, the over survives anyway.
     """
-    x = corpora.wav_mono(corpora.ONAIR_STANDING_LINK) / 32768.0
+    x = E.samples("kb5lzk-0829-144437-session") / 32768.0
     io = _Transport(x, _STANDING_RESUME)
     hs = _connected(io)
+    hs.called = "KB5LZK"
     fired = _keepalives(hs, io)
     _run(io, hs, keepalive_s, monkeypatch)
 
@@ -391,7 +394,8 @@ def test_the_session_that_stood_answers_its_over_and_then_closes(
                 if _STANDING_OVER[0] <= t <= _STANDING_OVER[1]], (fired, io.msgs)
     assert hs.state is not VA.VaraState.CONNECTED, (
         f"{len(fired)} keepalives and the link is still standing", io.msgs)
-    assert any("closing the link" in m for m in io.msgs), io.msgs
+    assert any(f"closing the stalled link to {hs.called}" in m
+               for m in io.msgs), io.msgs
 
 
 def test_the_channel_clearing_produces_no_keepalive_in_the_peers_turn(monkeypatch):

@@ -761,7 +761,11 @@ def _spans(lines: list[tuple[int, str]]):
             if joined:
                 joined += " "
             marks.append((len(joined), n))
-            joined += line
+            # Proposed commit titles are authored text, not a program transcript.
+            # Mask only this line; the same paragraph may quote real output next.
+            joined += (" " * len(line)
+                       if re.match(r"^(?:Suggested subjects?|Commit subject):", line)
+                       else line)
         para.clear()
         for m in _INLINE_SPAN.finditer(joined):
             if _denied(joined, m.start(), m.end()):
@@ -789,6 +793,30 @@ def _spans(lines: list[tuple[int, str]]):
         yield from ((at, _flat(t)) for at, t in _unwrapped(fence))
 
 
+def test_proposed_commit_subjects_are_not_log_quotations(tmp_path):
+    report = tmp_path / "REPORT.md"
+    report.write_text(
+        "Suggested subjects: `Drain host replies before shutdown`; "
+        "`Keep modem commands independent of the audio backlog`.\n\n"
+        "Commit subject: `test: cover station host ports over real TCP`\n\n"
+        "Suggested subject: `Pin late-path discovery independently of acquisition reference`.\n\n"
+        "The run failed with `PermissionError: [Errno 1] Operation not permitted`.\n")
+    assert [q.text for q in _quotations(report)] == [
+        "PermissionError: [Errno 1] Operation not permitted"]
+
+
+@pytest.mark.parametrize("label", ["Suggested subject", "Suggested subjects", "Commit subject"])
+def test_output_immediately_after_a_commit_subject_is_still_a_quotation(tmp_path, label):
+    report = tmp_path / "REPORT.md"
+    report.write_text(
+        f"{label}: `Drain host replies before shutdown`\n"
+        "The run failed with `PermissionError: [Errno 1]\n"
+        "Operation not permitted`.\n")
+    quotations = _quotations(report)
+    assert [q.text for q in quotations] == [
+        "PermissionError: [Errno 1] Operation not permitted"]
+
+
 @pytest.fixture(scope="module")
 def logs() -> dict[str, list[str]]:
     """Every log the reports are written off, a line at a time, whitespace flat.
@@ -799,10 +827,31 @@ def logs() -> dict[str, list[str]]:
     name every slot, so a live arm answered a three-day-old report's citation of a
     log on the operator's desktop and turned seven unchecked quotations green.
     """
-    return {p.relative_to(evidence.RECORD).as_posix():
-            [_flat(ln) for ln in
-             p.read_text(encoding="utf-8", errors="ignore").splitlines()]
-            for p in sorted({p for g in LOG_TREES for p in evidence.RECORD.glob(g)})}
+    found = {}
+    for path in sorted({p for g in LOG_TREES for p in evidence.RECORD.glob(g)}):
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        # Agent transcripts echo source and pytest failures, including this
+        # gate's own known misquotations. They are not independent run output.
+        if any(line.startswith("OpenAI Codex v") for line in lines[:32]):
+            continue
+        found[path.relative_to(evidence.RECORD).as_posix()] = [_flat(ln) for ln in lines]
+    return found
+
+
+def test_a_transcript_echoing_the_gate_is_not_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(evidence, "RECORD", tmp_path)
+    working = tmp_path / "working"
+    working.mkdir()
+    quote = "receiver rms 0.09346 -> LIVE, not transmitting"
+    (working / "renamed.log").write_text(
+        "Reading additional input from stdin...\n"
+        "ERROR: failed to refresh available models\n"
+        "ERROR: failed to refresh available models\nOpenAI Codex v0.159.1\n"
+        f"E     {quote}\n")
+    (working / "session.log").write_text("receiver rms 0.5 -> LIVE\n")
+    found = logs.__wrapped__()
+    assert found == {"working/session.log": ["receiver rms 0.5 -> LIVE"]}
+    assert not any(_holds(lines, quote) for lines in found.values())
 
 
 def _holds(lines: list[str], quote: str) -> bool:
@@ -864,7 +913,21 @@ def _kept(report: Path, logs: dict[str, list[str]]) -> set[str]:
 
 @pytest.fixture(scope="module")
 def reports() -> list[Path]:
-    return sorted(evidence.WORKING.glob(REPORTS))
+    # Reports are tracked prose under test; only their logs belong to the
+    # shared recording tree. A worktree must read its own report revisions.
+    return sorted((REPO / "working").glob(REPORTS))
+
+
+def test_reports_are_read_from_the_checkout_under_test(tmp_path, monkeypatch):
+    checkout, origin = tmp_path / "checkout", tmp_path / "origin"
+    (checkout / "working").mkdir(parents=True)
+    origin.mkdir()
+    report = checkout / "working" / "LOCAL-REPORT.md"
+    report.write_text("This checkout's revision.\n")
+    (origin / "OTHER-REPORT.md").write_text("The shared checkout's revision.\n")
+    monkeypatch.setattr(evidence, "WORKING", origin)
+    monkeypatch.setattr(f"{__name__}.REPO", checkout)
+    assert reports.__wrapped__() == [report]
 
 
 #: The reports whose logs never reached the tree, and where each one's are instead.
@@ -1099,7 +1162,7 @@ KNOWN_PHANTOM = {
     # ran outside any arm, so no arm log holds it.
     "KiwiTooBusyError: all 2 client slots taken",
     # In-slot analysis: an ad-hoc alignment of the arm 9 recording against
-    # `CONTROL_BURST_RESPONDER_2300`, laid out as two labelled rows. Nothing
+    # the BW2300 responder control burst, laid out as two labelled rows. Nothing
     # prints it, and the finding it carries is the report's own arithmetic.
     "read tail: (34,80) (83,97) (50,66) (59,95) (64,96) (59,77) (57,72)",
     "reference: (34,79) (80,82) (50,66) (59,95) (64,96) (59,77) (57,72)",

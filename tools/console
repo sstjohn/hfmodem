@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "${HFMODEM_PYTHON:-$HERE/../.venv/bin/python}" "$HERE/console.py" "$@"

@@ -35,10 +35,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
+
+from hfmodem.shrike import pactor1, rxfront
 from hfmodem.shrike.onair import (BREAKIN_LEAD_S, FS, ISS_GUARD_CYCLES,
                                   Protocol, RadioTx, _forecast_next_key,
-                                  _MasterGrid)
+                                  _MasterGrid, _read_held_window)
 
 CYCLE_S = 1.25
 SLOT_N = round(CYCLE_S * FS)
@@ -340,3 +344,77 @@ def test_the_changeover_never_stands_down_into_the_peers_packet():
     assert "STOOD DOWN" not in log.getvalue()
     assert log.getvalue().count("CHANGEOVER NOT PLACED") == 9
     assert "still on the air" in log.getvalue()
+
+
+# --------------------------------------------------------------------------
+# the head of a changeover, after the peer has answered it
+# --------------------------------------------------------------------------
+#: KB5LZK-30, 2026-09-23 14:52, the first changeover of the link: its CS3 head
+#: read at 32.34 s, our break-in keyed on its packet, its CS1 read at the anchor
+#: at 35.68 s, and the carrier of our first data packet a settle before slot 28.
+KB5LZK_CS3_AT = 1552218
+KB5LZK_BREAKIN = (1604000, 1651400)
+KB5LZK_CS1_AT = round(35.68 * FS)
+KB5LZK_FIRST_DATA = 1722092
+DATA_AIR_N = round(1.000 * FS)
+
+
+class _HeldRx:
+    """The hold loop's reader, holding the one word its anchored read returns."""
+
+    def __init__(self, word):
+        self.host = SimpleNamespace(protocol=Protocol.PACTOR1)
+        self.cs_log, self.cs_seen, self._word = [], False, word
+
+    def control_signal_in(self, seg, seg_start, raster):
+        if self._word is None:
+            return None, None
+        self.cs_log.append(self._word)
+        return self._word.cs, round(self._word.t * FS)
+
+
+def _after_our_changeover() -> tuple[RadioTx, _MasterGrid]:
+    g = _MasterGrid(anchor=0, slot_n=SLOT_N, offset_n=0, packet_n=PACKET_N,
+                    cs_n=CS_N, d_max_n=round(0.130 * FS))
+    g.sending = True
+    g.reverse(to_iss=False)
+    g.note_peer_codeword(KB5LZK_CS3_AT, CS_N, "CS3/break-in", "KB5LZK",
+                         protocol=Protocol.PACTOR1)
+    g.cycles += 1
+    g.reverse(to_iss=True)
+    tx = RadioTx(None, transmit=False, outdir=Path("."), settle=SETTLE_S)
+    tx.raster, tx.keyings = g, [KB5LZK_BREAKIN]
+    return tx, g
+
+
+def _held_read(tx, g, word) -> None:
+    _read_held_window(object(), g, tx, _HeldRx(word), 28, np.zeros(0), 0,
+                      KB5LZK_FIRST_DATA + round(SETTLE_S * FS))
+
+
+def test_the_peers_answer_to_our_changeover_retires_its_head():
+    """The CS3 that turned the link is the head of a packet on the raster the
+    peer left when it answered our changeover. Projected past that answer it
+    refused our first data packet twice, after every changeover of 0923-1452;
+    the answer, read at the anchor before the key, is what the key stands on."""
+    tx, g = _after_our_changeover()
+    stale = g.key_refusal(KB5LZK_FIRST_DATA, DATA_AIR_N)
+    assert stale is not None and "789 ms" in stale, stale
+
+    cs1 = rxfront.Event(KB5LZK_CS1_AT / FS, "cs", "", protocol="PACTOR-1",
+                        cs=pactor1.CS_ACK_A)
+    _held_read(tx, g, cs1)
+    assert g.peer_cs.at == KB5LZK_CS1_AT and g.peer_cs.name == "CS1/ack"
+    with contextlib.redirect_stdout(io.StringIO()) as log:
+        assert not tx._refused(KB5LZK_FIRST_DATA, DATA_AIR_N, "P1 pkt#1 200Bd 0B BK")
+    assert "GUARD" not in log.getvalue()
+
+
+def test_a_peer_that_repeats_its_packet_is_still_guarded():
+    """No control signal answers a changeover the peer did not hear: it repeats
+    its packet, and the head we read stays the evidence against keying over it."""
+    tx, g = _after_our_changeover()
+    _held_read(tx, g, None)
+    with contextlib.redirect_stdout(io.StringIO()) as log:
+        assert tx._refused(KB5LZK_FIRST_DATA, DATA_AIR_N, "P1 pkt#1 200Bd 0B BK")
+    assert "CS3/break-in" in log.getvalue()

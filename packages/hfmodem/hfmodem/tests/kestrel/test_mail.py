@@ -174,7 +174,7 @@ def test_the_peer_re_keys_the_over_a_nak_refused():
     """The last rung of the recovery ladder, with a peer that answers it: the
     station's own 8-symbol NAK, read by its tones off the lead pair it shares
     with the continue burst, and the over goes out again — which is what two
-    stock 4.9.0s did on the cables on 2026-09-07  [vara_frames, NAK_BY_CALLER].
+    stock 4.9.0s did on the cables on 2026-09-07  [vara_frames, nak].
     """
     import numpy as np
     from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF
@@ -185,10 +185,10 @@ def test_the_peer_re_keys_the_over_a_nak_refused():
     t.peer._next_over()
     keyed = len(t._to_station)
 
-    t.peer.on_air(MK.synth_tone_pairs(VF.OVER_CONTINUE_CALLER_2300))
+    t.peer.on_air(MK.synth_tone_pairs(VF.over_continue("K7ABC", "2300")[0]))
     assert t.peer.naks == 0, "the continue burst was read as a NAK"
 
-    t.peer.on_air(MK.synth_tone_pairs(VF.NAK_CALLER_2300))
+    t.peer.on_air(MK.synth_tone_pairs(VF.nak("K7ABC", "2300")[0]))
     assert t.peer.naks == 1
     assert len(t._to_station) == keyed + 1, "the NAK drew nothing"
     assert np.array_equal(t._to_station[-1], t._to_station[keyed - 1]), (

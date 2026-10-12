@@ -24,6 +24,8 @@ _DEST = np.arange(8)[:, None]
 _OLD_S3 = np.arange(2)[None, :]
 _PREV = (((_DEST >> 1) & 1) << 2) | ((_DEST & 1) << 1) | _OLD_S3
 _INCOMING_INPUT = ((_DEST >> 2) & 1) ^ (_DEST & 1) ^ _OLD_S3
+_DIRECTIONS = np.arange(2)[:, None, None]
+_NEIGHBORS = np.stack((_PREV, _NEXT))
 
 
 def _llrs(values, name):
@@ -43,16 +45,11 @@ def _llrs(values, name):
 class ComponentDecode:
     posterior: np.ndarray
     extrinsic: np.ndarray
+    parity_extrinsic: np.ndarray | None = None
 
 
-def component_decode(systematic, parity, apriori=None) -> ComponentDecode:
-    """Exact log-MAP BCJR; zero parity LLR means an erased observation.
-
-    Extrinsic excludes the local systematic observation and local a-priori LLR.
-    All eight start states have equal weight; all end states are allowed.
-    Inputs are not modified. Extremely large finite inputs that overflow the
-    log-domain arithmetic raise ValueError instead of returning invalid results.
-    """
+def component_decode(systematic, parity, apriori=None, *, parity_output=False, end_state=None, initial_state=None) -> ComponentDecode:
+    'Exact log-MAP BCJR; zero parity LLR means an erased observation.\n\n    Extrinsic excludes the local systematic observation and local a-priori LLR.\n    All eight start states have equal weight; all end states are allowed.\n    Inputs are not modified. Extremely large finite inputs that overflow the\n    log-domain arithmetic raise ValueError instead of returning invalid results.\n     Explicit initial_state/end_state pins select one of the eight trellis states; None preserves the historical uniform-start/free-end behavior.'
     sys = _llrs(systematic, "systematic")
     par = _llrs(parity, "parity")
     prior = np.zeros_like(sys) if apriori is None else _llrs(apriori, "apriori")
@@ -66,27 +63,51 @@ def component_decode(systematic, parity, apriori=None) -> ComponentDecode:
     if not np.all(np.isfinite(gamma)):
         raise ValueError("LLR magnitudes overflow component arithmetic")
     n = len(sys)
-    alpha = np.empty((n + 1, 8))
-    beta = np.empty((n + 1, 8))
-    alpha[0] = -np.log(8.)
-    beta[n] = 0.
+    # Both recurrences have two branches per state and independent boundaries.
+    metrics = np.empty((n + 1, 2, 8))
+    metrics[0, 0] = -np.log(8.)
+    if initial_state is not None:
+        if isinstance(initial_state, (bool, np.bool_)) or not isinstance(initial_state, Integral) or not 0 <= initial_state < 8:
+            raise ValueError("initial_state must be None or a state from 0 through 7")
+        metrics[0, 0] = -np.inf
+        metrics[0, 0, int(initial_state)] = 0.0
+    metrics[0, 1] = 0.
+    # Optional terminal constraint; None retains the historical free endpoint.
+    if end_state is not None:
+        if isinstance(end_state, (bool, np.bool_)) or not isinstance(end_state, Integral) or not 0 <= end_state < 8:
+            raise ValueError("end_state must be None or a state from 0 through 7")
+        metrics[0, 1] = -np.inf
+        metrics[0, 1, int(end_state)] = 0.0
+    edges = np.stack((gamma[:, _PREV, _INCOMING_INPUT], gamma[::-1]), axis=1)
+    # Log-domain recursion needs only a common offset, not a probability
+    # normalization at every symbol. Amortize it for the larger SL7/8 fields;
+    # retain per-symbol normalization at extreme LLRs to bound arithmetic.
+    interval = 32 if n >= 704 and np.max(abs(gamma)) < 1e6 else 1
     for t in range(n):
-        branch = alpha[t, _PREV] + gamma[t, _PREV, _INCOMING_INPUT]
-        alpha[t + 1] = np.logaddexp(branch[:, 0], branch[:, 1])
-        alpha[t + 1] -= np.logaddexp.reduce(alpha[t + 1])
-    for t in range(n - 1, -1, -1):
-        branch = gamma[t] + beta[t + 1, _NEXT]
-        beta[t] = np.logaddexp(branch[:, 0], branch[:, 1])
-        beta[t] -= np.logaddexp.reduce(beta[t])
+        branch = metrics[t, _DIRECTIONS, _NEIGHBORS] + edges[t]
+        row = np.logaddexp(branch[:, :, 0], branch[:, :, 1])
+        if (t + 1) % interval == 0:
+            row -= np.logaddexp.reduce(row, axis=1)[:, None]
+        metrics[t + 1] = row
+    alpha, beta = metrics[:, 0], metrics[::-1, 1]
+    # Certainty is valid; an empty fixed-boundary path set is not.
+    if not np.isfinite(np.logaddexp.reduce(alpha[-1] + beta[-1])):
+        raise ValueError("component boundaries admit no trellis path")
     # Omitting local input evidence here avoids posterior-minus-large-prior
     # cancellation and explicitly defines what may be exchanged by turbo passes.
     branch = alpha[:-1, :, None] + parity_log + beta[1:, _NEXT]
     marginal = np.logaddexp.reduce(branch, axis=1)
     extrinsic = marginal[:, 0] - marginal[:, 1]
     posterior = extrinsic + local
-    if not np.all(np.isfinite(posterior)) or not np.all(np.isfinite(extrinsic)):
+    if np.any(np.isnan(posterior)) or np.any(np.isnan(extrinsic)):
         raise ValueError("LLR magnitudes overflow component arithmetic")
-    return ComponentDecode(posterior, extrinsic)
+    parity_extrinsic = None
+    if parity_output:
+        edges = alpha[:-1, :, None] + input_log[:, None, :] + beta[1:, _NEXT]
+        parity_extrinsic = (
+            np.logaddexp.reduce(edges[:, _PARITY == 0], axis=1)
+            - np.logaddexp.reduce(edges[:, _PARITY == 1], axis=1))
+    return ComponentDecode(posterior, extrinsic, parity_extrinsic)
 
 
 @dataclass(frozen=True)
@@ -112,6 +133,18 @@ def turbo_decode(systematic, c1, c2, permutation, iterations=8) -> TurboDecode:
     posterior back as a prior. No clipping, tail removal, early stopping or
     automatic packet acceptance. Posterior0 is a tie, represented as hard bit0.
     Convergence and confidence diagnostics do not establish a valid packet.
+    """
+    result = None
+    for result in turbo_iterations(systematic, c1, c2, permutation, iterations):
+        pass
+    return result
+
+
+def turbo_iterations(systematic, c1, c2, permutation, iterations=8):
+    """Yield complete iterations, retaining extrinsic state between calls.
+
+    Packet readers can pause before the next iteration at an answer deadline.
+    The arithmetic and boundary conditions are identical to ``turbo_decode``.
     """
     sys = _llrs(systematic, "systematic")
     p1, p2 = _llrs(c1, "c1"), _llrs(c2, "c2")
@@ -140,4 +173,4 @@ def turbo_decode(systematic, c1, c2, permutation, iterations=8) -> TurboDecode:
             float(np.mean(np.abs(posterior))), float(np.max(np.abs(prior))),
         ))
         previous_bits = bits
-    return TurboDecode(posterior, previous_bits.astype(np.uint8), tuple(diagnostics))
+        yield TurboDecode(posterior.copy(), previous_bits.astype(np.uint8), tuple(diagnostics))

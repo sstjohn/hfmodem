@@ -88,7 +88,7 @@ def test_metadata_failure_closes_cat_before_rf(tmp_path, monkeypatch):
     ("PKTUSB", "malformed"), ("PKTUSB", "abort")])
 def test_real_startup_reaches_readback_before_any_rf(tmp_path, monkeypatch, mode, failure):
     args = _parsed("--transmit", "--serial", "/mock/CAT", "--ptt-port", "/mock/PTT",
-                   "--dial", "3595000", "--outdir", str(tmp_path), "--p1-grant-only")
+                   "--dial", "3595000", "--outdir", str(tmp_path / 'capture'), "--p1-grant-only")
     rig = FakeRig(mode=mode, failure=failure)
     reached = []
     original = rx.verify_receiver_startup
@@ -120,7 +120,7 @@ def test_real_startup_reaches_readback_before_any_rf(tmp_path, monkeypatch, mode
     assert reached == [True]
     assert ("set_mode", "PKTUSB", 3000) in rig.calls
     assert (("get_mode",) in rig.calls) == (failure not in ("write", "abort"))
-    report = json.loads((tmp_path / "radio-readback.json").read_text())
+    report = json.loads((tmp_path / 'capture' / "radio-readback.json").read_text())
     if failure is None:
         assert report["actual"]["mode"] == mode
     else:

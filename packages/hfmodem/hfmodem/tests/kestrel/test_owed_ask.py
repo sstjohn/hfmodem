@@ -87,13 +87,16 @@ def test_a_burst_nothing_names_still_opens_the_turnaround():
     assert len(_requests(io)) == 1, io.msgs
 
 
-def test_the_ask_is_owed_once():
+def test_a_lost_ask_is_asked_again_at_the_next_idle():
+    """This pinned one ask per owed ask until 2026-09-29. Stock's caller asks at
+    every idle the callee keys while its queue waits, twelve in a row
+    (bench-745owed m4, m8, m12, d3)  [see _owes_turn]."""
     hs, io = _connected()
     _owed(hs, io)
     hs.on_rx_audio(MK.synth_burst(_CALLED, VF.SESSION_RESPONDER_IDLE))
     hs.turn = VA._TURN_PEER          # the request was lost and the turn handed back
     hs.on_rx_audio(MK.synth_burst(_CALLED, VF.SESSION_RESPONDER_IDLE))
-    assert len(_requests(io)) == 1, "asked again on a burst with nothing owed"
+    assert len(_requests(io)) == 2, io.msgs
 
 
 def test_a_gate_still_open_at_the_bracket_holds_the_ask():
@@ -114,7 +117,9 @@ def test_an_over_under_the_owed_ask_is_answered_and_not_also_asked_into():
     that hands us the channel follows that acknowledgement, and a turn-request
     keyed in its place buys the ask and loses the release
     [see `_answer_data_over`]. So the ask outlives the delivery and goes out in
-    the peer's own cadence behind it  [see `_reack_release`].
+    the peer's own cadence behind it, at its first idle: stock's caller asks
+    there rather than re-keying the ack (bench-745owed m4, d3, 2026-09-29)
+    [see `_reack_release`].
     """
     hs, io = _connected()
     _owed(hs, io)
@@ -126,7 +131,6 @@ def test_an_over_under_the_owed_ask_is_answered_and_not_also_asked_into():
     hs.on_rx_audio(_their_over(b"end", 2))
     assert not _requests(io), "asked in place of acknowledging the last over"
     assert hs._answer_owed == VA._OWED_RELEASE, io.msgs
-    hs.on_rx_audio(MK.synth_burst(_CALLED, VF.SESSION_RESPONDER_IDLE))
     hs.on_rx_audio(MK.synth_burst(_CALLED, VF.SESSION_RESPONDER_IDLE))
     assert len(_requests(io)) == 1, io.msgs
     assert hs.turn == VA._TURN_ASKED

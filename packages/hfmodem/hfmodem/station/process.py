@@ -28,6 +28,8 @@ built here.
 from __future__ import annotations
 
 import signal
+import os
+import logging
 import sys
 import threading
 import time
@@ -37,10 +39,11 @@ from hfhost.config import ConfigError
 
 from hfmodem.core import devices, regulatory, wav
 from hfmodem.core.audio import ReplayAudio, StationAudio
-from hfmodem.core.config import Audio, StationConfig
+from hfmodem.core.config import ChainAudio, Audio, StationConfig
 from hfmodem.core.ptt import RtsPtt
+from hfmodem.core.operations import LeaseTimeout
 from hfmodem.core.rates import CARD_RATE_HZ
-from hfmodem.core.rig import FATAL_SIGNALS, Cat, Rig, RigError
+from hfmodem.core.rig import FATAL_SIGNALS, Cat, Rig, RigError, arm_deadman, fatal_write
 from hfmodem.station.arbiter import Identity, TxArbiter
 
 #: An `[audio] input` of `replay:FILE` is not a device name: the station reads
@@ -61,7 +64,7 @@ def recording(audio: Audio) -> Path | None:
             "replay:FILE — any WAV, at any rate. This tree ships "
             "packages/hfmodem/hfmodem/tests/besra/fixtures/"
             "offair_ke8lva_greeting.wav.")
-    path = Path(name).expanduser()
+    path = wav.stored(Path(name).expanduser())
     if not path.is_file():
         raise ConfigError(
             f"[audio]: there is no recording at {path}. The path is relative to "
@@ -75,6 +78,12 @@ class Station:
 
     def __init__(self, cfg: StationConfig, *, replay=None) -> None:
         self.cfg = cfg
+        from hfmodem.core import identification
+        st = getattr(cfg, "station", None)
+        # Freeze before audio lookup, PTT open or Rig.arm, which may itself key.
+        self.cw_identity = (identification.from_station(st)
+                            if st is not None and st.transmit and st.id_mode == "cw"
+                            else None)
         self.replay = replay
         self.replay_path: Path | None = None
         self.audio = None
@@ -83,11 +92,24 @@ class Station:
         self.lanes: dict[str, object] = {}
         self.hosts: dict = {}
         self._stop = threading.Event()
+        self._fatal_reason = None
+        self._fatal_entered = False
 
     # -- bring-up ----------------------------------------------------------
 
+    def validate_options(self):
+        from hfmodem.station.link import LINKS
+
+        for name in self.enabled:
+            LINKS[name].validate_options(self.cfg.protocols[name].options)
+
     def open_audio(self):
+        self.validate_options()
         cfg = self.cfg
+        may_transmit = cfg.station.transmit and bool(self.enabled)
+        if cfg.selected_rig != "ft891" and self.replay is None:
+            cfg.require_audio("station audio", input=True, output=may_transmit,
+                              drive=may_transmit)
         if self.replay is None:
             self.replay_path = recording(cfg.audio)
             if self.replay_path is not None:
@@ -95,14 +117,15 @@ class Station:
         if self.replay is not None:
             self.audio = ReplayAudio(self.replay)
         else:
-            may_transmit = cfg.station.transmit and bool(self.enabled)
             inp = devices.find_device(cfg.audio.input, "in", required=may_transmit)
             out = devices.find_device(cfg.audio.output, "out", required=may_transmit)
             self.audio = StationAudio(
                 input_device=inp, output_device=out,
                 gain=cfg.audio.input_gain, blocksize=cfg.audio.blocksize,
-                tx_latency_n=round(cfg.audio.tx_latency_ms
+                tx_latency_n=round((cfg.audio.tx_latency_ms if cfg.audio.tx_latency_ms is not None
+                                    else cfg.resolved_profile.get("tx_latency_ms", 0))
                                    * CARD_RATE_HZ / 1000))
+            self.audio.close_budget_s = cfg.rig.max_key_s + cfg.rig.ptt.settle_s + 5
         self.audio.open()
         return self.audio
 
@@ -116,22 +139,34 @@ class Station:
         cfg = self.cfg
         if not cfg.station.transmit:
             return None
+        if cfg.selected_rig != "ft891":
+            cfg.require_audio("station transmit", input=True, output=True, drive=True)
         if not cfg.rig.ptt.port:
             raise RigError("[rig.ptt] port is unset and transmit = true")
         line = RtsPtt(cfg.rig.ptt.port)
         line.open()
-        self.rig = Rig(model=cfg.rig.model, cat=Cat(cfg.rig.host, cfg.rig.port),
-                       ptt=line, profile=cfg.profile, control=cfg.control,
-                       mycall=cfg.station.mycall, transmit=True,
-                       max_key_s=cfg.rig.max_key_s)
-        report = self.rig.arm(prove_ptt=prove_ptt)
-        print(report)
-        ident = Identity(cfg.station.mycall, interval_s=cfg.station.id_interval_s,
-                         mode=cfg.station.id_mode)
-        self.arbiter = TxArbiter(self.audio, self.rig, identity=ident,
-                                 drive=self.cfg.audio.tx_drive,
-                                 settle_s=self.cfg.rig.ptt.settle_s)
-        return self.rig
+        try:
+            self.rig = Rig(model=cfg.rig.model, cat=Cat(cfg.rig.host, cfg.rig.port),
+                           ptt=line, profile=cfg.profile, control=cfg.control,
+                           mycall=cfg.station.mycall, transmit=True,
+                           max_key_s=cfg.rig.max_key_s)
+            self.rig.fatal = self.fatal_shutdown
+            report = self.rig.arm(prove_ptt=prove_ptt)
+            print(report)
+            ident = Identity(self.cw_identity.cw_call if self.cw_identity is not None
+                             else cfg.station.mycall, interval_s=cfg.station.id_interval_s,
+                             mode=cfg.station.id_mode)
+            self.arbiter = TxArbiter(self.audio, self.rig, identity=ident,
+                                     drive=(self.cfg.audio.drive_for() if isinstance(self.cfg.audio, ChainAudio)
+                                            else self.cfg.audio.tx_drive),
+                                     settle_s=self.cfg.rig.ptt.settle_s)
+            return self.rig
+        except BaseException:
+            if self.rig is None:
+                line.release()
+            else:
+                self.rig.close()
+            raise
 
     def build_lanes(self) -> dict:
         """One lane per enabled protocol, each subscribed to the card.
@@ -145,19 +180,19 @@ class Station:
             cls = LINKS.get(name)
             if cls is None:
                 continue
-            try:
-                link = cls(self)
-            except TypeError:
-                # besra's adapter needs its modem; a station without one runs the
-                # others rather than refusing to start.
+            if name == "ardop":
                 print(f"{name}: no modem instance, lane not built", file=sys.stderr)
                 continue
+            link = cls(self)
             self.audio.subscribe(link.lane)
             # sabir runs its own session on this station rather than handing frames
             # to something else, so its adapter owns a thread. The others do not.
             if hasattr(link, "start"):
                 link.start()
             self.lanes[name] = link
+        if self.arbiter is not None:
+            self.arbiter.active_protocols = lambda: tuple(
+                name for name, lane in self.lanes.items() if getattr(lane, "active", False))
         return self.lanes
 
     @property
@@ -172,19 +207,26 @@ class Station:
             f"transmit  {'enabled' if cfg.station.transmit else 'DISABLED'}",
             f"protocols {', '.join(self.enabled) or '(none)'}",
         ]
+        if self.cw_identity is not None:
+            lines.append(f"CW ID     {self.cw_identity.cw_call} ({self.cw_identity.source})")
         if self.replay is not None:
             lines.append(f"audio     replay {self.replay_path or '(samples)'}, "
                          f"{len(self.replay) / CARD_RATE_HZ:.1f} s")
         elif self.audio is not None:
             lines.append(f"audio     card, offset {self.audio.lat} samples")
         if cfg.listens and cfg.control is regulatory.Control.AUTOMATIC:
-            lines.append("NOTE      this station answers unattended, so §97.221 "
-                         "confines where it may transmit")
+            lines.append("NOTE      this station answers unattended; the selected emission "
+                         "profile uses automatic control")
         return "\n".join(lines)
 
     # -- run ---------------------------------------------------------------
 
-    def run(self) -> int:
+    def run(self, *, on_ready=None) -> int:
+        """Run the station; optional operator UI attaches after hosts are live.
+
+        The callback receives this station inside the shutdown guard. It must
+        return promptly so receive lanes continue to be pumped on this thread.
+        """
         if not self.enabled:
             print("no protocols enabled — nothing to run.", file=sys.stderr)
             return 2
@@ -211,6 +253,9 @@ class Station:
             from hfmodem.station import hosts
             self.hosts = hosts.build(self.cfg, station=self)
 
+            if on_ready is not None:
+                on_ready(self)
+
             breathe = getattr(self.audio, "breathe", None)
             if breathe is not None:
                 breathe()
@@ -233,8 +278,8 @@ class Station:
 
         Without this the interlock has no producer: at `id_interval_s` it closes,
         every live request is refused, and no callsign is ever sent — so the
-        station goes mute *and* §97.119 is still unsatisfied. The interlock is the
-        right shape; it needs something to satisfy it.
+        station goes mute without sending its scheduled identification. The
+        interlock is the right shape; it needs something to satisfy it.
         """
         arb = self.arbiter
         if arb is None or arb.identity is None or not arb.identity.due:
@@ -272,6 +317,8 @@ class Station:
         terminal, and a dropped one used to skip both this and `run()`'s `finally`.
         """
         def handler(signum, frame):
+            if self._fatal_reason is not None:
+                self.fatal_shutdown(self._fatal_reason)
             if self.rig is not None:
                 self.rig.panic()        # does not return
             # Nothing is keyed, but a stop that only sets a flag is not a stop
@@ -282,11 +329,64 @@ class Station:
         for sig in FATAL_SIGNALS:
             signal.signal(sig, handler)
 
+    def fatal_shutdown(self, why):
+        """Bounded process termination; unkey confirmation remains an observation.
+
+        The bound assumes the interpreter can still execute its timer handler.
+        A worker hands off through the station's signal path without a new thread.
+        """
+        self._fatal_reason = why
+        if threading.current_thread() is not threading.main_thread():
+            signal.setitimer(signal.ITIMER_REAL, 5.0)
+            os.kill(os.getpid(), signal.SIGTERM)
+            while True:
+                time.sleep(0.1)
+        if self._fatal_entered:
+            try:
+                fatal_write(b"fatal_shutdown confirmed=false reason=reentered fatal shutdown\n")
+            finally:
+                os._exit(1)
+        self._fatal_entered = True
+        arm_deadman(5.0, message=b"fatal_shutdown confirmed=false reason=deadman budget exhausted\n")
+        confirmed = False
+        try:
+            if self.rig is not None:
+                self.rig._fatal_handoff = True
+                self.rig.panic_unkey(why)
+                confirmed = getattr(self.rig, "_panic_confirmed", None) is True
+        except BaseException:
+            confirmed = False
+        message = f"fatal_shutdown confirmed={str(confirmed).lower()} reason={why}"
+        try:
+            fatal_write((message + "\n").encode())
+            logger = logging.getLogger(__name__)
+            record = logger.makeRecord(logger.name, logging.CRITICAL, __file__, 0,
+                                       message, (), None)
+            current = logger
+            while current is not None:
+                for handler in current.handlers:
+                    if handler.lock.acquire(timeout=0.02):
+                        try:
+                            handler.emit(record)
+                        finally:
+                            handler.lock.release()
+                current = current.parent if current.propagate else None
+            for link in self.lanes.values():
+                if hasattr(link, "flush_events"):
+                    link.flush_events(timeout=0.02)
+        except BaseException:
+            pass
+        finally:
+            os._exit(1)
+
     def shutdown(self) -> None:
         try:
             if getattr(self, "hosts", None):
                 from hfmodem.station import hosts
-                hosts.stop_all(self.hosts)
+                try:
+                    hosts.stop_all(self.hosts)
+                except LeaseTimeout as exc:
+                    self.fatal_shutdown(str(exc))
         finally:
             # Before the radio: an adapter with a thread of its own may still be
             # holding a transmission, and the arbiter is what ends one cleanly.
@@ -296,13 +396,21 @@ class Station:
                 if hasattr(link, "stop"):
                     try:
                         link.stop()
+                    except LeaseTimeout as exc:
+                        self.fatal_shutdown(str(exc))
                     except Exception as exc:            # noqa: BLE001
                         stubborn.append((name, exc))
             try:
                 if self.rig is not None:
-                    self.rig.close()
+                    try:
+                        self.rig.close()
+                    except LeaseTimeout as exc:
+                        self.fatal_shutdown(str(exc))
             finally:
                 if self.audio is not None:
-                    self.audio.close()
+                    try:
+                        self.audio.close()
+                    except LeaseTimeout as exc:
+                        self.fatal_shutdown(str(exc))
             for name, exc in stubborn:
                 print(f"{name}: the lane would not come down ({exc})", file=sys.stderr)

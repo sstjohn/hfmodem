@@ -8,6 +8,9 @@
     hfmodem rig      FILE [--arm]       talk to the radio; --arm proves the PTT line
     hfmodem rig      FILE --preflight   measure the station before a session
     hfmodem station  FILE               run the station
+    hfmodem ale-list [ACTION ...]       the ALE monitoring list: who an address
+                                        is, who uses a frequency, an agency's
+                                        channels (fetched, and kept)
     hfmodem version
 
 Every verb that can key a transmitter refuses unless the station file says
@@ -131,6 +134,64 @@ def cmd_mail(args) -> int:
     return mail.run(args)
 
 
+def cmd_ale_list(args) -> int:
+    from hfmodem.bateleur.ale import directory as D
+    try:
+        d = D.load(args.source or None, refresh=args.refresh or args.action == "fetch")
+    except OSError as exc:
+        print(f"cannot load the ALE list from {args.source or D.DEFAULT_URL}: {exc}",
+              file=sys.stderr)
+        return 1
+    what = " ".join(args.args)
+    if args.action in ("summary", "fetch"):
+        print(d.summary())
+        return 0
+    if args.action == "who":
+        if not args.args:
+            print("ale-list who ADDRESS ...", file=sys.stderr)
+            return 2
+        for a in args.args:
+            hits = d.who(a)
+            print(f"{a.upper()}: " + ("not listed" if not hits else ""))
+            for e in hits:
+                print(f"  {e}" + (f"  [{e.source}]" if len(set(x.source for x in hits)) > 1 else ""))
+        return 0
+    if args.action == "freq":
+        for f in args.args:
+            k = float(f)
+            k = k / 1000 if k > 100_000 else k            # Hz or kHz
+            hits = d.at(k, args.tolerance)
+            print(f"{k:.1f} kHz: " + ("not listed" if not hits else ""))
+            for ag, fk, note in hits:
+                print(f"  {fk:.1f}  {ag.name}" + (f"  ({note})" if note else ""))
+        return 0
+    if args.action == "agency":
+        for ag in d.agency(what):
+            print(f"{ag.name}: {len(ag.freqs)} frequencies")
+            for n in ag.notes:
+                print(f"  {n}")
+        for e in d.stations_of(what)[:200]:
+            print(f"  station {e}")
+        return 0
+    if args.action == "channels":
+        # As [protocols.ale] channels takes them: dial frequencies in Hz.
+        ags = d.agency(what)
+        if not ags:
+            print(f"no agency matches {what!r}", file=sys.stderr)
+            return 1
+        for ag in ags:
+            hz = sorted({int(round(f * 1000)) for f, _ in ag.freqs})
+            print(f"# {ag.name}")
+            print(f"channels = [{', '.join(str(h) for h in hz)}]")
+        return 0
+    if args.action == "acronym":
+        for a in args.args:
+            print(f"{a}: {d.expand(a) or 'not listed'}")
+        return 0
+    print(f"unknown action {args.action!r}", file=sys.stderr)
+    return 2
+
+
 def cmd_version(args) -> int:
     print(__version__)
     return 0
@@ -139,6 +200,13 @@ def cmd_version(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hfmodem", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="verb", required=True)
+
+    console = sub.add_parser('console', help='operator console: setup, peers, calls and monitors', add_help=False)
+    console.add_argument('args', nargs=argparse.REMAINDER)
+    console.set_defaults(fn=lambda args: __import__('hfmodem.operator.bootstrap', fromlist=['console']).console(args.args))
+    winlink = sub.add_parser('winlink', help='guided PACTOR-3 or VARA Winlink mail session', add_help=False)
+    winlink.add_argument('args', nargs=argparse.REMAINDER)
+    winlink.set_defaults(fn=lambda args: __import__('hfmodem.operator.bootstrap', fromlist=['winlink']).winlink(args.args))
 
     sub.add_parser("devices", help="list sound cards").set_defaults(fn=cmd_devices)
 
@@ -202,11 +270,33 @@ def build_parser() -> argparse.ArgumentParser:
                    help="where received messages are written")
     m.set_defaults(fn=cmd_mail)
 
+    al = sub.add_parser(
+        "ale-list", help="the ALE monitoring list: addresses, frequencies, agencies",
+        description="Read the ALE monitoring community's list (by default "
+                    "ominous-valve.com/ale-list.txt, fetched and kept in "
+                    "~/.cache/hfmodem) and answer from it.")
+    al.add_argument("action", nargs="?", default="summary",
+                    choices=["summary", "fetch", "who", "freq", "agency", "channels", "acronym"],
+                    help="summary; fetch (again); who ADDRESS...; freq KHZ...; agency TEXT; "
+                         "channels AGENCY (as [protocols.ale] channels); acronym WORD...")
+    al.add_argument("args", nargs="*")
+    al.add_argument("--source", action="append", default=None,
+                    help="a URL or file to read instead of the default list; "
+                         "repeat it to merge several (the ale-list text, or CSV "
+                         "rows kind,key,agency,description)")
+    al.add_argument("--refresh", action="store_true", help="fetch it again")
+    al.add_argument("--tolerance", type=float, default=0.5, help="kHz, for freq")
+    al.set_defaults(fn=cmd_ale_list)
+
     sub.add_parser("version").set_defaults(fn=cmd_version)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ('console', 'winlink'):
+        from hfmodem.operator import bootstrap
+        return getattr(bootstrap, argv[0])(argv[1:])
     args = build_parser().parse_args(argv)
     try:
         return args.fn(args)

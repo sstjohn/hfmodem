@@ -77,6 +77,21 @@ def test_control_flag_shapes_land_in_the_measured_fit_bands():
     assert fits[True, False] < .65 and fits[False, False] < .65
 
 
+@pytest.mark.skipif(not FIXTURE.exists(), reason='independent SCS CS6 recording absent')
+def test_crest_limited_control_fits_the_scs_burst_better(monkeypatch):
+    """`--p3-crest-limit` on the control burst, graded on the same real CS6.
+
+    The limiter takes 1.3-1.7 dB off the burst's peak-to-average ratio and the
+    fit goes UP: the real emitter's envelope is flatter than our unlimited sum.
+    """
+    unlimited = _fit(placement.control_signal(5, swapped=True))
+    for target, floor in ((6.0, .905), (5.0, .908)):
+        monkeypatch.setattr(placement, 'CREST_LIMIT_DB', target)
+        fit = _fit(placement.control_signal(5, swapped=True))
+        assert fit > unlimited + .005
+        assert fit >= floor
+
+
 def test_control_pulse_center_survives_trim_and_carrier_swap():
     for cs in range(6):
         for swapped in (False, True):

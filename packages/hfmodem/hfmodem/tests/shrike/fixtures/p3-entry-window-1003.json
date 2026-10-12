@@ -1,0 +1,1961 @@
+[
+  {
+    "arm": "1003-0004",
+    "d_ms": 105,
+    "rows": [
+      {
+        "tx": "tx_15.json",
+        "slot": 14,
+        "hold": "hold_07.json",
+        "origin": 883427,
+        "end": 899456,
+        "nominal": 893835,
+        "until": 900948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_16.json",
+        "slot": 15,
+        "hold": "hold_08.json",
+        "origin": 943427,
+        "end": 959488,
+        "nominal": 953835,
+        "until": 960980,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_17.json",
+        "slot": 16,
+        "hold": "hold_09.json",
+        "origin": 1003427,
+        "end": 1019392,
+        "nominal": 1013835,
+        "until": 1020884,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_18.json",
+        "slot": 17,
+        "hold": "hold_10.json",
+        "origin": 1063427,
+        "end": 1079424,
+        "nominal": 1073835,
+        "until": 1080916,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_19.json",
+        "slot": 18,
+        "hold": "hold_11.json",
+        "origin": 1123427,
+        "end": 1139456,
+        "nominal": 1133835,
+        "until": 1140948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_20.json",
+        "slot": 19,
+        "hold": "hold_12.json",
+        "origin": 1183427,
+        "end": 1199488,
+        "nominal": 1193835,
+        "until": 1200980,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_21.json",
+        "slot": 20,
+        "hold": "hold_13.json",
+        "origin": 1243427,
+        "end": 1259392,
+        "nominal": 1253835,
+        "until": 1260884,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_22.json",
+        "slot": 21,
+        "hold": "hold_14.json",
+        "origin": 1303427,
+        "end": 1319424,
+        "nominal": 1313835,
+        "until": 1320916,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_23.json",
+        "slot": 22,
+        "hold": "hold_15.json",
+        "origin": 1363427,
+        "end": 1379456,
+        "nominal": 1373835,
+        "until": 1380948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      }
+    ],
+    "sha256": {
+      "hold_07.json": "b430119582784443ecd23796dec5bcaab557a0d1bb44e16f088a2b84a13f3b24",
+      "hold_08.json": "c034118dc3503a8c022c7d80ed77505aa083c223a1f8abcc3d287d5ba06abce9",
+      "hold_09.json": "f3cea44daf9c3f57ed2b9bfb6366b67a24e933f623917401281c338e04040eb1",
+      "hold_10.json": "53e7a58cb1f54e567ae6d90f65d7bbba262b50bf647a1e97a9d71c1f4710195d",
+      "hold_11.json": "c20b57c185eed4fbb8d85ae34fd4c6405cb776108fad6fa81c3870fec848ed2a",
+      "hold_12.json": "20aff28995c75f0c30b3eb9b03590be86e273c11a89643c33b6f7783975b71ea",
+      "hold_13.json": "32cb1e7cd8db8c22a5d77ecb5d2ce5d94c6f4aa00fee7cd4099a7a245e640dc4",
+      "hold_14.json": "7c64732364ed258d0c3769d1acfcc306c943803e66908e59d77faf43249f7f74",
+      "hold_15.json": "5a987b10a57b1cec8549a4bea57897168ee906d70eeb7ab871ccafca571ed627",
+      "stream.flac": "f81d67d1c648cdc0b1d4bf630fe200442eefe7d87681fb0165c3fc5b039d740e",
+      "stream.json": "2a884db58e0738651d30fb72602aa262dec11c6b9a6119eeb13694edc3eed11b",
+      "tx_15.json": "cd0c24cf138962de44701c4c90bb9c429edde35b9d7f27cf8cb625f6be19015a",
+      "tx_16.json": "77dea0a07a562137c6d08984bb4cdaf84de12204035dcd2661121367af5df21f",
+      "tx_17.json": "3c02f701936bacc30709133b0a5b2819c8e8bddbfa0284e4d52cadba973be1f7",
+      "tx_18.json": "9a5783d37efb991692f5fa65c3fe4f94912e78cf55698f54830f37ab8c16317a",
+      "tx_19.json": "7d133252e10021eafd5e24e8ae939c9bcd7280e7ab97862dc00df23caeaf561c",
+      "tx_20.json": "279c62928bd9216c271c0b68ed7af3e210a3eeb6e79be002f792522e4f47e58e",
+      "tx_21.json": "77147450308756adf59a8be11f4b22e00130c159ebeb78b21fdbd263693ce96c",
+      "tx_22.json": "7be7713b5b8ad9316392d65e6bacd1a4d8134903265efd9b2e106152b872ee84",
+      "tx_23.json": "7cef8c89c65d83ddea6a2e6bfbe83644c3d143460798ae7fa72ec4ef6e286f7d",
+      "witness.json": "a517c3afd49191738d70b18823ade96ef951e072c8e65f479c9b42bd88ecab04",
+      "witness.wav": "520640e559d129a4425f6b81ab12be24b7c61383a9eac855cfb46a2acac0a718"
+    }
+  },
+  {
+    "arm": "1003-0007",
+    "d_ms": 109,
+    "rows": [
+      {
+        "tx": "tx_14.json",
+        "slot": 13,
+        "hold": "hold_08.json",
+        "origin": 823444,
+        "end": 839424,
+        "nominal": 834044,
+        "until": 840916,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_15.json",
+        "slot": 14,
+        "hold": "hold_09.json",
+        "origin": 883444,
+        "end": 899456,
+        "nominal": 894044,
+        "until": 900948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_16.json",
+        "slot": 15,
+        "hold": "hold_10.json",
+        "origin": 943444,
+        "end": 959488,
+        "nominal": 954044,
+        "until": 960980,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_17.json",
+        "slot": 16,
+        "hold": "hold_11.json",
+        "origin": 1003444,
+        "end": 1019520,
+        "nominal": 1014044,
+        "until": 1021012,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_18.json",
+        "slot": 17,
+        "hold": "hold_12.json",
+        "origin": 1063444,
+        "end": 1079424,
+        "nominal": 1074044,
+        "until": 1080916,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_19.json",
+        "slot": 18,
+        "hold": "hold_13.json",
+        "origin": 1123444,
+        "end": 1139456,
+        "nominal": 1134044,
+        "until": 1140948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_20.json",
+        "slot": 19,
+        "hold": "hold_14.json",
+        "origin": 1183444,
+        "end": 1199488,
+        "nominal": 1194044,
+        "until": 1200980,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_21.json",
+        "slot": 20,
+        "hold": "hold_15.json",
+        "origin": 1243444,
+        "end": 1259520,
+        "nominal": 1254044,
+        "until": 1261012,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_22.json",
+        "slot": 21,
+        "hold": "hold_16.json",
+        "origin": 1303444,
+        "end": 1319424,
+        "nominal": 1314044,
+        "until": 1320916,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      }
+    ],
+    "sha256": {
+      "hold_08.json": "bf01fb225f394cc4babe31ff12f9cdfd9846c41b461e9911ee6a8c97de591f32",
+      "hold_09.json": "b0ad3b2f364822bec89465a8041f305672dc5096d4a49421b8e0eb45f4babef1",
+      "hold_10.json": "24b58dd839d40906f21e2c7321ccfd67152798d5feeffa2493a5a61045d9c29c",
+      "hold_11.json": "7eb489fb00bf5125b2d7fe489445c4fa046dc38afd2e056039c9c40cfae2285b",
+      "hold_12.json": "fdbf1f2f2d03c6020d0165caa506c929114e4fd660938f7e8ab10459558d0302",
+      "hold_13.json": "5a7cecacafd8f4d2d93bbec2b2c91da8271f4c7c9c6218239d108fcc923988a7",
+      "hold_14.json": "d2eeed220a16adb7cb8eef1e3e4d446e0b9bd3a3eff8e0c75d7ebcf825a1b724",
+      "hold_15.json": "1c2b73d565aef9dfc62779db32656dcd018227e7f701d67166e1d051363b0f34",
+      "hold_16.json": "0d780a4afb623e3b808093d7337c3defb6f271b5db4a7e3a8b1524bebc447002",
+      "stream.flac": "4c8e931facfab000d21a2571abcb41c56f811124c5ed7767f738bdc5f7ca02c9",
+      "stream.json": "e754833dea166f66a0f25faf59123a5c482766cba59bec988c0b4deb768c106d",
+      "tx_14.json": "4bd4df27435c11304d37a9aed77cd59e20de8772a7b910e023944a2d5390da2a",
+      "tx_15.json": "fa13e19fcdef5b053049e651187824b64218bf6ebddb276e9a56809dc705dd99",
+      "tx_16.json": "22026f57bb523c3b91d722dbda91ceb129f02e5b5a0a2e94c76b65016eff7a85",
+      "tx_17.json": "673e3300807d0e766d498e615b5c4763586661ceb7749d955a582efbd0450314",
+      "tx_18.json": "689d5c73ef5b20b2f357988fde91ce6fb2e71ed806f0b7d31a87205e5ba205ca",
+      "tx_19.json": "68ac4552e4241ca6affff9b4ba71d979f340fda7e359e4d467f28c8a61cb00c6",
+      "tx_20.json": "8127fa080ebe48adc96cd24c39948a82bbbf489867c61940ef27563641ed67b5",
+      "tx_21.json": "b52ba904965b673f587b61a6b6f89dd1d6aa4b22a6cbef27fc4371fe7a0052dd",
+      "tx_22.json": "ee5e293cfa33de044a619a32cd466786c9959c4397b39364fbe21eb60dc1dd5a",
+      "witness.json": "a831c5d861a83546d028d3fabdecdd91df1c6fc295b566e6f8f2f97d2d65ab95",
+      "witness.wav": "0aae963729ade7c94dce062d531f56feb019842cc21899bcfd169c9bc2a8380a"
+    }
+  },
+  {
+    "arm": "1003-0008",
+    "d_ms": 114,
+    "rows": [
+      {
+        "tx": "tx_16.json",
+        "slot": 15,
+        "hold": "hold_05.json",
+        "origin": 943448,
+        "end": 959488,
+        "nominal": 954288,
+        "until": 960980,
+        "new_events": [
+          [
+            "cs",
+            3,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_17.json",
+        "slot": 16,
+        "hold": "hold_06.json",
+        "origin": 1003448,
+        "end": 1019520,
+        "nominal": 1014288,
+        "until": 1021012,
+        "new_events": [
+          [
+            "cs",
+            3,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_18.json",
+        "slot": 17,
+        "hold": "hold_07.json",
+        "origin": 1063448,
+        "end": 1079424,
+        "nominal": 1074288,
+        "until": 1080916,
+        "new_events": [
+          [
+            "cs",
+            3,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_19.json",
+        "slot": 18,
+        "hold": "hold_08.json",
+        "origin": 1123448,
+        "end": 1139456,
+        "nominal": 1134288,
+        "until": 1140948,
+        "new_events": [
+          [
+            "cs",
+            3,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_20.json",
+        "slot": 19,
+        "hold": "hold_09.json",
+        "origin": 1183448,
+        "end": 1199488,
+        "nominal": 1194288,
+        "until": 1200980,
+        "new_events": [
+          [
+            "cs",
+            3,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_21.json",
+        "slot": 20,
+        "hold": "hold_10.json",
+        "origin": 1243448,
+        "end": 1259520,
+        "nominal": 1254288,
+        "until": 1261012,
+        "new_events": [
+          [
+            "cs",
+            3,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_22.json",
+        "slot": 21,
+        "hold": "hold_11.json",
+        "origin": 1303448,
+        "end": 1319424,
+        "nominal": 1314288,
+        "until": 1320916,
+        "new_events": [
+          [
+            "cs",
+            0,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_23.json",
+        "slot": 22,
+        "hold": "hold_12.json",
+        "origin": 1363448,
+        "end": 1379456,
+        "nominal": 1374288,
+        "until": 1380948,
+        "new_events": [
+          [
+            "cs",
+            4,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_24.json",
+        "slot": 23,
+        "hold": "hold_13.json",
+        "origin": 1423448,
+        "end": 1439488,
+        "nominal": 1434288,
+        "until": 1440980,
+        "new_events": [
+          [
+            "cs",
+            2,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      }
+    ],
+    "sha256": {
+      "hold_05.json": "4d783bbfe70145e0a61f1e9b768a9d1ae6096ea5214dbd747b64904be6d0e03f",
+      "hold_06.json": "6e5c42a6235ba11bcbe29a00c38438a320f82816017c2ac0af3d533ecbab997b",
+      "hold_07.json": "646d48011ce78c852bd1decb522c10c809a42db31a74e717cd9f29fafa623cdd",
+      "hold_08.json": "ea14c10c31439e625b6327af7f40ae0487190c610c0fa0c43e62054a601526dd",
+      "hold_09.json": "f6fa28bb3bbac0a1e05d36a8b52f7ee8ee81d9d24e417ebeac20c8551dcbd6ee",
+      "hold_10.json": "1176c9b3e12780ea114b9ef32567217226d2fe5b953532b19f63b4386538b000",
+      "hold_11.json": "76419369b7f0329fc71321882ac5adc67ce4990b1d8ca4f9dd90e863badcb09d",
+      "hold_12.json": "5a5d304e06dcecabe6f8b4436c1e3cfdfd5bb615ad1b22f2ae5f5c68ebce488c",
+      "hold_13.json": "ce2e672c75c221db9d93c3ed33fce03ab277998bf523767a9749ceb30873f653",
+      "stream.flac": "3b054d8ad18ff610a75aa661781ef13f7828c51cc3fd2e96beb0a058bf7985aa",
+      "stream.json": "ce7e992ccfd21c79d0fec94c1423940da6b6314b0b348952c4378f6a3a1c863d",
+      "tx_16.json": "fa7bc4c0d56c90f44e4405d11292449328fba4d093f8ecf1439f42e15c2c1e8a",
+      "tx_17.json": "3fef13d8f3305cee8e2338bd0aee2427ccd3b951907d2ec0f3e88e2158ca038d",
+      "tx_18.json": "ceb927396b5fd15815008dc15e0b74a565401d3998fa50a694d63c7270a1d897",
+      "tx_19.json": "acaa33067a1dbbd4614ab68bd32a862fe0c385e18443d7446238aea70e17cac0",
+      "tx_20.json": "97026d9cc264c9a0663bce5858f2572470969ab9541b4a462244c4b077fe42a3",
+      "tx_21.json": "f5060bcaffb49651f0b6cca7cf48ca37f5f35d4e8a2c77ecaecbc55329dc89c2",
+      "tx_22.json": "4653e160a7b707ca7014a3806ffa2525f551af46d1f98fac01dff82b4caf9478",
+      "tx_23.json": "b128e46e82ca842c9d1911514536702d97198f76c5b782c416dfa3c2867d2a22",
+      "tx_24.json": "ba5379e7eba77cb5c95262b4dc904578783b5aa9790a06be2bd9125908660b9f"
+    }
+  },
+  {
+    "arm": "1003-0010",
+    "d_ms": 113,
+    "rows": [
+      {
+        "tx": "tx_13.json",
+        "slot": 12,
+        "hold": "hold_06.json",
+        "origin": 763451,
+        "end": 779520,
+        "nominal": 774243,
+        "until": 781012,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_14.json",
+        "slot": 13,
+        "hold": "hold_07.json",
+        "origin": 823451,
+        "end": 839424,
+        "nominal": 834243,
+        "until": 840916,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_15.json",
+        "slot": 14,
+        "hold": "hold_08.json",
+        "origin": 883451,
+        "end": 899456,
+        "nominal": 894243,
+        "until": 900948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_16.json",
+        "slot": 15,
+        "hold": "hold_09.json",
+        "origin": 943451,
+        "end": 959488,
+        "nominal": 954243,
+        "until": 960980,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_17.json",
+        "slot": 16,
+        "hold": "hold_10.json",
+        "origin": 1003451,
+        "end": 1019520,
+        "nominal": 1014243,
+        "until": 1021012,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_18.json",
+        "slot": 17,
+        "hold": "hold_11.json",
+        "origin": 1063451,
+        "end": 1079424,
+        "nominal": 1074243,
+        "until": 1080916,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_19.json",
+        "slot": 18,
+        "hold": "hold_12.json",
+        "origin": 1123451,
+        "end": 1139456,
+        "nominal": 1134243,
+        "until": 1140948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_20.json",
+        "slot": 19,
+        "hold": "hold_13.json",
+        "origin": 1183451,
+        "end": 1199488,
+        "nominal": 1194243,
+        "until": 1200980,
+        "new_events": [
+          [
+            "cs",
+            0,
+            null,
+            "PACTOR-3"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_21.json",
+        "slot": 20,
+        "hold": "hold_14.json",
+        "origin": 1243451,
+        "end": 1259520,
+        "nominal": 1254243,
+        "until": 1261012,
+        "new_events": []
+      }
+    ],
+    "sha256": {
+      "hold_06.json": "67cb1756d452865012b95e4991d24014d510c236d8821e248a46ee2d0be5bf03",
+      "hold_07.json": "c29fa96c1b225a2c75aab5711958aa025b2e17e7ba59fecbcf9a61c38463a9f2",
+      "hold_08.json": "d917b5658a10a479ed0fcf5c76f4f48fab0f164df493b83b0c896247972c7ced",
+      "hold_09.json": "4bfebc3f64108666b90924abef383285306255c29c9c17278e7c0fd4964bd424",
+      "hold_10.json": "6b281f2ba0674f0d910b9cec30091f53467dd11e46252524522df65a9dc8d707",
+      "hold_11.json": "30099c660602de8aae872fae4e364de85a0bab9d6ee761b7d3c4a30f870144c1",
+      "hold_12.json": "1cbb9ca02a0e5fe560f0da491ee896ad20693d83a156bd1884bcb87cf0afba8a",
+      "hold_13.json": "4c3fc22e3fe223a73b370ccc6e5a555e21217a19b0fc400e7bfbef2f2787b84f",
+      "hold_14.json": "4bf74886f0e995a896f28521cf46a697ee57f930c75632e477dc7488796ce10b",
+      "stream.flac": "d24ad94c67a4c90913caa418dfba33c33e9a0a4396abde602cef67cb8c342f90",
+      "stream.json": "d8570a63987d611b3430282f26311629be7359ca2b4dede0a23c31ab2a8823e3",
+      "tx_13.json": "99f615211fb32d7ca20d473388837a7639a899564f171f6090f8b569d08c5d2a",
+      "tx_14.json": "9b213a13e5d11eb4e2eeec3f09a96b1075095dab91c20bb59e537275642f8b3e",
+      "tx_15.json": "d2799d307b092924629ce249b688cf207e8f89e2ab30256fc8ea1db15ffb0996",
+      "tx_16.json": "31458d4ee51d5d48b60adad0c234137063ce75362491b98f737d338aec9db266",
+      "tx_17.json": "bb6932e399fd869fb3c054bc1b53e32544cd3079e44170716b04ab8e6d41f4b4",
+      "tx_18.json": "3a956cf75d94ed68866db3be6519eae3beb7b77bfc305235616429e0b586184d",
+      "tx_19.json": "b97d2fee5d1e95e02c5a08dfcff7ff5dd2df8164a2570f5cfa37d926fdce4759",
+      "tx_20.json": "26209bae0a64e600701665ec986436c161ed0f60b07bfda2824535049f21f789",
+      "tx_21.json": "b85cf6e7b4f0ef62b0406882a7805e71c9b8368c8fea42accaf5ce728daa8a4d"
+    }
+  },
+  {
+    "arm": "1003-0012",
+    "d_ms": 110,
+    "rows": [
+      {
+        "tx": "tx_10.json",
+        "slot": 9,
+        "hold": "hold_04.json",
+        "origin": 583451,
+        "end": 599424,
+        "nominal": 594099,
+        "until": 600916,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_11.json",
+        "slot": 10,
+        "hold": "hold_05.json",
+        "origin": 643451,
+        "end": 659456,
+        "nominal": 654099,
+        "until": 660948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_12.json",
+        "slot": 11,
+        "hold": "hold_06.json",
+        "origin": 703451,
+        "end": 719488,
+        "nominal": 714099,
+        "until": 720980,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_13.json",
+        "slot": 12,
+        "hold": "hold_07.json",
+        "origin": 763451,
+        "end": 779520,
+        "nominal": 774099,
+        "until": 781012,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_14.json",
+        "slot": 13,
+        "hold": "hold_08.json",
+        "origin": 823451,
+        "end": 839424,
+        "nominal": 834099,
+        "until": 840916,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_15.json",
+        "slot": 14,
+        "hold": "hold_09.json",
+        "origin": 883451,
+        "end": 899456,
+        "nominal": 894099,
+        "until": 900948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_16.json",
+        "slot": 15,
+        "hold": "hold_10.json",
+        "origin": 943451,
+        "end": 959488,
+        "nominal": 954099,
+        "until": 960980,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_17.json",
+        "slot": 16,
+        "hold": "hold_11.json",
+        "origin": 1003451,
+        "end": 1019520,
+        "nominal": 1014099,
+        "until": 1021012,
+        "new_events": []
+      },
+      {
+        "tx": "tx_18.json",
+        "slot": 17,
+        "hold": "hold_12.json",
+        "origin": 1063451,
+        "end": 1079424,
+        "nominal": 1074099,
+        "until": 1080916,
+        "new_events": []
+      }
+    ],
+    "sha256": {
+      "hold_04.json": "f5334afe94b04bab8dbc962612ab7441a6929351d3aa21b5b14a9102ebb05a03",
+      "hold_05.json": "e1d4dff861c84e9ba467ab54f74e6e4202e43669b4cdbdfc483c259eb6cfd634",
+      "hold_06.json": "67a5092cd9611126d4935dd3fb58b5f1b7d8b2fa896d3fa7efa7911d5526c0b6",
+      "hold_07.json": "bbb0e6cc49d4038fbfbc239b8cacfaa4a9d789f33b392e21ed8fd95046cec7d0",
+      "hold_08.json": "e08b00ded940fab7a4ebbdb3b9a9f5eaf1b23e6136b2d78145ea86daa48df85a",
+      "hold_09.json": "a22c6bda9e2b506f2a2da4d94ff451733493623feeab5a38ff82cf833b2e7511",
+      "hold_10.json": "d934ba6ae2072e3a0c87b63365508a512ba8400d0623cf7261f372d4319d7675",
+      "hold_11.json": "01f9ab1d3a180f1ead84eea2a2efc33e675a1b77e304e089da182060d2af0596",
+      "hold_12.json": "f200db90ea6f0fb993ed06c3bc818693c85a2493fe3f21e0ac2249f5c48c3cb1",
+      "stream.flac": "6fc08964bd34c8892d5a871147313e56ef52615582086e4cb78033337adb5024",
+      "stream.json": "3e2862314ce0e40cc0007d897ac6fd69112c25594857065caa3bcc00730553f3",
+      "tx_10.json": "ca773bfb28112346ddc6cb60e7d9cbaedf7201df800d87a27b5b3c058fe74523",
+      "tx_11.json": "f338655aea555f0cd45c83d6e9dfcd1c5e7b47bf641965d046d9d49b021386cd",
+      "tx_12.json": "24d589ed636203dab40b5c8fd52bb909f54f41b9b552dba8faf9c90fa4a39282",
+      "tx_13.json": "9bddbf4a03f21a44a146071eb80b1b5679d0e93172cc1613ea738659775bf9a1",
+      "tx_14.json": "6b2f5992454b05c3b409a669eaacea1202d16dff763a89b8d37040186fda64d3",
+      "tx_15.json": "e022770b9d5151b30a585884ef4228c204fd01f28e61d83f0fff6cab635ba71a",
+      "tx_16.json": "31458d4ee51d5d48b60adad0c234137063ce75362491b98f737d338aec9db266",
+      "tx_17.json": "7e0bffc13e7ab4345c8fd4d7a84ca15e29729d15e4b09620dc304b90565a1fee",
+      "tx_18.json": "2755323662f4a4b9a1a4faf6def4ccbf2f7e698a29938ccbbbce18782d0a2d94"
+    }
+  },
+  {
+    "arm": "1003-0000",
+    "d_ms": 107,
+    "rows": [
+      {
+        "tx": "tx_07.json",
+        "slot": 6,
+        "hold": "hold_03.json",
+        "origin": 403446,
+        "end": 419456,
+        "nominal": 413950,
+        "until": 420948,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_08.json",
+        "slot": 7,
+        "hold": "hold_04.json",
+        "origin": 463446,
+        "end": 479488,
+        "nominal": 473950,
+        "until": 480980,
+        "new_events": [
+          [
+            "unassigned",
+            null,
+            5,
+            "PACTOR-1"
+          ]
+        ]
+      },
+      {
+        "tx": "tx_09.json",
+        "slot": 8,
+        "hold": "hold_05.json",
+        "origin": 523446,
+        "end": 568006,
+        "nominal": 533950,
+        "until": 569498,
+        "new_events": []
+      }
+    ],
+    "sha256": {
+      "hold_03.json": "bc95acf70b62a922faa54dc7b341ccefbfda6fb5817e42067d006ae5f2e1475d",
+      "hold_04.json": "1a9d1130d07bc4610ccf3fd6542cf849032e48c1e503ef303ee0c92f715a12e7",
+      "hold_05.json": "faf37d101d63faf0041518fc40f4e953f6c9363fd68efee439191deac7581900",
+      "stream.flac": "ca7c10386adc5757124640c4c384cedb22142a0f06a7280ba7482672853cd192",
+      "stream.json": "cd66fe766d9408187a918d3df6fa2135b317472f262473c35fff9d310f147bc4",
+      "tx_07.json": "decb14273f289535e1924e8f279b4e0e5c97df9ede1b38c28c0b9a923760fa5c",
+      "tx_08.json": "54982d5a613a0040a78e70177cdd9eca86c940eb123fe1fd13d233d1d4a66a7f",
+      "tx_09.json": "1e99af37d8e4ec91baa78e2e87a09eb7637d765ad228e34f5d6394cb24457779",
+      "witness.json": "1885072656385012a2ad2364b38d1285c3b02cf790679661d1ea0d2106ee9f08",
+      "witness.wav": "f24bc516f9585fdef3ec5f0b8d56dfbc60782826947ac445610b60ffc1f8ee02"
+    },
+    "mail_replay": {
+      "rows": [
+        [
+          529386,
+          1,
+          -14.5
+        ],
+        [
+          589386,
+          1,
+          -14.5
+        ],
+        [
+          653706,
+          1,
+          -14.5
+        ],
+        [
+          713706,
+          1,
+          -14.5
+        ],
+        [
+          773706,
+          1,
+          -14.5
+        ],
+        [
+          833706,
+          2,
+          -14.5
+        ],
+        [
+          893586,
+          2,
+          -14.5
+        ],
+        [
+          953706,
+          2,
+          -14.5
+        ],
+        [
+          1013826,
+          3,
+          -14.5
+        ],
+        [
+          1073706,
+          2,
+          -14.5
+        ],
+        [
+          1133706,
+          2,
+          -14.5
+        ],
+        [
+          1253706,
+          2,
+          -14.5
+        ],
+        [
+          2298312,
+          1,
+          -14.7
+        ],
+        [
+          2358312,
+          1,
+          -14.7
+        ],
+        [
+          2422632,
+          1,
+          -14.7
+        ],
+        [
+          2482512,
+          1,
+          -14.7
+        ],
+        [
+          2542512,
+          1,
+          -14.7
+        ],
+        [
+          2602632,
+          2,
+          -14.7
+        ],
+        [
+          2662632,
+          2,
+          -14.7
+        ],
+        [
+          2782632,
+          3,
+          -14.7
+        ],
+        [
+          2842446,
+          2,
+          -14.7
+        ],
+        [
+          2902566,
+          2,
+          -14.7
+        ],
+        [
+          3082686,
+          2,
+          -14.7
+        ],
+        [
+          3202566,
+          2,
+          -14.7
+        ],
+        [
+          3407236,
+          1,
+          -14.6
+        ],
+        [
+          3467198,
+          1,
+          -13.7
+        ],
+        [
+          3531518,
+          1,
+          -13.7
+        ],
+        [
+          3591518,
+          1,
+          -13.7
+        ],
+        [
+          3651398,
+          1,
+          -13.7
+        ],
+        [
+          3711518,
+          1,
+          -13.7
+        ],
+        [
+          3771398,
+          1,
+          -13.7
+        ],
+        [
+          3831518,
+          1,
+          -13.7
+        ],
+        [
+          3891398,
+          2,
+          -13.7
+        ],
+        [
+          3951398,
+          2,
+          -13.7
+        ],
+        [
+          4011398,
+          2,
+          -13.7
+        ],
+        [
+          4191278,
+          2,
+          -13.7
+        ],
+        [
+          4251398,
+          2,
+          -13.7
+        ],
+        [
+          4311398,
+          2,
+          -13.7
+        ],
+        [
+          4371398,
+          2,
+          -13.7
+        ],
+        [
+          4671518,
+          2,
+          -13.7
+        ],
+        [
+          4791518,
+          3,
+          -13.7
+        ],
+        [
+          4851518,
+          3,
+          -13.7
+        ],
+        [
+          4911518,
+          3,
+          -13.7
+        ],
+        [
+          4971518,
+          3,
+          -13.7
+        ],
+        [
+          5031638,
+          3,
+          -13.7
+        ],
+        [
+          5091518,
+          3,
+          -13.7
+        ],
+        [
+          5151518,
+          3,
+          -13.7
+        ],
+        [
+          5211518,
+          3,
+          -13.7
+        ],
+        [
+          5271518,
+          3,
+          -13.7
+        ],
+        [
+          5331518,
+          3,
+          -13.7
+        ],
+        [
+          5391518,
+          3,
+          -13.7
+        ],
+        [
+          5451518,
+          3,
+          -13.7
+        ],
+        [
+          5511518,
+          3,
+          -13.7
+        ],
+        [
+          5571638,
+          3,
+          -13.7
+        ],
+        [
+          5631518,
+          3,
+          -13.7
+        ],
+        [
+          5691638,
+          3,
+          -13.7
+        ],
+        [
+          5751638,
+          3,
+          -13.7
+        ],
+        [
+          5811518,
+          3,
+          -13.7
+        ],
+        [
+          5871638,
+          3,
+          -13.7
+        ],
+        [
+          5931638,
+          3,
+          -13.7
+        ],
+        [
+          5991638,
+          3,
+          -13.7
+        ],
+        [
+          6051638,
+          3,
+          -13.7
+        ],
+        [
+          6111638,
+          3,
+          -13.7
+        ],
+        [
+          6171638,
+          3,
+          -13.7
+        ],
+        [
+          6231638,
+          3,
+          -13.7
+        ],
+        [
+          6291638,
+          3,
+          -13.7
+        ],
+        [
+          6351638,
+          3,
+          -13.7
+        ],
+        [
+          6411638,
+          3,
+          -13.7
+        ],
+        [
+          6471638,
+          3,
+          -13.7
+        ],
+        [
+          6531638,
+          3,
+          -13.7
+        ],
+        [
+          6591638,
+          3,
+          -13.7
+        ],
+        [
+          6651638,
+          3,
+          -13.7
+        ],
+        [
+          6711638,
+          3,
+          -13.7
+        ],
+        [
+          6771638,
+          3,
+          -13.7
+        ],
+        [
+          6831638,
+          3,
+          -13.7
+        ],
+        [
+          6891638,
+          3,
+          -13.7
+        ],
+        [
+          6951638,
+          3,
+          -13.7
+        ],
+        [
+          7011638,
+          3,
+          -13.7
+        ],
+        [
+          7071638,
+          3,
+          -13.7
+        ],
+        [
+          7131638,
+          3,
+          -13.7
+        ],
+        [
+          7191638,
+          3,
+          -13.7
+        ],
+        [
+          7251638,
+          3,
+          -13.7
+        ],
+        [
+          7311638,
+          3,
+          -13.7
+        ],
+        [
+          7371638,
+          3,
+          -13.7
+        ],
+        [
+          7431638,
+          3,
+          -13.7
+        ],
+        [
+          7696174,
+          1,
+          -14.0
+        ],
+        [
+          7756174,
+          1,
+          -14.0
+        ],
+        [
+          7820374,
+          1,
+          -14.0
+        ],
+        [
+          7880494,
+          1,
+          -14.0
+        ],
+        [
+          7940494,
+          1,
+          -14.0
+        ]
+      ],
+      "packets_sha256": "d0267d4b9dfe74419e1f0c37da96c313f5724cbb86bd575fd487856eb90d57df",
+      "payload_bytes": 3103
+    }
+  },
+  {
+    "arm": "1002-2349",
+    "d_ms": 83,
+    "rows": [
+      {
+        "tx": "tx_19.json",
+        "slot": 18,
+        "hold": "hold_03.json",
+        "origin": 1123453,
+        "end": 1168013,
+        "nominal": 1132805,
+        "until": 1169505,
+        "new_events": []
+      }
+    ],
+    "sha256": {
+      "hold_03.json": "c9e593a92b279d9dcc016fa0f18f63dfd081b9155c075071298631756d100609",
+      "stream.flac": "91f537a14aca60f13a52590a39315329657a6d6451029bf82952bc48fb2a48c9",
+      "stream.json": "405f3802e3ce67a0d7efee9527cca935240041e73af9a6b3b63c929e34a6cbb2",
+      "tx_19.json": "8078cc6deb5f8babd7e62fac2ddc199118df33e5347bed45910118b6c3badc9c"
+    },
+    "mail_replay": {
+      "rows": [
+        [
+          1129333,
+          1,
+          -12.9
+        ],
+        [
+          1189309,
+          1,
+          -12.7
+        ],
+        [
+          1253629,
+          1,
+          -12.7
+        ],
+        [
+          1313509,
+          1,
+          -12.7
+        ],
+        [
+          1373629,
+          1,
+          -12.7
+        ],
+        [
+          1673629,
+          1,
+          -12.7
+        ],
+        [
+          1733629,
+          1,
+          -12.7
+        ],
+        [
+          1793629,
+          1,
+          -12.7
+        ],
+        [
+          1973509,
+          1,
+          -12.7
+        ],
+        [
+          2093509,
+          1,
+          -12.7
+        ],
+        [
+          2153509,
+          1,
+          -12.7
+        ],
+        [
+          2213629,
+          1,
+          -12.7
+        ],
+        [
+          2273749,
+          1,
+          -12.7
+        ],
+        [
+          2393749,
+          1,
+          -12.7
+        ],
+        [
+          2513629,
+          1,
+          -12.7
+        ],
+        [
+          2573509,
+          1,
+          -12.7
+        ],
+        [
+          2633509,
+          1,
+          -12.7
+        ],
+        [
+          2693509,
+          1,
+          -12.7
+        ],
+        [
+          2753509,
+          1,
+          -12.7
+        ],
+        [
+          2813509,
+          1,
+          -12.7
+        ],
+        [
+          2873509,
+          1,
+          -12.7
+        ],
+        [
+          2933509,
+          1,
+          -12.7
+        ],
+        [
+          3113509,
+          1,
+          -12.7
+        ],
+        [
+          3173509,
+          1,
+          -12.7
+        ],
+        [
+          3233509,
+          1,
+          -12.7
+        ],
+        [
+          3293509,
+          1,
+          -12.7
+        ],
+        [
+          3413509,
+          1,
+          -12.7
+        ],
+        [
+          3473509,
+          1,
+          -12.7
+        ],
+        [
+          3533509,
+          1,
+          -12.7
+        ],
+        [
+          3593389,
+          1,
+          -12.7
+        ],
+        [
+          3653509,
+          1,
+          -12.7
+        ],
+        [
+          3773509,
+          1,
+          -12.7
+        ],
+        [
+          3893509,
+          1,
+          -12.7
+        ],
+        [
+          3953509,
+          1,
+          -12.7
+        ],
+        [
+          4013509,
+          1,
+          -12.7
+        ],
+        [
+          4073509,
+          1,
+          -12.7
+        ],
+        [
+          4133389,
+          1,
+          -12.7
+        ],
+        [
+          4193509,
+          1,
+          -12.7
+        ],
+        [
+          4253509,
+          1,
+          -12.7
+        ],
+        [
+          4313509,
+          1,
+          -12.7
+        ],
+        [
+          4373389,
+          1,
+          -12.7
+        ],
+        [
+          4433389,
+          1,
+          -12.7
+        ],
+        [
+          4493389,
+          1,
+          -12.7
+        ],
+        [
+          4553389,
+          1,
+          -12.7
+        ],
+        [
+          4613509,
+          1,
+          -12.7
+        ],
+        [
+          4673389,
+          1,
+          -12.7
+        ],
+        [
+          4733509,
+          1,
+          -12.7
+        ],
+        [
+          4853509,
+          1,
+          -12.7
+        ],
+        [
+          4913629,
+          1,
+          -12.7
+        ],
+        [
+          5033509,
+          1,
+          -12.7
+        ],
+        [
+          5093509,
+          1,
+          -12.7
+        ],
+        [
+          5153389,
+          1,
+          -12.7
+        ],
+        [
+          5213389,
+          1,
+          -12.7
+        ],
+        [
+          5273389,
+          1,
+          -12.7
+        ],
+        [
+          5333509,
+          1,
+          -12.7
+        ],
+        [
+          5393389,
+          1,
+          -12.7
+        ],
+        [
+          5453509,
+          1,
+          -12.7
+        ],
+        [
+          5513509,
+          1,
+          -12.7
+        ],
+        [
+          5573545,
+          1,
+          -12.7
+        ],
+        [
+          5693545,
+          1,
+          -12.7
+        ],
+        [
+          5753545,
+          1,
+          -12.7
+        ],
+        [
+          5813305,
+          1,
+          -12.7
+        ],
+        [
+          5873305,
+          1,
+          -12.7
+        ],
+        [
+          5933425,
+          1,
+          -12.7
+        ],
+        [
+          5993305,
+          1,
+          -12.7
+        ],
+        [
+          6053425,
+          1,
+          -12.7
+        ],
+        [
+          6113425,
+          1,
+          -12.7
+        ],
+        [
+          6173425,
+          1,
+          -12.7
+        ],
+        [
+          6233545,
+          1,
+          -12.7
+        ],
+        [
+          6413545,
+          1,
+          -12.7
+        ],
+        [
+          6473425,
+          1,
+          -12.7
+        ],
+        [
+          6713545,
+          1,
+          -12.7
+        ],
+        [
+          6773425,
+          1,
+          -12.7
+        ],
+        [
+          6833545,
+          1,
+          -12.7
+        ],
+        [
+          6953545,
+          1,
+          -12.7
+        ],
+        [
+          7013425,
+          1,
+          -12.7
+        ],
+        [
+          7073425,
+          1,
+          -12.7
+        ],
+        [
+          7133425,
+          1,
+          -12.7
+        ],
+        [
+          7193305,
+          1,
+          -12.7
+        ],
+        [
+          7253425,
+          1,
+          -12.7
+        ],
+        [
+          7313425,
+          1,
+          -12.7
+        ],
+        [
+          7373425,
+          1,
+          -12.7
+        ],
+        [
+          7433545,
+          1,
+          -12.7
+        ],
+        [
+          7853425,
+          1,
+          -12.7
+        ],
+        [
+          7973425,
+          1,
+          -12.7
+        ],
+        [
+          9138050,
+          1,
+          -12.6
+        ],
+        [
+          9198050,
+          1,
+          -12.6
+        ],
+        [
+          9318050,
+          1,
+          -12.6
+        ],
+        [
+          9378050,
+          1,
+          -12.6
+        ],
+        [
+          9438050,
+          1,
+          -12.6
+        ],
+        [
+          9498050,
+          1,
+          -12.6
+        ],
+        [
+          9558050,
+          1,
+          -12.6
+        ],
+        [
+          9622130,
+          1,
+          -12.6
+        ],
+        [
+          9682130,
+          1,
+          -12.6
+        ],
+        [
+          9742130,
+          1,
+          -12.6
+        ],
+        [
+          9802130,
+          1,
+          -12.6
+        ],
+        [
+          9862250,
+          1,
+          -12.6
+        ],
+        [
+          9982250,
+          1,
+          -12.6
+        ],
+        [
+          10042130,
+          1,
+          -12.6
+        ],
+        [
+          10102250,
+          1,
+          -12.6
+        ],
+        [
+          10162250,
+          1,
+          -12.6
+        ],
+        [
+          10222130,
+          1,
+          -12.6
+        ],
+        [
+          10426751,
+          1,
+          -12.9
+        ],
+        [
+          10486751,
+          1,
+          -12.9
+        ],
+        [
+          10550951,
+          1,
+          -12.9
+        ]
+      ],
+      "packets_sha256": "9df8f76fd8e87cc95b4c93a8997aec6b6252c72d651723cc3c0accfbdad95683",
+      "payload_bytes": 427
+    }
+  }
+]

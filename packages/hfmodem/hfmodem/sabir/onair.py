@@ -41,10 +41,10 @@ _ID_SPAN_HZ = (1500.0 - cwid.BANDWIDTH_HZ / 2, 1500.0 + cwid.BANDWIDTH_HZ / 2)
 #: the window `core.busy` set `shape` and `tone` — the two that decide — against.
 LISTEN_S = 8.0
 
-#: `--transmit` says a licensed operator is on frequency, and this path makes one
+#: `--transmit` says an operator is on frequency, and this path makes one
 #: bounded transmission and exits -- it answers nothing and waits for nothing, so
-#: there is no moment at which it is the station deciding on its own. §97.221 and
-#: its equivalents are about the other case.
+#: there is no moment at which it is the station deciding on its own. The
+#: profile therefore checks this path as local control.
 CONTROL = regulatory.Control.LOCAL
 
 
@@ -72,7 +72,7 @@ class Burst:
                 max(self.audio_hi_hz, _ID_SPAN_HZ[1]))
 
     def emission(self, dial_hz: int, power_w: float | None = None) -> regulatory.Emission:
-        """What the regulatory gate is asked about -- the same span `describe`
+        """What the emission-profile check is asked about -- the same span `describe`
         shows the operator, so what is checked and what is printed cannot drift
         apart."""
         lo, hi = self.span_hz
@@ -209,7 +209,7 @@ def _burst(args) -> Burst:
 
 
 def _rules(args) -> regulatory.Profile:
-    """The regime this station operates under, in the station file's vocabulary.
+    """The emission profile selected by the operator, using the station file's vocabulary.
 
     Built here rather than defaulted anywhere: `core.regulatory` ships no default
     profile on purpose, and a beacon is exactly the emission an operator is least
@@ -238,16 +238,14 @@ def _refusals(args) -> str | None:
         return ("NOT KEYING: --transmit needs --rigctld or --serial. A dial "
                 "nothing can read back is not a verified dial")
     if not args.regulatory:
-        return ("NOT KEYING: --transmit needs --regulatory. 'part97' for the US "
-                "amateur service (with --licence), or 'unregulated' if you "
-                "operate under rules hfmodem does not model (with --because), "
-                "in which case you are answerable for every emission. There is "
-                "no default: a station that has not said which rules it "
-                "operates under has not said enough")
+        return ("NOT KEYING: --transmit needs --regulatory. 'part97' applies configured "
+                "emission limits (with --licence); 'unregulated' applies no "
+                "emission limits (with --because). The operator remains "
+                "responsible for their station. There is no default: a station "
+                "that has not selected a profile has not said enough")
     if args.regulatory == "part97" and not args.licence:
-        return ("NOT KEYING: --regulatory part97 needs --licence -- which HF "
-                "segments carry data depends on the class, and guessing it in "
-                "the permissive direction is the failure that matters")
+        return ("NOT KEYING: --regulatory part97 needs --licence to select the "
+                "profile's data segments and power ceilings")
     return None
 
 
@@ -393,11 +391,11 @@ def build_parser() -> argparse.ArgumentParser:
     rg.add_argument("--audio-out", help="transmit audio device")
     rg.add_argument("--list-audio", action="store_true")
 
-    rl = ap.add_argument_group("the rules this station operates under")
+    rl = ap.add_argument_group("the emission limits selected for this station")
     rl.add_argument("--regulatory", metavar="PROFILE",
-                    help="'part97' (US amateur, needs --licence) or "
-                         "'unregulated' (no constraint modelled, you are "
-                         "answerable for every emission, needs --because). "
+                    help="'part97' (configured emission limits, needs --licence) or "
+                         "'unregulated' (applies no emission limits, "
+                         "needs --because). "
                          "Required with --transmit and has no default")
     rl.add_argument("--licence", metavar="CLASS",
                     help="technician|general|advanced|extra (--regulatory part97)")

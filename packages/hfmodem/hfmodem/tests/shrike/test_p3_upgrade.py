@@ -72,7 +72,7 @@ from hfmodem.shrike import (compress, onair, p1rx, p3frame, p3rx, pactor1,
 from hfmodem.shrike import arq as arq_mod
 from hfmodem.shrike.arq import (CS_ACK, CS_BREAKIN, CS_REQUEST, IRS,
                                 State)
-from hfmodem.shrike.ptc import PtcHost
+from hfmodem.shrike.ptc import GRANT_ENTRY_SL, PtcHost
 from hfmodem.shrike.spec import Protocol
 from hfmodem.tests.kestrel import corpora
 from hfmodem.tests.shrike.test_p3_offer import (MESSAGE, Keyed, cs_event,
@@ -425,17 +425,18 @@ def _announcement_arm(path: Path, check) -> None:
     `1dl6maa`, which is the whole point of an announcement and what an independent
     decoder reads off this same audio, while three bits make it PMC German swapped
     and it says `1DIT)   WS DUNZ0 AN`. The link layer read three bits on both
-    seams, so that is what opened the port for as long as the frame decoded at
-    all.
+    seams, so that is what named the caller for as long as the frame decoded at
+    all. The line itself is the modem's, as in SCS's firmware, and stops there.
     """
     host, _, delivered, _ = _replay(path)
     rx_bytes = bytes(host.channel(host.ptchn).rx)
     p1 = [d for d in delivered if d[1] == Protocol.PACTOR1]
     check("the recording's PACTOR-1 phase reaches the link layer at all",
-          any(d[4] for d in p1),
-          f"{len(p1)} of {len(delivered)} packets are PACTOR-1")
-    check("...and the host data port opens with the caller's own callsign",
-          rx_bytes.startswith(b"1dl6maa\r"), repr(rx_bytes[:40]))
+          bool(p1), f"{len(p1)} of {len(delivered)} packets are PACTOR-1")
+    check("...and names the caller, which the connect burst cannot",
+          host.arq.dxcall == "DL6MAA"
+          and host.channel(host.ptchn).link[:1] == [f"({host.ptchn}) CONNECTED to DL6MAA"],
+          f"{host.arq.dxcall!r}, port opens {rx_bytes[:24]!r}")
 
 
 def _codewords(audio: np.ndarray) -> list[tuple[int, int]]:
@@ -1114,11 +1115,12 @@ def _grant_arm(path: Path, check) -> None:
           f"levels {p3rx.levels_present(energy)}")
 
     # The entry packet is the entry and nothing more: once the peer has answered
-    # it the waveform is acquired, and the traffic runs at `entry_sl`.
+    # it the waveform is acquired, and the traffic stays at the level acquired.
+    # Only the peer's CS4 moves it -- docs/protocols/pactor/P3-ADAPTATION.md.
     ci = CS_ACK if host.arq.tx_seq % 2 == 0 else CS_REQUEST
     host.on_rx_event(rxfront.Event(0.0, "cs", "", protocol="PACTOR-3", cs=ci))
-    check("an acknowledged entry packet takes the link to entry_sl",
-          host.arq.speed_level == host.arq.cfg.entry_sl,
+    check("an acknowledged entry packet keeps the link at the granted entry level",
+          host.arq.speed_level == GRANT_ENTRY_SL,
           f"SL{host.arq.speed_level}")
 
     # ...AND THE ANSWER THESE RECORDINGS CARRY IS A BREAK-IN, which `_ack_arm`
@@ -1126,9 +1128,7 @@ def _grant_arm(path: Path, check) -> None:
     # channel to send its own greeting instead of keying a codeword. That is
     # still the entry packet's acknowledgement -- `arq.PactorArq._yield_link`
     # settles the packet in flight on one -- so everything the acknowledgement
-    # above buys has to survive the handover. It did not: the traffic level was
-    # spent only on the `_on_ack` path, and a granted link answered this way ran
-    # its whole PACTOR-3 phase at speed level 1, five bytes a cycle.
+    # above settles has to survive the handover.
     host, keyed = _granted_station()
     host.on_rx_event(grant)
     n = len(keyed)
@@ -1141,8 +1141,9 @@ def _grant_arm(path: Path, check) -> None:
           f"{host.protocol} {host.arq.role} {host.arq.state}")
     check("...and answers the upgrade, so nothing counts it unfollowed",
           not host.arq.upgrade_unanswered)
-    check("...and takes the traffic to entry_sl, as an acknowledgement does",
-          host.arq.speed_level == host.arq.cfg.entry_sl,
+    check("...and keeps the traffic at the granted entry level, as an "
+          "acknowledgement does",
+          host.arq.speed_level == GRANT_ENTRY_SL,
           f"SL{host.arq.speed_level}")
     host.tick()
     check("...and the cycle behind it keys nothing over the station we just "
@@ -1484,9 +1485,9 @@ def _sequence_arm(path: Path, check) -> None:
     # held everything, which is the case the model is written from.
     host, keyed, got = _drive_grant(path, answers)
     check("a station whose entry packet is answered that way ends the cycle as "
-          "the SENDER again, in PACTOR-3, at entry_sl",
+          "the SENDER again, in PACTOR-3, at the granted entry level",
           host.protocol is Protocol.PACTOR3 and host.arq.role == arq_mod.ISS
-          and host.arq.speed_level == host.arq.cfg.entry_sl
+          and host.arq.speed_level == GRANT_ENTRY_SL
           and not host.arq.entry_pending,
           f"{host.protocol} {host.arq.role} SL{host.arq.speed_level} "
           f"entry_pending={host.arq.entry_pending}")
@@ -1520,7 +1521,7 @@ def _sequence_arm(path: Path, check) -> None:
     check("and the greeting ALONE answers the entry packet, with the CS3 head "
           "missed: the peer transmitting a packet of its own is the answer",
           host.protocol is Protocol.PACTOR3 and host.arq.role == arq_mod.ISS
-          and host.arq.speed_level == host.arq.cfg.entry_sl
+          and host.arq.speed_level == GRANT_ENTRY_SL
           and not host.arq.entry_pending and got > 0,
           f"{host.protocol} {host.arq.role} SL{host.arq.speed_level} "
           f"entry_pending={host.arq.entry_pending} {got} B")

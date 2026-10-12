@@ -30,6 +30,9 @@ pytestmark = pytest.mark.skipif(
 witness_align = pytest.importorskip("witness_align")
 kiwi_witness = pytest.importorskip("kiwi_witness")
 
+TEST_STATION = (44.15, -89.29)  # Explicit location used by these geometry fixtures.
+
+
 TONES = (1400.0, 1600.0)
 RATE = 100.0
 
@@ -150,16 +153,17 @@ def _csv(tmp_path: Path, rows) -> Path:
     lines = ["hostname,port,lat_lon,free_channels,name_location"]
     for host, lat, free in rows:
         lines.append(
-            f"{host},8073,\"{lat},{kiwi_witness.STATION[1]}\",{free},{host}")
+            f"{host},8073,\"{lat},{TEST_STATION[1]}\",{free},{host}")
     p.write_text("\n".join(lines) + "\n")
     return p
 
 
 def _at(miles_north: float) -> float:
-    return kiwi_witness.STATION[0] + miles_north / 69.0   # due north of the station
+    return TEST_STATION[0] + miles_north / 69.0   # due north of the station
 
 
 def _hosts(*a, **kw) -> list[str]:
+    kw.setdefault("station", TEST_STATION)
     return [c.host for c in kiwi_witness.candidates(*a, **kw)]
 
 
@@ -181,7 +185,7 @@ def test_inside_the_window_it_is_still_nearest_first(tmp_path):
 def test_the_ones_outside_the_window_are_a_fallback_and_not_a_refusal(tmp_path):
     """A witness from the wrong distance still beats no witness at all."""
     p = _csv(tmp_path, [("far", _at(1900), 8), ("close", _at(20), 8)])
-    assert len(kiwi_witness.candidates(p, 6)) == 2
+    assert len(kiwi_witness.candidates(p, 6, station=TEST_STATION)) == 2
 
 
 def test_a_receiver_with_no_free_slot_is_never_offered(tmp_path):
@@ -198,8 +202,8 @@ def test_a_receiver_with_no_free_slot_is_never_offered(tmp_path):
 # to reach a gateway in Arkansas, chose a receiver 516 mi away in Virginia and
 # the arm was scored without the cover the spec requires.
 
-PEER = (kiwi_witness.STATION[0] - 600 / 69.0,   # 600 mi due south of the station
-        kiwi_witness.STATION[1])
+PEER = (TEST_STATION[0] - 600 / 69.0,   # 600 mi due south of the station
+        TEST_STATION[1])
 
 
 def _toward_peer(miles_from_peer: float) -> float:
@@ -247,7 +251,7 @@ def test_a_gateway_callsign_resolves_through_the_published_roster(tmp_path):
                 ["KB5LZK,KB5LZK,EM34UT,\"7,101.600 KHz\""])
     where, label = kiwi_witness.peer_latlon("KB5LZK", [r])
     assert label == "KB5LZK EM34UT"
-    assert kiwi_witness.great_circle(kiwi_witness.STATION, where) == pytest.approx(663, abs=5)
+    assert kiwi_witness.great_circle(TEST_STATION, where) == pytest.approx(663, abs=5)
 
 
 def test_the_ssid_an_arm_calls_is_not_how_the_station_is_listed(tmp_path):
@@ -427,8 +431,21 @@ def test_our_own_silence_is_not_the_witness_being_short():
                                    theirs[:int(10 * RATE)], RATE) is None
 
 
+def _placement_keying(secs=60.0, rate=RATE):
+    """A unique cadence for absolute placement, unlike the periodic track raster."""
+    rng = np.random.default_rng(20261011)
+    keying = np.zeros(int(secs * rate))
+    at = 0.0
+    while at < secs:
+        width = rng.uniform(0.07, 0.18)
+        keying[int(at * rate):int((at + width) * rate)] = 1.0
+        at += rng.uniform(0.8, 1.7)
+    return keying
+
+
 def test_the_first_lag_is_found_with_the_witness_the_shorter_file():
-    ours, theirs = _raster(lambda t: 0.0, secs=60.0)
+    ours = _placement_keying()
+    theirs = ours.copy()
     lag, r = witness_align.whole_file_lag(
         ours, theirs[int(9 * RATE):int(45 * RATE)], RATE)
     # Under 1 because 24 s of our 60 has no witness to be found in; the lag it
@@ -437,7 +454,8 @@ def test_the_first_lag_is_found_with_the_witness_the_shorter_file():
 
 
 def test_the_first_lag_is_found_with_the_witness_the_longer_file():
-    ours, theirs = _raster(lambda t: 0.0, secs=60.0)
+    ours = _placement_keying()
+    theirs = ours.copy()
     lag, r = witness_align.whole_file_lag(
         ours, np.concatenate([np.zeros(int(7 * RATE)), theirs]), RATE)
     assert lag == pytest.approx(7.0, abs=0.05) and r > 0.9

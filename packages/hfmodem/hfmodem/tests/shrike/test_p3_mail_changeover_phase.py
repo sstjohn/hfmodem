@@ -77,11 +77,13 @@ def test_legacy_audio_reference_reproduces_early_changeover_and_clock_reset(tmp_
     # Keeping B's audio boundary alone would place CS3's pulse17.75ms early.
     assert tx._breakin_key(grid, 69) == 4172591
     assert 4173443 - tx._breakin_key(grid, 69) == 852
-    # Dropping B altogether moves the normal reply even farther backwards and
-    # reproduces the refused turn in the actual recording.
+    # Dropping B altogether moves the normal reply even farther backwards.
+    # Against the old 890 ms `P3_REPLY_S` this fell 20 ms past the clamp and
+    # reproduced the refused turn in the actual recording; the 910 ms fix
+    # spends that margin on the same placement and it is no longer refused.
     grid.p3_reply_shift(69)
     tx.aim(grid, 69)
-    assert '20 ms' in tx._clamp_refusal(grid.peer_packet_end(69))
+    assert tx._clamp_refusal(grid.peer_packet_end(69)) is None
 
 
 @pytest.mark.parametrize('first_swapped', [False, True])

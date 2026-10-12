@@ -498,6 +498,36 @@ def data_packet(payload: bytes, baud: int = 100, packet_count: int = 0,
     return bytes([header]) + protected + bytes([crc & 0xFF, crc >> 8])
 
 
+def qrt_field(callsign: str, baud: int = 100) -> bytes:
+    """The QRT packet's field: the called station's address, byte-reversed.
+
+    `0x55` and the first seven characters of the call, the head of the connect
+    address image, so a peer already back in standby can find it and answer
+    with the final CS. At 200 Bd every bit goes twice, which keeps the address
+    at 100 Bd and 80 ms into the packet at either speed. Matched byte for byte
+    against five decoded gateway QRTs from VE3KPG and WS8EOC, every one status
+    0x83 (counter 3, QRT bit).
+    """
+    address = address_image(callsign[:ADDR_LEN - 2])[ADDR_LEN - 2::-1]
+    if baud == 100:
+        return address
+    doubled = b"".join(sum(((b >> k) & 1) * 3 << 2 * k for k in range(8))
+                       .to_bytes(2, "little") for b in address)
+    return bytes(1) + doubled + bytes(3)
+
+
+def qrt_address(field: bytes) -> str | None:
+    """The call a QRT field carries, or None if the field is not an address."""
+    if len(field) == DATA_FIELD[200]:
+        words = [int.from_bytes(field[i:i + 2], "little") for i in range(1, 17, 2)]
+        if field[0] or any(field[17:]) or any((w ^ w >> 1) & 0x5555 for w in words):
+            return None
+        field = bytes(sum(((w >> 2 * k) & 1) << k for k in range(8)) for w in words)
+    if len(field) != DATA_FIELD[100] or field[-1] != SYNC:
+        return None
+    return field[-2::-1].rstrip(bytes([PAD])).decode("latin-1")
+
+
 def field_bytes(field: bytes, data_type: int) -> bytes:
     """The characters a data field carries: everything in it that is not IDLE.
 

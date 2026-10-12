@@ -254,7 +254,10 @@ def test_full_receive_tick_render_keeps_first_packet_reply(recording, tmp_path, 
     assert slot == 71
     assert tx.n == 1 and not tx.refused
     assert len(bench.emissions) == 1
-    assert abs(tx.tx_audio_start - row["key"]) < round(.005 * onair.FS)
+    assert abs(tx.tx_audio_start - key) < round(.005 * onair.FS)
+    # `P3_REPLY_S` moved from 0.890 to 0.910 after this fixture was cut; a
+    # future move of the reply slot has to show up here as a deliberate delta.
+    assert abs(key - row["key"] - round((onair.P3_REPLY_S - 0.890) * onair.FS)) <= 1
     assert not tx._pending_p3_cs
     said = capsys.readouterr().out
     assert "CS2 ACK seq=1" in said

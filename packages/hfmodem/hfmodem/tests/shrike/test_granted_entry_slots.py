@@ -31,6 +31,8 @@ import contextlib
 
 import numpy as np
 
+from hfmodem.tests.shrike.entry_reply_policy import observe_entry_policy, assert_entry_policy
+
 from hfmodem.shrike import onair, pactor1
 
 from hfmodem.tests.shrike.test_grid import (
@@ -231,8 +233,14 @@ def _why(log: str) -> str:
 
 
 def a_granted_entry_keys_every_slot_it_is_owed() -> None:
+    """Initial entry keeps its slot; later yields retain full replies.
+
+    Each yielded slot keeps the keyed P1 reply's complete 120-ms word.
+    """
     print("\nA granted PACTOR-3 entry keys every slot the grant commands")
-    got = _arm(onair.TX_ADMIT_RESERVE_S)
+    with observe_entry_policy() as evidence:
+        got = _arm(onair.TX_ADMIT_RESERVE_S, acquire_cut=True)
+    got["entry_policy"] = evidence
     check("the gateway's grant was read", "0x59A grant" in got["log"])
     entries = _keyed(got, "ENTRY")
     slots = _slots(entries)
@@ -243,10 +251,8 @@ def a_granted_entry_keys_every_slot_it_is_owed() -> None:
           f"the packet the grant answered keyed on slot {owed}, "
           f"entries on {slots}")
 
-    check("...and the entry run is CONSECUTIVE -- one slot to the next, which "
-          "is the cadence the peer counts its cycles on",
-          len(slots) >= 3 and set(_gaps(slots)) == {1},
-          f"{len(slots)} entries on slots {slots}, gaps {_gaps(slots)}")
+    assert_entry_policy(got)
+    assert len(slots) >= 3
 
     check("...every one of them on its boundary, to the sample",
           bool(entries) and all(b["first"] == b["boundary"] for b in entries),

@@ -53,3 +53,30 @@ def from_card(samples: np.ndarray, rate: int) -> np.ndarray:
     """Sound-card float32 → int16 at `rate`."""
     down = resample_poly(samples.astype(np.float64), rate, CARD_RATE_HZ)
     return np.clip(np.round(down * 32768.0), -32768, 32767).astype("<i2")
+
+
+class FirDecimator:
+    """An integer FIR decimator whose phase persists across chunks."""
+
+    def __init__(self, card_rate: int, rate: int = 8000, cutoff: float = 3400,
+                 taps_per_phase: int = 12):
+        from scipy.signal import firwin
+        if card_rate % rate:
+            raise ValueError(f"card rate {card_rate} is not a multiple of {rate}")
+        self.m = card_rate // rate
+        self.h = firwin(taps_per_phase * self.m + 1, cutoff, fs=card_rate)
+        self.tail = np.zeros(self.h.size - 1)
+        self.phase = 0
+
+    def push(self, audio):
+        from scipy.signal import upfirdn
+        x = np.asarray(audio, dtype=np.float64)
+        if not x.size:
+            return np.zeros(0)
+        buf = np.concatenate((self.tail, x))
+        count = max(0, (x.size - self.phase + self.m - 1) // self.m)
+        skip = (self.h.size - 1) // self.m
+        out = upfirdn(self.h, buf[self.phase:], down=self.m)[skip:skip + count]
+        self.tail = buf[-(self.h.size - 1):]
+        self.phase = (self.phase - x.size) % self.m
+        return out

@@ -141,7 +141,7 @@ section:first-of-type{border-top:none}
 .hs-controls label{font-family:var(--mono);font-size:.72rem;color:var(--ink-dim);letter-spacing:.06em;text-transform:uppercase}
 input.call{font-family:var(--mono);font-size:1rem;letter-spacing:.12em;text-transform:uppercase;
   background:var(--bg-2);border:1px solid var(--line);color:var(--ink);border-radius:0;padding:9px 12px;width:9.5em}
-input.call:focus{border-color:var(--sig);outline:none}
+input.call:focus{border-color:var(--sig);outline:revert}
 .seg-ctl{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:0;overflow:hidden}
 .seg-ctl button{font-family:var(--mono);font-size:.72rem;background:var(--bg-2);color:var(--ink-dim);
   border:none;padding:8px 12px;cursor:pointer;border-right:1px solid var(--line)}
@@ -240,7 +240,8 @@ html{scroll-padding-top:170px}
 </style>
 <link rel="stylesheet" href="guide.css">
 
-<header class="site-header"><div class="site-header-inner"><div class="site-heading"><a class="site-home" href="../README.md">Documentation</a><span class="site-title">hfmodem / PACTOR</span></div><nav class="site-nav" aria-label="Modes"><a href="flock-compared.html" data-route="compared">Comparison</a><a href="pactor-explained.html" data-route="pactor" aria-current="page">PACTOR</a><a href="vara-explained.html" data-route="vara">VARA</a><a href="ardop-explained.html" data-route="ardop">ARDOP</a><a href="sabir-explained.html" data-route="sabir">sabir</a></nav><details class="page-contents"><summary>On this page</summary><nav class="rail" aria-label="sections"><a href="#tones">Channel occupancy</a><a href="#connect">Link entry</a><a href="#generations">Generations</a><a href="#packet">Frame structure and coding</a><a href="#arq">ARQ and host interface</a><a href="#numbers">Rate selection and values</a><a href="#results">Observed results</a></nav></details></div></header>
+<header class="site-header"><div class="site-header-inner"><div class="site-heading"><a class="site-home" href="../README.md">Documentation</a><span class="site-title">hfmodem / PACTOR</span></div><nav class="site-nav" aria-label="Modes"><a href="flock-compared.html" data-route="compared">Comparison</a><a href="pactor-explained.html" data-route="pactor" aria-current="page">PACTOR</a><a href="vara-explained.html" data-route="vara">VARA</a><a href="ardop-explained.html" data-route="ardop">ARDOP</a><a href="sabir-explained.html" data-route="sabir">sabir</a><a href="robust-packet-explained.html" data-route="robust-packet">Robust Packet</a><a href="stanag-explained.html" data-route="stanag">STANAG</a><a href="rtty-explained.html" data-route="rtty">RTTY / SITOR / NAVTEX</a></nav><details class="page-contents"><summary>On this page</summary><nav class="rail" aria-label="sections"><a href="#tones">Channel occupancy</a><a href="#connect">Link entry</a><a href="#generations">Generations</a><a href="#packet">Frame structure and coding</a><a href="#arq">ARQ and host interface</a><a href="#numbers">Rate selection and values</a><a href="#results">Observed results</a></nav></details></div></header>
+<main id="main" tabindex="-1">
 
 
 
@@ -264,18 +265,18 @@ html{scroll-padding-top:170px}
   </div>
 
   <div class="stage" id="wfStage">
-    <canvas id="wf" aria-label="Scrolling waterfall of a PACTOR-3 session"></canvas>
+    <canvas aria-describedby="wf-description" id="wf" role="img" aria-label="Scrolling waterfall of a PACTOR-3 session"></canvas>
     <div class="ovl">
       <div class="badge">Schematic exchange · frequency × time</div>
       <div class="axis-f">frequency 0.3 – 2.7 kHz →</div>
       <div class="axis-t">time ↓</div>
     </div>
     <div class="ctl">
-      <button class="btn" id="wfPlay">❚❚</button>
+      <button class="btn" id="wfPlay" type="button" aria-pressed="false">Play diagrams</button>
     </div>
   </div>
   <div class="wf-legend" id="wfLegend"></div>
-  <p class="dim" style="margin-top:14px;font-size:.9rem;max-width:var(--measure)">
+  <p id="wf-description" class="dim" style="margin-top:14px;font-size:.9rem;max-width:var(--measure)">
     Schematic PACTOR-1 link entry followed by PACTOR-3 data cycles. PACTOR-3 channels 5 and 12,
     at 1080 and 1920 Hz, carry headers and control signals at every speed level.</p>
 
@@ -292,8 +293,8 @@ html{scroll-padding-top:170px}
   <div class="grid cols7-5">
     <div class="card">
       <div class="hs-controls" style="margin-bottom:14px">
-        <label>Speed level</label>
-        <span class="seg-ctl" id="slSeg">
+        <span id="speed-label">Speed level</span>
+        <span class="seg-ctl" id="slSeg" role="group" aria-labelledby="speed-label">
           <button data-sl="1">SL1</button>
           <button data-sl="2" class="on">SL2</button>
           <button data-sl="3">SL3</button>
@@ -302,13 +303,13 @@ html{scroll-padding-top:170px}
           <button data-sl="6">SL6</button>
         </span>
       </div>
-      <canvas class="c2d" id="toneCanvas" height="260"></canvas>
+      <canvas class="c2d" id="toneCanvas" height="260" role="img" aria-label="Selected PACTOR speed-level carrier positions"></canvas>
       <p class="dim" style="font-size:.8rem;margin:12px 0 0">DBPSK has two differential phase states; DQPSK has four. Channels 5 and 12 carry the variable header and control signals.</p>
     </div>
     <div class="grid" style="align-content:start;gap:14px">
       <div class="card">
         <div class="eyebrow" style="margin-bottom:10px">This speed level</div>
-        <div class="readout" id="slReadout"></div>
+        <div class="readout" id="slReadout" aria-live="polite"></div>
       </div>
       <div class="callout info">
         <h4>Symmetric about 1500 Hz</h4>
@@ -333,10 +334,10 @@ html{scroll-padding-top:170px}
   <div class="grid cols7-5">
     <div class="card">
       <div class="hs-controls">
-        <label>Called callsign</label>
+        <label for="callIn">Called callsign</label>
         <input class="call" id="callIn" value="DL6MAA" maxlength="8" spellcheck="false" autocomplete="off">
       </div>
-      <canvas class="c2d" id="fskCanvas" height="150"></canvas>
+      <canvas class="c2d" id="fskCanvas" height="150" role="img" aria-label="Called-callsign FSK address waveform"></canvas>
       <div class="binline" id="fskBins" style="margin-top:10px"></div>
       <div class="kat ok" id="fskKat"></div>
     </div>
@@ -344,7 +345,7 @@ html{scroll-padding-top:170px}
     <div class="grid" style="align-content:start;gap:14px">
       <div class="card">
         <div class="eyebrow" style="margin-bottom:10px">The frame, byte by byte</div>
-        <div class="readout" id="fskReadout"></div>
+        <div class="readout" id="fskReadout" aria-live="polite"></div>
       </div>
       <div class="card">
         <div class="eyebrow" style="margin-bottom:10px">Closed form (per callsign)</div>
@@ -396,7 +397,7 @@ LSB-first · continuous phase · no CRC</pre>
     <div class="card">
       <div class="eyebrow" style="margin-bottom:4px">Phase-reference symbol — Schroeder's quadratic</div>
       <p class="dim" style="font-size:.84rem;margin:0 0 10px">A phase-reference symbol precedes the data. Carrier <i>k</i> starts at <code>−πk(k+1)/18</code>, a quadratic phase assignment that reduces crest factor. Subsequent symbols encode differential phase changes.</p>
-      <canvas class="c2d" id="refCanvas" height="240"></canvas>
+      <canvas class="c2d" id="refCanvas" height="240" role="img" aria-label="Per-carrier phase-reference start angles"></canvas>
     </div>
   </div>
 
@@ -433,7 +434,7 @@ LSB-first · continuous phase · no CRC</pre>
     <div class="card">
       <div class="eyebrow" style="margin-bottom:14px">Connect → transfer → disconnect</div>
       <div class="states" id="stateRow"></div>
-      <canvas class="c2d" id="ladderCanvas" height="380" style="margin-top:16px"></canvas>
+      <canvas class="c2d" id="ladderCanvas" height="380" style="margin-top:16px" role="img" aria-label="Link exchange or rate-selection values"></canvas>
     </div>
     <div class="grid" style="align-content:start;gap:14px">
       <div class="card">
@@ -507,7 +508,7 @@ LSB-first · continuous phase · no CRC</pre>
       <tr><td>Transmit G0/G1 order</td><td class="mono"><span class="val" data-fig="coding.tx_generators"></span>, bits packed LSB-first over the transmit form, terminated, over the whitened field</td></tr>
       <tr><td>Puncture · SL5 (3/4)</td><td class="mono">G1=<span data-fig="coding.puncture_3_4.0"></span> G2=<span data-fig="coding.puncture_3_4.1"></span></td></tr>
       <tr><td>Puncture · SL6 (8/9)</td><td class="mono" style="font-size:.72rem">G1=<span data-fig="coding.puncture_8_9.0"></span> G2=<span data-fig="coding.puncture_8_9.1"></span></td></tr>
-      <tr><td>Interleaver</td><td class="mono">Stride by speed level: <span class="val" id="strideList"></span>. At SL1, channel order matches code order. Full-frame interleaver geometry remains unresolved.</td></tr>
+      <tr><td>Interleaver</td><td class="mono">Stride by speed level: <span class="val" id="strideList"></span>. At SL1, channel order matches code order. Implemented SHORT/LONG paths specify full-frame placement and code order. The general interleaver research entry remains open.</td></tr>
       <tr><td>Decoder</td><td class="mono">soft-decision Viterbi</td></tr>
       <tr><td>CRC</td><td class="mono">CRC-16/X25 (0x1021, init/xor 0xFFFF, reflected, residue 0xF0B8)</td></tr>
     </tbody></table></div></div>
@@ -543,22 +544,41 @@ LSB-first · continuous phase · no CRC</pre>
     </tbody></table></div></div>
   </details>
 
+<p><a href="../protocols/pactor/implementation-constants.md">Complete PACTOR-3 implementation inputs</a> maps the codewords, coding, framing and carrier placement to the public source.</p>
 </div></section>
 
 <section id="results"><div class="wrap"><div class="sechead"><h2>Observed results</h2>
-<p>Confirmed outbound mail delivery through WS8EOC over PACTOR-3
-(message <code>9WQNVWBDLVOY</code>). Four messages received through KB5LZK over PACTOR-1, with a normal session close.</p>
-<p>PACTOR-2 codec behavior has bench evidence. PACTOR-3 mail delivery is demonstrated
-through one gateway; speed-level coverage and reliability across gateways remain open.</p>
+<p>Winlink mail sent and received through WS8EOC over hfmodem’s PACTOR-3. Four messages received through KB5LZK over PACTOR-1, with a normal session close.</p>
+<p>PACTOR-2 codec behavior has bench evidence. Reliability across gateways and confirmed
+link shutdown are separate checks.</p>
 <p><a href="../STATUS.md">Implementation evidence</a> records the conditions and coverage.</p>
 </div></div></section>
+</main>
 <footer><div class="wrap"><p>PACTOR-3 physical-layer values and cycle timing: ITU-R M.1798.
 Interactive figures use the shrike implementation tables.</p></div></footer>
 
+
+<script>
+// Native controls and tables keep the figures usable without a pointer or sound.
+const guideValues=new WeakMap();
+function guideData(id,title,head,rows){
+  const canvas=document.getElementById(id);let details=document.getElementById(id+'-data');
+  if(!details){details=document.createElement('details');details.id=id+'-data';details.className='diagram-data';
+    const summary=document.createElement('summary');summary.id=id+'-summary';summary.textContent=title+' — text and values';details.append(summary);
+    const wrap=document.createElement('div');wrap.className='tbl-scroll';wrap.tabIndex=0;wrap.setAttribute('role','region');wrap.setAttribute('aria-label',title+' values');
+    const table=document.createElement('table');wrap.append(table);details.append(wrap);canvas.after(details);}
+  details.querySelector('summary').textContent=title+' — text and values';details.querySelector('[role=region]').setAttribute('aria-label',title+' values');
+  const value=JSON.stringify([title,head,rows]);if(guideValues.get(details)===value)return;guideValues.set(details,value);
+  const table=details.querySelector('table');table.replaceChildren();const caption=document.createElement('caption');caption.textContent=title;table.append(caption);
+  const thead=document.createElement('thead'),tr=document.createElement('tr');head.forEach(v=>{const th=document.createElement('th');th.scope='col';th.textContent=v;tr.append(th)});thead.append(tr);table.append(thead);
+  const body=document.createElement('tbody');rows.forEach(row=>{const tr=document.createElement('tr');row.forEach((v,i)=>{const cell=document.createElement(i?'td':'th');if(!i)cell.scope='row';cell.textContent=String(v);tr.append(cell)});body.append(tr)});table.append(body);
+  canvas.setAttribute('role','img');canvas.setAttribute('aria-label',title);canvas.setAttribute('aria-describedby',id+'-summary');canvas.setAttribute('aria-details',details.id);
+}
+</script>
 <script>
 "use strict";
 /* ---- generated by docs/viz/build.py; do not edit by hand ---- */
-const FIG = {"coding": {"crc_poly": "0x1021", "interleave": "per-path stride (unknowns.U3_INTERLEAVER: OPEN)", "puncture_3_4": [[1, 1, 0], [0, 1, 1]], "puncture_8_9": [[0, 1, 0, 1, 1, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 1]], "tx_generators": ["0o171", "0o133"]}, "control": {"bits": 20, "names": ["ACK", "REQ", "BREAK-IN", "SPEED-UP", "NAK", "CYCLE-TOG"], "words": ["52D56", "AABA2", "AD45A", "95AC5", "74339", "4B4AD"]}, "cycle": {"cs_window_s": 0.29, "long_longpath_s": 4.2, "long_s": 3.75, "pulse_slot_s": 0.01, "short_longpath_s": 1.4, "short_s": 1.25}, "levels": [{"bits_per_symbol": 1, "channels": [5, 12], "crest_db": 1.9, "generators": ["0o753", "0o561"], "k": 9, "n_buf": 144, "ndr": 76.8, "payload_long": 36, "payload_short": 5, "pdr": 200, "puncture": [[1], [1]], "rate": "1/2", "sl": 1, "stride": 0}, {"bits_per_symbol": 1, "channels": [3, 5, 7, 10, 12, 14], "crest_db": 2.6, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 432, "ndr": 247.5, "payload_long": 116, "payload_short": 23, "pdr": 600, "puncture": [[1], [1]], "rate": "1/2", "sl": 2, "stride": 35}, {"bits_per_symbol": 1, "channels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "crest_db": 3.1, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 1008, "ndr": 588.8, "payload_long": 276, "payload_short": 59, "pdr": 1400, "puncture": [[1], [1]], "rate": "1/2", "sl": 3, "stride": 69}, {"bits_per_symbol": 2, "channels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "crest_db": 3.8, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2016, "ndr": 1186.1, "payload_long": 556, "payload_short": 122, "pdr": 2800, "puncture": [[1], [1]], "rate": "1/2", "sl": 4, "stride": 250}, {"bits_per_symbol": 2, "channels": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "crest_db": 5.2, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2304, "ndr": 2039.5, "payload_long": 956, "payload_short": 212, "pdr": 3200, "puncture": [[1, 1, 0], [0, 1, 1]], "rate": "3/4", "sl": 5, "stride": 563}, {"bits_per_symbol": 2, "channels": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17], "crest_db": 5.7, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2592, "ndr": 2722.1, "payload_long": 1276, "payload_short": 284, "pdr": 3600, "puncture": [[0, 1, 0, 1, 1, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 1]], "rate": "8/9", "sl": 6, "stride": 909}], "packet": {"constant_headers": 16, "data_offset": 9, "header_symbols": 8, "packet_s": 0.81, "rows_long": 320, "rows_short": 72, "variable_headers": 16}, "phase": {"bit_deg": [315.0, 135.0], "dibit_deg": [135.0, 45.0, -135.0, -45.0], "pattern_a_deg": [0.0, 180.0, 0.0, 90.0, 180.0, 180.0, 180.0, 90.0], "start_deg": [0.0, 340.0, 300.0, 240.0, 160.0, 60.0, 300.0, 160.0, 0.0, 180.0, 340.0, 120.0, 240.0, 340.0, 60.0, 120.0, 160.0, 180.0]}, "physical": {"baud": 100.0, "centre_hz": 1500.0, "chan0_hz": 480.0, "emission": "2K20J2D", "hi_hz": 2520.0, "n_channels": 18, "spacing_hz": 120.0, "vh": [5, 12]}};
+const FIG = {"coding": {"crc_poly": "0x1021", "interleave": "Implemented SHORT/LONG path walks; legacy general research registry U3: OPEN", "puncture_3_4": [[1, 1, 0], [0, 1, 1]], "puncture_8_9": [[0, 1, 0, 1, 1, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 1]], "tx_generators": ["0o171", "0o133"]}, "control": {"bits": 20, "names": ["ACK", "REQ", "BREAK-IN", "SPEED-UP", "NAK", "CYCLE-TOG"], "words": ["52D56", "AABA2", "AD45A", "95AC5", "74339", "4B4AD"]}, "cycle": {"cs_window_s": 0.29, "long_longpath_s": 4.2, "long_s": 3.75, "pulse_slot_s": 0.01, "short_longpath_s": 1.4, "short_s": 1.25}, "levels": [{"bits_per_symbol": 1, "channels": [5, 12], "crest_db": 1.9, "generators": ["0o753", "0o561"], "k": 9, "n_buf": 144, "ndr": 76.8, "payload_long": 36, "payload_short": 5, "pdr": 200, "puncture": [[1], [1]], "rate": "1/2", "sl": 1, "stride": 0}, {"bits_per_symbol": 1, "channels": [3, 5, 7, 10, 12, 14], "crest_db": 2.6, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 432, "ndr": 247.5, "payload_long": 116, "payload_short": 23, "pdr": 600, "puncture": [[1], [1]], "rate": "1/2", "sl": 2, "stride": 35}, {"bits_per_symbol": 1, "channels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "crest_db": 3.1, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 1008, "ndr": 588.8, "payload_long": 276, "payload_short": 59, "pdr": 1400, "puncture": [[1], [1]], "rate": "1/2", "sl": 3, "stride": 69}, {"bits_per_symbol": 2, "channels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "crest_db": 3.8, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2016, "ndr": 1186.1, "payload_long": 556, "payload_short": 122, "pdr": 2800, "puncture": [[1], [1]], "rate": "1/2", "sl": 4, "stride": 250}, {"bits_per_symbol": 2, "channels": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "crest_db": 5.2, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2304, "ndr": 2039.5, "payload_long": 956, "payload_short": 212, "pdr": 3200, "puncture": [[1, 1, 0], [0, 1, 1]], "rate": "3/4", "sl": 5, "stride": 563}, {"bits_per_symbol": 2, "channels": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17], "crest_db": 5.7, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2592, "ndr": 2722.1, "payload_long": 1276, "payload_short": 284, "pdr": 3600, "puncture": [[0, 1, 0, 1, 1, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 1]], "rate": "8/9", "sl": 6, "stride": 909}], "packet": {"constant_headers": 16, "data_offset": 9, "header_symbols": 8, "packet_s": 0.81, "rows_long": 320, "rows_short": 72, "variable_headers": 16}, "phase": {"bit_deg": [315.0, 135.0], "dibit_deg": [135.0, 45.0, -135.0, -45.0], "pattern_a_deg": [0.0, 180.0, 0.0, 90.0, 180.0, 180.0, 180.0, 90.0], "start_deg": [0.0, 340.0, 300.0, 240.0, 160.0, 60.0, 300.0, 160.0, 0.0, 180.0, 340.0, 120.0, 240.0, 340.0, 60.0, 120.0, 160.0, 180.0]}, "physical": {"baud": 100.0, "centre_hz": 1500.0, "chan0_hz": 480.0, "emission": "2K20J2D", "hi_hz": 2520.0, "n_channels": 18, "spacing_hz": 120.0, "vh": [5, 12]}};
 /* ---- end generated ---- */
 /* ===================================================================== */
 /*  PACTOR-III facts — every one of them out of the generated block above */
@@ -581,13 +601,23 @@ function fitCanvas(cv,h){
   const ctx=cv.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
   return{ctx,w,h};
 }
+let guideMotion=false;
+const guideLoops=[];
 function registerLoop(el,step){
-  if(prefersReduce){step(0);return;}
-  const o={vis:true};
-  const pump=()=>{if(o._on)return;o._on=true;const tick=t=>{if(!o.vis){o._on=false;return;}step(t);requestAnimationFrame(tick);};requestAnimationFrame(tick);};
-  new IntersectionObserver(es=>{o.vis=es[0].isIntersecting;if(o.vis)pump();},{threshold:.05}).observe(el);
-  pump();
+  const loop={el,step,visible:true};guideLoops.push(loop);step(0);
+  new IntersectionObserver(es=>{loop.visible=es[0].isIntersecting;},{threshold:.05}).observe(el);
 }
+function guideTick(t){
+  if(guideMotion&&!document.hidden)guideLoops.forEach(loop=>{if(loop.visible)loop.step(t)});
+  requestAnimationFrame(guideTick);
+}
+requestAnimationFrame(guideTick);
+matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{
+  guideMotion=false;wfPaused=true;document.getElementById('wfPlay').textContent='Play diagrams';
+  document.getElementById('wfPlay').setAttribute('aria-pressed','false');guideLoops.forEach(loop=>loop.step(0));
+});
+addEventListener('resize',()=>guideLoops.forEach(loop=>loop.step(0)));
+
 // Phosphor-cyan waterfall ramp: dark ground → teal → cyan → white-hot.
 const CM=[[0,[6,10,16]],[0.15,[10,40,64]],[0.34,[16,86,120]],[0.55,[30,150,180]],[0.74,[90,210,225]],[0.9,[190,240,245]],[1,[240,252,255]]];
 function colormap(t){t=Math.max(0,Math.min(1,t));for(let i=1;i<CM.length;i++){if(t<=CM[i][0]){const a=CM[i-1],b=CM[i],f=(t-a[0])/(b[0]-a[0]);return[a[1][0]+(b[1][0]-a[1][0])*f,a[1][1]+(b[1][1]-a[1][1])*f,a[1][2]+(b[1][2]-a[1][2])*f];}}return CM[CM.length-1][1];}
@@ -642,7 +672,7 @@ function renderStrip(){
 }
 renderStrip();
 const wfCanvas=document.getElementById('wf');
-let wfPaused=false, wfOff=0, wfLast=0;
+let wfPaused=true, wfOff=0, wfLast=0;
 function drawWaterfall(t){
   const dpr=Math.min(2,devicePixelRatio||1);
   const w=wfCanvas.clientWidth,h=wfCanvas.clientHeight;
@@ -663,7 +693,7 @@ function drawWaterfall(t){
   for(const hz of [1080,1920]){const x=hz2col(hz)/(NF-1)*w;ctx.fillRect(x-1,0,2,h);}
 }
 registerLoop(document.getElementById('wfStage'),drawWaterfall);
-document.getElementById('wfPlay').onclick=function(){wfPaused=!wfPaused;this.textContent=wfPaused?'▶':'❚❚';};
+document.getElementById('wfPlay').onclick=function(){guideMotion=!guideMotion;wfPaused=!guideMotion;this.textContent=guideMotion?'Pause diagrams':'Play diagrams';this.setAttribute('aria-pressed',String(guideMotion));};
 
 /* ===================================================================== */
 /*  Scene 1 — speed-level tone map                                       */
@@ -711,6 +741,7 @@ function updateSL(){
     ["net rate",sl.ndr+" bit/s"],
     ["crest factor",sl.crest_db+" dB"],
   ].map(([k,v])=>`<div><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+  guideData('toneCanvas','PACTOR-3 SL'+curSL+' active carriers',['Channel','Audio frequency / Hz','Modulation'],sl.channels.map(c=>[c,chanHz(c),sl.bits_per_symbol===1?'DBPSK':'DQPSK']));
   drawTones();
 }
 document.getElementById('slSeg').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;
@@ -745,7 +776,7 @@ function drawFsk(){
   ctx.font="10px "+cssv('--mono');
   ctx.fillStyle=cssv('--ink-faint');ctx.textAlign="left";
   ctx.fillText("1400 Hz",padL,yMark-6);ctx.fillText("1600 Hz",padL,ySpace+14);
-  const nRev=prefersReduce?total:Math.min(total,Math.floor(fskReveal));
+  const nRev=(!guideMotion||prefersReduce)?total:Math.min(total,Math.floor(fskReveal));
   let x=padL;
   ctx.lineWidth=2;ctx.strokeStyle=cssv('--sig');ctx.beginPath();let started=false;
   const step=(bit,wU,i)=>{
@@ -775,6 +806,7 @@ function updateConnect(){
   document.getElementById('fskBins').innerHTML=
     "<span class='faint'>on-air bytes</span> <b>"+hex(frame.raw)+"</b> <span class='faint'>|</span> "+hex(frame.red);
   document.getElementById('fskKat').innerHTML="Address: "+(frame.call||"—")+" · 0.960 s";
+  guideData('fskCanvas','Connect waveform for '+(frame.call||'empty callsign'),['Field','Baud','Bytes, LSB first'],[['Address',100,hex(frame.raw)],['Redundancy',200,hex(frame.red)]]);
   drawFsk();
 }
 document.getElementById('callIn').addEventListener('input',e=>{curCall=e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'');e.target.value=curCall;updateConnect();});
@@ -834,6 +866,7 @@ function drawRef(){
   ctx.fillText(N_CH+" channels, one start angle each",cx,h-8);
 }
 registerLoop(refCanvas,()=>{refPh++;drawRef();});
+guideData('refCanvas','Phase-reference start angles',['Channel','Start angle / degrees'],FIG.phase.start_deg.map((d,k)=>[k,d]));
 
 /* Scene 3 — control-signal perfect code */
 (function(){
@@ -841,7 +874,7 @@ registerLoop(refCanvas,()=>{refPh++;drawRef();});
   CONTROL_SIGNALS.forEach((cs,i)=>{
     const row=document.createElement('div');row.className='csrow';
     let word='';for(let b=19;b>=0;b--)word+=`<span class="b ${(cs>>b)&1?'one':''}"></span>`;
-    row.innerHTML=`<span class="lab">CS${i+1}</span><span class="word">${word}</span>`;bitsEl.appendChild(row);
+    row.innerHTML=`<span class="lab">CS${i+1}</span><span class="word" aria-hidden="true">${word}</span><span class="sr-only">${cs.toString(2).padStart(20,'0')}</span>`;bitsEl.appendChild(row);
   });
   const pop=x=>{let n=0;while(x){n+=x&1;x>>=1;}return n;};
   const mat=document.getElementById('csMat');
@@ -887,7 +920,7 @@ function drawLadder(){
   ctx.fillStyle=cssv('--gold-hi');ctx.fillText("responder  B",laneB,16);
   ctx.strokeStyle=cssv('--line-2');ctx.lineWidth=1;
   [laneA,laneB].forEach(x=>{ctx.beginPath();ctx.moveTo(x,padT-6);ctx.lineTo(x,h-8);ctx.stroke();});
-  const shown=prefersReduce?LADDER.length:Math.min(LADDER.length,Math.floor(ladProg));
+  const shown=(!guideMotion||prefersReduce)?LADDER.length:Math.min(LADDER.length,Math.floor(ladProg));
   let curState=0;
   for(let i=0;i<shown;i++){const e=LADDER[i];const y=padT+i*rowH+rowH/2;
     const x0=e.from==="A"?laneA:laneB, x1=e.from==="A"?laneB:laneA;
@@ -901,6 +934,7 @@ function drawLadder(){
   document.querySelectorAll('#stateRow .st').forEach(el=>el.classList.toggle('on',+el.dataset.i===curState));
 }
 registerLoop(ladderCanvas,()=>{ladProg+=0.028;if(ladProg>LADDER.length+9)ladProg=0;drawLadder();});
+guideData('ladderCanvas','Schematic PACTOR exchange',['Step','Sender','Frame','Link state'],LADDER.map((e,i)=>[i+1,e.from,e.label,STATES[e.st]]));
 
 /* ===================================================================== */
 /*  Numbers — every value cell reaches back into the generated block      */
@@ -929,7 +963,7 @@ registerLoop(ladderCanvas,()=>{ladProg+=0.028;if(ladProg>LADDER.length+9)ladProg
 /* ===================================================================== */
 /*  Theme toggle + rail scroll-spy                                       */
 /* ===================================================================== */
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>location.reload());
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>guideLoops.forEach(loop=>loop.step(0)));
 const railLinks=[...document.querySelectorAll('.rail a')];
 const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
   railLinks.forEach(a=>a.classList.toggle('on',a.getAttribute('href')==='#'+e.target.id));}});},{rootMargin:"-40% 0px -55% 0px"});
@@ -937,6 +971,18 @@ const io=new IntersectionObserver(es=>{es.forEach(e=>{if(e.isIntersecting){
 </script>
 
 
-<script>document.querySelectorAll('.page-contents a').forEach(a=>a.addEventListener('click',()=>{a.closest('details').open=false;}));</script>
+<script>
+document.querySelectorAll('.page-contents a').forEach(a=>a.addEventListener('click',()=>{
+  const target=document.getElementById(a.hash.slice(1));if(!target)return;
+  a.closest('details').open=false;target.tabIndex=-1;target.focus({preventScroll:true});
+}));
+document.querySelectorAll('.tbl-scroll,.table-scroll,.frequency-scroll,.scroll,.barwrap,[style*="overflow-x:auto"]').forEach((el,i)=>{
+  el.tabIndex=0;el.setAttribute('role','region');if(!el.hasAttribute('aria-label')){const title=el.closest('section,header,details')?.querySelector('h2,h3,summary')?.textContent;el.setAttribute('aria-label',(title||'Diagram or table')+' — scrollable values');}
+});
+document.querySelectorAll('.seg,.seg-ctl').forEach(group=>{
+  const sync=()=>group.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.classList.contains('on'))));sync();
+  group.addEventListener('click',()=>queueMicrotask(sync));
+});
+</script>
 
 </html>

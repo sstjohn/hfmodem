@@ -15,66 +15,23 @@ code rewrite. See `unknowns.py` for what is genuinely unknown.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 
 import numpy as np
 
+# M.1798 names only "CCITT-CRC16". Init, reflection and xorout distinguish
+# three variants, so callers retain an explicit variant choice. The X.25
+# choice is pinned by the 0xF0B8 residue of a message including its CRC.
+from hfmodem.core.crc import (
+    CRC_VARIANTS as CRC_VARIANTS, crc16 as crc16, crc16_rows as crc16_rows,
+    reflected_crc_ccitt_table as reflected_crc_ccitt_table,
+)
+from hfmodem.core.fec import (
+    ConvCode as ConvCode, Puncture as Puncture, viterbi_decode as viterbi_decode,
+)
+
 from . import spec, unknowns
 
-# ---------------------------------------------------------------------------
-# CRC-16
-# ---------------------------------------------------------------------------
-
-# The spec says "CCITT-CRC16" and gives the polynomial by name only. The three
-# real-world variants that go by that name differ in init/reflection/xorout, and
-# guessing wrong is invisible until a receiver rejects the packet -- so all three
-# are here and the choice is an explicit, tagged parameter.
-CRC_VARIANTS: dict[str, dict] = {
-    "ccitt-false": dict(init=0xFFFF, refin=False, refout=False, xorout=0x0000),
-    "kermit":      dict(init=0x0000, refin=True,  refout=True,  xorout=0x0000),
-    "x25":         dict(init=0xFFFF, refin=True,  refout=True,  xorout=0xFFFF),
-}
-
-
-def _reflect(x: int, width: int) -> int:
-    r = 0
-    for _ in range(width):
-        r = (r << 1) | (x & 1)
-        x >>= 1
-    return r
-
-
-def reflected_crc_ccitt_table() -> list[int]:
-    """The 256-entry reflected CRC-16/CCITT table (poly reversed = 0x8408).
-
-    Used for the CRC and data whitening. First entries: 0x0000, 0x1189, 0x2312, ...
-    """
-    tbl = []
-    for b in range(256):
-        crc = b
-        for _ in range(8):
-            crc = (crc >> 1) ^ 0x8408 if crc & 1 else crc >> 1
-        tbl.append(crc & 0xFFFF)
-    return tbl
-
-
 _WHITEN = reflected_crc_ccitt_table()
-_CRC_TABLE_LSB = _WHITEN                    # shared CRC and whitening table
-
-
-def _msb_crc_ccitt_table() -> list[int]:
-    """The un-reflected companion to the above, for the ccitt-false variant."""
-    tbl = []
-    for b in range(256):
-        crc = b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ spec.CRC_POLY) & 0xFFFF if crc & 0x8000 \
-                else (crc << 1) & 0xFFFF
-        tbl.append(crc)
-    return tbl
-
-
-_CRC_TABLE_MSB = _msb_crc_ccitt_table()
 
 
 def whiten(data: bytes) -> bytes:
@@ -103,62 +60,6 @@ def whiten(data: bytes) -> bytes:
     return bytes(out[:len(data)]) if odd else bytes(out)
 
 
-def crc16(data: bytes, variant: str = "x25") -> int:
-    """CRC-16 with polynomial 0x1021, in the named variant.
-
-    Default is CRC-16/X-25: init 0xFFFF, reflected in and out, xorout 0xFFFF. The
-    variant is pinned by its residue, 0xF0B8 -- the value a correct message plus
-    its own CRC leaves behind -- which separates it from the other 0x1021
-    variants, so a receiver's verify step doubles as identification of the
-    variant.
-    """
-    if variant not in CRC_VARIANTS:
-        raise ValueError(f"unknown CRC variant {variant!r}; "
-                         f"choose from {sorted(CRC_VARIANTS)}")
-    p = CRC_VARIANTS[variant]
-    # Byte-at-a-time, which is how PACTOR receivers do it -- the reflected
-    # variants run on `reflected_crc_ccitt_table` above. The bitwise form this
-    # replaces was 8x the work, and the P1 packet scan CRCs tens of thousands of
-    # candidate frames per capture.
-    if p["refin"]:                          # refin and refout always agree here
-        reg = _reflect(p["init"], 16)
-        for byte in data:
-            reg = (reg >> 8) ^ _CRC_TABLE_LSB[(reg ^ byte) & 0xFF]
-    else:
-        reg = p["init"]
-        for byte in data:
-            reg = ((reg << 8) & 0xFFFF) ^ _CRC_TABLE_MSB[((reg >> 8) ^ byte) & 0xFF]
-    return reg ^ p["xorout"]
-
-
-def crc16_rows(data: np.ndarray, variant: str = "x25") -> np.ndarray:
-    """`crc16` of every row of a (k, n) uint8 array, as a (k,) uint32 array.
-
-    The register recurrence is sequential in the byte but independent across rows,
-    so a scan of k candidate frames is n table lookups wide rather than k*n
-    lookups long. The PACTOR-1 packet search gates tens of thousands of candidate
-    alignments per capture, which is a call per frame the narrow way.
-    """
-    if variant not in CRC_VARIANTS:
-        raise ValueError(f"unknown CRC variant {variant!r}; "
-                         f"choose from {sorted(CRC_VARIANTS)}")
-    p = CRC_VARIANTS[variant]
-    cols = np.asarray(data, np.uint32).T
-    if p["refin"]:
-        reg = np.full(cols.shape[1], _reflect(p["init"], 16), np.uint32)
-        for col in cols:
-            reg = (reg >> 8) ^ _TABLE_LSB[(reg ^ col) & 0xFF]
-    else:
-        reg = np.full(cols.shape[1], p["init"], np.uint32)
-        for col in cols:
-            reg = ((reg << 8) & 0xFFFF) ^ _TABLE_MSB[((reg >> 8) ^ col) & 0xFF]
-    return reg ^ p["xorout"]
-
-
-_TABLE_LSB = np.array(_CRC_TABLE_LSB, np.uint32)
-_TABLE_MSB = np.array(_CRC_TABLE_MSB, np.uint32)
-
-
 # ---------------------------------------------------------------------------
 # bit <-> byte helpers  (MSB-first; bit order is itself a candidate -- see U8)
 # ---------------------------------------------------------------------------
@@ -182,46 +83,6 @@ def bits_to_bytes(bits: np.ndarray, msb_first: bool = True) -> bytes:
 # ---------------------------------------------------------------------------
 # Convolutional code
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class ConvCode:
-    """Rate-1/2 feed-forward convolutional code.
-
-    `generators` are octal, e.g. (0o171, 0o133) for K=7. Which generator produces
-    the FIRST output bit is not stated by the spec -- swap them to test the other
-    ordering (both orderings are in unknowns.U1_GENERATORS.candidates).
-    """
-    constraint_length: int
-    generators: tuple[int, int]
-
-    @property
-    def n_states(self) -> int:
-        return 1 << (self.constraint_length - 1)
-
-    def _taps(self) -> tuple[np.ndarray, np.ndarray]:
-        K = self.constraint_length
-        out = []
-        for g in self.generators:
-            out.append(np.array([(g >> (K - 1 - i)) & 1 for i in range(K)],
-                                dtype=np.uint8))
-        return out[0], out[1]
-
-    def encode(self, bits: np.ndarray, terminate: bool = True) -> np.ndarray:
-        """Encode, MSB-first, optionally flushing the register with K-1 zeros."""
-        K = self.constraint_length
-        g0, g1 = self._taps()
-        bits = np.asarray(bits, dtype=np.uint8)
-        if terminate:
-            bits = np.concatenate([bits, np.zeros(K - 1, dtype=np.uint8)])
-        # shift register, newest bit first
-        reg = np.zeros(K, dtype=np.uint8)
-        out = np.empty(bits.size * 2, dtype=np.uint8)
-        for i, b in enumerate(bits):
-            reg[1:] = reg[:-1]
-            reg[0] = b
-            out[2 * i] = np.bitwise_xor.reduce(reg & g0)
-            out[2 * i + 1] = np.bitwise_xor.reduce(reg & g1)
-        return out
 
 
 CODE_K9 = ConvCode(9, (0o657, 0o435))
@@ -251,150 +112,9 @@ PACTOR-III's slowest path independently reaches the same taps by measurement
 declaring the pair."""
 
 
-@lru_cache(maxsize=None)
-def _trellis(code: ConvCode) -> tuple[np.ndarray, ...]:
-    """Branch amplitudes and predecessors for `code` -- a pure function of the code.
-
-    State convention (must match encode()): the state holds the K-1 PREVIOUS input
-    bits, with bit 0 = most recent. Feeding input b therefore yields
-        next = ((state << 1) | b) & mask
-    and so, going backwards, the input that produced a given state is simply
-    `state & 1` -- which is what makes viterbi_decode's traceback unambiguous.
-
-    Cached because the timing search calls the decoder once per candidate symbol
-    position and this was rebuilt every time -- 512 ufunc reduces per call at K=9,
-    which cost more than the trellis sweep it was setting up for.
-    """
-    K = code.constraint_length
-    g0, g1 = code._taps()
-    states = np.arange(code.n_states)
-    out = np.zeros((code.n_states, 2, 2), dtype=np.int8)
-    for s in range(code.n_states):
-        for b in (0, 1):
-            reg = np.empty(K, dtype=np.uint8)
-            reg[0] = b                                  # newest bit
-            for i in range(1, K):
-                reg[i] = (s >> (i - 1)) & 1             # older bits
-            out[s, b, 0] = np.bitwise_xor.reduce(reg & g0)
-            out[s, b, 1] = np.bitwise_xor.reduce(reg & g1)
-
-    # +1 for coded bit 0, -1 for coded bit 1: the branch metric is a correlation,
-    # which we MAXIMISE. Passing 0.0 for a punctured bit contributes nothing --
-    # exactly the "exactly intermediate value" the spec asks for.
-    amp = np.where(out == 0, 1.0, -1.0)
-
-    # For every next-state, its two predecessors and the input bit that got there.
-    b_of = (states & 1).astype(np.int64)
-    pred0 = (states >> 1).astype(np.int64)
-    pred1 = pred0 | (1 << (K - 2))
-    return (amp[pred0, b_of, 0], amp[pred0, b_of, 1],
-            amp[pred1, b_of, 0], amp[pred1, b_of, 1], pred0, pred1)
-
-
-def viterbi_decode(soft: np.ndarray, code: ConvCode, terminated: bool = True,
-                   pinned: bool = False) -> np.ndarray:
-    """Soft-decision Viterbi.
-
-    `soft` holds one value per CODED bit, where +1 means "confidently 0" and -1
-    means "confidently 1" (i.e. it is the expected BPSK amplitude). A punctured
-    bit is passed in as 0.0 -- exactly the "neither a 1 nor a 0, but an exactly
-    intermediate value" the spec describes.
-
-    `terminated` says the last K-1 steps carry the flush and their bits are not
-    information. It does NOT say the register was at zero there, and by default
-    neither boundary state is assumed, because on the air neither one holds for
-    PACTOR-3. Measured on the DL6MAA session: a decoder pinned to state 0 at
-    both ends recovers a real speed level 5 or 6 field everywhere except its
-    first byte and its last few -- which is where the CRC lives -- so all
-    fourteen of that session's punctured packets failed the CRC while their
-    payload sat in plain sight, the same repeating test pattern the speed level
-    3 packets carry, one byte out of place. Reading the ends free returns every
-    one of them, and the fields it returns are byte-for-byte what the pinned
-    decoder already had in the middle. The lower speed levels never showed it:
-    at rate 1/2 the trellis recovers inside the field's own slack, so the CRC
-    bytes are clean either way.
-
-    `pinned` holds both boundary states at zero, and it is the honest model for
-    PACTOR-2, whose encoder measurably starts at zero and flushes to zero
-    (`pactor2.encode_frame`, and the flush is inside `Path.n_buf`). The freedom
-    is not free at the decode edge: on the faded 33.15 s burst of
-    `hb9ak_055246_c1500.wav` the free-boundary trellis prefers an impostor path
-    whose re-encoded-from-zero metric is 36 below the true field's, and pinning
-    the ends is one of the three changes that turned that burst from a miss
-    into a byte-exact decode. Pinning also shrinks the space a chance CRC
-    accept can come from.
-    """
-    K = code.constraint_length
-    n_states = code.n_states
-    soft = np.asarray(soft, dtype=np.float64)
-    if soft.size % 2:
-        raise ValueError("expected an even number of coded soft values")
-    n_steps = soft.size // 2
-    a0_0, a0_1, a1_0, a1_1, pred0, pred1 = _trellis(code)
-
-    if pinned:
-        metric = np.full(n_states, -1e12)
-        metric[0] = 0.0
-    else:
-        metric = np.zeros(n_states)
-    back = np.zeros((n_steps, n_states), dtype=np.int32)
-
-    for t in range(n_steps):
-        r0, r1 = soft[2 * t], soft[2 * t + 1]
-        cand0 = metric[pred0] + (a0_0 * r0 + a0_1 * r1)
-        cand1 = metric[pred1] + (a1_0 * r0 + a1_1 * r1)
-        take1 = cand1 > cand0
-        metric = np.where(take1, cand1, cand0)
-        back[t] = np.where(take1, pred1, pred0)
-
-    state = 0 if pinned else int(np.argmax(metric))
-    bits = np.zeros(n_steps, dtype=np.uint8)
-    for t in range(n_steps - 1, -1, -1):
-        bits[t] = state & 1          # the input bit is the low bit of the state
-        state = int(back[t, state])
-    if terminated:
-        bits = bits[: n_steps - (K - 1)]
-    return bits
-
-
 # ---------------------------------------------------------------------------
 # Puncturing
 # ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class Puncture:
-    """A puncture pattern over the rate-1/2 output stream.
-
-    `mask` is a 2 x period array of 0/1; 1 = transmit, 0 = delete, row 0 for the
-    G0 output and row 1 for G1, with the period counted in trellis steps. Rate 1/2
-    is the all-ones mask, which makes the stage a no-op rather than a branch at
-    every caller that does not puncture.
-    """
-    mask: tuple[tuple[int, ...], ...]
-
-    @property
-    def period(self) -> int:
-        return len(self.mask[0])
-
-    @property
-    def rate(self) -> tuple[int, int]:
-        kept = sum(sum(row) for row in self.mask)
-        return (self.period, kept)
-
-    def apply(self, coded: np.ndarray) -> np.ndarray:
-        m = np.array(self.mask, dtype=bool)          # shape (2, period)
-        pairs = coded.reshape(-1, 2).T               # shape (2, n)
-        n = pairs.shape[1]
-        keep = np.tile(m, (1, int(np.ceil(n / self.period))))[:, :n]
-        return pairs.T[keep.T]                       # column-major, time-ordered
-
-    def depuncture(self, soft: np.ndarray, n_pairs: int) -> np.ndarray:
-        """Reinsert punctured positions as 0.0 (the neutral value)."""
-        m = np.array(self.mask, dtype=bool)
-        keep = np.tile(m, (1, int(np.ceil(n_pairs / self.period))))[:, :n_pairs]
-        full = np.zeros((2, n_pairs), dtype=np.float64)
-        full.T[keep.T] = soft
-        return full.T.ravel()
 
 
 RATE_1_2 = Puncture(((1,), (1,)))
@@ -484,7 +204,24 @@ class BlockInterleaver:
 
 
 def conv_code_for(sl: int, generators: dict[int, tuple[int, int]] | None = None) -> ConvCode:
-    """The convolutional code for a speed level, using the ASSUMED generators."""
+    """The convolutional code for a speed level, using the ASSUMED generators.
+
+    The spec does not state which generator emits the first bit; both orders
+    remain in unknowns.U1_GENERATORS.candidates.
+
+    PACTOR-3 uses free Viterbi boundary states, even when the last K-1 steps
+    are omitted as flush bits. Pinning both ends to zero spoiled the first
+    byte and the CRC end of all fourteen punctured SL5/6 fields in the DL6MAA
+    session; free ends recovered every field, agreeing with the pinned
+    decoder in the middle. At rate 1/2 the trellis recovered within the
+    field's slack, hiding the boundary mistake.
+
+    PACTOR-2 instead starts and flushes at zero (pactor2.encode_frame, with
+    flush inside Path.n_buf). On the faded 33.15 s hb9ak_055246_c1500.wav
+    burst, free ends preferred an impostor whose re-encoded-from-zero metric
+    was 36 below the true field's. Pinning was one of three changes that
+    recovered it byte-exact, and also narrows the chance-CRC search space.
+    """
     gens = generators or unknowns.U1_GENERATORS.value
     K = spec.SPEED_LEVELS[sl].constraint_length
     return ConvCode(constraint_length=K, generators=gens[K])

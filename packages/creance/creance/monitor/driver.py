@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import math
 import os
 import queue
 import subprocess
@@ -40,7 +41,7 @@ from .activity import Detection
 
 RUNNERS = Path(__file__).resolve().parent / "runners"
 #: source tree holding both the modem distribution and the shared field tools
-#: the kestrel runner reads its segmenter from
+#: the PACTOR-4 runner reads its chirp acquisition from
 MODEM_ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -63,7 +64,7 @@ class MonitorSpec:
         The question is whether the runner RUNS, and only starting it answers
         that. Layout cannot: a runner file is on disk in every tree carrying
         creance, while what it imports is the modem's own business and need not
-        be there — one of the three reads its decode path out of a directory the
+        be there — one of them reads its decode path out of a directory the
         publication boundary denies, so a distribution holds its file and not its
         import.
 
@@ -84,9 +85,7 @@ class MonitorSpec:
 #: how long the probe waits for a runner to answer definitively. Only a runner
 #: still going at the bound costs the whole wait, and that one is answered
 #: `available` anyway, so the bound can never report a working modem missing —
-#: it only decides how long a definitive answer is waited for. The three shipped
-#: runners settle in 0.06-1.4 s on this station: a failed import is the fastest
-#: outcome of the three, since it happens before numpy is loaded.
+#: it only decides how long a definitive answer is waited for.
 PROBE_S = 15.0
 
 
@@ -109,7 +108,8 @@ def _probe(spec: "MonitorSpec") -> str:
     try:
         proc = subprocess.Popen([spec.interpreter, spec.runner, *spec.args],
                                 cwd=spec.cwd, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                start_new_session=True)
     except OSError as exc:
         return f"runner could not be started: {exc}"
     try:
@@ -126,13 +126,13 @@ def _probe(spec: "MonitorSpec") -> str:
 
 
 def default_specs(base: str | Path | None = None,
-                  deep: bool = False) -> list[MonitorSpec]:
+                  deep: bool = False, no_rtty_usos: bool = False) -> list[MonitorSpec]:
     """The modems creance knows how to monitor. The set is a plain list — adding
     sabir later is one entry.
 
-    The runners use the interpreter creance itself runs under. The Kestrel
-    runner additionally needs the development tree's unshipped monitoring tools;
-    the startup probe reports it unavailable when those tools are absent.
+    The runners use the interpreter creance itself runs under. The PACTOR-4
+    runner additionally needs the development tree's unshipped collector;
+    the startup probe reports it unavailable when that is absent.
     ``CREANCE_MODEM_PYTHON`` points them at another interpreter — an external checkout of a modem, or a build with a
     different numpy — and ``base`` (or ``CREANCE_MODEM_ROOT``) moves the tree
     they resolve against.
@@ -140,12 +140,14 @@ def default_specs(base: str | Path | None = None,
     ``deep`` asks each runner for its expensive decode (kestrel's wideband over,
     which costs seconds of turbo decoding per burst). It is offline-only: on live
     audio the cost backs the stream up, so the CLI refuses it outside --wav.
+    ``no_rtty_usos`` keeps lanner's RTTY receiver in figures across spaces.
     """
     root = Path(base or os.environ.get("CREANCE_MODEM_ROOT") or MODEM_ROOT)
     return [MonitorSpec(name, _interpreter(), str(RUNNERS / f"{name}_runner.py"),
                         str(root),
-                        ("--deep",) if deep and name == "kestrel" else ())
-            for name in ("kestrel", "shrike", "besra")]
+                        ("--deep",) if deep and name == "kestrel" else
+                        ("--no-rtty-usos",) if no_rtty_usos and name == "lanner" else ())
+            for name in ("kestrel", "shrike", "besra", "p4", "lanner")]
 
 
 def _interpreter() -> str:
@@ -183,7 +185,7 @@ class _Clock:
     """
 
     #: marks kept before the oldest are trimmed; 0.1 s frames, so ~10 minutes.
-    #: A detection lags its audio by a decode window, never by minutes.
+    #: Completed NAVTEX messages can refer to source-clock marks several minutes old.
     KEEP = 6000
 
     def __init__(self) -> None:
@@ -239,11 +241,6 @@ class ModemMonitor:
     #: out of a channel that has since moved on.
     BACKLOG_S = 8.0
 
-    #: how long a lossless feed waits for room before it gives up and drops. Only
-    #: a runner that has stopped reading altogether gets that far, and dropping
-    #: beats hanging a sweep on it.
-    STALL_S = 30.0
-
     def __init__(self, spec: MonitorSpec, out: "queue.Queue[Detection]", *,
                  backlog_s: float = BACKLOG_S, lossy: bool = True) -> None:
         self.spec = spec
@@ -263,16 +260,27 @@ class ModemMonitor:
         self._reader: threading.Thread | None = None
         self._errpump: threading.Thread | None = None
         self._writer: threading.Thread | None = None
+        self._decoded: float | None = None
 
     def start(self) -> None:
+        # Its own session, so a terminal's ^C reaches only this process: the
+        # operator's first interrupt is the console's to turn into a drain, and
+        # a runner that took it too died mid-block with a traceback.
         self.proc = subprocess.Popen(
             [self.spec.interpreter, self.spec.runner, *self.spec.args],
             cwd=self.spec.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, bufsize=0)
+            stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
         self.alive = True
         self._reader = _spawn_thread(self._read)
         self._errpump = _spawn_thread(self._pump_err)
         self._writer = _spawn_thread(self._write)
+
+    @property
+    def decoded_s(self) -> float | None:
+        """Where on the source's clock the runner has said everything it will
+        say about the audio before: its last ``{"heard": s}`` line, infinite once
+        it has exited, None while it has said neither."""
+        return self._decoded
 
     def feed(self, t0: int, pcm: bytes) -> None:
         """Queue one audio frame for the runner.
@@ -286,17 +294,19 @@ class ModemMonitor:
         and counted — a real loss, reported as one, where waiting would instead
         stall the reader and push a *larger* loss upstream into a device that
         counts nothing. Over a recording nothing is at stake but time, so the
-        feed waits for room and the sweep stays complete.
+        feed waits for room as long as the runner lives, and never drops: a
+        30 s give-up used to, and a loaded machine reached it, dropping 0.3 s of
+        shrike's feed on a replay of the 2026-07-26 recording.
         """
         if not self.alive:
             return
         arrived = time.time()
         with self._cv:
             if not self.lossy:
-                self._cv.wait_for(
-                    lambda: (self._queued + len(pcm) <= self._cap
-                             or not self._pending or not self.alive),
-                    timeout=self.STALL_S)
+                self._cv.wait_for(lambda: (self._queued + len(pcm) <= self._cap
+                                           or not self._pending or not self.alive))
+                if not self.alive:
+                    return
             while self._pending and self._queued + len(pcm) > self._cap:
                 _, _, old = self._pending.popleft()
                 self._queued -= len(old)
@@ -339,6 +349,10 @@ class ModemMonitor:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue                       # a stray print is not a detection
+            if "heard" in obj and "t" not in obj:
+                with self._cv:
+                    self._decoded = self._clock.locate(float(obj["heard"]))[0]
+                continue
             obj.setdefault("modem", self.spec.name)
             try:
                 d = Detection.from_json(obj)
@@ -346,7 +360,10 @@ class ModemMonitor:
                 continue
             with self._cv:
                 stream_t, wall = self._clock.locate(d.t)
+                if d.t_start is not None:
+                    d = replace(d, t_start=self._clock.locate(d.t_start)[0])
             self.out.put(replace(d, t=stream_t, wall=wall))
+        self._decoded = math.inf
         self._retire()
 
     def _retire(self) -> None:

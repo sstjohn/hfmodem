@@ -16,6 +16,9 @@ Run: pytest hfmodem/tests/shrike/test_connect_prefix.py
 """
 from __future__ import annotations
 
+import sys
+
+import numpy as np
 import pytest
 
 from hfmodem.shrike import hostmode, p1rx, rxfront
@@ -213,3 +216,119 @@ def test_a_simulated_far_end_sees_the_call_it_was_made_with():
         peer.pump()
         assert (peer._far.state == State.CONNECTED) == answered, \
             f"CONType {contype} against a robust call"
+
+
+def _modem_args(monkeypatch, argv):
+    """What `onair.main` resolves, without opening anything."""
+    from hfmodem.shrike import onair
+    got = []
+    monkeypatch.setattr(onair, "run", lambda args: got.append(args) or 0)
+    monkeypatch.setattr(sys, "argv", ["onair", "--dxcall", "VE3KPG", *argv])
+    assert onair.main() == 0
+    return got[0]
+
+
+@pytest.mark.parametrize("argv, connect", [([], "normal"),
+                                           (["--connect", "robust"], "robust")])
+def test_the_command_line_makes_the_call_the_operator_asked_for(monkeypatch, tmp_path,
+                                                                argv, connect):
+    """Read off a whole replayed session, because the argument the call is made
+    with is built inside `run` and no namespace shows what went out."""
+    from hfmodem.tests.shrike.test_grantslot import _log
+    log = _log(tmp_path, *argv)
+    assert "connect burst -> K7ABC" in log, log
+    assert ("connect burst -> K7ABC (robust call)" in log) == (connect == "robust"), log
+    assert _modem_args(monkeypatch, argv).connect == connect
+
+
+@pytest.mark.parametrize("argv", [
+    ["--dxcall", "!VE3KPG", "--connect", "robust"],
+    ["--dxcall", "%VE3KPG", "--connect", "robust"],
+    ["--dxcall", "%!VE3KPG"],
+    ["--connect-fallback-after", "3"],
+    ["--connect", "robust", "--connect-fallback-after", "0"],
+    ["--after-connect", "listen", "--after-connect-cycles", "0"],
+    ["--after-connect", "listen", "--message", "TEST DE W9SSJ"],
+    ["--after-connect", "chirp", "--message", "TEST DE W9SSJ"],
+    ["--after-connect", "listen", "--p4-entry"],
+])
+def test_an_incoherent_call_is_refused_before_the_hardware_opens(monkeypatch, argv):
+    with pytest.raises(SystemExit):
+        _modem_args(monkeypatch, argv)
+
+
+def test_the_robust_call_keeps_the_alternation_the_normal_one_has(monkeypatch, tmp_path):
+    from hfmodem.shrike import onair, pactor1
+    keyed = []
+    monkeypatch.setattr(pactor1, "connect_signal",
+                        lambda dxcall, invert, variant:
+                        keyed.append((invert, variant)) or np.zeros(480, np.float32))
+    for variant in ("normal", "robust"):
+        keyed.clear()
+        tx = onair.RadioTx(transmit=False, outdir=tmp_path, settle=.04)
+        tx.host = PtcHost()
+        tx.host.arq.connect_variant = variant
+        for _ in range(4):
+            tx.connect_burst("W9SSJ", "VE3KPG")
+        assert keyed == [(False, variant), (True, variant),
+                         (False, variant), (True, variant)]
+
+
+def test_the_fallback_keys_the_rest_of_the_retries_normally():
+    arq, io = _calling(ArqConfig(max_connect_retries=6))
+    arq.connect_fallback_after = 2
+    logged = []
+    arq.io.log = logged.append
+    arq.on_host_connect("W9SSJ", "%VE3KPG")
+    for _ in range(4):
+        arq.on_cycle()
+    assert [variant for _, variant in io.calls] == \
+        ["robust", "robust", "normal", "normal", "normal"]
+    assert logged.count("ROBUST CALL UNANSWERED AFTER 2 -- FALLING BACK TO A "
+                        "NORMAL CONNECT") == 1
+
+
+def test_a_cycle_the_peer_was_heard_in_buys_no_fallback():
+    arq, io = _calling(ArqConfig(max_connect_retries=6))
+    arq.connect_fallback_after = 1
+    arq.on_host_connect("W9SSJ", "%VE3KPG")
+    arq.note_peer_heard()
+    arq.on_cycle()
+    assert [variant for _, variant in io.calls] == ["robust", "robust"]
+
+
+def test_without_the_flag_a_robust_call_never_falls_back():
+    arq, io = _calling(ArqConfig(max_connect_retries=6))
+    arq.on_host_connect("W9SSJ", "%VE3KPG")
+    for _ in range(4):
+        arq.on_cycle()
+    assert set(io.calls) == {("VE3KPG", "robust")}
+
+
+def test_the_connection_fixture_retains_the_actual_p3_owner_guard(monkeypatch, tmp_path):
+    from hfmodem.shrike import onair, pactor1
+
+    rendered, writes = [], []
+    monkeypatch.setattr(pactor1, "connect_signal",
+                        lambda dxcall, invert, variant: rendered.append(invert)
+                        or np.zeros(480, np.float32))
+    monkeypatch.setattr(onair.session, "write_wav",
+                        lambda *args, **kwargs: writes.append(True))
+    tx = onair.RadioTx(transmit=False, outdir=tmp_path, settle=0.04)
+    tx.host = PtcHost()
+    tx.host.protocol = onair.Protocol.PACTOR3
+    tx.host.arq.state = State.CONNECTED
+    owner = tx.host.arq.p3_tx_owner
+    assert tx.host.arq.p3_tx_allowed(owner)
+    tx._p3_render_owner = owner
+    tx.host.arq.on_host_abort()
+    assert tx.host.arq.p3_tx_owner != owner
+    assert not tx.host.arq.p3_tx_allowed(owner)
+    tx.connect_burst('W9SSJ', 'VE3KPG')
+    assert rendered == [False]
+    assert tx.refused
+    assert tx.n == 0
+    assert writes == []
+    assert tx.keyed == []
+    assert tx.keyings == []
+    assert tx._p3_tx_admit is None

@@ -18,7 +18,7 @@ key down.
 
 `key()` takes an `Emission` and consults the station's regulatory profile before
 the line goes up. It is not possible to key this object without one, which is
-deliberate: an earlier design had a perfectly good regulatory gate that **nothing
+deliberate: an earlier design had a perfectly good emission-profile check that **nothing
 ever called**, and a gate no transmit path consults is documentation. Making it an
 argument means forgetting is a type error rather than an omission.
 
@@ -71,6 +71,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 from hfmodem.core import band, rigs
+from hfmodem.core.operations import LeaseTimeout, OperationGate, leased
 from hfmodem.core.ptt import Ptt, PttError
 from hfmodem.core.regulatory import Control, Emission, NotPermitted, Profile
 
@@ -96,7 +97,20 @@ _WATCHDOG_FRACTION = 0.25
 FATAL_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
-def arm_deadman(budget_s: float = PANIC_BUDGET_S) -> None:
+def fatal_write(message: bytes) -> None:
+    """Best-effort stderr output without changing the caller's tty mode."""
+    try:
+        blocking = os.get_blocking(2)
+        try:
+            os.set_blocking(2, False)
+            os.write(2, message)
+        finally:
+            os.set_blocking(2, blocking)
+    except OSError:
+        pass
+
+
+def arm_deadman(budget_s: float = PANIC_BUDGET_S, *, message: bytes | None = None) -> None:
     """Kill this interpreter shortly, whatever it is doing.
 
     setitimer, not threading.Timer. Starting a thread takes interpreter locks the
@@ -105,11 +119,16 @@ def arm_deadman(budget_s: float = PANIC_BUDGET_S) -> None:
     nothing but the kernel. Off the main thread no handler is installable and a
     thread is what is left.
     """
+    def terminate(*_):
+        if message is not None:
+            fatal_write(message)
+        os._exit(1)
+
     try:
-        signal.signal(signal.SIGALRM, lambda *_: os._exit(1))
+        signal.signal(signal.SIGALRM, terminate)
         signal.setitimer(signal.ITIMER_REAL, budget_s)
     except (ValueError, OSError):
-        threading.Timer(budget_s, lambda: os._exit(1)).start()
+        threading.Timer(budget_s, terminate).start()
 
 
 @contextlib.contextmanager
@@ -159,6 +178,8 @@ class KeyToken:
     at: float
     deadline: float
     why: str
+    card_index: int | None = None
+    card_deadline: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +209,7 @@ class Cat:
     def __init__(self, host: str = "127.0.0.1", port: int = 4532,
                  timeout: float = 2.0) -> None:
         self.host, self.port, self.timeout = host, port, timeout
+        self.operations = OperationGate()
         self._sock: socket.socket | None = None
         self._buf = b""
         #: False when rigctld would not take the setup above, so `t` is a cache
@@ -203,6 +225,7 @@ class Cat:
         #: Set by the Rig that owns us. Read on every command.
         self.keyed_probe = lambda: False
 
+    @leased
     def open(self) -> None:
         if self._sock is not None:
             return
@@ -272,6 +295,7 @@ class Cat:
             except OSError:
                 pass
 
+    @leased
     def command(self, line: str, *, _arming: bool = False) -> str:
         """One rigctld command. Refuses to run while the transmitter is up.
 
@@ -279,11 +303,9 @@ class Cat:
         CAT to learn whether the keying line reaches the radio, and there is no
         other way to learn it.
         """
-        if self.keyed_probe() and not _arming:
-            raise RigError(
-                f"refusing CAT command {line!r} while keyed. Every account of a "
-                "stuck transmitter here agrees on this one point.")
         with self._lock:
+            if self.keyed_probe() and not _arming:
+                raise RigError(f"refusing CAT command {line!r} while keyed")
             if self._sock is None:
                 raise RigError("CAT is not open")
             try:
@@ -427,6 +449,10 @@ class Rig:
         #: A hard interlock, not a preference. False and nothing can key.
         self.transmit = transmit
         self.max_key_s = max_key_s
+        self.operations = OperationGate()
+        self.cat.operations = self.operations
+        self.fatal = None
+        self._fatal_handoff = False
 
         self._armed = False
         self._retired_why = ""
@@ -437,7 +463,6 @@ class Rig:
         self._keyed_since = 0.0
         self._timer: threading.Timer | None = None
         self._dial_hz = 0
-        self._claimed = False
         self._lock = threading.Lock()
         #: Held only by the panic path. A lock no caller and no CAT path takes
         #: cannot reintroduce the deadlock the panic path exists to avoid, and a
@@ -467,6 +492,7 @@ class Rig:
 
     # -- arming ------------------------------------------------------------
 
+    @leased
     def arm(self, *, prove_ptt: bool = True) -> ArmReport:
         """Everything that must be true before this object may key.
 
@@ -579,10 +605,9 @@ class Rig:
         """Assert the line and check the radio agrees it is transmitting.
 
         **This is a keying test, not an identification.** An earlier version sent
-        the callsign in Morse on the RTS line and claimed that discharged §97.119.
-        It does not: the rig's configured mode is PKTUSB, and keying a
-        sideband transmitter with no audio produces no RF at all — so nothing
-        identifiable went out, and nothing went out. Identification is the
+        the callsign in Morse on the RTS line. The rig's configured mode is
+        PKTUSB, and keying a sideband transmitter with no audio produces no RF at
+        all — so nothing identifiable went out, and nothing went out. Identification is the
         arbiter's job, through `cwid.audio()` and the transmit path.
 
         So the proof is short and its deadline comes from its own length, the way a
@@ -643,22 +668,25 @@ class Rig:
 
     # -- tuning ------------------------------------------------------------
 
+    @leased
     def tune(self, centre_hz: float) -> None:
         """Point the radio at a published channel centre.
 
         The dial is derived, never configured. Re-read afterwards because it does
         not stay where you left it — a real and repeated observation, not caution.
         """
-        if self.keyed:
-            raise RigError("refusing to retune while keyed")
-        dial = band.dial_hz(centre_hz)
-        self.cat.set_freq(dial)
-        self._dial_hz = self.cat.freq()
-        if abs(self._dial_hz - dial) > band.QSY_TOLERANCE_HZ:
-            raise RigError(
-                f"asked for dial {dial} Hz, the radio reports {self._dial_hz}. "
-                "Believe the readback.")
+        with self._lock:
+            if self.keyed:
+                raise RigError("refusing to retune while keyed")
+            dial = band.dial_hz(centre_hz)
+            self.cat.set_freq(dial)
+            self._dial_hz = self.cat.freq()
+            if abs(self._dial_hz - dial) > band.QSY_TOLERANCE_HZ:
+                raise RigError(
+                    f"asked for dial {dial} Hz, the radio reports {self._dial_hz}. "
+                    "Believe the readback.")
 
+    @leased
     def dial(self) -> int:
         if self.keyed:
             return self._dial_hz
@@ -667,8 +695,10 @@ class Rig:
 
     # -- keying ------------------------------------------------------------
 
+    @leased
     def key(self, emission: Emission, *, why: str, duration_s: float,
-            settle_s: float = 0.0, responding: bool = False) -> KeyToken:
+            settle_s: float = 0.0, responding: bool = False,
+            sample_now=None) -> KeyToken:
         """Bring the transmitter up for one burst.
 
         The emission is checked against the station's profile first, on the dial
@@ -690,27 +720,26 @@ class Rig:
                 raise RigError("arm() has not passed")
             if self.keyed:
                 raise RigError("already keyed")
-            self._claimed = True
 
-        checked = Emission(self.dial(), emission.audio_lo_hz, emission.audio_hi_hz,
-                           power_w=emission.power_w, designator=emission.designator,
-                           technique=emission.technique,
-                           symbol_rate_bd=emission.symbol_rate_bd,
-                           drift_hz=emission.drift_hz)
-        try:
-            self.profile.check(checked, control=self.control, responding=responding)
-        except NotPermitted as exc:
-            raise RigError(f"refused by {self.profile.name}: {exc}") from None
+            checked = Emission(self.dial(), emission.audio_lo_hz, emission.audio_hi_hz,
+                               power_w=emission.power_w, designator=emission.designator,
+                               technique=emission.technique,
+                               symbol_rate_bd=emission.symbol_rate_bd,
+                               drift_hz=emission.drift_hz)
+            try:
+                self.profile.check(checked, control=self.control, responding=responding)
+            except NotPermitted as exc:
+                raise RigError(f"refused by {self.profile.name}: {exc}") from None
 
-        deadline = self._deadline(duration_s, settle_s)
-        with self._lock:
+            deadline = self._deadline(duration_s, settle_s)
             self._seq += 1
             token = KeyToken(self._seq, time.monotonic(), deadline, why)
-        # Armed before the key goes up, and the flag set before it too: a wedge
-        # between the two must look keyed, not idle.
-        self._arm_watchdog(deadline, why)
-        self._keyed.set()
-        self._keyed_since = time.monotonic()
+            # Armed before the key goes up, and the flag set before it too: a wedge
+            # between the two must look keyed, not idle.
+            expires = time.monotonic() + deadline
+            self._arm_watchdog(deadline, why)
+            self._keyed.set()
+            self._keyed_since = time.monotonic()
         try:
             self.ptt.assert_(True)
         except PttError as exc:
@@ -718,6 +747,10 @@ class Rig:
             self._cancel_watchdog()
             self._retire(f"the keying line refused to assert: {exc}")
             raise RigError(f"cannot key: {exc}") from None
+        if sample_now is not None:
+            index = int(sample_now())
+            end = index + int(max(0, expires - time.monotonic()) * 48000)
+            token = KeyToken(token.seq, token.at, token.deadline, token.why, index, end)
         return token
 
     def _deadline(self, duration_s: float, settle_s: float) -> float:
@@ -731,6 +764,7 @@ class Rig:
                                            _WATCHDOG_FRACTION * duration_s)
         return min(want, self.max_key_s)
 
+    @leased
     def unkey(self, token: KeyToken | None = None) -> None:
         """Bring the key down and confirm it went down."""
         if token is not None and token.seq != self._seq:
@@ -760,6 +794,9 @@ class Rig:
         No `keyed` guard anywhere on this path: a guard that can suppress the
         panic is not a safety mechanism.
         """
+        if self.fatal is not None and self.operations.active and not self._fatal_handoff:
+            self._fatal_handoff = True
+            self.fatal(f"panic overlapped an admitted operation: {why}")
         with self._panic_lock:
             first, self._panicked = not self._panicked, True
         if not first:
@@ -905,8 +942,35 @@ class Rig:
     # -- teardown ----------------------------------------------------------
 
     def close(self) -> None:
-        self._cancel_watchdog()
+        # A failed drain can leave PTT up even when no Station fatal handler is
+        # installed (CLI and preflight use this object too). Always attempt the
+        # bounded line release, and retain the watchdog until a clean drain.
+        drain_error = None
         try:
-            self.ptt.release()
-        finally:
-            self.cat.close()
+            self.operations.close(self.max_key_s + 5)
+        except LeaseTimeout as exc:
+            drain_error = exc
+            self._retire(f"close timed out: {exc}")
+
+        # Even after a clean drain, a USB ioctl can wedge in release().  Bound
+        # this leg so Station.shutdown can reach its deadman and independent CAT
+        # unkey path.  Keep the watchdog until the line has actually answered.
+        errors: list[Exception] = []
+
+        def release() -> None:
+            try:
+                self.ptt.release()
+            except Exception as exc:  # noqa: BLE001 — report on the caller
+                errors.append(exc)
+
+        line = threading.Thread(target=release, daemon=True)
+        line.start()
+        line.join(RELEASE_BUDGET_S)
+        if line.is_alive():
+            raise LeaseTimeout("keying line did not release during close")
+        if errors:
+            raise LeaseTimeout(f"keying line release failed during close: {errors[0]}")
+        if drain_error is not None:
+            raise drain_error
+        self._cancel_watchdog()
+        self.cat.close()

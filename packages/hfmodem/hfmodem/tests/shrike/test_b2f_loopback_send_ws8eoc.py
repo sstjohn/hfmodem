@@ -108,10 +108,19 @@ class Volunteering(Ws8eoc):
         super().__init__(script, **kw)
         self.unprompted = list(unprompted)
 
-    def _take(self) -> None:
-        if not self.out and self.unprompted:
+    def _volunteer(self) -> None:
+        if not self.out and self.unprompted and self._step == len(self.script):
             self.out += transparent(self.unprompted.pop(0))
+
+    def _take(self) -> None:
+        self._volunteer()
         super()._take()
+
+    def _send(self) -> None:
+        """Or on the turn it already holds: a CMS writes its mailbox when it
+        is ready, whichever way the link is pointing."""
+        self._volunteer()
+        super()._send()
 
 
 def gateway_read(rx: bytes) -> tuple[bytes, int, bytes]:
@@ -189,9 +198,12 @@ def test_scene7_the_body_goes_out_behind_a_changeover_of_ours():
     ours = [b for b in gw.bursts if b[3]]
     assert [b[1] for b in ours] == [b";FW", bytes((SOH,)) + b"\x12E"]
     assert bytes(gw.rx).index(b"FC EM") < bytes(gw.rx).index(bytes((SOH,)))
-    counters = [b[2] & spec.STATUS_SEQ for b in gw.bursts]
-    assert counters == [i % 4 for i in range(len(gw.bursts))], \
-        "the peer accepted every packet of the body first time"
+    expected = 0
+    for _, _, status, breakin in gw.bursts:
+        if breakin:
+            expected = 0  # Each transmit turn restarts the packet counter.
+        assert status & spec.STATUS_SEQ == expected
+        expected = (expected + 1) % 4
 
 
 def test_scene7_a_compressed_body_crosses_the_changeover_field_escaped():
@@ -315,21 +327,35 @@ def test_scene10_an_answer_read_late_costs_cycles_and_not_the_body():
     assert gateway_read(bytes(gw.rx))[2] == blob
 
 
-def test_scene10_an_answer_that_never_arrives_spends_the_budget_and_says_goodbye():
-    """NEGATIVE CONTROL. Past `max_retries` the far end is not slow, and a link
-    that says goodbye beats one holding a channel for an answer to a proposal
-    the gateway has stopped being able to deliver."""
+def test_scene10_an_answer_returning_after_40_unread_copies_preserves_the_body():
+    """Exercise qualified recovery or the existing physical absence limit."""
     msg = outbound()
     blob = compress(msg.render())
     gw = Ws8eoc(send_script(blob, b"EN54 send check"))
     host, session = linked(gw, outbox=[msg])
     the_answer_is_not_decoded(gw, 40)
 
-    assert run(host, gw, cycles=SEND_CYCLES) == 0
-    assert session.stage == "awaiting proposal answer"
-    assert session.sent_mids == []
-    assert bytes((SOH,)) not in bytes(gw.rx)
-    assert host.arq._qrt_pending or host.arq.state is not arq.State.CONNECTED
+    assert run(host, gw, cycles=SEND_CYCLES) > 0
+    assert session.done and not session.failure
+    assert session.sent_mids == [msg.mid]
+    assert blob == gateway_read(bytes(gw.rx))[2]
+
+
+def test_scene10_an_answer_absent_for_the_physical_lifetime_retains_the_body():
+    """Exercise qualified recovery or the existing physical absence limit."""
+    msg = outbound()
+    blob = compress(msg.render())
+    gw = Ws8eoc(send_script(blob, b"EN54 send check"))
+    host, session = linked(gw, outbox=[msg])
+    the_answer_is_not_decoded(gw, SEND_CYCLES * 2)
+
+    assert run(host, gw, cycles=SEND_CYCLES) > 0
+    assert session.failure and not session.sent_mids
+    assert host.arq.state is arq.State.DISCONNECTED
+    assert host.arq.transfer_unconfirmed is not None
+    assert host.arq._p3_crc_wait_ticks == arq.P3_CRC_WAIT_TICKS
+    assert host.arq.transfer_unconfirmed["suffix"] == b""
+    assert host.arq.transfer_unconfirmed["field"] == b""
 
 
 # --------------------------------------------------------------------------- #

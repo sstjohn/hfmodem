@@ -136,20 +136,20 @@ def test_a_receive_only_station_opens_no_cat_port_and_holds_no_line(tmp_path):
 
 
 def test_the_station_says_when_it_is_automatically_controlled(tmp_path):
-    """And says nothing under local control, where §97.221 does not apply — the
+    """And says nothing under local control, where the automatic setting is absent — the
     shipped example is local, so asserting the note appears for it was wrong."""
     import tomllib
     raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
 
     st = Station(config.parse(raw), replay=np.zeros(4800, np.int16))
     st.open_audio()
-    assert "§97.221" not in st.describe()
+    assert "profile uses automatic control" not in st.describe()
     st.shutdown()
 
     raw["station"]["control"] = "automatic"
     st = Station(config.parse(raw), replay=np.zeros(4800, np.int16))
     st.open_audio()
-    assert "§97.221" in st.describe()
+    assert "profile uses automatic control" in st.describe()
     st.shutdown()
 
 

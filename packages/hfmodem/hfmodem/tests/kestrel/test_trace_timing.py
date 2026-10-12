@@ -23,7 +23,7 @@ def transport(monkeypatch):
     monkeypatch.setattr(kc.time, "sleep", advance)
     monkeypatch.setattr(kc, "_BracketSegmenter", lambda: SimpleNamespace(restart=lambda: None))
     monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(
-        query_devices=lambda _dev: {"max_output_channels": 2},
+        query_devices=lambda _dev, _kind=None: {"max_output_channels": 2},
         InputStream=lambda **kw: SimpleNamespace()))
 
     def drive(samples, _amp):
@@ -139,14 +139,19 @@ def test_the_keyed_hold_is_spent_from_our_last_sample_not_from_the_drains_return
     assert calls == [True, False]
 
 
-def test_default_trace_is_quiet_and_reads_no_monotonic_clock(transport, monkeypatch, capsys):
-    kc, _, make = transport
+def test_default_keeps_detailed_trace_off_but_records_transmit_evidence(transport, monkeypatch, capsys):
+    kc, clock, make = transport
     io, _, played = make()
     monkeypatch.setattr(kc.time, "monotonic", lambda: pytest.fail("disabled trace read a clock"))
+    io.trace_timing_event("unused")
+    monkeypatch.setattr(kc.time, "monotonic", lambda: clock.now)
     io.key(True)
     io.tx(np.zeros(4))
+    assert capsys.readouterr().out == "", "no serialization while keyed"
     io.key(False)
-    assert capsys.readouterr().out == ""
+    output = capsys.readouterr().out
+    assert "timing event=" not in output
+    assert '"outcome":"sent"' in output and output.startswith('tx_event ')
     assert len(played) == 1
 
 
@@ -224,7 +229,8 @@ def test_cli_routes_timing_flag_without_opening_devices(monkeypatch, trace):
 
     def io(*args, **kwargs):
         options.append(kwargs)
-        return SimpleNamespace(stop=lambda: stopped.append(True))
+        return SimpleNamespace(bursts_sent=0, burst_level=None,
+                               stop=lambda: stopped.append(True))
 
     def refused(*args, **kwargs):
         raise kc.ChannelBusy
@@ -300,3 +306,37 @@ def test_default_trace_does_not_require_constructor_only_fields(monkeypatch, cap
     io.tx(None)
     io.key(False)
     assert "timing " not in capsys.readouterr().out
+
+
+def test_shared_tx_event_keeps_sender_identity_and_capture_clock(transport, capsys):
+    from hfmodem.core.tx_events import read_line
+    _, _, make = transport
+    io, _, _ = make()
+    io.rec = SimpleNamespace(path='/capture/stream.wav')
+    io.tx_metadata(packet_kind='data', speed_level=6, modulation='DQPSK',
+                   bandwidth_hz=2750, over_id=4, retry=True)
+    io.key(True)
+    io.tx(np.zeros(4))
+    assert not capsys.readouterr().out
+    io.key(False)
+    record=next(r for line in capsys.readouterr().out.splitlines() if (r:=read_line(line)))
+    assert record['outcome']=='sent' and record['unkey_confirmed']
+    assert record['tx_id']==1 and record['session_id']
+    assert record['ptt_start_sample']==1000 and record['audio_start_sample']==1000
+    assert record['audio_end_sample']==1008 and record['waveform_samples']==4
+    assert record['recording']=='/capture/stream.wav' and record['retry']
+    assert record['speed_level']==6 and record['modulation']=='DQPSK'
+
+
+@pytest.mark.parametrize('mode,expected',[('refused','refused'),('disarmed','dry_run'),('no-rig','dry_run')])
+def test_shared_tx_outcome_cannot_claim_unsent_audio(transport,capsys,mode,expected):
+    from hfmodem.core.tx_events import read_line
+    _,_,make=transport
+    io,_,_=make(refuse=mode=='refused',armed=mode!='disarmed',rig=mode!='no-rig')
+    io.key(True)
+    io.tx(None if mode=='refused' else np.zeros(4))
+    io.key(False)
+    r=next(r for line in capsys.readouterr().out.splitlines() if (r:=read_line(line)))
+    assert r['outcome']==expected
+    if mode=='refused':
+        assert r['waveform_samples'] is None and r['audio_start_sample'] is None

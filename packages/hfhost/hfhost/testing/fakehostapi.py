@@ -26,6 +26,19 @@ from ..hostapi import (CONNECT, DATA_RECEIVED, DISCONNECT, ERR_BAD_STATE,
                        ABORT, KEY, NAME, pack, unpack)
 
 
+def _hang_up(sock: socket.socket) -> None:
+    # On Linux close() alone neither sends FIN nor wakes the serving thread's
+    # blocked recv or accept, so the client would never see the modem go.
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
 class FakeHostApiModem:
     """A HOST-API modem for tests.
 
@@ -107,18 +120,12 @@ class FakeHostApiModem:
         with self._lock:
             conn, self._conn = self._conn, None
         if conn is not None:
-            try:
-                conn.close()
-            except OSError:
-                pass
+            _hang_up(conn)
 
     def close(self) -> None:
         self._stop.set()
         self.drop()
-        try:
-            self._sock.close()
-        except OSError:
-            pass
+        _hang_up(self._sock)
 
     def commands(self, m: int | None = None) -> list[dict[str, Any]]:
         return [c for c in self.log if m is None or c.get("m") == m]

@@ -108,7 +108,7 @@ def probe_hello_symmetric(ctx: Ctx) -> Finding:
 
 @_probe("hello_advertises_profiles")
 def probe_hello_profiles(ctx: Ctx) -> Finding:
-    """Profiles are how the host learns what regulatory envelopes exist. A
+    """Profiles are how the host learns which emission profiles are advertised. A
     modem that advertises none is usable but leaves the host guessing."""
     profiles = ctx.client.hello.get("profiles")
     if not profiles:

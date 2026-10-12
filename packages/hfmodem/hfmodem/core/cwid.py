@@ -3,16 +3,14 @@
 
 """The station's own callsign, as Morse audio for the transmit path.
 
-One caller: the identification interlock, which owes a callsign at the cadence
-the station's regulatory profile names, and owes it in a form that reads as a
-callsign to an operator listening and to every decoder ever written — unlike a
-callsign inside a data frame, which under §97.309(b) is an unspecified digital
-code and reads as nothing to anyone not running that modem.
+Callers: the identification interlock, which schedules a callsign at the
+station's configured cadence, and each modem's closing identification. Morse
+can be read without decoding the modem's data frames; a callsign carried inside
+a data frame needs that modem's decoder.
 
 The rig's arm gate is deliberately not a caller. An earlier version keyed the
-callsign in Morse on the RTS line during the PTT proof and claimed that
-discharged §97.119; it did not, because keying a sideband transmitter with no
-audio produces no RF, so nothing identifiable went out. The proof now says what
+callsign in Morse on the RTS line during the PTT proof, but keying a sideband
+transmitter with no audio produces no RF, so nothing identifiable went out. The proof now says what
 it is — a keying test that identifies nothing (`Rig._prove_ptt`).
 
 Timing is PARIS: a dit is 1.2 s / WPM, a dah is three dits, one dit separates the
@@ -27,6 +25,8 @@ data. Different obligation, different mechanism, and wiring this in beside it
 would put two identifications on the air for one.
 """
 from __future__ import annotations
+
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -45,16 +45,14 @@ MORSE = {
     "/": "-..-.",
 }
 
-#: §97.119(b)(1): an identification sent by an automatic device may not exceed
-#: 20 WPM. Refused rather than clamped — a caller asking for 25 has a wrong idea
-#: of what it is allowed to send, and quietly sending 20 leaves it holding that
-#: idea while its next transmission is somebody else's problem.
+#: The identification speed ceiling. Refuse rather than clamp so the caller
+#: learns that the requested speed is above it.
 MAX_WPM = 20.0
 
 WPM = 20.0
 TONE_HZ = 700.0
 
-#: What a keyed tone occupies, for the regulatory gate. A 20 WPM CW envelope with a
+#: What a keyed tone occupies, for the emission-profile check. A 20 WPM CW envelope with a
 #: 5 ms raised-cosine edge is a few tens of hertz wide; 150 is generous and errs
 #: toward charging the emission for more than it uses.
 BANDWIDTH_HZ = 150.0
@@ -62,11 +60,29 @@ FS = 48000
 RAMP_S = 0.005
 
 
+@contextmanager
+def confirming(mycall: str):
+    """Around a closing identification: any way it fails to go out tells the
+    operator to send it by hand, and an interrupt or exit still ends the run."""
+    try:
+        yield
+    except BaseException as exc:
+        unsent(mycall, repr(exc))
+        if not isinstance(exc, Exception):
+            raise
+
+
+def unsent(mycall: str, why: str) -> None:
+    """Tell the operator the closing identification did not go out."""
+    print(f"  !! IDENTIFICATION NOT CONFIRMED ({why}) -- send {mycall.upper()} by hand",
+          flush=True)
+
+
 def dit_seconds(wpm: float) -> float:
     """PARIS: the word ``PARIS `` is 50 dits long, so a dit is 1.2 s / WPM."""
     if not 0.0 < wpm <= MAX_WPM:
         raise ValueError(f"{wpm} WPM: an identification runs at 0 < WPM <= {MAX_WPM:g} "
-                         "(§97.119(b)(1))")
+                         "(identification speed ceiling)")
     return 1.2 / wpm
 
 

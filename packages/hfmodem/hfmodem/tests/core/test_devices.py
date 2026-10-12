@@ -58,6 +58,7 @@ def test_a_device_with_no_channels_of_that_kind_is_not_a_match(monkeypatch):
         find_device("usb audio", "out")
 
 
+@pytest.mark.hardware
 def test_an_output_device_is_matched_on_output_channels():
     """`kind` is "in" or "out". Passing "output" reads as correct and matched on
     *input* channels instead, so a transmit-only interface never resolved and the

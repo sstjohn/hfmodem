@@ -300,12 +300,42 @@ def test_disconnect_without_flush_is_fail(fake, tr):
         return None
     fake.on_command = script
     c = attached(fake, tr)
+
+    def enqueue():
+        fake.wait_data(64, timeout=2.0)
+        fake.notify("BUFFER 64")
+
+    thread = threading.Thread(target=enqueue)
+    thread.start()
     try:
         f = probe("disconnect_flush_order")(make_ctx(c))
     finally:
         c.close()
+        thread.join(2)
+    assert not thread.is_alive()
     assert f.verdict == FAIL
     assert "was 7, not 0" in f.detail
+
+
+def test_disconnect_probe_requires_enqueue_acknowledgement(fake, tr):
+    def script(cmd):
+        if cmd.startswith("CONNECT"):
+            return ["OK", "CONNECTED N0CRE K7CRE 500"]
+        if cmd == "DISCONNECT":
+            return ["OK", "BUFFER 0", "DISCONNECTED"]
+        if cmd == "ABORT":
+            return ["OK", "DISCONNECTED"]
+        return None
+
+    fake.on_command = script
+    c = attached(fake, tr)
+    try:
+        f = probe("disconnect_flush_order")(make_ctx(c, drain_timeout_s=0.15))
+    finally:
+        c.close()
+    assert f.verdict == FAIL
+    assert "no BUFFER enqueue" in f.detail
+    assert "DISCONNECT" not in fake.commands
 
 
 def test_abort_that_never_disconnects_is_fail(fake, tr):

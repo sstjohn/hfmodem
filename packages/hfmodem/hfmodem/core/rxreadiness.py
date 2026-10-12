@@ -18,8 +18,9 @@ import time
 from .occupied import FILTER_HZ, occupied_hz
 
 # Manufacturer FT-891 CAT reference p17, DATA/RTTY/PSK width settings.
-FT891_DATA_WIDTHS = frozenset((50, 100, 150, 200, 250, 300, 350, 400, 450,
-                             500, 800, 1200, 1400, 1700, 2000, 2400, 3000))
+from .rigs import RIGS
+
+FT891_DATA_WIDTHS = frozenset(RIGS['ft891']['data_widths'])
 
 
 class ReceiverReadbackError(RuntimeError):
@@ -47,11 +48,18 @@ def assessment_profile(args):
                                     separators=(",", ":")).encode()).hexdigest()
 
 
-def assessment_sources():
+def assessment_sources(protocol="pactor", source_names=None):
     """Critical-source binding; launcher qualification binds the full source set."""
     package = Path(__file__).resolve().parents[1]
-    names = ("core/rxreadiness.py", "shrike/ota.py", "shrike/onair.py", "shrike/live.py",
-             "shrike/rxfront.py", "shrike/p3acquire.py", "shrike/ptc.py", "shrike/arq.py")
+    sets = {
+        "pactor": ("core/rxreadiness.py", "shrike/ota.py", "shrike/onair.py", "shrike/live.py",
+                   "shrike/rxfront.py", "shrike/p3acquire.py", "shrike/ptc.py", "shrike/arq.py"),
+        "rpr": ("core/rxreadiness.py", "core/audio.py", "station/link.py",
+                "core/fec.py", "core/crc.py", "core/resample.py", "ax25/frame.py",
+                "brubru/rx.py", "brubru/tx.py", "brubru/frame.py",
+                "brubru/waveform.py", "brubru/access.py"),
+    }
+    names = sets[protocol] if source_names is None else source_names
     return {n: hashlib.sha256((package / n).read_bytes()).hexdigest() for n in names}
 
 
@@ -92,7 +100,7 @@ def verify_inherited_claim(serial, fd):
     return {"device": owned.st_dev, "inode": owned.st_ino, "cat": serial}
 
 
-def read_assessment(args, serial, *, clock=None):
+def read_assessment(args, serial, *, clock=None, protocol="pactor", source_names=None):
     clock = clock or time.monotonic
     claim = verify_inherited_claim(serial, args.rx_claim_fd)
     path = Path(args.rx_assessment)
@@ -108,8 +116,9 @@ def read_assessment(args, serial, *, clock=None):
             or not math.isfinite(issued) or not math.isfinite(expires)
             or not issued <= now < expires or not 0 < expires-issued <= 900):
         raise ReceiverReadbackError("expired or invalid RX assessment interval")
+    sources = assessment_sources(protocol, source_names)
     if (record.get("claim") != claim or record.get("profile_sha256") != assessment_profile(args)
-            or record.get("sources") != assessment_sources()):
+            or record.get("sources") != sources):
         raise ReceiverReadbackError("RX assessment ownership, profile or source changed")
     actual = record.get("actual")
     if (not isinstance(actual, dict) or type(actual.get("frequency_hz")) is not int
@@ -118,10 +127,14 @@ def read_assessment(args, serial, *, clock=None):
     return record
 
 
-def verify_assessed_receiver_startup(rig, *, args, serial, expected_mode, model, dial, output_dir):
+def verify_assessed_receiver_startup(rig, *, args, serial, expected_mode, model, dial, output_dir,
+                                     occupied_key=None, source_names=None):
     """Reobserve the assessed tuple before RF, with no post-CCA setters."""
     try:
-        record = read_assessment(args, serial)
+        binding = ({} if occupied_key is None and source_names is None else
+                   {"protocol": occupied_key[0] if occupied_key else "pactor",
+                    "source_names": source_names})
+        record = read_assessment(args, serial, **binding)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -133,8 +146,9 @@ def verify_assessed_receiver_startup(rig, *, args, serial, expected_mode, model,
             if frequency != dial or observed != record["actual"]:
                 raise ReceiverReadbackError("radio drifted after RX/CCA assessment; not retuning")
             width = validate_mode_width(actual, expected_mode=expected_mode, model=model,
-                         span_hz=occupied_hz("pactor", "1" if args.pactor1_only else ""))
-            if read_assessment(args, serial) != record:
+                         span_hz=occupied_hz(*(occupied_key or
+                                               ("pactor", "1" if args.pactor1_only else ""))))
+            if read_assessment(args, serial, **binding) != record:
                 raise ReceiverReadbackError("RX assessment changed during readback")
             report = {"schema": "radio-assessed-readback-1", "status": "readback_verified_only",
                       "actual": observed, "assessment": record, "width": width,
@@ -164,17 +178,21 @@ def parse_mode_readback(stdout: str, returncode: int, stderr: str = "") -> Radio
 
 
 def validate_mode_width(actual: RadioMode, *, expected_mode: str, model: int,
-                        span_hz: tuple[float, float], centre_hz: float = 1500) -> dict:
+                        span_hz: tuple[float, float], centre_hz: float = 1500,
+                        require_width: bool = True) -> dict:
     lo, hi = span_hz
     if (not all(math.isfinite(x) for x in (lo, hi, centre_hz))
             or not 0 <= lo < centre_hz < hi):
         raise ReceiverReadbackError("invalid occupied-span contract")
     if actual.mode != expected_mode:
         raise ReceiverReadbackError(f"requested {expected_mode}, radio reports {actual.mode}")
-    if model == 1036 and expected_mode == "PKTUSB" and actual.passband_hz not in FT891_DATA_WIDTHS:
-        raise ReceiverReadbackError("undocumented FT-891 DATA passband readback")
+    profile = next((p for p in RIGS.values() if p['model'] == model), None)
+    if (profile and profile['data_widths'] and expected_mode == "PKTUSB"
+            and actual.passband_hz not in profile['data_widths']):
+        name = "FT-891" if model == 1036 else "FTDX10"
+        raise ReceiverReadbackError(f"undocumented {name} DATA passband readback")
     minimum = 2 * max(centre_hz - lo, hi - centre_hz)
-    if actual.passband_hz < minimum:
+    if require_width and actual.passband_hz < minimum:
         raise ReceiverReadbackError(
             f"radio reports {actual.passband_hz} Hz width; profile requires at least {minimum:g} Hz")
     return {"occupied_hz": [lo, hi], "nominal_centre_hz": centre_hz,
@@ -184,7 +202,8 @@ def validate_mode_width(actual: RadioMode, *, expected_mode: str, model: int,
 
 
 def verify_receiver_startup(rig, *, expected_mode: str, model: int,
-                            pactor1_only: bool, output_dir: Path) -> dict:
+                            pactor1_only: bool = False, output_dir: Path,
+                            occupied_key=None) -> dict:
     """Request, observe and gate before first RF; preserve exact startup evidence.
 
     Mode/nominal-width only. IF shift, DATA-menu cuts, DSP and analog/codec
@@ -196,23 +215,47 @@ def verify_receiver_startup(rig, *, expected_mode: str, model: int,
     report = {"schema": "radio-startup-readback-1", "status": "pending",
               "utc": now.isoformat(), "model": model,
               "requested": {"mode": expected_mode, "passband_hz": FILTER_HZ},
-              "actual": None, "profile": "pactor1-only" if pactor1_only else "pactor-upgrade",
+              "actual": None, "profile": (occupied_key[0] if occupied_key else
+                                            "pactor1-only" if pactor1_only else "pactor-upgrade"),
               "calibration": {"DATA_OUT": None, "codec_input_scalar": None,
                               "AF_gain": None, "RF_gain": None, "AGC": None,
                               "IF_shift": None, "DATA_filters": None, "DSP": None},
               "full_receiver_verified": False, "rf_authorized": False}
+    if model == 1042:
+        from .rigs import RIGS
+        profile = RIGS['ftdx10']
+        report['requested'] = dict(mode=expected_mode, passband_hz=profile['rx_width_hz'],
+                                   roofing_hz=profile['roofing_hz'], setters=False)
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         path = session_readback_path(output_dir, now.strftime("%Y%m%dT%H%M%S.%fZ"))
         with path.open("x") as handle:
             try:
-                if rig.set_mode(expected_mode, passband=FILTER_HZ) is not True:
-                    raise ReceiverReadbackError("mode request did not enter the CAT transport")
-                actual = rig.get_mode()
+                if model == 1042:
+                    actual, roof = rig.get_receiver_filters()
+                    report['actual'] = asdict(actual)
+                    report['roofing_hz'] = roof
+                    report['warnings'] = [
+                        f'{label} reads {reading} Hz; profile requests {expected} Hz'
+                        for label, reading, expected in (
+                            ('width', actual.passband_hz, profile['rx_width_hz']),
+                            ('roofing filter', roof, profile['roofing_hz']))
+                        if reading != expected]
+                else:
+                    if rig.set_mode(expected_mode, passband=FILTER_HZ) is not True:
+                        raise ReceiverReadbackError("mode request did not enter the CAT transport")
+                    actual = rig.get_mode()
                 report["actual"] = asdict(actual)
                 report.update(validate_mode_width(actual, expected_mode=expected_mode,
-                    model=model, span_hz=occupied_hz("pactor", "1" if pactor1_only else "")))
+                    model=model, span_hz=occupied_hz(*(occupied_key or
+                                                      ("pactor", "1" if pactor1_only else ""))),
+                    require_width=model != 1042))
+                if model == 1042:
+                    report['width_source'] = 'FTDX10 raw CAT SH0; (DATA/PSK CAT Table 3)'
+                    report['roofing_source'] = 'FTDX10 raw CAT RF0;'
                 report["status"] = "mode_width_verified_only"
+                if report.get('warnings'):
+                    report['status'] = 'mode_verified_filters_warning'
             except BaseException as exc:
                 report["status"] = "refused"
                 report["reason"] = str(exc)
@@ -233,6 +276,9 @@ def verify_receiver_startup(rig, *, expected_mode: str, model: int,
         if isinstance(exc, Exception):
             raise SystemExit(f"NOT KEYING: receiver mode/passband unverified: {exc}") from exc
         raise
+    for warning in report.get('warnings', []):
+        print(f'  !! {warning}')
+    width_status = 'filters differ from profile' if report.get('warnings') else 'nominal width verified'
     print(f"receiver readback: {report['actual']['mode']} {report['actual']['passband_hz']} Hz "
-          f"(requested {FILTER_HZ}); nominal width verified, IF/DSP/calibration unknown")
+          f"(requested {report['requested']['passband_hz']}); {width_status}, IF/DSP/calibration unknown")
     return report

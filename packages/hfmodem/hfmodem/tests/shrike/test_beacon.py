@@ -78,7 +78,7 @@ class _Rig:
         self.failure = None
         self.serial = "/dev/null"
 
-    def set_mode(self, m):
+    def set_mode(self, m, passband):
         return True
 
     def set_freq(self, hz):

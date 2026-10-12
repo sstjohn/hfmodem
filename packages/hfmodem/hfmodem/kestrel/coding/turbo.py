@@ -20,6 +20,7 @@ Public API used by the RX:
 from functools import cache as _cache
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 
 @_cache
@@ -87,7 +88,6 @@ def encode(inp, perm=None):
 # so this is the same arithmetic to the last bit, in one ufunc call rather than seven.
 _maxstar=np.logaddexp
 NEG=-1e9
-_NEG8=np.full(8,NEG)
 _SGN_U=1.0-2.0*np.arange(2)          # (1-2u)          -> (2,)
 _SGN_P=1.0-2.0*PAR                   # (1-2*PAR[s,u])  -> (8,2)
 
@@ -100,41 +100,54 @@ def _predecessors():
     assert (np.array(k)==2).all()
     return ps,pu
 _PS,_PU=_predecessors()
+_DELTA0=np.where(np.arange(8)==0,0.0,NEG)
+
+# Parallel-window BCJR: the trellis is cut into windows of _WIN steps, each entered from
+# a uniform metric _WARM steps early, and all windows recurse at once. Eight constraint
+# lengths of warm-up leave the frame error rate where the whole-trellis recursion has it;
+# a trellis no longer than _WIN is one window with exact boundaries.
+_WIN=128
+_WARM=32
+
+def _normalise(x):
+    m=x.max(1,keepdims=True)
+    return x-np.where(m>NEG/2,m,0.0)
 
 def _bcjr(Ls, Lp, La, tail_s, tail_p):
     """LLR convention L=log P(0)/P(1). tail_s/tail_p: 3 tail (sys,par) LLRs -> forces term to state 0."""
     N=len(Ls); T=N+3
     sysL=np.concatenate([Ls, tail_s]); parL=np.concatenate([np.nan_to_num(Lp,nan=0.0), tail_p])
     aprL=np.concatenate([La, np.zeros(3)])
-    # branch metrics for the whole trellis at once — they carry no recursion
-    gam=(0.5*(sysL+aprL))[:,None,None]*_SGN_U + (0.5*parL)[:,None,None]*_SGN_P   # (T,8,2)
-    gfwd=gam[:,_PS,_PU]                                                          # (T,8,2) by destination
-    alpha=np.full((T+1,8),NEG); alpha[0,0]=0.0
-    for t in range(T):
-        a=alpha[t]
-        c=a[_PS]+gfwd[t]
-        # The sentinel mask runs at EVERY step, not just the t<3 trellis fill. All 8
-        # states are reachable from t=3 on, so it looks like fill-only bookkeeping — but
-        # the scalar original's `alpha[t,s] <= NEG/2` skip is also a metric-underflow
-        # guard, and it fires at t>=3 once the normalised alpha spread reaches the
-        # sentinel scale (empirically ~5.6x max|LLR|, so from max|LLR| ~ 9e7). Restricting
-        # it to t<3 diverged from the original above ~2e8. Unreachable from this receiver
-        # — real channel LLRs peak at 12 — but the guard costs one gather per step.
-        live=(a>NEG/2)[_PS]
-        c=np.where(live,c,NEG)
-        nxt=np.where(live.any(1), _maxstar(c[:,0],c[:,1]), NEG)
-        m=nxt.max()
-        if m>NEG/2: nxt-=m
-        alpha[t+1]=nxt
-    beta=np.full((T+1,8),NEG); beta[T,0]=0.0    # terminated to state 0
-    for t in range(T-1,-1,-1):
-        c=beta[t+1][NS]+gam[t]
-        b=_maxstar(_maxstar(_NEG8,c[:,0]),c[:,1])
-        m=b.max()
-        if m>NEG/2: b-=m
-        beta[t]=b
-    # extrinsic: fold the 8 states per input bit, the whole block at a time
-    M=(alpha[:N,:,None]+(0.5*parL[:N])[:,None,None]*_SGN_P)+beta[1:N+1][:,NS]     # (N,8,2)
+    L=min(_WIN,T); D=min(_WARM,L); nw=-(-T//L)
+    gam=np.zeros((D+nw*L+D,8,2))         # branch metrics, zero-padded by the warm-up at each end
+    gam[D:D+T]=(0.5*(sysL+aprL))[:,None,None]*_SGN_U + (0.5*parL)[:,None,None]*_SGN_P
+    # (nw,8,2,L+D) views: window w's k-th forward step is gfwd[...,k], its k-th backward
+    # step gbwd[...,L+D-1-k]
+    gfwd=sliding_window_view(gam[:,_PS,_PU],L+D,axis=0)[:nw*L:L]
+    gbwd=sliding_window_view(gam[D:],L+D,axis=0)[::L]
+    alpha=np.empty((nw,L,8)); beta=np.empty((nw,L,8))
+    a=np.zeros((nw,8)); b=np.zeros((nw,8))
+    k_end=(np.arange(nw)+1)*L+D-T        # the step at which a window's beta reaches the tail's end
+    for k in range(L+D):
+        if k==D: a[0]=_DELTA0
+        b[k_end==k]=_DELTA0
+        if k>=D:
+            alpha[:,k-D]=a; beta[:,L-1-(k-D)]=b
+            if k==L+D-1: break
+        c=a[:,_PS]+gfwd[...,k]
+        # The sentinel mask is also a metric-underflow guard: it fires past the trellis
+        # fill once the normalised alpha spread reaches the NEG scale (from max|LLR| ~ 9e7,
+        # far above anything this receiver feeds it). Skipped only when nothing is dead.
+        if (a<=NEG/2).any():
+            live=(a>NEG/2)[:,_PS]
+            c=np.where(live,c,NEG)
+            a=_normalise(np.where(live.any(2),_maxstar(c[...,0],c[...,1]),NEG))
+        else:
+            a=_normalise(_maxstar(c[...,0],c[...,1]))
+        c=b[:,NS]+gbwd[...,L+D-1-k]
+        b=_normalise(_maxstar(np.maximum(c[...,0],NEG),c[...,1]))
+    alpha=alpha.reshape(-1,8)[:N]; beta=beta.reshape(-1,8)[:N]
+    M=(alpha[:,:,None]+(0.5*parL[:N])[:,None,None]*_SGN_P)+beta[:,NS]            # (N,8,2)
     l0=np.full(N,NEG); l1=np.full(N,NEG)
     for s in range(8):
         l0=_maxstar(l0,M[:,s,0]); l1=_maxstar(l1,M[:,s,1])
@@ -214,47 +227,48 @@ def decode_r13(Lc, N, perm, iters=12, check=None):
 
 
 # ------------------- PUNCTURED variant (higher-rate high-throughput levels) -------------------
-# spec/03 §3.5.4 / 06 §6.1d: the BW2300 high-throughput records reach rates 2/3, 4/5, 5/6
-# above the 1/2 base by puncturing parity down to a target coded length. VARA's exact
-# BW2300 puncture matrix is UNVALIDATED in the spec (§3.5.4), so this uses a deterministic,
-# evenly-spaced parity puncture on the same (13,15) constituents + 12-bit dual tail. It is a
-# self-consistent invertible code (TX/RX share the pattern); layout is
-#   coded = [ systematic(N) | kept-parity(P) | tail(12) ],  P = coded_len − 12 − N,
-# with parity multiplexed par1 at even i / par2 at odd i (matching the rate-1/2 base) and the
-# kept subset chosen by even spacing over 0..N−1.
+# The group law read off high speed capable BW2300 and BW500 tapes (KPA-bw2300-const.md §5,
+# KPA-bw500-const.md §7): the info bits go in groups of k, each group led by one parity bit
+# after its first systematic bit, `s[kg], P, s[kg+1] .. s[kg+k-1]`, P = p1[kg] for even g and
+# p2[kg] for odd g; then the 12-bit dual tail, then zero padding to `coded_len`. k = 1 is the
+# rate-1/2 mux of `encode`.
 
-def _punct_keep(N, P):
-    if P >= N:
-        return np.arange(N)
-    return np.unique(np.floor(np.arange(P) * N / P).astype(int))
+@_cache
+def _groups(N, coded_len):
+    """(k, systematic positions, group parity positions, tail start) for the group law."""
+    P = coded_len - N - 12
+    k = round(N / P) if P > 0 else 0
+    tail = N // k * (k + 1) if k else 0
+    if k < 1 or N % k or tail + 12 > coded_len:
+        raise ValueError(f"no group puncture carries N={N} in {coded_len} coded bits")
+    i = np.arange(N)
+    j = i % k
+    spos = i // k * (k + 1) + j + (j > 0)
+    ppos = np.arange(0, tail, k + 1) + 1
+    for a in (spos, ppos):
+        a.setflags(write=False)
+    return k, spos, ppos, tail
 
 
 def encode_punctured(inp, perm, coded_len):
-    """(13,15) turbo encode punctured to exactly ``coded_len`` bits (coded_len ≥ N+12)."""
+    """(13,15) turbo encode, group-punctured to exactly ``coded_len`` bits."""
     inp = np.asarray(inp, int); N = len(inp)
-    P = coded_len - 12 - N
-    if not (0 <= P <= N):
-        raise ValueError(f"coded_len {coded_len} out of range for N={N} (need N+12..2N+12)")
+    k, spos, ppos, tail = _groups(N, coded_len)
     par1, ts1, tp1 = _enc_constituent(inp)
     par2, ts2, tp2 = _enc_constituent(inp[perm])
-    pmux = np.where(np.arange(N) % 2 == 0, par1, par2)
-    keep = _punct_keep(N, P)
-    coded = np.empty(coded_len, int)
-    coded[:N] = inp
-    coded[N:N + P] = pmux[keep]
-    t = []
-    for k in range(3):
-        t += [ts1[k], tp1[k], ts2[k], tp2[k]]
-    coded[N + P:] = t
+    lead = np.arange(0, N, k)
+    coded = np.zeros(coded_len, int)
+    coded[spos] = inp
+    coded[ppos] = np.where(np.arange(len(lead)) % 2 == 0, par1[lead], par2[lead])
+    coded[tail:tail + 12] = np.column_stack([ts1, tp1, ts2, tp2]).ravel()
     return coded
 
 
 def decode_punctured(Lc, N, perm, coded_len, iters=8, check=None):
     """Log-MAP decode of :func:`encode_punctured`. Lc: length ``coded_len`` channel LLRs."""
-    P = coded_len - 12 - N
-    keep = _punct_keep(N, P)
-    pmux = np.zeros(N); pmux[keep] = Lc[N:N + P]
-    ev = np.arange(N) % 2 == 0
-    Lp1 = np.where(ev, pmux, np.nan)          # parity1 known at kept even i
-    Lp2 = np.where(~ev, pmux, np.nan)         # parity2 known at kept odd i
-    return _iterate(Lc[:N].copy(), Lp1, Lp2, _split_tail(Lc[N + P:]), perm, iters, check)
+    k, spos, ppos, tail = _groups(N, coded_len)
+    lead = np.arange(0, N, k)
+    odd = np.arange(len(lead)) % 2 == 1
+    Lp1 = np.full(N, np.nan); Lp1[lead[~odd]] = Lc[ppos[~odd]]
+    Lp2 = np.full(N, np.nan); Lp2[lead[odd]] = Lc[ppos[odd]]
+    return _iterate(Lc[spos], Lp1, Lp2, _split_tail(Lc[tail:tail + 12]), perm, iters, check)

@@ -53,21 +53,22 @@ A generic shape detector correctly refuses a burst without that symbol.
 
 Three native KC9GHZ BW2300 reply windows from September 18 have all seven tail
 pairs intact. They agree with three independently host-confirmed stock replies
-on September 19. `OVER_CONTINUE_RESPONDER_BY_LINK` now includes that full link.
-The matcher still requires all seven measured tail pairs live, clear and exact,
+on September 19, and are the link's generated continue tail
+([04 §4.2C](04-frame-block-formats.md), answer tails).
+The matcher requires all seven tail pairs live, clear and exact,
 an unavailable lead, an outstanding full intermediate block, and more queued
 DATA. NAK and final-control vetoes precede it.
 
 The receive cursor can begin after the missing lead. The matcher pads one symbol
 of unavailable time before its analysis, allowing the intact tail to align; this
 adds no evidence and reconstructs no received tone. Without it, the 05:29 UTC
-session's third DATA reply could not align even with the correct tail table.
+session's third DATA reply could not align even with the correct tail.
 The 23:17 and 23:50 UTC sessions also recover. Tests feed the exact transport
 cursor crops through 512-, 4096- and 4800-sample callbacks and verify one distinct
 next DATA frame, with no second advancement on a replayed bracket.
 
-This tail exception is scoped to measured full links. Other unreadable short
-replies take the query exchange instead of receiving an assumed ACK.
+The exception reads only the link's own tail. Other unreadable short replies
+take the query exchange instead of receiving an assumed ACK.
 
 ## Weak known eight-symbol answers (September 20)
 
@@ -76,10 +77,12 @@ K0SI's 15:05 UTC BW2300 session supplied all eight expected pairs after DATA
 two pairs of #6 did not clear its 2 dB threshold. Each subsequent 288/1 query
 answer confirmed the same pending block without a DATA retransmission.
 
-For independently measured full-link ACKs, a separate matcher requires all
+For the link's own continue tail, a separate matcher requires all
 seven tail pairs exact and live, the final pair clear, and at least six clear
 pairs overall. An unclear lead can be ignored; a clear contradictory lead,
-missing interior pair, wrong link, or unknown tail cannot. Eight consecutive
+missing interior pair, or another link's tail cannot. The tail does not move with
+the record, so the matcher runs at lowered records too; 12 of 13 KC9GHZ misses at
+16:06 UTC on September 20 were at one. Eight consecutive
 alignment offsets (5.3 ms) are required. The native #6 has nine such offsets.
 Existing NAK and final-control vetoes still run first. This does not relax the
 generic detector or teach unknown replies an ACK meaning.

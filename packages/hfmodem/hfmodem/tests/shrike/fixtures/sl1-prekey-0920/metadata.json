@@ -1,0 +1,38 @@
+[
+  {
+    "file": "ve3kpg-long-ch12-lead.wav",
+    "source": "captures/onair-0920-2224/hold_53.wav",
+    "source_sha256": "f50fcfe9f28970d7abee6ae2f121d3a9f3a5f4903011267d4fd3432b6a6fe1da",
+    "source_channel": 0,
+    "start_sample": 8233590,
+    "end_sample": 8394240,
+    "row0_local": 6240,
+    "offset_hz": -13.4,
+    "hold": 53,
+    "slot": 138,
+    "cycle_long": true,
+    "carrier_swapped": true,
+    "physical_lead": "ch12",
+    "payload": " test via WS8EOC 2026-09-21 0317z\u00000\u0000",
+    "status": 35,
+    "pcm_sha256": "ed8745f44cda99219a11133b8a75bb7d79a145826c91df170b97b1c474ac3936"
+  },
+  {
+    "file": "ve3kpg-long-ch5-lead.wav",
+    "source": "captures/onair-0920-2224/hold_57.wav",
+    "source_sha256": "97806c76489a7aafbc953c4c6a294620251085182f473fe9846a1f5897d4e6a3",
+    "source_channel": 0,
+    "start_sample": 9133590,
+    "end_sample": 9294336,
+    "row0_local": 6240,
+    "offset_hz": -13.4,
+    "hold": 57,
+    "slot": 153,
+    "cycle_long": true,
+    "carrier_swapped": false,
+    "physical_lead": "ch5",
+    "payload": "\u0002\u00fa\u00c2R\u0089\u0004\u0000\u0000\u00ec\u00f5z\u001c|mf\u001c\u007fO\u00b5\u00c1\u00eb_\u00e0_w\u00bc|>~g-g\u00da\u0001\u00f1\u00c2",
+    "status": 32,
+    "pcm_sha256": "746729d6435d64fe6e5280938986d8e3a85e0865a5ab19370e044aa3158fb674"
+  }
+]

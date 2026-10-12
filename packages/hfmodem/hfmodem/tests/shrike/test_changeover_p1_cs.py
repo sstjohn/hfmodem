@@ -67,7 +67,7 @@ def test_our_own_reader_takes_it_back_off_the_air(tmp_path, monkeypatch):
 
 
 def test_the_key_instant_stays_on_the_pactor3_raster(tmp_path, monkeypatch):
-    """The peer read the entry packet, so its window is the LINK's -- 0.890 s
+    """The peer read the entry packet, so its window is the LINK's -- `P3_REPLY_S`
     past its own packet, not the PACTOR-1 turnaround the codeword usually keys
     on (`docs/protocols/pactor/pactor3.md`, "The slot moves when the LINK does")."""
     _, tx, grid, at, audio, _ = _keyed(tmp_path, monkeypatch, p1_changeover=True)

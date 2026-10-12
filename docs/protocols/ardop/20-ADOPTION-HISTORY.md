@@ -43,7 +43,7 @@ multi-platform mode alive so "Winlink gateway operators continue to support Ardo
 | ~end 2016 | "Near the end of beta testing for the ARDOP_Win TNC"; being integrated into Winlink Express + RMS Trimode; "2017 will be the year Winlink moves to ARDOP" | [ardop_news](https://winlink.org/content/ardop_news) |
 | 2016–2017 | ARDOP (and VARA) offered as beta in the shipping client/gateway, after first proving out via BPQ32 | [ardop_and_vara_now_beta_testing](https://winlink.org/content/ardop_and_vara_now_beta_testing_winlink_software) |
 | 27 Nov 2017 | ARDOP Specification dated build (the copy bundled with ardopcf) | `ardopcf/docs/refs/ARDOP_Specification_20171127.pdf` |
-| 10 Jul 2020 | ARSFI Board **deprecates WINMOR**; asks sysops to move to ARDOP, VARA HF, PACTOR 3/4 | [winmor_deprecated](https://winlink.org/content/winmor_deprecated) |
+| 10 Jul 2020 | ARSFI Board **deprecates WINMOR**; asks sysops to move to ARDOP, VARA HF, PACTOR | [winmor_deprecated](https://winlink.org/content/winmor_deprecated) |
 | 1 Apr 2024 | Community fork **ardopcf** begins (v2.0.3.2.1, renamed v1.0.4.1.1 on 26 Apr 2024) | [changelog.md](https://github.com/pflarue/ardop/blob/master/changelog.md) |
 
 **ARDOP 1 vs 2/3.** Winlink runs **ARDOP v1 only**. **ARDOP v2 "appears to be abandoned"**

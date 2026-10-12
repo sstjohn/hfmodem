@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
 """The shaped compatibility entry must retain its 1.25-second cadence."""
-from hfmodem.shrike import onair, pactor1, rxfront, spec
+import numpy as np
+
+from hfmodem.shrike import onair, pactor1, pactor2, placement, rxfront, spec
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.tests.shrike.test_grid import _Bench, _Rig
 from hfmodem.tests.shrike.test_p3_offer import Keyed, cs_event
@@ -28,6 +30,11 @@ def test_entry_pulse_lead_is_reserved_before_the_renderer_runs(tmp_path):
                             packet_n=round(0.810 * fs),
                             cs_n=round(0.210 * fs),
                             d_max_n=round(0.130 * fs))
+    path = pactor2.PATHS[0]
+    raw = pactor2.data_burst(pactor2.build_field(
+        placement.field_info(b"", path.crc_bytes - 3, 0x1a), path), path)
+    raw = onair.levels.at_drive(raw, tx.drive)
+    trim = int(np.flatnonzero(abs(raw) > .02 * np.max(abs(raw)))[0])
     for slot in range(10, 14):
         tx.aim(grid, slot)
         # The live bridge closes against key_instant, then the renderer runs.
@@ -37,4 +44,5 @@ def test_entry_pulse_lead_is_reserved_before_the_renderer_runs(tmp_path):
         bench.spend(round(0.005 * fs))
         tx.send_p2_entry_packet(b"", 0x1a)
         assert tx.slots_used[-1] == slot
-        assert bench.emissions[-1][0] + onair.P2_KEY_LEAD_N == grid.boundary(slot)
+        assert (bench.emissions[-1][0] + onair.P2_KEY_LEAD_N - trim
+                == grid.boundary(slot))

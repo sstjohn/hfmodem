@@ -291,8 +291,7 @@ def test_breakin_head_phase_replaces_control_phase_after_trim(swapped, tmp_path,
     g = transitioned()
     observed_reply(g)
     tx = tx_at(g, 44, tmp_path)
-    tx.host = SimpleNamespace(protocol=spec.Protocol.PACTOR3,
-                             arq=SimpleNamespace(role=arq.IRS, entry_pending=False))
+    tx.host = host_stub()
     tx.breakin_due = True
     monkeypatch.setattr(tx, "_flip", lambda: swapped)
     calls = []
@@ -332,9 +331,7 @@ def test_duplex_breakin_reaches_phase_or_refuses_before_emission(late, tmp_path,
     g = transitioned()
     observed_reply(g)
     tx = tx_at(g, 44, tmp_path)
-    tx.host = SimpleNamespace(protocol=spec.Protocol.PACTOR3,
-                             arq=SimpleNamespace(role=arq.IRS, entry_pending=False,
-                                                 entry_variant=None, answering=False))
+    tx.host = host_stub()
     tx.breakin_due = True
     # All output is intercepted by this arithmetic stream and dummy key seam.
     tx.rig = SimpleNamespace(ptt=lambda state: None, key_failure=lambda: None)
@@ -479,10 +476,15 @@ PAST_N = 336                # ...and past it
 
 
 def host_stub(role=arq.IRS):
-    return SimpleNamespace(
-        protocol=spec.Protocol.PACTOR3,
-        arq=SimpleNamespace(role=role, entry_pending=False, entry_variant=None,
-                            answering=False, rx_seq=0, _rx_seen=True))
+    # Render-only host uses the current ARQ owner, not invented permission.
+    io = arq.ArqIO()
+    io.protocol = spec.Protocol.PACTOR3
+    a = arq.PactorArq(io, arq.ArqConfig())
+    a.state = arq.State.CONNECTED
+    a.role = role
+    a.entry_pending = False
+    a._rx_seen = True
+    return SimpleNamespace(protocol=spec.Protocol.PACTOR3, arq=a)
 
 
 def duplex(g, tmp_path, seconds=200.0):
@@ -752,13 +754,13 @@ def test_the_grid_keeps_a_changeover_cycles_slot_on_its_own_cost(tmp_path):
     assert onair._clamp_forgives(tx.live, tx, tol + 1) == 0
     tx.breakin_cost_n = 2 * tol
     assert onair._clamp_forgives(tx.live, tx, tol) == tol
-    # ...while an ordinary cycle's own cost still comes off its tolerance: no
-    # drain of its stands it off, so the grid owes it here.
+    # ...and an ordinary cycle on its own whole tolerance too: `_regrid` stands
+    # its cost off the drain, so the grid does not deduct it here as well.
     tx.breakin_due = False
     tx.prekey_cost_n = CHANGEOVER_WORK_N
-    room = round(onair.KEY_CLAMP_TOL_S * FS) - CHANGEOVER_WORK_N
-    assert onair._clamp_forgives(tx.live, tx, room) == room
-    assert onair._clamp_forgives(tx.live, tx, room + 1) == 0
+    tol = round(onair.KEY_CLAMP_TOL_S * FS)
+    assert onair._clamp_forgives(tx.live, tx, tol) == tol
+    assert onair._clamp_forgives(tx.live, tx, tol + 1) == 0
 
 
 def test_a_stream_with_no_transmitter_forgives_a_changeover_nothing(tmp_path):
@@ -811,3 +813,24 @@ def test_a_repeated_changeover_is_rendered_once(tmp_path, monkeypatch):
     tx.aim(g, 51)
     tx.send_packet(3, b"RMS", STATUS, breakin=True)
     assert len(built) == 3 and built[-1][0] == 3
+
+
+@pytest.mark.parametrize("change", ["generation", "epoch", "role", "counter", "receive_only"])
+def test_render_host_uses_current_arq_owner_and_refuses_stale_authority(change):
+    host = host_stub()
+    a = host.arq
+    assert isinstance(a, arq.PactorArq)
+    assert not a.peer_qualified
+    owner = a.p3_tx_owner
+    assert a.p3_tx_allowed(owner)
+    if change == "generation":
+        a._link_generation += 1
+    elif change == "epoch":
+        a._p3_tx_epoch += 1
+    elif change == "role":
+        a.role = arq.ISS
+    elif change == "counter":
+        a._expected_seq += 1
+    else:
+        a._p3_receive_only = True
+    assert not a.p3_tx_allowed(owner)

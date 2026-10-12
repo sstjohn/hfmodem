@@ -1,7 +1,7 @@
 # How a PACTOR station learns what the other end can demodulate
 
-Every PACTOR link opens in FSK PACTOR-1 and may end up in PACTOR-2, PACTOR-3 or
-PACTOR-4. Something has to stop the faster station keying a waveform the slower
+Every PACTOR link opens in FSK PACTOR-1 before any switch to a faster generation.
+Something has to stop the faster station keying a waveform the slower
 one cannot read. This document records what that something is, and the shape of
 the record is the finding: **the only complete description of the mechanism was
 published in 1990, and every specification since states the property and
@@ -85,8 +85,10 @@ stations are capable of PACTOR-III, automatic switching to this highest protocol
 level is performed."
 
 That sentence, across three editions of an ITU Recommendation and two vendor
-papers, is the entire published treatment. *The PACTOR-4 Protocol* has no
-link-establishment section at all.
+papers, is the entire published treatment.
+<!-- site:omit:start -->
+*The PACTOR-4 Protocol* has no link-establishment section at all.
+<!-- site:omit:end -->
 
 The PTC-IIIusb manual's `MYLevel` parameter takes 1, 2 or 3; the modem "will
 switch to PACTOR-2/-3 when the other station is so fitted", and the default 3

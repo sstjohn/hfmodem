@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from scipy.io import wavfile
 from hfmodem.kestrel.arq import phy
-from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as MK
+from hfmodem.kestrel.vara import vara_arq as VA, vara_mfsk as MK
 from .test_data_over_gate import _connected
 
 HERE = Path(__file__).with_name('fixtures') / 'data-nak-pairs-0919'
@@ -74,7 +74,7 @@ def test_no_action_before_tail_or_after_fresh_window(row):
 def test_refusal_and_exhausted_budget_keep_rejected_bytes(row):
     hs, io, data, audio = setup(row)
     # Use the bracket to isolate transaction behavior from callback scheduling.
-    at = hs._pair_data_nak_at(audio)
+    at = hs._peer_nak_at(audio)
     fresh = audio[:at + 8 * MK.HOP + int(.1 * MK.FS)]
     assert hs._peer_data_nak(fresh)
     old, queue = hs._tx_pending, list(hs._txq)
@@ -87,6 +87,57 @@ def test_refusal_and_exhausted_budget_keep_rejected_bytes(row):
     hs._took_data_nak()
     assert hs.state == VA.VaraState.DISCONNECTED
     assert unconfirmed(hs) == data
+
+
+def deliver(hs, io, audio):
+    """Feed ``audio`` as the station would hear it; where each keying began."""
+    fed, keyed = [0], []
+    key = io.key
+    io.key = lambda on: (on and keyed.append(fed[0]), key(on))
+    if hs.bw == '500':
+        fed[0] = len(audio)
+        hs.on_rx_audio(audio)
+    else:
+        for start in range(0, len(audio), 4800):
+            fed[0] = min(start + 4800, len(audio))
+            hs.on_rx_stream(audio[start:start + 4800])
+    return keyed
+
+
+def short_final(row):
+    hs, io, _, audio = setup(row)
+    data = b'A' * min(20, phy.body_size(row['bw'], row['record']) - 4)
+    hs._tx_pending = (phy.vara_body(data, hs.caller,
+                                    body_len=phy.body_size(row['bw'], row['record'])),
+                      1, row['record'])
+    hs._txq = []
+    return hs, io, data, audio
+
+
+@pytest.mark.parametrize('row', ROWS, ids=[r['name'] for r in ROWS])
+def test_a_short_final_over_drops_a_record_behind_the_naks_tail(row):
+    hs, io, data, audio = short_final(row)
+    tail = hs._peer_nak_at(audio) + 8 * MK.HOP
+    keyed = deliver(hs, io, audio)
+    assert len(keyed) == 1 and hs._tx_retries == 1
+    if row['bw'] != '500':
+        assert keyed[0] - tail >= .06 * MK.FS
+    assert hs._tx_pending[1:] == (1, phy.lower_level(row['bw'], row['record']))
+    assert unconfirmed(hs) == data and not hs._txq
+
+
+@pytest.mark.parametrize('row', ROWS, ids=[r['name'] for r in ROWS])
+@pytest.mark.parametrize('stale', ['queried', 'expired'])
+def test_a_nak_outside_its_window_keys_nothing(row, stale):
+    for hs, io, data, audio in (setup(row), short_final(row)):
+        if stale == 'queried':
+            hs._intermediate_query_attempted = True
+        else:
+            hs._pending_answer_at -= 5
+        old = hs._tx_pending
+        assert not deliver(hs, io, audio)
+        assert hs._tx_pending == old and hs._tx_retries == 0
+        assert unconfirmed(hs) == data
 
 
 @pytest.mark.parametrize('bw,levels,sizes', [
@@ -134,15 +185,3 @@ def test_bw500_record2_crc_rejection_uses_stock_qualified_floor():
     assert hs._tx_pending[2] == 0 and hs._tx_retries == 1
     assert hs._tx_recovery_levels and set(hs._tx_recovery_levels) == {0}
     assert unconfirmed(hs) == data
-
-
-@pytest.mark.skipif(not ROWS, reason='VARA DATA NACK recordings are not included')
-def test_unmapped_eight_symbol_nak_is_retained_for_query(monkeypatch):
-    row = next(r for r in ROWS if r['bw'] == '2300')
-    hs, io, data, audio = setup(row)
-    monkeypatch.delitem(VF.DATA_NAK_RESPONDER_BY_LINK, (hs.caller, hs.called, hs.bw))
-    assert not hs._peer_data_nak(audio)
-    assert not hs._peer_over_continue(audio)
-    assert hs._unclassified_continue is not None
-    assert hs._probe_intermediate_answer()
-    assert unconfirmed(hs) == data and not hs._confirmed_continue_pairs

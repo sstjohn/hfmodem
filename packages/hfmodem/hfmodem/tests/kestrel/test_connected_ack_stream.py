@@ -31,6 +31,8 @@ why none of it may stand in for the ack.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -55,17 +57,29 @@ from hfmodem.kestrel.vara.vara_arq import (
     _tone_track,
     _top3_track,
 )
-from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.kestrel import corpora, greetings_evidence
 
 FS = MK.FS
 _CALLED = "NS0A"
 # Last sample of the link-setup that corpora.OFFAIR/NS0A_2300's ack answers; the
 # ack itself begins 0.171 s later.
 _OFFAIR_LINKSETUP_END = 17.800
-# corpora.ONAIR_REFUSED_ACK: last sample of the first link-setup, read off the
-# recording as the start of the receiver mute behind it, and where W8MW's ack lands.
-_W8MW_LINKSETUP_END = 23.140
-_W8MW_ACK_AT = 23.280
+# AA5AF's refused ack, 2026-09-24. The small clip pins the positive; the whole
+# tap in external.json preserves the null on both sides. Cuts: provenance.json.
+_FIXTURES = Path(__file__).with_name("fixtures") / "greetings-a2-0930"
+_REFUSED_ACK = _FIXTURES / "aa5af-ack.flac"
+_AA5AF_CLIP_START = 40.27
+_AA5AF_LINKSETUP_END = 40.27
+_AA5AF_ACK_AT = 40.546
+_UNCONNECTED = tuple((name + "-no-over.flac", called, count) for
+                     name, called, count in (
+                         ("kb8ay-145917", "KB8AY", 2),
+                         ("ns0a-150107", "NS0A", 1),
+                         ("kb8ay-150701", "KB8AY", 3),
+                         ("kc2our-whole-780s", "KC2OUR", 6),
+                         ("k0si-040824", "K0SI", 3),
+                         ("k0si-041849", "K0SI", 3),
+                         ("k0si-042438", "K0SI", 4)))
 # corpora.ONAIR_CROWDED_ACK, read the same way: our own transmission comes back
 # through the rig at -17 to -30 dBFS and stops at 40.79 s, the receiver is dead for
 # the 165 ms behind it, and KD0PYG's ack opens 0.30 s out.
@@ -341,46 +355,42 @@ def test_two_lost_preamble_symbols_are_still_a_rejection():
     assert _stream(_awaiting_ack(), x).state is not VaraState.CONNECTED
 
 
-@corpora.requires_onair_refused_ack
+@corpora._requires(_REFUSED_ACK, what="AA5AF refused-ack fixture")
 def test_the_ack_a_busy_channel_buried_completes_the_connect():
-    """The 2026-08-19 call to W8MW, and the whole of what this recogniser was
-    getting wrong.
+    """AA5AF's marginal ack connects despite the buried upper carrier.
 
-    A two-tone symbol's second carrier is a second argmax, so where the band is
-    over one of the pair the reader still returns a bin for it — and matched on all
-    six bins the ack at 23.280 s holds at no alignment at all, which is what every
-    `preamble holds for 0 alignments` in that log was. Four of its six stand clear,
-    all four are the preamble's, and it holds for 24.
-
-    Fed from our own last transmitted sample, and again from the 0.10 s of cursor
-    the driver skips behind it (`tools/kestrel_connect.RX_ECHO_GUARD_S` plus the
-    keyed idle hold): the ack begins 0.14 s out, so the skip is not what loses it
-    either.
+    The third link-setup ends at 40.27 s and the ack locks at 40.546 s.
+    The held plateau is only three alignments, exactly the acceptance floor.
+    Both resumes include the driver's possible 0.10-second echo guard.
     """
-    x = corpora.wav_mono(corpora.ONAIR_REFUSED_ACK)
-    x = x / (np.abs(x).max() or 1.0)
-    for at in (_W8MW_LINKSETUP_END, _W8MW_LINKSETUP_END + 0.10):
+    x = _norm(_REFUSED_ACK)
+    at = round((_AA5AF_ACK_AT - _AA5AF_CLIP_START) * FS)
+    seg = x[at - MK.HOP:at + 12 * MK.HOP]
+    lock = _ack_lock(seg)
+    assert lock is not None and abs(lock - MK.HOP) < MK.HOP // 4
+    heard = MK.demod_tone_pairs(seg[lock:], VF.CONNECTED_ACK_NSYM)
+    assert tuple(heard[1:3]) == VF.CONNECTED_ACK_PREAMBLE[1:3]
+    assert tuple(heard[3]) == (38, 68), "the buried upper carrier is the pin"
+    for at in (_AA5AF_LINKSETUP_END, _AA5AF_LINKSETUP_END + 0.10):
         io = _IO()
-        hs = _stream(_awaiting_ack(io, called="W8MW"), x[int(at * FS):])
+        hs = _stream(_awaiting_ack(io, called="AA5AF"), x[round((at - _AA5AF_CLIP_START) * FS):])
         assert hs.state is VaraState.CONNECTED, f"fed from +{at:.2f} s"
+        assert io.connected_as == ("W9SSJ", "AA5AF", "2300")
         assert any("connected-ack on the receive stream" in m for m in io.log_lines)
 
 
-@corpora.requires_onair_refused_ack
 def test_nothing_else_in_that_recording_holds_the_preamble():
-    """The other side of it. One 24-alignment plateau in 70 s of an occupied 80 m
-    channel, and it is the ack; the recogniser reads the peer rather than the
-    band it is buried in."""
-    x = corpora.wav_mono(corpora.ONAIR_REFUSED_ACK)
-    x = x / (np.abs(x).max() or 1.0)
-    ack = int(_W8MW_ACK_AT * FS)
-    assert _ack_plateau(x[ack - MK.NFFT:ack + 8 * MK.HOP]) >= _ACK_PLATEAU
+    """One three-alignment plateau in the entire AA5AF tap, at its ack."""
+    x = greetings_evidence.samples("aa5af-refused-ack.flac") / 32768.0
+    ack = round(_AA5AF_ACK_AT * FS)
+    assert _ack_plateau(x[ack - MK.NFFT:ack + 8 * MK.HOP]) == _ACK_PLATEAU == 3
     before, after = x[:ack - MK.NFFT], x[ack + 8 * MK.HOP:]
     assert _ack_plateau(before) == 0 and _ack_plateau(after) == 0, (
         "the preamble holds somewhere in this recording other than at its one ack")
 
 
-@corpora.requires_onair_crowded_ack
+@pytest.mark.skip(reason="Needs a rig-rx BW2300 --force flight over a 40 m "
+                         "occupant, e.g. KD0PYG at 7101.2 kHz, with a crowded ack")
 def test_the_ack_an_occupant_stood_on_completes_the_connect():
     """The 2026-08-26 call to KD0PYG, and the other way a shared channel takes a
     carrier.
@@ -402,7 +412,8 @@ def test_the_ack_an_occupant_stood_on_completes_the_connect():
     assert any("connected-ack on the receive stream" in m for m in io.log_lines)
 
 
-@corpora.requires_onair_crowded_ack
+@pytest.mark.skip(reason="Needs a rig-rx BW2300 --force flight over a 40 m "
+                         "occupant, e.g. KD0PYG at 7101.2 kHz, with a crowded ack")
 def test_the_crowded_ack_reads_the_shipped_preamble_where_it_locks():
     """What settles that the constant was never the fault. The lock lands within a
     tenth of a symbol of where the burst opens, and the three compared symbols read
@@ -421,7 +432,8 @@ def test_the_crowded_ack_reads_the_shipped_preamble_where_it_locks():
         "moved this fixture is no longer the case it was kept for")
 
 
-@corpora.requires_onair_crowded_ack
+@pytest.mark.skip(reason="Needs a rig-rx BW2300 --force flight over a 40 m "
+                         "occupant, e.g. KD0PYG at 7101.2 kHz, with a crowded ack")
 def test_nothing_else_in_the_kd0pyg_recording_holds_the_preamble():
     """The other side of it, over 190 s of an occupied 40 m channel: one plateau,
     and it is the gateway's answer to our first link-setup."""
@@ -469,9 +481,9 @@ _TOOK_THE_LINK = (
 #: back 7.3 to 22.3 dB under the band while all five gateway overs sit 1.5 to 9.5
 #: dB over it: one line with four and a half decibels of room on each side.
 _ECHO_SPLIT_DB = -3.0
-#: Best anything that is not a frame reaches across the 2,434,523 alignments of
-#: those 27 windows, against the 16 `_OVER_GUARD_MIN` opens on.
-_TURNAROUND_FLOOR = 11
+#: Measured maximum for non-frames across the substitute population
+#: (4,386,087 alignments), against the 16 `_OVER_GUARD_MIN` opens on.
+_TURNAROUND_FLOOR = 10
 
 
 def _norm(path) -> np.ndarray:
@@ -524,46 +536,30 @@ def _scan(x: np.ndarray, called: str):
     return frames, floor, total
 
 
-@corpora.requires_unconnected_linksetups
 def test_a_link_setup_that_brought_no_connect_brought_no_over_either():
-    """Every link-setup this station has sent that did not end in a connect.
+    """Twenty-two own link-setups, no peer DATA, across 4,386,087 alignments.
 
-    27 of them, across three evenings and six callsigns, 861 s of receive audio,
-    2,434,523 alignments — and the same one thing in all 27: our own link-setup
-    coming back through the receiver, 24 of 24 reference columns, a clean CRC and
-    the callsign it names is this station's. Nothing else in any of those windows
-    reaches 12 of the 24, against the 16 the guard opens on.
-
-    So there is no peer over in a turnaround anywhere in the record, and a rule
-    that read one as the link coming up would have exactly one thing to read: the
-    frame we ourselves had just transmitted, in 27 windows out of 27. The 2026-08-19
-    call to KC9GHZ is the specimen — its third link-setup keys at 46.87 s and its
-    395 emission columns begin at 47.121, which is the 4.21 s frame at "46.94 s"
-    that reads as a gateway starting to send.
-
-    `ONAIR_REFUSED_ACK` is in this population and is the case that settles the
-    other reading. W8MW DID take the link there — its connected-ack is at 23.280 s
-    and the two tests above recover it — and it still sent nothing for the
-    remaining 47 s. A peer that has the link waits for the session-confirm.
+    The three surviving 08-03 rig recordings contribute six frames. The KC2OUR
+    home tap contributes six, and three K0SI arm taps another ten. All must
+    name W9SSJ, and non-frames must stay below the measured floor of ten.
     """
     seen, floors, total = 0, [], 0
-    for path, count in corpora.ONAIR_UNCONNECTED_LINKSETUPS:
-        called = path.stem.rsplit("-W9SSJ-", 1)[-1]
-        frames, floor, n = _scan(_norm(path), called)
+    for name, called, count in _UNCONNECTED:
+        frames, floor, n = _scan(greetings_evidence.samples(name) / 32768.0, called)
         seen, total = seen + len(frames), total + n
-        floors.append((path.name, floor))
+        floors.append((name, floor))
         assert len(frames) == count, (
-            f"{path.name} holds {count} link-setup(s) and the over search found "
+            f"{name} holds {count} link-setup(s) and the over search found "
             f"{len(frames)} base frame(s) in it")
         for hits, body, line in frames:
-            assert hits == _OVER_REF_COLS, f"{path.name}: {hits}/{_OVER_REF_COLS}"
+            assert hits == _OVER_REF_COLS, f"{name}: {hits}/{_OVER_REF_COLS}"
             assert body is None and f"link-setup naming {_MYCALL}" in line, (
-                f"{path.name}: a frame in a turnaround that is not ours — {line}")
-    declared = sum(n for _, n in corpora.ONAIR_UNCONNECTED_LINKSETUPS)
-    assert seen == declared == 27, (
+                f"{name}: a frame in a turnaround that is not ours — {line}")
+    declared = sum(n for _, _, n in _UNCONNECTED)
+    assert seen == declared == 22, (
         f"{seen} link-setups found against {declared} declared — the floor below "
-        "was measured over 27, and a window that has gone relaxes it")
-    assert total > 2_000_000, f"only {total:,} alignments — the audio has changed"
+        "was measured over 22, and a window that has gone relaxes it")
+    assert total == 4_386_087, f"{total:,} alignments instead of 4,386,087 — the audio has changed"
     worst = max(floors, key=lambda kv: kv[1])
     assert worst[1] <= _TURNAROUND_FLOOR, (
         f"{worst[0]} reaches {worst[1]}/{_OVER_REF_COLS} reference columns on "
@@ -572,9 +568,9 @@ def test_a_link_setup_that_brought_no_connect_brought_no_over_either():
         "opens on — the two no longer have room between them")
 
 
-@corpora.requires_onair_gateway_greeting
-@corpora.requires_onair_gateway_overs
-@corpora.requires_onair_faded_greeting
+@pytest.mark.skip(reason="Needs three connected BW2300 flights recorded rig-rx, "
+                         "e.g. K0SI 40 m 7101.8 kHz or AA5AF 7104.0 kHz; "
+                         "taps cannot pin receiver attenuation during our TX")
 def test_a_peer_that_took_the_link_sends_nothing_in_the_ack_turnaround():
     """The positives, and the reason no over in a turnaround can be step 5.
 

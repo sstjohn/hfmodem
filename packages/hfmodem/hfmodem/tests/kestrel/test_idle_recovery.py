@@ -72,14 +72,14 @@ def test_controls_cannot_settle_or_reset_missing_data_recovery():
     assert hs.progress == before
 
 
-def test_unsupported_nak_closes_instead_of_spinning_forever():
+def test_a_caller_without_idle_recovery_or_a_taped_nak_closes():
     hs, io = waiting("2750")
-    hs.caller = "N0XYZ"  # W9SSJ now has measured BW2750 idle recovery.
+    hs.caller = "N0XYZ"  # W9SSJ has measured BW2750 idle recovery.
     partial_window(hs)
     hs._reack()
     assert hs.state == VA.VaraState.DISCONNECTED
-    assert any("no NAK is measured" in msg for msg in io.msgs)
-    assert hs._reacks == 0  # no fictitious NAK transmission
+    assert any("no caller's NAK is on tape" in msg for msg in io.msgs)
+    assert hs._reacks == 0
 
 
 def test_missing_data_retries_end_without_a_generic_ack_ladder():

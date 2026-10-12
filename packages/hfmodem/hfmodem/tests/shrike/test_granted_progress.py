@@ -101,7 +101,8 @@ def test_a_grant_behind_a_read_announcement_does_not_requeue_it():
     assert host.protocol is Protocol.PACTOR3 and host.arq.entry_pending
     assert host.arq.tx_seq == 2 and keyed.p3 == [b""]
     host.on_rx_event(cs_event(arq.CS_ACK, Protocol.PACTOR3))
-    assert keyed.p3 == [b"", QUEUED]
+    assert keyed.p3 == [b"", QUEUED[:5]]
+    assert host.arq._inflight.payload + bytes(host.arq._outbuf) == QUEUED
 
 
 def test_the_first_pactor3_field_after_the_entry_is_idle_fill():
@@ -114,10 +115,10 @@ def test_the_first_pactor3_field_after_the_entry_is_idle_fill():
     host.tick()                             # R06's own cycle, so the evening
     host.on_rx_event(cs_event(arq.CS_ACK, Protocol.PACTOR3))  # runtime keys its
                                             # entry and fails on the empty field
-    assert not host.arq.entry_pending and host.arq.speed_level == 3
+    assert not host.arq.entry_pending and host.arq.speed_level == 1
     host.tick()
     assert keyed.p3 == [b"", b""]
-    assert host.arq.tx_seq == 3 and host.arq._inflight.sl == 3
+    assert host.arq.tx_seq == 3 and host.arq._inflight.sl == 1
     assert not any(payload for payload in keyed.p3)
 
 
@@ -164,13 +165,14 @@ def test_a_gear_command_restarts_the_rung_budget():
     """CS5 is the IRS working the ladder, which is progress: the level it
     hands us gets the whole allowance rather than what is left of it."""
     host, _ = unread_announcement()
+    host.arq.cfg.traffic_sl = 3  # Reproduce the historical SL3 trial explicitly.
     host.on_rx_event(grant())
     host.on_rx_event(cs_event(arq.CS_ACK, Protocol.PACTOR3))
     host.tick()
     for _ in range(arq.UNREAD_RUNG_REPEATS):
         host.on_rx_event(cs_event(arq.CS_ACK, Protocol.PACTOR3))
     host.on_rx_event(cs_event(arq.CS_NAK, Protocol.PACTOR3))    # CS5: gear down
-    assert host.arq.speed_level == 2 and host.arq._inflight.repeats == 1
+    assert host.arq.speed_level == 2 and host.arq._inflight.repeats == 0
     for _ in range(arq.UNREAD_RUNG_REPEATS):
         host.on_rx_event(cs_event(arq.CS_REQUEST, Protocol.PACTOR3))
         assert host.protocol is Protocol.PACTOR3
@@ -240,7 +242,7 @@ def test_the_recorded_gateway_answer_releases_the_entry_packet():
         rx.new_cycle()
         rx.control_signal(audio, row["start_stream_sample"],
                           row["anchor_stream_sample"])
-    assert not host.arq.entry_pending and host.arq.speed_level == 3
+    assert not host.arq.entry_pending and host.arq.speed_level == 1
     host.tick()
     assert keyed.p3 == [b"", b""]
     assert host.arq.tx_seq == 3

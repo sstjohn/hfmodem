@@ -3,6 +3,11 @@
 
 """`test_capture_loss`'s bench with the station's own callback in the loop.
 
+Quiet-machine variants: HFMODEM_REALTIME=1 pytest -m realtime <this module>.
+
+The default gates replay converter stamps and recorded samples synchronously.
+The following description applies to the retained real-time bench.
+
 The device there is a pipe and a thread; here the thread drives
 `StationAudio._callback` with the ticker's stamps as the converter's, so what is
 measured is the station's capture path -- the copy, the lane push, the `ahead`
@@ -16,6 +21,7 @@ that wrap none.
 """
 from __future__ import annotations
 
+import os
 import struct
 import subprocess
 import sys
@@ -133,7 +139,8 @@ def _arm(monkeypatch, *, breathe: bool) -> tuple[int, int, float]:
 
 
 @pytest.mark.realtime
-def test_the_station_loses_capture_under_the_listening_cycle_and_counts_it(monkeypatch):
+@pytest.mark.skipif(os.environ.get("HFMODEM_REALTIME") != "1", reason="set HFMODEM_REALTIME=1 on a quiet machine")
+def test_the_station_loses_capture_under_the_listening_cycle_and_counts_it_realtime(monkeypatch):
     overwritten, counted, worst = _arm(monkeypatch, breathe=False)
     assert _per_cycle(overwritten) > 150, (
         f"the unbreathed station lost {_per_cycle(overwritten):.0f} samples a "
@@ -145,7 +152,8 @@ def test_the_station_loses_capture_under_the_listening_cycle_and_counts_it(monke
 
 
 @pytest.mark.realtime
-def test_breathing_from_the_polling_thread_takes_the_stations_loss_to_zero(monkeypatch):
+@pytest.mark.skipif(os.environ.get("HFMODEM_REALTIME") != "1", reason="set HFMODEM_REALTIME=1 on a quiet machine")
+def test_breathing_from_the_polling_thread_takes_the_stations_loss_to_zero_realtime(monkeypatch):
     overwritten, counted, worst = _arm(monkeypatch, breathe=True)
     assert (overwritten, counted) == (0, 0), (
         f"{overwritten} samples went with the station breathing "
@@ -158,8 +166,63 @@ def test_breathing_from_the_polling_thread_takes_the_stations_loss_to_zero(monke
 def test_close_releases_the_breather(monkeypatch):
     """The window is process-wide and one at a time: a station that closed and
     left it claimed would leave the next stream decoding unbreathed."""
-    sa, _ = _station(monkeypatch)
+    sa = StationAudio(input_device="replay", output_device="replay")
     sa.breathe()
     assert gil._tool is not None
     sa.close()
     assert gil._tool is None
+
+
+def sample_station_arm(monkeypatch, *, breathe):
+    from hfmodem.tests.core.test_capture_loss import SampleCapture, recorded_session
+    sa = StationAudio(input_device="replay", output_device="replay")
+    sa.blocksize = BLOCK
+    lane = sa.subscribe(StreamLane(audio.CARD_RATE_HZ))
+    samples = recorded_session()
+    position = [0]
+
+    def callback(stamp):
+        start = position[0] % (len(samples.audio)-BLOCK)
+        block = samples.audio[start:start+BLOCK, None]
+        position[0] += BLOCK
+        sa._callback(block, np.zeros_like(block), BLOCK, _Times(stamp), _Status())
+        assert sa.failure is None
+        assert lane.poll() is not None
+
+    device = SampleCapture(monkeypatch, callback)
+    # Establish an ahead baseline before any overwrite; no open or real device.
+    callback(0.)
+    try:
+        if breathe:
+            sa.breathe()
+        for _ in range(CYCLES):
+            device.run(samples.listening)
+        device.lost()  # final delivered callback accounts for trailing loss
+        return device.overwritten, sa.lost, device.worst
+    finally:
+        sa.close()
+
+
+def test_the_station_loses_capture_under_the_listening_cycle_and_counts_it(monkeypatch):
+    overwritten, counted, worst = sample_station_arm(monkeypatch, breathe=False)
+    assert _per_cycle(overwritten) > 150
+    assert counted == overwritten
+    assert worst > 4*gil.PERIOD
+
+
+def test_breathing_from_the_polling_thread_takes_the_stations_loss_to_zero(monkeypatch):
+    overwritten, counted, worst = sample_station_arm(monkeypatch, breathe=True)
+    assert (overwritten, counted) == (0, 0)
+    assert worst < 5*gil.PERIOD
+
+
+@pytest.mark.parametrize('regression', ['loss-accounting', 'station-breather'])
+def test_sample_station_gates_reject_in_memory_regressions(monkeypatch, regression):
+    if regression == 'loss-accounting':
+        monkeypatch.setattr(audio.rates, 'lost_step', lambda *args: 0)
+        gate = test_the_station_loses_capture_under_the_listening_cycle_and_counts_it
+    else:
+        monkeypatch.setattr(StationAudio, 'breathe', lambda self: None)
+        gate = test_breathing_from_the_polling_thread_takes_the_stations_loss_to_zero
+    with pytest.raises(AssertionError):
+        gate(monkeypatch)

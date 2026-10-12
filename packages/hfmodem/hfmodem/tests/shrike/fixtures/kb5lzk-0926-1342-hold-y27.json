@@ -1,0 +1,26 @@
+{
+  "file": "kb5lzk-0926-1342-hold-y27.wav",
+  "source": "captures/onair-0926-1342/stream.flac",
+  "rate": 12000,
+  "samples": 16800,
+  "sha256": "5f1bd7b681e4924e1c10cc1df618f86f05e88e03d94709dfdde312e4ba666376",
+  "link": "KB5LZK on 10146.4 kHz, 2026-09-26 18:43Z, leaving P1 while we still keyed our unacknowledged packet 1 (holds 13-16): Y27 from our slot boundary + 0.918 s: each piece runs from boundary + 0.90 s to + 1.25 s, our own carrier's mute and all, so only the word's tail is in it",
+  "cut_s": [
+    0.9,
+    1.25
+  ],
+  "slots": [
+    29,
+    30,
+    31,
+    32
+  ],
+  "slot_boundaries_s": [
+    36.3069,
+    37.5569,
+    38.8069,
+    40.0569
+  ],
+  "word": "Y27",
+  "onset_after_boundary_s": 0.918
+}

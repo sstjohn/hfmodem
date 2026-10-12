@@ -85,7 +85,7 @@ def test_fractional_continue_preserves_all_bandwidths(bw, offset, shift):
     hs, _ = _connected(bw=bw)
     hs._peer_shift = shift
     hs._peer_offset = offset
-    x = _off_frequency(MK.synth_tone_pairs(VF.over_continue('W9SSJ', bw)),
+    x = _off_frequency(MK.synth_tone_pairs(VF.over_continue(hs.called, bw)[1]),
                        offset + shift)
     x = np.pad(x, (4800, 4800))
     assert hs._peer_over_continue(x)
@@ -96,14 +96,14 @@ def test_fractional_nak_keeps_the_pending_frame(offset, shift):
     hs, _ = _connected(bw='2300')
     hs._peer_shift = shift
     hs._peer_offset = offset
-    x = _off_frequency(MK.synth_tone_pairs(VF.nak('W9SSJ', '2300')[1]),
+    x = _off_frequency(MK.synth_tone_pairs(VF.nak(hs.called, '2300')[1]),
                        offset + shift)
     assert not hs._peer_over_continue(np.pad(x, (4800, 4800)))
 
 
 def test_fractional_reader_does_not_search_an_unrelated_integer_offset():
     hs, _ = _connected(bw='2750')
-    x = _off_frequency(MK.synth_tone_pairs(VF.over_continue('W9SSJ', '2750')), 2)
+    x = _off_frequency(MK.synth_tone_pairs(VF.over_continue(hs.called, '2750')[1]), 2)
     assert not hs._peer_over_continue(np.pad(x, (4800, 4800)))
 
 

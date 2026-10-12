@@ -7,6 +7,33 @@ which matters, because a transmitting radio mutes its own receiver, and one mode
 transmitting while another recorded has already invalidated eight sessions that
 were reported as a silent band.
 
+For a first PACTOR-3 or VARA Winlink call, use `hfmodem winlink` and the
+[operator quickstart](CONSOLE.md#install-and-receive-winlink-mail). It guides
+radio and identity setup without transmitting. The sections below describe
+manual station operation and its interlocks.
+
+## Rig profiles
+
+The station uses a Yaesu FTDX10 with its built-in USB audio codec. The FT-891
+remains supported with an external audio interface through the same rig-profile
+system. X6100 and G90 support is planned; their profile entries have unmeasured
+timing and incomplete readback qualification.
+
+Select the current profile with `HFMODEM_RIG=ftdx10`
+or a per-modem tool’s `--rig ftdx10` option. Explicit options take precedence over the
+environment. The shared resolver retains `ft891` as its fallback, so select the
+FTDX10 explicitly. Station files supply rig-profile overlays and audio settings;
+inspect them with `hfmodem config` before starting the station.
+
+The operator chooses the station settings and when to transmit. The software
+provides the modem, checks and controls used to run that station.
+
+For the operator console, passive monitoring, ALE scanning and selcall, start
+with the [console guide](CONSOLE.md), [monitor guide](console-monitor.md) and
+[HFLINK guide](console-hflink.md). Passive single-mode monitoring permits
+manual radio retuning and preserves the receive filter, including a 4 kHz
+voice passband. Active ALE scanning owns tuning until you stop its scan.
+
 ## Before anything transmits
 
     hfmodem config station.toml     what the file actually means
@@ -34,7 +61,8 @@ amounts to. The profile checks use this setting.
 
 **`regulatory`** selects the software's emission-checking profile and has no
 default. `part97` requires a licence-class setting; `unregulated` bypasses the
-profile checks and requires a stated reason.
+profile checks and requires a stated reason. These are limits the operator
+chooses to apply.
 
 **Identification is an interlock rather than a request.** When one is due, the
 station refuses to carry traffic until the callsign has gone out. A priority scheme

@@ -248,7 +248,7 @@ def _delivery(payload: bytes) -> list:
     hs.state, hs.step = VA.VaraState.CONNECTED, VA._I_CONNECTED
     hs.send(payload)
     for _ in range(3):
-        hs.on_rx_audio(MK.synth_tone_pairs(VF.CONTROL_BURST_RESPONDER_500))
+        hs.on_rx_audio(MK.synth_tone_pairs(VF.control_bursts(_MYCALL, "500")[1]))
     overs = [s for s in io.sent if len(s) > 2 * rx.FS]
     return [rx.decode_burst_frames(s, OF.ONSET_500, len(s))[0] for s in overs]
 

@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 from scipy.io import wavfile
 
+from hfmodem.core import wav as recordings
 from hfmodem.sabir import offair
 from hfmodem.sabir.arq import wire
 from hfmodem.sabir.arq.fsm import ArqConfig
@@ -150,7 +151,7 @@ def load_burst(manifest_path, callsign: str | None = None):
 
     manifest = validate_manifest(manifest_path, callsign=callsign)
     wav = _asset(Path(manifest_path).resolve().parent, manifest["waveform"])
-    rate, raw = wavfile.read(wav)
+    rate, raw = wavfile.read(recordings.source(wav))
     if rate != FS or raw.ndim != 1 or len(raw) / FS != manifest["transmit_seconds"]:
         raise ValueError("prepared waveform geometry mismatch")
     audio = offair.wav_read(str(wav))
@@ -183,7 +184,7 @@ def verify(manifest_path, capture_path) -> dict:
 
     manifest_path, capture_path = Path(manifest_path).resolve(), Path(capture_path).resolve()
     manifest = validate_manifest(manifest_path, require_current_source=False)
-    rate, raw = wavfile.read(capture_path)
+    rate, raw = wavfile.read(recordings.source(capture_path))
     audio = offair.wav_read(str(capture_path))
     if not np.all(np.isfinite(audio)):
         raise ValueError("capture contains non-finite samples")

@@ -60,7 +60,7 @@ def station(tmp_path, monkeypatch):
 
 def test_without_a_station_file_we_announce_our_own_name(monkeypatch):
     monkeypatch.delenv(config.STATION_ENV, raising=False)
-    assert config.client_sid() == CLIENT_SID == "HFM-0.1"
+    assert config.client_sid() == CLIENT_SID == "HFM-0.2"
 
 
 def test_the_shipped_example_announces_the_shipped_default():
@@ -87,8 +87,8 @@ def test_a_station_file_that_will_not_load_names_itself(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("bad", [
-    "[HFM-0.1-B2FHM$]",          # the whole SID, brackets and letters and all
-    "HFM-0.1-B2FHM$",            # the capability field, which is not theirs
+    "[HFM-0.2-B2FHM$]",          # the whole SID, brackets and letters and all
+    "HFM-0.2-B2FHM$",            # the capability field, which is not theirs
     "HFM–0.1",                   # an en dash out of a word processor
     "",
 ])
@@ -102,7 +102,7 @@ def test_a_carriage_return_in_the_name_is_refused_at_the_flag():
     """Not a malformed SID: a second protocol line of the setter's choosing,
     injected into the handshake."""
     with pytest.raises(ConfigError, match="client_sid"):
-        config.client_sid("HFM-0.1\r;FW: N0CALL")
+        config.client_sid("HFM-0.2\r;FW: N0CALL")
 
 
 # -- what reaches the wire ------------------------------------------------
@@ -115,7 +115,7 @@ def _handshake(**kw) -> list[str]:
 
 
 def test_the_default_sid_on_the_wire_is_unchanged():
-    assert "[HFM-0.1-B2FHM$]" in _handshake()
+    assert "[HFM-0.2-B2FHM$]" in _handshake()
 
 
 def test_the_configured_name_is_what_goes_out():
@@ -147,7 +147,7 @@ def test_the_configured_name_reaches_the_vara_mail_path(station):
 
 
 #: Every program that calls a gateway must take its client type from the
-#: resolver. One that constructs its own announces `HFM-0.1` whatever the
+#: resolver. One that constructs its own announces `HFM-0.2` whatever the
 #: operator set, which is a setting that can be changed and does nothing — the
 #: exact shape `[audio] tx_drive` was in before it was wired up.
 _CALLERS = re.compile(r"B2FSession\((?:[^()]|\([^()]*\))*\)", re.S)

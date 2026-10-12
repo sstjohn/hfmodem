@@ -1,0 +1,111 @@
+{
+  "arm": "onair-1002-2108",
+  "stream_sha256": "f9dacfdb2634b2cfd61f11f9beed24090615bb2e2bc8f299c5e8c479b608456b",
+  "holds": {
+    "64": {
+      "metadata_sha256": "f8a1c30eda331fc7ae13238f0f2a1e337288099354609927dae2adbb8f0895e2",
+      "origin": 4212028,
+      "end": 4258304
+    },
+    "65": {
+      "metadata_sha256": "61faee02b5026fcde5cc185c51049c234aba74feefc04fc94678769b933da420",
+      "origin": 4272026,
+      "end": 4318336
+    },
+    "66": {
+      "metadata_sha256": "bf4839e1b2d5e4654807b58dd5c22f2f19f7b6937cd6d9dbee4763c23111de16",
+      "origin": 4332026,
+      "end": 4378240
+    },
+    "67": {
+      "metadata_sha256": "acee18292f0eb7c131cabe305fb104d79b8958a144a9f067bf3c77dffdc7df60",
+      "origin": 4392026,
+      "end": 4438272
+    },
+    "68": {
+      "metadata_sha256": "93772090a54e3ba56e3fc6c74113157bb4732990c88d02d26e13cb41217917da",
+      "origin": 4452026,
+      "end": 4498432
+    },
+    "69": {
+      "metadata_sha256": "5d1f6f4439860e2f4c398fcb28c939c745386f155dadb6a4558809d85cee2bda",
+      "origin": 4511974,
+      "end": 4558464
+    },
+    "70": {
+      "metadata_sha256": "b22247affa393b99f0225fb303ce4eee0d90c2c56ecb18e6d7faa50185340b74",
+      "origin": 4571956,
+      "end": 4618368
+    },
+    "71": {
+      "metadata_sha256": "fdef3215f264f18cc58724c244ecaf0dd4f9e2e5abda555093b065de75734453",
+      "origin": 4631944,
+      "end": 4678400
+    },
+    "72": {
+      "metadata_sha256": "81622e7bf2c852f836aedce1e4b350ba2aaa37ec7a1cde342fb23078df08ea75",
+      "origin": 4691934,
+      "end": 4738176
+    },
+    "73": {
+      "metadata_sha256": "79aa57d43a33d1e6a2a15dff2e14fc27a3c6b8ea88dc6947dedb0dcb8bf90531",
+      "origin": 4751928,
+      "end": 4798208
+    },
+    "74": {
+      "metadata_sha256": "b32b23b511cec8d71218400be90c19321eb0865748b3215f6ac004ee79a4a24d",
+      "origin": 4811928,
+      "end": 4858240
+    },
+    "75": {
+      "metadata_sha256": "82536f75bf9fb6a1d3a4e45199cceefcbf4b2f074076dbf1a2e1909bf694aaa9",
+      "origin": 4871922,
+      "end": 4918144
+    },
+    "76": {
+      "metadata_sha256": "acafcf10745f338c2d26bd299a255cec361835f8a73d921a171329137cdd8214",
+      "origin": 4931974,
+      "end": 4978176
+    },
+    "77": {
+      "metadata_sha256": "9e569fcc12aebe7fd99ef06195e6446ddd26999a3ff2462bee1ec545199ab516",
+      "origin": 4992006,
+      "end": 5038464
+    },
+    "78": {
+      "metadata_sha256": "93b23a850709fcb54d6ceaa8d9f279362bc73a2a2ab13d32cc896e203b5fcddd",
+      "origin": 5051922,
+      "end": 5098368
+    },
+    "79": {
+      "metadata_sha256": "46d48123bedfbb42061926a60aabf9cac7197717355a068780a4db0bcb31209a",
+      "origin": 5111922,
+      "end": 5158400
+    },
+    "80": {
+      "metadata_sha256": "f85f279244f6b7539e9fc7738192abbb04f01aa6ee406b6bbd6d9b03009e80aa",
+      "origin": 5171922,
+      "end": 5218432
+    },
+    "81": {
+      "metadata_sha256": "6d526010e5fcd8f76523434a574d5025d84201a6b229017ad4a88f9e6046e2ce",
+      "origin": 5231922,
+      "end": 5278464
+    },
+    "82": {
+      "metadata_sha256": "c48d6f837f13a58b592e3b428b8123603f8022e09716486d36430962ea9be9f3",
+      "origin": 5291922,
+      "end": 5338368
+    },
+    "83": {
+      "metadata_sha256": "d3015389255a76c9aa0f2515727eb2d30f9a027164194a17a318783bfb622d45",
+      "origin": 5351922,
+      "end": 5398400
+    },
+    "84": {
+      "metadata_sha256": "6eca9187b083b3050962fe6cbab1574ae2304dc4fa0ca275499c8efdae90be15",
+      "origin": 5411922,
+      "end": 5458048
+    }
+  }
+}

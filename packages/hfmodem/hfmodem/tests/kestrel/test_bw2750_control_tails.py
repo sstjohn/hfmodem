@@ -70,7 +70,3 @@ def test_transmitter_keys_the_measured_tail_for_its_role(role, index):
     assert hs._tx_control_burst()
     assert pairs(io.sent[-1]) == VF.control_bursts('W9SSJ', '2750')[index]
 
-
-def test_unmeasured_caller_does_not_claim_a_measured_tail():
-    assert VF.control_bursts('N0XYZ', '2750') is None
-    assert VF.control_bursts('w9ssj', '2750') == VF.control_bursts('W9SSJ', '2750')

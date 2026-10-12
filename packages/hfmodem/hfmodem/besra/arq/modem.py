@@ -120,6 +120,7 @@ class BesraModem(ModemCore):
             listen=self._listen)
         self._session.tick(self._clock)      # publishes the initial NEWSTATE DISC
         if self._start_threaded if threaded is None else threaded:
+            self._t0 = time.monotonic()
             self._running = True
             self._pump = threading.Thread(target=self._run, name="besra-pump",
                                           daemon=True)
@@ -140,6 +141,13 @@ class BesraModem(ModemCore):
     @property
     def state(self) -> str:
         return self._session.state if self._session else P.ArdopState.OFFLINE
+
+    @property
+    def connected(self) -> bool:
+        # `ModemCore.connected` reads `state` alone, which is ISS from the first
+        # keyed ConReq — before any ConAck. Defer to the session's own notion,
+        # which knows the connect handshake from a link a peer actually granted.
+        return self._session.connected if self._session else False
 
     @property
     def queued(self) -> int:
@@ -290,6 +298,11 @@ class BesraModem(ModemCore):
         with self._lock:
             if self._session is None:
                 return
+            # The timer pump is held off this lock for a whole transmission, so the
+            # session's clock can be a frame old here, and a repeat scheduled from it
+            # keys with no gap left to hear the answer in.
+            if self._running:
+                self._clock = self._session._now = time.monotonic() - self._t0
             for frame in frames:
                 self._session.on_receive(frame.type, self._frame_payload(frame),
                                          frame.session_id, frame.ok, frame.quality,
@@ -304,7 +317,6 @@ class BesraModem(ModemCore):
     def _run(self) -> None:
         """Threaded pump: decode delivered audio and advance timers off the wall
         clock until stopped."""
-        start = time.monotonic()
         while self._running:
             try:
                 samples = self._rx_q.get(timeout=0.1)
@@ -317,7 +329,7 @@ class BesraModem(ModemCore):
                     obs = self._observer
                     if obs is not None:
                         obs.modem_fault(f"receive error: {exc}")
-            self.tick(time.monotonic() - start)
+            self.tick(time.monotonic() - self._t0)
 
     @staticmethod
     def _frame_payload(frame: DecodedFrame) -> bytes:

@@ -70,13 +70,18 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, NamedTuple, Protocol
 
 import numpy as np
 
 from hfmodem.core import gil, levels, rates, resample
+from hfmodem.core.operations import OperationGate, leased
 
 CARD_RATE_HZ = rates.CARD_RATE_HZ
+
+# A one-hour run on the FTDX10's USB codec under heavy load saw at most 0.777 ms
+# excess over a 2.667 ms block across 1.35 million callbacks; allow about 13 times that.
+CALLBACK_JITTER_ALLOWANCE_S = 0.010
 BLOCKSIZE = 128
 LATENCY = "low"
 
@@ -436,6 +441,28 @@ class RollingLane(_BaseLane):
         self._resync_at = card_index
 
 
+@dataclass(frozen=True)
+class StreamFault:
+    index: int
+    cause: str
+    serial: int
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    at: int
+    samples: np.ndarray
+    faults: tuple[StreamFault, ...]
+    boundaries: tuple[int, ...]
+
+    def __iter__(self):
+        # Existing stream consumers still unpack the card index and samples.
+        return iter((self.at, self.samples))
+
+    def __getitem__(self, index):
+        return (self.at, self.samples)[index]
+
+
 class StreamLane(_BaseLane):
     """Every sample once, in order — for a detector that carries state.
 
@@ -458,24 +485,65 @@ class StreamLane(_BaseLane):
                 f"{rate}: chunk-wise resampling would put an edge transient in "
                 "front of a stateful detector")
         super().__init__(rate, **kw)
+        self.fault_serial = 0
+        self._fault_lock = threading.Lock()
+        self.faults: deque[StreamFault] = deque(maxlen=64)
+        self._fault_read = 0
+        self._push_next = None
 
-    def poll(self) -> list[tuple[int, np.ndarray]]:
+    def fault(self, card_index: int, cause: str) -> None:
+        with self._fault_lock:
+            self.fault_serial += 1
+            self.faults.append(StreamFault(card_index, cause, self.fault_serial))
+
+    def push(self, block: Block) -> None:
+        if self._push_next is not None and block.n0 != self._push_next:
+            self.fault(block.n0, "index gap")
+        self._push_next = block.n0 + len(block.samples)
+        if len(self._q) == self._q.maxlen:
+            self.fault(block.n0, "deque drop")
+        super().push(block)
+
+    def poll(self) -> list[StreamChunk]:
         """What arrived since the last call, and the card index it starts at.
 
         A list of at most one, so a caller can treat every lane the same way.
         """
-        buf, at = self._gather()
-        if not len(buf):
+        blocks = self._drain()
+        out = []
+        expect = self.pos
+        if self._resync_at is not None:
+            blocks = [b for b in blocks if b.n0 >= self._resync_at]
+            expect = self._resync_at
+        for block in blocks:
+            if expect is not None and block.n0 != expect:
+                out.clear()
+            out.append(block)
+            expect = block.n0 + len(block.samples)
+        with self._fault_lock:
+            faults = tuple(f for f in self.faults if f.serial > self._fault_read)
+        self._resync_at = None
+        if not out:
             return []
-        self.pos = at + len(buf)
-        return [(at, buf)]
+        self.pos = expect
+        at = out[0].n0
+        samples = np.concatenate([b.samples for b in out])
+        skip = min(len(samples), max(0, self._flush_before - at))
+        if skip == len(samples):
+            return []
+        if faults:
+            self._fault_read = faults[-1].serial
+        boundaries = tuple(b.n0 + len(b.samples) for b in out)
+        return [StreamChunk(at + skip, samples[skip:], faults, boundaries)]
 
     def flush_to(self, card_index: int) -> None:
         self._flush_before = card_index
+        self.fault(card_index, "flush")
 
     def resync(self, card_index: int) -> None:
         self.resyncs += 1
         self._resync_at = card_index
+        self.fault(card_index, "resync")
 
 
 class CycleLane(_BaseLane):
@@ -543,6 +611,102 @@ def _iterable(x):
     return x if isinstance(x, (list, tuple)) else (x,)
 
 
+class Progress(NamedTuple):
+    """How far the card has taken a `TxStream`, published whole by the callback.
+
+    `emitted` samples have been handed to the card; `end` is the capture index just
+    past the last of them, holes included; `runs` holds the (stream position,
+    capture index) where each hole-free run of emission began.
+    """
+
+    emitted: int
+    end: int
+    runs: tuple[tuple[int, int], ...]
+
+    def card_end(self, position: int) -> int | None:
+        """The capture index just past stream sample `position - 1`, once emitted."""
+        if not 0 < position <= self.emitted:
+            return None
+        start, card = next(run for run in reversed(self.runs) if run[0] < position)
+        return card + position - start
+
+
+class TxStream:
+    """An open-ended transmission: written ahead of the DAC, drained by the callback.
+
+    `write` refuses to queue past `capacity`, so a producer that keeps it topped
+    up holds a bounded lead over the air. After `close` the callback drains what
+    is left and the transmission is done. Found empty before then it is an
+    underrun, and `starved_at` holds the capture index where the queue ran dry.
+    The producer only ever adds to `written`; the callback replaces `progress`
+    in one assignment, so a reader on any thread sees one callback's account
+    and never half of two.
+    """
+
+    def __init__(self, at: int, capacity: int) -> None:
+        self.at = at
+        self.capacity = capacity
+        self.written = 0
+        self.closed = False
+        self.starved_at: int | None = None
+        self.progress = Progress(0, at, ())
+        self._chunks: deque[np.ndarray] = deque()
+        self._head = np.zeros(0, np.float32)
+
+    @property
+    def emitted(self) -> int:
+        return self.progress.emitted
+
+    @property
+    def end(self) -> int:
+        return self.progress.end
+
+    @property
+    def queued(self) -> int:
+        return self.written - self.progress.emitted
+
+    def drained_at(self, progress: Progress) -> bool:
+        return self.closed and progress.emitted >= self.written
+
+    @property
+    def drained(self) -> bool:
+        return self.drained_at(self.progress)
+
+    def write(self, samples: np.ndarray) -> None:
+        if self.closed:
+            raise AudioError("write to a closed transmit stream")
+        buf = np.asarray(samples, np.float32)
+        if self.queued + len(buf) > self.capacity:
+            raise AudioError(f"transmit stream full: {self.queued} queued, "
+                             f"{len(buf)} more past its {self.capacity}")
+        self._chunks.append(buf)
+        self.written += len(buf)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def _read(self, n: int) -> np.ndarray:
+        out = []
+        got = 0
+        while got < n:
+            if not len(self._head):
+                try:
+                    self._head = self._chunks.popleft()
+                except IndexError:
+                    break
+                continue
+            take = self._head[:n - got]
+            self._head = self._head[len(take):]
+            out.append(take)
+            got += len(take)
+        return np.concatenate(out) if out else np.zeros(0, np.float32)
+
+    def _emitted(self, got: int, card: int) -> None:
+        was = self.progress
+        runs = was.runs if was.runs and was.end == card else was.runs + ((was.emitted, card),)
+        self.progress = Progress(was.emitted + got, card + got, runs)
+
+
 class StationAudio:
     """The card. One stream, one clock, N lanes.
 
@@ -579,12 +743,19 @@ class StationAudio:
         self._ahead: float | None = None
         self._fit: list[tuple[float, int]] = []
         self._burst: tuple[np.ndarray, int] | None = None
+        self._tx_stream: TxStream | None = None
         self._emitted = 0
         self._tx_invalid = False
         #: Set by the callback instead of raising. See `_callback`.
         self.failure: BaseException | None = None
         self._lock = threading.Lock()
         self._breathing = contextlib.ExitStack()
+        self.operations = OperationGate()
+        self.close_budget_s = 35.0
+        self.callback_count = 0
+        self._callback_at = time.monotonic()
+        self._consumed = 0
+        self._reserved = False
 
     @property
     def loop_lat(self) -> int:
@@ -650,6 +821,7 @@ class StationAudio:
         self._breathing.enter_context(gil.breathing())
 
     def close(self) -> None:
+        self.operations.close(self.close_budget_s)
         self._breathing.close()
         s, self._stream = self._stream, None
         if s is not None:
@@ -708,10 +880,17 @@ class StationAudio:
                     # emission, and invalidating a burst that went out intact is
                     # the wrong direction to be wrong.
                     self._tx_invalid = True
+                stream = self._tx_stream
+                if stream is not None and stream.emitted and not stream.drained:
+                    self._tx_invalid = True
 
         ahead = t.inputBufferAdcTime - n0 / CARD_RATE_HZ
-        self.lost += rates.lost_step(ahead, self._ahead, self.blocksize,
-                                     CARD_RATE_HZ)
+        lost = rates.lost_step(ahead, self._ahead, self.blocksize, CARD_RATE_HZ)
+        self.lost += lost
+        if lost:
+            for lane in self._lanes:
+                if hasattr(lane, "fault"):
+                    lane.fault(n0, "timestamp loss")
         self._ahead = ahead
 
         self._last = (t.inputBufferAdcTime, n0)
@@ -768,7 +947,16 @@ class StationAudio:
         bursts*, not *no stream* — and this satisfies it while keeping the
         transmit index arithmetic.
         """
+        with self._lock:
+            self.callback_count += 1
+            self._callback_at = time.monotonic()
+            self._fill_locked(outdata, frames, n0)
+
+    def _fill_locked(self, outdata, frames: int, n0: int) -> None:
         outdata[:] = 0.0
+        if self._tx_stream is not None:
+            self._fill_stream(outdata, frames, n0)
+            return
         burst = self._burst
         if burst is None:
             return
@@ -782,7 +970,28 @@ class StationAudio:
         # rather than at the next boundary. A cursor instead of an index also
         # stretches a burst across a skipped callback rather than skipping ahead.
         outdata[lo - start:hi - start, 0] = tx[lo - at:hi - at]
+        if self._reserved and lo - at != self._consumed:
+            self._tx_invalid = True
+        self._consumed += hi - lo
         self._emitted = hi - at
+
+    def _fill_stream(self, outdata, frames: int, n0: int) -> None:
+        stream = self._tx_stream
+        start = n0 + self.loop_lat
+        if start + frames <= stream.at:
+            return
+        offset = max(0, stream.at - start)
+        got = stream._read(frames - offset)
+        outdata[offset:offset + len(got), 0] = got
+        if len(got):
+            stream._emitted(len(got), start + offset)
+        if len(got) < frames - offset and not stream.closed:
+            if stream.starved_at is None:
+                stream.starved_at = n0
+            if stream.emitted:
+                self._tx_invalid = True
+        else:
+            stream.starved_at = None
 
     # -- the clock ---------------------------------------------------------
 
@@ -805,13 +1014,39 @@ class StationAudio:
         """
         return rates.rate_fit(self._fit, CARD_RATE_HZ)
 
-    def wait_until(self, card_index: int) -> None:
+    @leased
+    def wait_until(self, card_index: int, *, healthy: bool = False,
+                   deadline: float | None = None, cancelled=None) -> None:
         """Block until the card has delivered `card_index`, in short hops."""
         while self.sample_now() < card_index:
+            if cancelled is not None and cancelled():
+                raise BurstInvalidated("cancelled")
+            if healthy:
+                self.check_callbacks()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise BurstInvalidated("audio wait deadline expired")
             time.sleep(_HOP_S)
+        if healthy:
+            self.check_callbacks()
+
+    def check_callbacks(self) -> None:
+        self.alive()
+        # Allow one block, negotiated output buffering, and the measured
+        # callback delivery margin. The FT-891 input run is still pending.
+        latency = (self.lat or 0) / CARD_RATE_HZ
+        if self._stream is not None:
+            reported = self._stream.latency
+            latency = reported[1] if isinstance(reported, tuple) else reported
+        timeout = self.blocksize / CARD_RATE_HZ + latency + CALLBACK_JITTER_ALLOWANCE_S
+        if time.monotonic() - self._callback_at > timeout:
+            raise BurstInvalidated("output callbacks stopped")
+
+    def callback_age(self) -> float:
+        return time.monotonic() - self._callback_at
 
     # -- transmit ----------------------------------------------------------
 
+    @leased
     def arm_burst(self, audio: np.ndarray, at: int) -> int:
         """Schedule `audio` so its first sample reaches the DAC as capture index
         `at` reaches the ADC. Returns the index actually used.
@@ -829,19 +1064,58 @@ class StationAudio:
         earliest = int(self.samples) + self.loop_lat + 3 * self.blocksize
         at = max(at, earliest)
         self._tx_invalid = False
+        self._reserved = False
+        self._consumed = 0
+        self._emitted = 0
         self._burst = (buf, at)                 # single atomic publication
         return at
 
+    @leased
+    def reserve_burst(self, audio: np.ndarray, at: int, deadline: int) -> int:
+        """Publish under the callback lock only when the entire keyed interval fits."""
+        buf = np.asarray(audio, np.float32)
+        with self._lock:
+            actual = max(at, int(self.samples) + self.loop_lat + 3 * self.blocksize)
+            if actual + len(buf) + round(0.1 * CARD_RATE_HZ) > deadline:
+                exc = BurstInvalidated("reserved burst exceeds keyed deadline")
+                exc.displacement = actual - at
+                raise exc
+            self._tx_invalid = False
+            self._consumed = self._emitted = 0
+            self._reserved = True
+            self._burst = (buf, actual)
+            return actual
+
+    @leased
+    def arm_stream(self, at: int, capacity: int) -> TxStream:
+        """Open a transmission of no fixed length, its first sample at capture index
+        `at` or the earliest this card can still meet. Write to what comes back;
+        `finish_burst` ends it, as it ends a burst.
+        """
+        stream = TxStream(max(at, int(self.samples) + self.loop_lat + 3 * self.blocksize),
+                          capacity)
+        with self._lock:
+            self._tx_invalid = False
+            self._tx_stream = stream
+        return stream
+
     def burst_done(self) -> bool:
+        stream = self._tx_stream
+        if stream is not None:
+            return stream.drained
         burst = self._burst
         return burst is None or self._emitted >= len(burst[0])
 
+    @leased
     def cancel_burst(self) -> None:
         """Drop an armed burst that never keyed. Emits nothing and records nothing."""
-        self._burst = None
-        self._emitted = 0
-        self._tx_invalid = False
+        with self._lock:
+            self._burst = None
+            self._emitted = self._consumed = 0
+            self._tx_invalid = False
+            self._reserved = False
 
+    @leased
     def finish_burst(self) -> int:
         """Stop emitting, flush every lane past our own carrier, and report where.
 
@@ -849,9 +1123,19 @@ class StationAudio:
         half-duplex is enforced once — replacing besra's `muted` flag and shrike's
         per-session flush with one mechanism.
         """
-        burst, self._burst = self._burst, None
-        invalid, self._tx_invalid = self._tx_invalid, False
+        with self._lock:
+            burst, self._burst = self._burst, None
+            stream, self._tx_stream = self._tx_stream, None
+            invalid, self._tx_invalid = self._tx_invalid, False
+            if self._reserved and burst is not None:
+                self.check_callbacks()
+                invalid |= (self._consumed != len(burst[0]) or
+                            self.sample_now() < burst[1] + len(burst[0]))
+            self._reserved = False
         end = (burst[1] + len(burst[0])) if burst is not None else int(self.samples)
+        if stream is not None:
+            stream.close()
+            end = stream.end
         for lane in self._lanes:
             lane.flush_to(end)
         if invalid:

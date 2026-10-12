@@ -7,15 +7,19 @@
     python docs/viz/build.py --check  # verify the embedded values
 
 The comparison and mode pages contain delimited JSON blocks so their figures
-work offline. Source data includes ARDOP recordings in the test fixtures and
-the mode implementation tables. Pages absent from a reduced source tree are
+work offline. Source data includes ARDOP recordings in the test fixtures,
+retained public PACTOR-3/VARA FLAC recordings, and mode implementation tables.
+Regenerating the comparison requires the FLAC command-line decoder. Pages absent from a reduced source tree are
 reported and skipped.
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
+import io
 import json
+import subprocess
 import sys
 import wave
 from pathlib import Path
@@ -85,6 +89,215 @@ def _psd(x: np.ndarray, fs: int, nfft: int, f_hi: float) -> dict:
             "db": [round(v - db[keep].max(), 2) for v in db[keep]]}
 
 
+def _measured(x: np.ndarray, fs: int) -> dict:
+    """Actual PCM, an RMS envelope and a short list of separated spectral peaks."""
+    x = np.asarray(x, dtype=float)
+    nfft = 1 << round(np.log2(fs / 11.71875))
+    psd = _psd(x, fs, nfft, 3000)
+    psd["bin_spacing_hz"] = fs / nfft
+    hz, db = np.array(psd["hz"]), np.array(psd["db"])
+    maxima = [i for i in range(1, len(db) - 1)
+              if db[i] >= db[i - 1] and db[i] > db[i + 1]]
+    chosen = []
+    for i in sorted(maxima, key=lambda i: -db[i]):
+        if all(abs(hz[i] - hz[j]) >= 100 for j in chosen):
+            chosen.append(i)
+        if len(chosen) == 6:
+            break
+    center = max(0, len(x) // 2 - round(.02 * fs))
+    trace = x[center:center + round(.04 * fs)]
+    edges = np.linspace(0, len(x), 65).astype(int)
+    envelope = [round(float(np.sqrt(np.mean(x[a:b] ** 2))) / 32768, 6)
+                for a, b in zip(edges, edges[1:])]
+    return {"psd": psd, "peaks": [[float(hz[i]), float(db[i])] for i in chosen],
+            "sample_rate": fs, "samples": len(x), "seconds": round(len(x) / fs, 6),
+            "waveform": [int(v) for v in trace], "waveform_offset_s": center / fs,
+            "envelope": envelope, "peak": round(float(np.max(np.abs(x))) / 32768, 6),
+            "rms": round(float(np.sqrt(np.mean(x ** 2))) / 32768, 6)}
+
+
+def public_recordings() -> dict:
+    """Hash-bound public QSO windows; source-clock offsets come from the manifests.
+
+    These are transmitted audio recorded by the local monitor, not peer receive
+    measurements. Selection also checks the public decoder event and its packet
+    digest. No filename-derived clock adjustments or private recordings are used.
+    FLAC is needed to regenerate this comparison figure, but not to view it.
+    """
+    picks = [
+        ("pactor3", "pactor3-send", "source0-p3-00071",
+         "2ebac0630d50ed829bd632337b2048e568d76587fcf98905358378a3cc8d5937",
+         "becaac678f066d6e917daeb2ed3ea8a826b309f9bd29efa270e8203702a4f98c",
+         .09, "PACTOR-3 SL6 · VE1YZ · 2026-09-24",
+         "CRC-passing SL6 rate probe; no mail payload in this frame. The QSO sent one message accepted by the gateway."),
+        ("vara", "vara-send", "source0-frame-00057",
+         "350e4d8da638ec9fcf7bcb83f287a8b39bff94cd65d685f9b35ca00af2bb50c0",
+         "779c0bf916c214f5b748dc68df714e923fc6878e36a4ef965e0db1749fab4547",
+         0, "VARA Tone L9 · NS0A · 2026-09-27",
+         "CRC-passing local L9 DATA frame. The QSO reached acknowledged L9 and sent one destination-confirmed message; this is a tone frame, not OFDM."),
+    ]
+    out = {}
+    for key, route, event_id, digest, packet_digest, body_offset, title, context in picks:
+        directory = REPO / "site/examples" / route
+        manifest = json.loads((directory / "data/manifest.json").read_text())
+        events = json.loads((directory / "data/events.json").read_text())
+        if isinstance(events, dict):
+            events = events["events"]
+        event = next(e for e in events if e["id"] == event_id)
+        assert event["status"] == "CRC pass" and event["direction"] == "tx", event_id
+        assert event["packet_sha256"] == packet_digest and not event.get("combined"), event_id
+        source = next(s for s in manifest["sources"] if s["id"] == "source0")
+        audio = directory / source["url"].removeprefix("./")
+        assert source["file_sha256"] == digest
+        assert hashlib.sha256(audio.read_bytes()).hexdigest() == digest, audio
+        fs = manifest["sample_rate"]
+        start = round((event["t0"] + body_offset + source["offset_s"]) * fs)
+        end = round((event["t1"] + source["offset_s"]) * fs)
+        decoded = subprocess.run(["flac", "--decode", "--stdout", "--silent",
+                                  f"--skip={start}", f"--until=+{end - start}", str(audio)],
+                                 check=True, capture_output=True).stdout
+        with wave.open(io.BytesIO(decoded)) as wav:
+            assert wav.getframerate() == fs and wav.getnchannels() == 1 and wav.getsampwidth() == 2
+            samples = np.frombuffer(wav.readframes(end - start), "<i2")
+        assert len(samples) == end - start
+        out[key] = {**_measured(samples, fs), "title": title, "context": context,
+                    "spectrogram": _spectrogram(samples.astype(float), fs, 150, 96, 3000),
+                    "route": route, "event_id": event_id, "source_kind": source["kind"],
+                    "source_sha256": digest, "packet_sha256": event["packet_sha256"],
+                    "source_offset_s": source["offset_s"], "source_start_sample": start,
+                    "source_end_sample": end, "audio_url": source["url"]}
+    return out
+
+
+def _decision_summary(points: np.ndarray, ideal: np.ndarray) -> dict:
+    """Angular offset from the nearest ideal direction, not a decoder quality score.
+
+    The radial scales differ between decoders. In particular, PACTOR exports only
+    phase, so a common amplitude-error or EVM score would misrepresent its input.
+    """
+    phase = np.angle(points[:, 0] + 1j * points[:, 1])
+    target = np.angle(ideal[:, 0] + 1j * ideal[:, 1])
+    offsets = np.abs(np.angle(np.exp(1j * (phase[:, None] - target))))
+    error = np.min(offsets, axis=1)
+    return {"rms_deg": round(float(np.degrees(np.sqrt(np.mean(error ** 2)))), 2),
+            "worst_deg": round(float(np.degrees(np.max(error))), 2),
+            "direction_counts": np.bincount(offsets.argmin(axis=1), minlength=len(ideal)).tolist()}
+
+
+def _public_constellation(recording: dict, asset: str, digest: str) -> dict:
+    """Read the reviewed decoder export exactly, never synthesize a point cloud."""
+    directory = REPO / "site/examples" / recording["route"] / "data"
+    raw = (directory / asset).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError(f"Recorded constellation asset changed: {asset}")
+    data = json.loads(raw)
+    event = next(e for e in json.loads((directory / "events.json").read_text())
+                 if e["id"] == recording["event_id"])
+    if (event["symbols"] != asset or event["status"] != "CRC pass"
+            or event["packet_sha256"] != recording["packet_sha256"]
+            or event["stage"] != data["stage"]
+            or event["source_id"] != recording.get("source_id", "source0")
+            or event.get("combined")
+            or event["direction"] != recording.get("direction", "tx")):
+        raise ValueError(f"Recorded constellation event mismatch: {asset}")
+    points = np.column_stack((data["i"], data["q"]))
+    ideal = np.asarray(data["ideal"], dtype=float)
+    t = np.asarray(data["t"], dtype=float)
+    if (points.shape != (len(t), 2) or len(data["carrier"]) != len(t)
+            or not np.isfinite(points).all() or not np.isfinite(ideal).all()
+            or not np.isfinite(t).all() or ideal.shape != (4, 2)
+            or np.min(t) < event["t0"] - 1e-6 or np.max(t) > event["t1"] + 1e-6):
+        raise ValueError(f"Invalid recorded constellation decisions: {asset}")
+    payload_bytes = sum(p.get("payload_length", p["length"]) for p in event["payloads"])
+    return {"title": recording["title"], "points": points.tolist(), "ideal": ideal.tolist(),
+            **_decision_summary(points, ideal), "normalization": data["normalization"],
+            "stage": data["stage"], "carriers": len(set(data["carrier"])),
+            "point_count": len(points), "payload_bytes": payload_bytes,
+            "context": recording["context"], "route": recording["route"],
+            "event_id": event["id"], "asset": asset, "asset_sha256": digest,
+            "source_sha256": recording["source_sha256"],
+            "packet_sha256": recording["packet_sha256"], "direction": recording.get("direction", "tx"),
+            "source_kind": recording["source_kind"], "quality": event.get("quality"),
+            "omitted": data["omitted_nonfinite_or_outside"]}
+
+
+def _ofdm_constellation() -> dict:
+    """Decode the bounded public crop without a supplied level or cached telemetry."""
+    from hfmodem.kestrel.rx import varaofdm
+
+    directory = REPO / "site/recordings"
+    provenance = json.loads((directory / "vara-ofdm-k5dat-0930.json").read_text())
+    audio = directory / "vara-ofdm-k5dat-0930.flac"
+    expected_audio = "9e962f2e070ec0f7d957b020c0b637a0afacac04c89b1586d31ed5c96a98b17b"
+    expected_pcm = "aa22e6b58187185a59d781d50d49aeb0bc7388ebf9cc69b759b6850001e876e1"
+    expected_packet = "9fcf2548dbac0ef8af07ea2412eafc0885c910101ea3b437dec924952f8574b6"
+    if (hashlib.sha256(audio.read_bytes()).hexdigest() != expected_audio
+            or provenance["audio_file_sha256"] != expected_audio
+            or provenance["pcm_s16le_sha256"] != expected_pcm
+            or provenance["packet_sha256"] != expected_packet):
+        raise ValueError("Public OFDM recording identity changed")
+    decoded = subprocess.run(["flac", "--decode", "--stdout", "--silent", str(audio)],
+                             check=True, capture_output=True).stdout
+    with wave.open(io.BytesIO(decoded)) as wav:
+        if (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) != (48000, 1, 2):
+            raise ValueError("Unexpected OFDM recording format")
+        pcm = wav.readframes(wav.getnframes())
+    if len(pcm) != 422400 or hashlib.sha256(pcm).hexdigest() != expected_pcm:
+        raise ValueError("Public OFDM decoded PCM changed")
+    observations = []
+    result = varaofdm.decode_burst(np.frombuffer(pcm, "<i2").astype(float) / 32768,
+                                   500, on_symbols=observations.append)
+    if (not result.ok or result.level != 7 or len(result.frames) != 1 or len(observations) != 1
+            or len(result.frames[0]) != 197 or not observations[0].crc_ok
+            or hashlib.sha256(result.frames[0]).hexdigest() != expected_packet
+            or result.quality.raw_errors != 0):
+        raise ValueError("Public OFDM crop no longer independently validates")
+    observation = observations[0]
+    points = np.round(np.column_stack((observation.points.real, observation.points.imag)), 6)
+    ideal = np.column_stack((observation.ideal.real, observation.ideal.imag))
+    if (points.shape != (1584, 2) or not np.isfinite(points).all()
+            or len(set(observation.carrier_hz)) != 11
+            or ideal.shape != (4, 2) or not np.isfinite(ideal).all()):
+        raise ValueError("Unexpected public OFDM decision points")
+    return {"title": "VARA OFDM BW500 L7 · K5DAT-13 · 2026-09-30",
+            "points": points.tolist(), "ideal": ideal.tolist(), **_decision_summary(points, ideal),
+            "point_count": len(points), "carriers": len(set(observation.carrier_hz)),
+            "frame_bytes": 197, "payload_bytes": 194, "decoded_bytes": 197,
+            "bytes_label": "decoded frame bytes (including control/CRC)",
+            "normalization": provenance["normalization"], "stage": "OFDM differential QPSK",
+            "context": "CRC-passing BW500 L7 OFDM data frame carrying the Winlink FQ close request, padding and trailer. This supplemental narrowband frame is not a maximum-rate wideband example and contains no mail body.",
+            "source_kind": provenance["source_kind"], "direction": "tx", "omitted": 0,
+            "audio": "vara-ofdm-k5dat-0930.flac", "source_sha256": expected_audio,
+            "pcm_s16le_sha256": expected_pcm, "packet_sha256": expected_packet,
+            "crop_source_start_sample": provenance["original_start_sample"],
+            "crop_source_end_sample": provenance["original_end_sample"],
+            "decision_start_sample": observation.start_sample,
+            "decision_end_sample": observation.end_sample,
+            "raw_errors": result.quality.raw_errors, "raw_bits": result.quality.raw_bits}
+
+
+def recorded_constellations(recordings: dict) -> dict:
+    pactor = _public_constellation(recordings["pactor3"], "symbols-source0-symbols-pactor-00071.json",
+                                  "7e60ed02e715f6e2f626ae9cdd8efe857d4ac69a867d222c0f3939adc759e4d3")
+    vara = _public_constellation(recordings["vara"], "symbols-source0-symbols-00057.json",
+                                "d09d81d4675ffab75ed550a76488b5801a1b1343f27ded41729a52af4e2b796a")
+    directory = REPO / "site/examples/ardop-send"
+    manifest = json.loads((directory / "data/manifest.json").read_text())
+    source = manifest["sources"][0]
+    source_digest = "5c2ab275898cd15fc7367076ce1e4681bea2cc23eb2fb3372ffe58b7ab34aa0a"
+    if (source["file_sha256"] != source_digest or
+            hashlib.sha256((directory / source["url"].removeprefix("./")).read_bytes()).hexdigest() != source_digest):
+        raise ValueError("Curated ARDOP witness changed")
+    metadata = {"route": "ardop-send", "event_id": "ardop-604005-64", "source_id": "rx",
+                "source_kind": "remote SDR witness", "source_sha256": source_digest, "direction": "rx",
+                "packet_sha256": "4d719cc8ac1c37fa7bee9c3142cfc1475532df28bcf8ca7a7fdbd8d3ce39545e",
+                "title": "ARDOP 4PSK.200.100.E · WW2MI · 2026-08-23",
+                "context": "CRC-passing peer data frame from WW2MI. The session sent one destination-confirmed message; subsequent receive parsing failed and END was not confirmed."}
+    ardop = _public_constellation(metadata, "symbols-ardop-604005-64.json",
+                                  "5aba7b85a4d804f63fc14ced9ce30aaeb44eb72ada46c8ea7309a01471ff7448")
+    return {"ardop": ardop, "pactor3": pactor, "vara": vara, "vara-ofdm": _ofdm_constellation()}
+
+
 class _Recorder:
     """The decoder's own symbol decisions, taken on the way past.
 
@@ -108,7 +321,7 @@ class _Recorder:
         self.demod = Tapped(**kw)
 
 
-def offair() -> dict:
+def offair(*, measured: bool = False) -> dict:
     """Two of the three off-air ARDOP recordings the distribution carries.
 
     `greeting` is the window `RollingDecoder` held when it read KE8LVA's RMS
@@ -175,6 +388,18 @@ def offair() -> dict:
         "spectrogram": _spectrogram(body, fs, 90, 96, 3000.0),
         "psd": _psd(body, fs, 1024, 3000.0),
     }
+    if not measured:
+        return out
+    for key, entry in out.items():
+        # The last decoded body is the conack; re-read the greeting span for its
+        # measured trace rather than trying to recover amplitude from symbols.
+        if key == "greeting":
+            fs, au = _wav(FIXTURES / "offair_ke8lva_greeting.wav")
+            f = next(f for f in Demodulator().decode(au) if f.ok)
+            clip = au[f.offset:f.offset + _HEADER_LEN + _body_span(f.type)]
+        else:
+            clip = body
+        entry.update(_measured(clip, fs))
     return out
 
 
@@ -183,13 +408,12 @@ def geometry() -> dict:
 
     PACTOR-III and sabir carry their carrier positions as audio frequencies, so
     those are drawn; ARDOP derives its from the carrier count, so that is called.
-    kestrel's BW2300 raster is indexed in the receiver's own decimated bins and
-    does not convert to an audio frequency here — its ladder is what this takes,
-    and the spectrum panel says plainly that VARA is absent from it.
+    VARA's index bins are converted with each record's own DFT length. They are
+    possible one-hot positions, distinct from simultaneous tone/OFDM carriers.
     """
     import hfmodem.besra.frame.frame as bframe
     from hfmodem.besra.phy.demodulator import _carrier_freq
-    from hfmodem.kestrel.rx import varahf2300
+    from hfmodem.kestrel.rx import varahf2300, varahf500, varatone, varaofdm
     from hfmodem.sabir.phy import modem as smodem
     from hfmodem.shrike import spec as pspec
 
@@ -223,9 +447,33 @@ def geometry() -> dict:
                        for name in smodem.LADDER
                        if (g := smodem.GEARS.get(name)) is not None]}
 
-    vara = {"levels": [{"level": r.level, "name": r.name, "bpc": r.bpc,
-                        "frame_bytes": r.frame_bytes}
-                       for r in varahf2300.RECORDS.values()]}
+    allocations = []
+    for r in varahf2300.RECORDS.values():
+        allocations.append({"bw": 2750 if r.level >= 100 else 2300,
+                            "level": r.level % 100 + 1, "family": "index", "bpc": r.bpc,
+                            "frame_bytes": r.frame_bytes, "name": "one-hot index",
+                            "marks": [round(float(f), 6) for f in
+                                      np.arange(r.first_bin, r.first_bin + r.span) * varahf2300.FS / r.dw50]})
+    for r in varahf500.INDEX_RECORDS.values():
+        allocations.append({"bw": 500, "level": r.level, "family": "index", "bpc": 3,
+                            "frame_bytes": r.payload + 3, "name": "one-hot index",
+                            "marks": [round(float(f), 6) for f in
+                                      np.arange(r.first_bin, r.first_bin + r.span) * varahf500.FS / r.dw]})
+    allocations.append({"bw": 500, "level": 4, "family": "index", "bpc": 1,
+                        "frame_bytes": 46, "name": "two-subband DBPSK",
+                        "marks": [f for _, f in varahf500.SUBBANDS]})
+    for r in varatone.ROWS.values():
+        allocations.append({"bw": r.bw, "level": r.level, "family": "tone", "bpc": 2,
+                            "frame_bytes": r.frame_bytes, "name": "differential QPSK tones",
+                            "marks": [round(float(f), 6) for f in r.centres]})
+    for r in varaofdm.ROWS.values():
+        allocations.append({"bw": r.bw, "level": r.level, "family": "ofdm", "bpc": r.pos + 1,
+                            "frame_bytes": r.frame_bytes, "name": "OFDM",
+                            "marks": [round(float(f), 6) for f in
+                                      (r.first_bin + np.arange(r.carriers)) * varaofdm.FS / varaofdm.TU]})
+    allocations.sort(key=lambda r: (r["bw"], r["level"]))
+    vara = {"allocations": allocations,
+            "levels": [r for r in allocations if r["bw"] == 2300]}
     return {"pactor3": pactor, "ardop": ardop, "sabir": sabir, "vara": vara}
 
 
@@ -315,7 +563,9 @@ def raster() -> dict:
 
 
 def figures() -> dict:
-    return {"offair": offair(), "geometry": geometry(),
+    off_air, recordings = offair(measured=True), public_recordings()
+    return {"offair": off_air, "recordings": recordings,
+            "constellations": recorded_constellations(recordings), "geometry": geometry(),
             "kernel": kernels(), "raster": raster()}
 
 
@@ -378,8 +628,8 @@ def pactor3() -> dict:
                    "crc_poly": f"0x{spec.CRC_POLY:04X}",
                    "puncture_3_4": [list(m) for m in coding.PUNCTURE_3_4.mask],
                    "puncture_8_9": [list(m) for m in coding.PUNCTURE_8_9.mask],
-                   "interleave": "per-path stride (unknowns.U3_INTERLEAVER: "
-                                 f"{unknowns.U3_INTERLEAVER.status})"},
+                   "interleave": "Implemented SHORT/LONG path walks; legacy general "
+                                 f"research registry U3: {unknowns.U3_INTERLEAVER.status}"},
         "phase": {"dibit_deg": [round(float(d), 3) for d in
                                 np.degrees(np.angle(p3frame.DIBIT_PHASOR))],
                   "bit_deg": [round(float(np.degrees(placement.BIT_PHASE[b])), 3)
@@ -404,12 +654,24 @@ def vara() -> dict:
     """
     from hfmodem.kestrel.rx import varahf500 as bw500
     from hfmodem.kestrel.rx import varahf2300 as bw2300
+    from hfmodem.kestrel.rx import varaofdm, varatone, tablegen
     from hfmodem.kestrel.vara import vara_frames as vframes
     from hfmodem.kestrel.vara import vara_mfsk as vmfsk
 
     r = bw2300.RECORDS[bw2300.BASE_LEVEL]
     ref_cols, _, data_cols, _ = bw2300._column_roles(bw2300.BASE_LEVEL)
     bin_hz = bw2300.FS / r.dw50
+
+    ladder = (
+        [{"level": lv + 1, "family": "index", "carriers": 1, "bpc": bw2300.RECORDS[lv].bpc,
+          "samples": bw2300.RECORDS[lv].dw50, "frame_bytes": bw2300.RECORDS[lv].frame_bytes}
+         for lv in bw2300.LEVELS]
+        + [{"level": t.level, "family": "tone", "carriers": t.nb, "bpc": 2,
+            "samples": varatone.H, "frame_bytes": t.frame_bytes}
+           for (bw, _), t in sorted(varatone.ROWS.items()) if bw == 2300]
+        + [{"level": o.level, "family": "ofdm", "carriers": o.carriers, "bpc": o.bpc,
+            "samples": varaofdm.SYM, "frame_bytes": o.frame_bytes}
+           for (bw, _), o in sorted(varaofdm.ROWS.items()) if bw == 2300])
 
     def burst(k) -> dict:
         n = len(k.preamble) + k.n_payload
@@ -419,15 +681,30 @@ def vara() -> dict:
                 "preamble": list(k.preamble), "n_payload": k.n_payload}
 
     return {
+        "highspeed": {
+            "fft": varaofdm.TU, "prefix": varaofdm.CP,
+            "symbol_samples": varaofdm.SYM,
+            "bin_hz": varaofdm.FS / varaofdm.TU,
+            "points": {str(pos): [[round(float(z.real), 9), round(float(z.imag), 9)]
+                                  for z in (tablegen._column(pos, v) for v in range(2 ** (pos + 1)))]
+                       for pos in (1, 2, 3, 4)},
+            "rows": [{"bw": row.bw, "level": row.level,
+                      "carriers": row.carriers, "first_bin": row.first_bin,
+                      "last_bin": row.first_bin + row.carriers - 1,
+                      "info": row.n_info, "coded": row.coded,
+                      "frame_bytes": row.frame_bytes, "bpc": row.bpc}
+                     for _, row in sorted(varaofdm.ROWS.items())]},
         "mfsk": {"fs": vmfsk.FS, "nfft": vmfsk.NFFT, "hop": vmfsk.HOP,
                  "wola_n": vmfsk.WOLA_N, "stride": vmfsk.STRIDE,
                  "hz_per_bin": round(vmfsk.FS / vmfsk.NFFT, 6),
+                 "connected_ack_symbols": vframes.CONNECTED_ACK_NSYM,
+                 "connected_ack_preamble": list(vframes.CONNECTED_ACK_PREAMBLE),
+                 "connected_ack": list(vframes.control_bursts("W2XYZ", "2300", 0)[1]),
                  "bursts": {name: burst(k) for name, k in
                             (("CR", vframes.CR), ("RESP", vframes.CONNECT_RESPONSE),
                              ("RELEASE", vframes.SESSION_TURN_RELEASE),
                              ("DISCONNECT", vframes.SESSION_DISCONNECT_REQ))}},
-        "bw2300": {"base_level": bw2300.BASE_LEVEL, "law": r.law, "bpc": r.bpc,
-                   "dw50": r.dw50, "cp": r.cp,
+        "bw2300": {"base_level": bw2300.BASE_LEVEL, "bpc": r.bpc, "dw50": r.dw50,
                    "baud": round(bw2300.FS / r.dw50, 4),
                    "hz_per_bin": round(bin_hz, 4),
                    "first_bin": r.first_bin, "span": r.span, "stride": r.stride,
@@ -439,11 +716,7 @@ def vara() -> dict:
                    "frame_bytes": r.frame_bytes,
                    "payload_bytes": bw2300.payload_bytes(bw2300.BASE_LEVEL),
                    "blocks_s": round((r.lead + r.ncols) * r.dw50 / bw2300.FS, 3),
-                   "levels": [{"level": rec.level, "name": rec.name, "law": rec.law,
-                               "bpc": rec.bpc, "span": rec.span,
-                               "frame_bytes": rec.frame_bytes, "dw50": rec.dw50}
-                              for rec in bw2300.RECORDS.values()],
-                   "keyable": list(bw2300.KEYABLE_LEVELS)},
+                   "ladder": ladder},
         "bw500": {"subbands": [[i, hz] for i, hz in bw500.SUBBANDS],
                   "samples_per_symbol": bw500.H, "columns": bw500.NSYM,
                   "coded": bw500.CODED, "info_bits": bw500.N_SRC,

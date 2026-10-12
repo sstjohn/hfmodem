@@ -110,7 +110,7 @@ def test_session_loop_keeps_first_data_on_call_grid(tmp_path, monkeypatch, turna
 
     monkeypatch.setattr(onair.RadioTx, "send_p1_packet", packet)
     log = _run(wav, tmp_path / "out", "--max-cycles", "16", "--retries", "20",
-               "--pactor1-only", hold=4)
+               "--pactor1-only", "--call-hush", "4,6", hold=4)
     assert "HUSHED, not keying" in log
     assert "** CONNECTED to" in log
     initial = int(re.search(r"master grid: anchor @ sample (\d+)", log)[1])

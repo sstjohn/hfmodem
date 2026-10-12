@@ -257,7 +257,7 @@ def p3_comb_db(seg: np.ndarray, fs: int = FS, offset_hz: float = 0.0) -> float:
 
 
 EVENT_KINDS = ("connect", "cs", "packet", "detect", "fsk", "p1reply", "unassigned",
-               "callb")
+               "callb", "word", "body", "short", "long", "normal", "chirp")
 """Every value `Event.kind` can take. This is a PUBLISHED INTERFACE, not a set of
 convenient strings, and adding to it is a breaking change for anything that maps
 kinds to its own vocabulary.
@@ -316,6 +316,7 @@ class Event:
     the PACTOR-1 data decoder landed. Neither is `detect`, whose only emitter is
     the PACTOR-2 carrier pair and which every consumer therefore reported as
     PACTOR-3 -- an unset field reading as a confident wrong answer."""
+    p4: object | None = None  # RegisteredObservation, isolated from P1/P3 fields
     connect: p1rx.Connect | None = None
     cs: int | None = None
     spare: int | None = None
@@ -348,6 +349,9 @@ class Event:
     """Measured P3 physical carrier order; independent of header request bit 0."""
     information: bytes | None = None
     """Decoded P3 data, fill and status bytes, before the CRC; never re-padded."""
+    baud: int | None = None
+    """The rate a PACTOR-1 data packet was read at, which is the rate its sender
+    is on -- the link's, whatever this end last commanded or assumed."""
 
 
 def load_wav(path: str) -> np.ndarray:
@@ -1431,7 +1435,20 @@ def _cs_event(audio: np.ndarray, ci: int, be: int, at: int, t: float,
         # the head, and eight symbols either side covers the filter's own edges.
         lo = max(0, at - 8 * SPS)
         hi = min(len(audio), at + round(placement.PACKET_S * FS) + 8 * SPS)
-        field, ok, swapped = p3rx.decode_changeover_details(audio[lo:hi], at - lo)
+        # The CRC reader samples a fixed symbol grid, including its +/- one
+        # symbol confirmation search. Computing a full convolution over this
+        # entire burst spent the live reply budget on samples never read.
+        reach = (p3rx.CHANGEOVER_SEARCH + 1) * p3rx.CONFIRM_STEP
+        base = at - lo + placement.CHANGEOVER_HEAD_SYMBOLS * SPS
+        tail = placement.CHANGEOVER.n_symbols * SPS
+        delay = (_matched_filter().size - 1) // 2
+        idx = np.arange(base + delay - reach,
+                        base + tail + delay + reach + SPS // 2 + 1,
+                        p3rx.CONFIRM_STEP)
+        idx = idx[(idx >= 0) & (idx < hi - lo + _matched_filter().size - 1)]
+        Z = (_sampled_baseband(audio[lo:hi], spec.VH_CHANNELS, idx)
+             if idx.size else None)
+        field, ok, swapped = p3rx.decode_changeover_details(audio[lo:hi], at - lo, Z=Z)
         if ok:
             info, st = field[:-2], field[-3]
             data = spec.field_payload(bytes(info[:-1]))
@@ -1516,7 +1533,7 @@ def _p1_packet_event(p, start: int | None, *, t: float | None = None,
                  f"(cnt={p.packet_count} type={p.data_type}{flags})  "
                  f"{len(p.payload)}B {p.payload[:24]!r}  [CRC-VALID{tag}]",
                  protocol="PACTOR-1", packet=(0, p.status, p.payload, True),
-                 breakin=p.breakin, start=start)
+                 breakin=p.breakin, start=start, baud=p.baud)
 
 
 def decode_expected_p1_packet(audio: np.ndarray,
@@ -1771,7 +1788,10 @@ def decode_events(audio: np.ndarray, hop_s: float = 0.5,
                   acquiring: bool = False,
                   p3_envelope: bool = True,
                   p3_packets: bool = True,
-                  p3_packets_after: float | None = None) -> Iterator[Event]:
+                  p3_packets_after: float | None = None,
+                  p3_headers: bool = True, p1_controls: bool = True,
+                  p2_markers: bool = True, mycall: str | None = None,
+                  strict: bool = False) -> Iterator[Event]:
     """Decoded PACTOR events in `audio`.
 
     `acquiring` selects the connect-answer path: a sliding correlator over the
@@ -1802,13 +1822,31 @@ def decode_events(audio: np.ndarray, hop_s: float = 0.5,
     File readers and callers without that protocol context retain the default.
     `p3_packets_after` is the optional opening-header floor of that transition,
     relative to this audio; it does not constrain controls or other readers.
+
+    `p3_headers`, `p1_controls` and `p2_markers` let a caller that can see the
+    audio's geometry skip a family the audio cannot hold: the header and
+    PACTOR-3 control-signal search on the header tones, the PACTOR-1 control
+    signal correlator, the PACTOR-2 marker pass. A monitor instance that hears
+    one track uses them; on a busy tape those three are most of the cost.
+
+    `mycall` is a called station listening: `p1rx.search_calls` looks for a
+    call to it across the tone-pair offsets and both connect frames, and each
+    call found comes first, as a `connect` at the frame's end. `strict` is
+    CONIntegrity 1.
     """
-    delay = (len(rx._pulse(SPS)) - 1) // 2
-    Z = {cn: rx._baseband(audio, cn, FS, rx._pulse(SPS)) for cn in HDR_TONES}
-    dA = _pattern_a()
-    starts = np.arange(0, max(1, len(audio) - 9 * SPS), SPS // 4)
-    scores = rx.pilot_corr(Z, starts, delay, dA)
-    floor = np.median(scores) + 1e-9
+    if mycall:
+        for t, cn in p1rx.search_calls(audio, mycall, strict=strict):
+            yield Event(t, "connect", f"{cn.report()}  RX {cn.offset_hz:+g} Hz"
+                        + (f", {cn.errors} bit errors" if cn.errors else ""),
+                        connect=cn)
+    starts = np.zeros(0, dtype=int)
+    if p3_headers:
+        delay = (len(rx._pulse(SPS)) - 1) // 2
+        Z = {cn: rx._baseband(audio, cn, FS, rx._pulse(SPS)) for cn in HDR_TONES}
+        dA = _pattern_a()
+        starts = np.arange(0, max(1, len(audio) - 9 * SPS), SPS // 4)
+        scores = rx.pilot_corr(Z, starts, delay, dA)
+        floor = np.median(scores) + 1e-9
     # KNOWN LIMITATION, measured 2026-07-25: a data packet decodes on a clean
     # channel and at NO signal-to-noise ratio below it, 40 dB included, for the
     # same reason the acknowledgement did not -- the ratio below reads 2.49-2.51
@@ -1856,7 +1894,7 @@ def decode_events(audio: np.ndarray, hop_s: float = 0.5,
     # `_occupied_bw`, inside `P1_MAX_BW_HZ`, so every burst of it satisfied
     # `_fsk_present` and left through the `fsk` branch before this pass existed.
     # The `detect` line said so of a real PACTOR-2 station exactly never.
-    p2_frames = _p2_markers(audio)
+    p2_frames = _p2_markers(audio) if p2_markers else []
     for fr in p2_frames:
         yield Event(fr.t, "detect",
                     f"PACTOR-2 frame marker, {fr.path.name}, correlation "
@@ -1923,7 +1961,7 @@ def decode_events(audio: np.ndarray, hop_s: float = 0.5,
                     yield ev
         seg = audio[seg0:min(len(audio), seg0 + 2 * FS)]
         sp = _Spectrum(seg)
-        for b_t0, b_dur in _p1_cs_bursts(seg):
+        for b_t0, b_dur in _p1_cs_bursts(seg) if p1_controls else ():
             cs = p1rx.decode_control_signal(seg, b_t0, b_dur)
             # ZERO errors or nothing. The four words sit at mutual distance 8, so a
             # burst that is one of them lands exactly on it; 1-4 errors means it is
@@ -2180,6 +2218,13 @@ def _matched_filter() -> np.ndarray:
     return rx._pulse(SPS)[::-1].copy()
 
 
+@lru_cache(maxsize=32)
+def _sampled_kernels(tones: tuple) -> np.ndarray:
+    taps = _matched_filter()
+    k = np.stack([taps * rx.carrier(c, FS, 0, taps.size) for c in tones], axis=1)
+    return np.concatenate((k.real, k.imag), axis=1)
+
+
 def _sampled_baseband(audio: np.ndarray, tones, idx: np.ndarray) -> dict:
     """`rx._baseband` for each tone, evaluated ONLY where `idx` reads it.
 
@@ -2192,27 +2237,64 @@ def _sampled_baseband(audio: np.ndarray, tones, idx: np.ndarray) -> dict:
     decode.
 
     Returns full-length arrays with only `idx` populated, so `rx.cells_from_baseband`
-    and `rx.cs_bits` index them exactly as they index the real thing: the demod
-    downstream is untouched and cannot drift away from the blind path's. Agrees
-    with `rx._baseband` at those positions to 4e-16.
+    and `rx.cs_bits` index them exactly as they index the real thing. Real
+    histories are gathered once for all tones; mixing is in cached FIR kernels.
+    The full-filter equivalence pins agree at those positions to 2e-12.
     """
     taps = _matched_filter()
     m = taps.size
-    # bbp[j:j+m] is the history rx._baseband's 'full' convolution reads for output
-    # j, so only the samples some window touches need mixing down at all.
     lo, hi = int(idx.min()), int(idx.max())
     b0, b1 = max(0, lo - m + 1), min(len(audio), hi + 1)
-    pad = np.zeros(m - 1, complex)
+    pad = np.zeros(m - 1, audio.dtype)
     rows = idx - b0
+    tones = tuple(tones)
+    win = np.lib.stride_tricks.sliding_window_view(
+        np.concatenate([pad, audio[b0:b1], pad]), m)[rows]
+    values = win @ _sampled_kernels(tones)
+    values = values[:, :len(tones)] + 1j * values[:, len(tones):]
     out = {}
-    for cn in tones:
-        bb = audio[b0:b1] * rx.carrier(cn, FS, b0, b1 - b0)
-        win = np.lib.stride_tricks.sliding_window_view(
-            np.concatenate([pad, bb, pad]), m)[rows]
+    for rank, cn in enumerate(tones):
         z = np.zeros(len(audio) + m - 1, complex)
-        z[idx] = win @ taps
+        phase = rx.carrier(cn, FS, lo - m + 1, hi - lo + 1)
+        z[idx] = values[:, rank] * phase[idx - lo]
         out[cn] = z
     return out
+
+
+class _EarlySL3:
+    def __init__(self, at: int):
+        self.at = at
+        self.tones = tuple(placement.SPEED_PATHS[3].tones)
+        path = placement.SPEED_PATHS[3]
+        grid = np.add.outer(
+            at + (np.arange(path.n_symbols + 1) - 1) * SPS + MATCHED_DELAY_N,
+            path.clock_offsets(SPS)).ravel()
+        # Preparation is admitted only by a strong, exact short-SL3 header.
+        # That path reads the central grid; neighbouring confirmation rows
+        # belong to the weak-header fallback, which cannot use this cache.
+        self.idx = np.unique(grid)
+        self.done = np.zeros(self.idx.size, bool)
+        self.values = {tone: np.zeros(self.idx.size, complex) for tone in self.tones}
+
+    def update(self, audio: np.ndarray, *, final: bool = False) -> None:
+        limit = len(audio) + (MATCHED_DELAY_N if final else -2000)
+        chosen = np.flatnonzero(~self.done & (self.idx < limit))
+        if not chosen.size:
+            return
+        idx = self.idx[chosen]
+        z = _sampled_baseband(audio, self.tones, idx)
+        for tone in self.tones:
+            self.values[tone][chosen] = z[tone][idx]
+        self.done[chosen] = True
+
+    def baseband(self, audio: np.ndarray) -> dict:
+        self.update(audio, final=True)
+        out = {}
+        for tone in self.tones:
+            z = np.zeros(len(audio) + _matched_filter().size - 1, complex)
+            z[self.idx] = self.values[tone]
+            out[tone] = z
+        return out
 
 
 class SyncedRx:
@@ -2317,15 +2399,17 @@ class SyncedRx:
             self.locks += 1
 
     def packet(self, audio: np.ndarray, *,
-               preferred_only: bool = False) -> "Event | None":
+               preferred_only: bool = False,
+               requested_level: int | None = None) -> "Event | None":
         """The data frame due this cycle, or None -- meaning fall back to blind.
 
-        `preferred_only` keeps the read on the last CRC-validated level and
-        stops there; see `_packet_at_lock` for what the ladder behind it costs.
+        `preferred_only` tries the requested and last CRC-validated levels;
+        see `_packet_at_lock` for what the ladder behind them costs.
         """
         return self._try(
             lambda a, at: self._packet_at_lock(a, at,
-                                               preferred_only=preferred_only),
+                                               preferred_only=preferred_only,
+                                               requested_level=requested_level),
             self.packet_at, audio)
 
     def control_signal(self, audio: np.ndarray,
@@ -2337,6 +2421,23 @@ class SyncedRx:
     WIDEBAND_EARLY_N = round(.025 * FS)
     """Maximum missing short-packet tail admitted by the bounded CRC trial."""
 
+    def sl1_header_at(self, audio: np.ndarray, at: int) -> "p3frame.PacketHeader | None":
+        """Read a bounded narrow header; it authorizes listening, never ACKs."""
+        h = self._narrow_header_at(audio, at)
+        if h is not None and h.fit >= p3rx.VH_FIT and 1 in h.levels:
+            return h
+        return None
+
+    def _narrow_header_at(self, audio: np.ndarray, at: int):
+        home = placement.SPEED_PATHS[1]
+        lead = p3frame.DATA_OFFSET * SPS
+        if at < lead + SPS or len(audio) < at + SPS:
+            return None
+        starts = range(at - SPS, at + SPS + 1, SPS // 4)
+        idx = np.arange(starts.start - lead, starts[-1] + 1, SPS // 4) + MATCHED_DELAY_N
+        idx = np.unique(np.add.outer(idx, home.clock_offsets(SPS)).ravel())
+        return p3rx.header_of(_sampled_baseband(audio, home.tones, idx), starts, home)
+
     def sl1_packet_at(self, audio: np.ndarray, at: int) -> "Event | None":
         """One header-selected SL1 CRC at the current retained packet clock.
 
@@ -2344,6 +2445,7 @@ class SyncedRx:
         A speculative SL3 read must not suppress this two-carrier packet or
         consume its reply deadline. Fit only nine quarter-symbol header
         positions, then decode once at the strongest header's row zero. A
+        valid header selects either the short or long body. A
         faded header uses the retained clock and the existing two short SL1
         carrier-order hypotheses. No alignment, speed, frequency, or combining
         ladder is opened; a failed CRC changes no receiver state.
@@ -2360,15 +2462,16 @@ class SyncedRx:
         z = _sampled_baseband(audio, home.tones, idx)
         h = p3rx.header_of(z, starts, home)
         if h is not None and h.fit >= p3rx.anchor_gate(home):
-            if 1 not in h.levels or h.long_cycle:
+            if 1 not in h.levels:
                 return None
             trials = [(h.at + lead, h)]
         else:
             trials = [(at, None), (at, p3frame.PacketHeader(0, 0, 0.0, carrier_swapped=True))]
         for row, header in trials:
+            path = p3rx.path_for(1, header)
+            span = _packet_span(_frame_span(path))
             if len(audio) < row + span:
                 continue
-            path = p3rx.path_for(1, header)
             idx = row + np.arange(-1, path.n_symbols) * SPS + delay
             idx = np.unique(np.add.outer(idx, path.clock_offsets(SPS)).ravel())
             z = _sampled_baseband(audio, path.tones, idx)
@@ -2410,13 +2513,13 @@ class SyncedRx:
         if len(audio) < row + span:
             return None
         first = header.swapped if header is not None else False
+        idx = row + np.arange(-1, home.n_symbols) * SPS + delay
+        idx = np.unique(np.add.outer(idx, home.clock_offsets(SPS)).ravel())
+        z = _sampled_baseband(audio, home.tones, idx)
         for swapped in (first, not first):
             h = p3frame.PacketHeader(row - lead, 2, 0.0,
                                     carrier_swapped=swapped)
             path = p3rx.path_for(2, h)
-            idx = row + np.arange(-1, path.n_symbols) * SPS + delay
-            idx = np.unique(np.add.outer(idx, path.clock_offsets(SPS)).ravel())
-            z = _sampled_baseband(audio, path.tones, idx)
             near = header.rot if header is not None else self.rotation or 0.0
             rot, _ = p3rx.field_rotation(z, row, path, near)
             h = replace(h, rot=rot)
@@ -2474,7 +2577,7 @@ class SyncedRx:
 
     def wideband_packet_at(self, audio: np.ndarray, at: int, *,
                            allow_short_fallback: bool = False,
-                           can_decode=None) -> tuple["Event | None", bool]:
+                           can_decode=None, prepared: _EarlySL3 | None = None) -> tuple["Event | None", bool]:
         """One header-selected short SL3 frame at a retained peer clock.
 
         The boolean says a wideband header owned this trial, including a CRC
@@ -2516,7 +2619,13 @@ class SyncedRx:
             return None, False
         fallback = header.fit < p3rx.anchor_gate(probe)
         if fallback:
+            if prepared is not None:
+                return None, False
             if not allow_short_fallback:
+                return None, False
+            narrow = self._narrow_header_at(audio, at)
+            if (narrow is not None and narrow.fit >= p3rx.VH_FIT
+                    and (3 not in narrow.levels or narrow.long_cycle)):
                 return None, False
             # This is a declared short-SL3 hypothesis, not a lowered header
             # gate. Only its body CRC may turn it into a delivered packet.
@@ -2530,6 +2639,10 @@ class SyncedRx:
         sl = 3
         path = p3rx.path_for(sl, header)
         start = header.at + lead
+        if prepared is not None and (prepared.at != start
+                                     or set(path.tones) != set(prepared.tones)):
+            # The staged reserve cannot pay for a new full-grid hypothesis.
+            return None, False
         grid = np.add.outer(
             start + (np.arange(path.n_symbols + 1) - 1) * SPS + delay,
             path.clock_offsets(SPS)).ravel()
@@ -2538,7 +2651,9 @@ class SyncedRx:
         idx = np.unique(np.add.outer(
             grid, (-p3rx.CONFIRM_STEP, 0, p3rx.CONFIRM_STEP) if fallback
             else (0,)).ravel())
-        Z = _sampled_baseband(audio, path.tones, idx)
+        Z = (prepared.baseband(audio) if prepared is not None
+             and prepared.at == start and set(path.tones) == set(prepared.tones)
+             else _sampled_baseband(audio, path.tones, idx))
         # SL3's unstaggered field has the same rotation weight under either
         # carrier permutation, so the angle is one measurement for both and
         # the arrangement is not something it can rank.
@@ -2654,13 +2769,24 @@ class SyncedRx:
             return None
         ev = decode(audio, at)
         if ev is None:
-            self.misses += 1
-            if self.misses >= self.MAX_MISSES:
-                self.packet_at = self.cs_at = None
-                self.packet_level = None
+            self.note_miss()
             return None
         self.misses = 0
         self.tracked += 1
+        return ev
+
+    def note_miss(self) -> None:
+        self.misses += 1
+        if self.misses >= self.MAX_MISSES:
+            self.packet_at = self.cs_at = None
+            self.packet_level = None
+
+    def level_at(self, audio: np.ndarray, at: int, sl: int) -> "Event | None":
+        """One level's read at `at`, and on a hit the lock `_try` would have kept."""
+        ev = self._level_at_lock(audio, at, sl)
+        if ev is not None:
+            self.packet_at, self.packet_level, self.misses = ev.start, sl, 0
+            self.tracked += 1
         return ev
 
     def _candidates(self, audio: np.ndarray, at: int, span: int, step: int,
@@ -2696,7 +2822,8 @@ class SyncedRx:
         return np.unique(np.add.outer(idx, path.clock_offsets(SPS)).ravel())
 
     def _packet_at_lock(self, audio: np.ndarray, at: int, *,
-                        preferred_only: bool = False) -> "Event | None":
+                        preferred_only: bool = False,
+                        requested_level: int | None = None) -> "Event | None":
         """The frame due at `at`, at whatever speed level the peer sent it.
 
         THE LEVEL IS THE PEER'S TO CHOOSE and this used to assume it was 2. The
@@ -2706,7 +2833,8 @@ class SyncedRx:
         a six-tone grid whatever comb was lit. A level 3 packet is fourteen tones
         and does not validate on that grid at all.
 
-        Try the last CRC-validated level first. Interference can make occupancy
+        Try the requested level, then the last CRC-validated level.
+        Interference can make occupancy
         rank several wide combs ahead of an unchanged SL1 retry, spending the
         response deadline on failed geometries. This preference changes only
         their order: a miss still tries every occupancy-ranked candidate, so the
@@ -2716,24 +2844,29 @@ class SyncedRx:
         in `p3rx.decode_headed`: the header carries the level modulo four, so it
         cannot separate levels 1 and 5, or 2 and 6.
 
-        A CALLER WITH A KEY IN FRONT OF IT TAKES THE PREFERRED LEVEL ALONE.
+        A CALLER WITH A KEY IN FRONT OF IT TAKES ONLY THOSE TWO LEVELS.
         Walking the occupancy ranking costs up to 80 ms on the 80 m arm of
         2026-09-13, which is ten times the whole pre-key budget, and it bought
         nothing there: the bounded read takes the same 104 frames at 1.48 ms
         median and 7.42 ms at worst, none of them over budget against 35 of 177.
         The sweep behind our own carrier has a cycle to spend and keeps the
-        ladder, which is where the peer's speed change is picked up.
+        ladder for any unrequested speed change.
         """
         preferred = self.packet_level
-        if preferred is not None:
-            ev = self._level_at_lock(audio, at, preferred)
+        tried = set()
+        for sl in (requested_level, preferred):
+            if sl not in placement.SPEED_PATHS or sl in tried:
+                continue
+            tried.add(sl)
+            ev = self._level_at_lock(audio, at, sl)
             if ev is not None:
+                self.packet_level = sl
                 return ev
-            if preferred_only:
-                return None
+        if preferred_only and tried:
+            return None
         on = audio[at:at + int(p3rx.LEVEL_WINDOW_S * FS)]
         for sl in p3rx.levels_present(p3rx.channel_energy(on, fs=FS)):
-            if sl == preferred:
+            if sl in tried:
                 continue
             ev = self._level_at_lock(audio, at, sl)
             if ev is not None:
@@ -2828,6 +2961,22 @@ class SyncedRx:
             # but let the CRC choose either physical order. WS8EOC 2026-09-11
             # has one such header among 35 otherwise readable repeated frames.
             headers.append(p3frame.PacketHeader(0, 0, 0.0, carrier_swapped=True))
+        def attempt(start, trial_header, path, Z, from_field):
+            h = trial_header
+            if from_field:
+                rot, _ = p3rx.field_rotation(Z, start, path, h.rot, fs=FS)
+                h = replace(h, rot=rot)
+            p = p3rx.decode_at(audio, start, sl, fs=FS, Z=Z, header=h)
+            if p is None:
+                return None
+            if from_field or (header is not None and trial_header is header):
+                # Only a measurement updates it: the level 1 fallback
+                # header carries a placeholder angle, not a reading.
+                self.rotation = h.rot
+            self.memory.clear()
+            return _packet_event(p, tag=", tracked")
+
+        walks = []
         for trial_header in headers:
             path = p3rx.path_for(sl, trial_header)
             # A long cycle is four and a half times the grid, so the window that held
@@ -2837,9 +2986,37 @@ class SyncedRx:
                                     SPS, lead)
             if cand is None:
                 continue
+            from_field = sl >= 2 and trial_header is not None
+            rows = np.arange(-1, path.n_symbols) * SPS
+            if header is not None and trial_header is header and header.at + lead not in cand:
+                # THE BLOCK'S OWN ROW 0 BEFORE THE LOCK'S GRID. The header is
+                # read on a quarter symbol and the CRC was only ever offered the
+                # lock's whole symbols, so a lock a quarter symbol late failed
+                # all ten long VE3KPG frames of 2026-09-20 22:24 replayed 120
+                # samples off, five trials each, where the row the block named
+                # passes first time -- sampled on its own, so the hit costs
+                # one frame's instants and not the bracket's.
+                row = header.at + lead
+                z = _sampled_baseband(audio, path.tones,
+                                      self._index(range(row, row + 1), path, delay, rows))
+                ev = attempt(row, trial_header, path, z, from_field)
+                if ev is not None:
+                    return ev
+            # NEAREST THE LOCK FIRST, which is where a held link's frame is. The
+            # candidates were walked in time order, so the alignment the cycle
+            # before decoded at -- the one an unmoved grid puts this cycle's row 0
+            # on -- sat fifth of nine, and the four in front of it each spent a
+            # Viterbi run over the whole frame before the CRC turned them down.
+            # That is most of what a tracked read costs at the wide levels:
+            # measured through `onair._SessionRx.deep_scan`, speed level 6 goes
+            # 50.5 ms to 23.4 on the short cycle and 190.6 to 67.5 on the long one,
+            # with the same nine alignments still admissible and the same CRC
+            # admitting them. `tests/shrike/test_rxcost.py` holds the table.
+            starts = sorted(cand, key=lambda st: (abs(st - at), st))
             grid = np.arange(-1, path.n_symbols + len(cand) - 1) * SPS
-            Z = _sampled_baseband(audio, path.tones,
-                                  self._index(cand, path, delay, grid))
+            Z = (walks[-1][3] if sl == 1 and walks
+                 else _sampled_baseband(audio, path.tones,
+                                        self._index(cand, path, delay, grid)))
             # THE ANGLE COMES OFF THE FIELD, not off the block in front of it.
             # `p3rx.field_rotation` folds the data out of all 432 cells where
             # the block offers 48 on four constant words out of sixteen: over
@@ -2860,34 +3037,21 @@ class SyncedRx:
             # on that arm names the arrangement the packet was sent in on every
             # one of the eight cycles that pass a CRC, by 1.6x to 10x, where
             # the block's own variable-header fit is a coin at 0.42-0.55.
-            from_field = sl >= 2 and trial_header is not None
             if from_field and trial_header is below:
                 trial_header = self._field_shape(Z, at, sl, trial_header)
                 path = p3rx.path_for(sl, trial_header)
-            # NEAREST THE LOCK FIRST, which is where a held link's frame is. The
-            # candidates were walked in time order, so the alignment the cycle
-            # before decoded at -- the one an unmoved grid puts this cycle's row 0
-            # on -- sat fifth of nine, and the four in front of it each spent a
-            # Viterbi run over the whole frame before the CRC turned them down.
-            # That is most of what a tracked read costs at the wide levels:
-            # measured through `onair._SessionRx.deep_scan`, speed level 6 goes
-            # 50.5 ms to 23.4 on the short cycle and 190.6 to 67.5 on the long one,
-            # with the same nine alignments still admissible and the same CRC
-            # admitting them. `tests/shrike/test_rxcost.py` holds the table.
-            for start in sorted(cand, key=lambda st: (abs(st - at), st)):
-                h = trial_header
-                if from_field:
-                    rot, _ = p3rx.field_rotation(Z, start, path, h.rot, fs=FS)
-                    h = replace(h, rot=rot)
-                p = p3rx.decode_at(audio, start, sl, fs=FS, Z=Z, header=h)
-                if p is not None:
-                    if from_field or (header is not None
-                                      and trial_header is header):
-                        # Only a measurement updates it: the level 1 fallback
-                        # header carries a placeholder angle, not a reading.
-                        self.rotation = h.rot
-                    self.memory.clear()
-                    return _packet_event(p, tag=", tracked")
+            walks.append((trial_header, path, starts, Z, from_field, cand))
+        # ALIGNMENT OUTERMOST. Speed level 1's faded-header trials share one
+        # bracket, and walking the home order over all nine before the swapped
+        # one at any spent nine Viterbi runs on every swapped cycle whose block
+        # faded -- KB5LZK 2026-09-20 22:48 holds 31 and 103 passed on the tenth.
+        for k in range(max((len(w[2]) for w in walks), default=0)):
+            for trial_header, path, starts, Z, from_field, _ in walks:
+                if k < len(starts):
+                    ev = attempt(starts[k], trial_header, path, Z, from_field)
+                    if ev is not None:
+                        return ev
+        for trial_header, path, _, Z, from_field, cand in walks:
             if from_field and sl == self.packet_level:
                 # The level the link is ON, not one the ladder behind a miss is
                 # guessing at: `FieldMemory` groups by geometry and resets on a

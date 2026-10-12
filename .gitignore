@@ -10,5 +10,6 @@ build/
 # On-air session products. shrike's --outdir defaults to captures/onair and
 # ota's to captures/ota; delivered mail lands in logs/mail. Recordings are
 # evidence — keep them somewhere deliberate, not in the checkout.
+operator-data/
 captures/
 logs/

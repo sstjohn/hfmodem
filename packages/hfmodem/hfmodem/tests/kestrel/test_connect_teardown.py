@@ -49,6 +49,9 @@ def test_the_transmitter_comes_down_before_the_audio_teardown(monkeypatch):
             return True
 
     class Io:
+        bursts_sent = 0
+        burst_level = None
+
         def __init__(self, *_a, **_kw):
             pass
 
@@ -97,6 +100,9 @@ def test_a_rig_already_taken_down_is_not_put_through_the_ladder_again(monkeypatc
             return True
 
     class Io:
+        bursts_sent = 0
+        burst_level = None
+
         def __init__(self, *_a, **_kw):
             pass
 
@@ -140,6 +146,9 @@ def test_the_audio_comes_down_even_when_the_unkey_itself_raises(monkeypatch):
             raise OSError("rigctld went away with the key up")
 
     class Io:
+        bursts_sent = 0
+        burst_level = None
+
         def __init__(self, *_a, **_kw):
             pass
 

@@ -40,10 +40,10 @@ from . import session, spec
 from ..core.audio import play_drained, warm_output
 from ..core.devices import find_device, list_devices
 from ..core.occupied import FILTER_HZ
-from ..core.rxreadiness import parse_mode_readback, parse_frequency_readback, ReceiverReadbackError
+from ..core.rxreadiness import RadioMode, parse_mode_readback, parse_frequency_readback, ReceiverReadbackError
 from ..core.ptt import (Keyer, OneShotRigctl, PttError, derive_ptt_port,
                         require_char_device)
-from ..core.rigs import RIGS
+from ..core.rigs import RIGS, flight_defaults
 
 FS = spec.SAMPLE_RATE
 
@@ -177,6 +177,13 @@ def drain(proc: subprocess.Popen, errors: deque | None = None) -> None:
         except (ValueError, OSError):
             pass
     threading.Thread(target=pump, daemon=True).start()
+
+
+def mode_passband(profile) -> int:
+    """hamlib's RIG_PASSBAND_NOCHANGE where the profile names its own width:
+    `tune` set it by raw CAT, and any hamlib passband rewrites the FTDX10's
+    width and roofing filter both."""
+    return -1 if "rx_width_hz" in profile else FILTER_HZ
 
 
 class Rig:
@@ -467,6 +474,28 @@ class Rig:
             raise ReceiverReadbackError("mode readback transport failed or timed out") from exc
         return parse_mode_readback(result.stdout, result.returncode, result.stderr)
 
+    def get_receiver_filters(self):
+        from ..core.ftdx10 import read_filters
+        self._close()
+        argv = [str(self.rigctl), "-m", str(self.model), "-r", self.serial,
+                "-s", str(self.baud), "-P", "NONE",
+                "w", "VS;", "w", "MD0;", "w", "MD1;", "w", "SH0;", "w", "RF0;"]
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=8)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ReceiverReadbackError("raw receiver readback transport failed or timed out") from exc
+        if (result.returncode or "error =" in result.stdout or "error =" in result.stderr
+                or "RPRT -" in result.stdout or "RPRT -" in result.stderr):
+            raise ReceiverReadbackError("raw receiver readback failed")
+        vfos = re.findall(r"\bVS([01]);", result.stdout)
+        modes = (re.findall(rf"\bMD{vfos[0]}([0-9A-F]);", result.stdout)
+                 if len(vfos) == 1 else [])
+        width, roof = read_filters(result.stdout)
+        if len(modes) != 1 or width is None or roof is None:
+            raise ReceiverReadbackError("missing or unknown raw receiver readback")
+        return RadioMode("PKTUSB" if modes[0] == "C" else modes[0], width,
+                         result.stdout), roof
+
     def get_frequency_readback(self):
         """Strict CAT-only getter for an already assessed non-retuning child."""
         self._close()
@@ -567,7 +596,7 @@ def _warm_output(device) -> None:
         pass
 
 
-def _play(audio_f32, device, max_key, rig, settle=0.10):
+def _play(audio_f32, device, max_key, rig, settle=0.10, *, admit=None):
     """Key PTT, let the codec settle, play, unkey — watchdog force-unkeys on overrun.
 
     `settle` is the pause between keying and pushing samples, and it is per rig --
@@ -581,7 +610,11 @@ def _play(audio_f32, device, max_key, rig, settle=0.10):
     (110.6 s, against a 40 s default) once read as a dead antenna and cost a real
     hardware misdiagnosis.
     """
+    if admit is not None:
+        admit()
     _warm_output(device)
+    if admit is not None:
+        admit()
     import threading
     dur = len(audio_f32) / FS
     if dur > max_key:
@@ -610,6 +643,8 @@ def _play(audio_f32, device, max_key, rig, settle=0.10):
         # that is not there; False is a channel that did not take the command.
         # Either way, audio into an unkeyed transmitter is a burst spent
         # talking to nobody -- and counted afterwards as if it were carrier.
+        if admit is not None:
+            admit()
         if rig and rig.ptt(True) is False:
             raise PttError(f"the key-down was not taken -- rigctl on "
                            f"{rig.serial} has stopped answering")
@@ -618,6 +653,8 @@ def _play(audio_f32, device, max_key, rig, settle=0.10):
         # Per-burst open/close does stall the input occasionally (6% of blocks);
         # holding the device open starves it continuously, which is worse. Both
         # measured on the air 2026-07-28, and `play_drained` carries the rest.
+        if admit is not None:
+            admit()
         play_drained(audio_f32, FS, device)
     finally:
         if rig: rig.ptt(False)
@@ -708,7 +745,7 @@ def run(args):
     rig = Rig(r["model"], args.serial, args.baud or r["baud"],
               ptt_type=r.get("ptt_type", "RIG"), ptt_port=ptt_port)
     try:
-        if not (rig.set_mode(r["mode"]) and rig.set_freq(dial)):
+        if not (rig.set_mode(r["mode"], mode_passband(r)) and rig.set_freq(dial)):
             raise SystemExit(f"NOT KEYING: rigctl on {args.serial} did not take "
                              f"the mode/frequency commands -- the CAT channel "
                              f"is not standing")
@@ -751,7 +788,7 @@ def run(args):
 def main():
     p = argparse.ArgumentParser(description="shrike on-air PACTOR probe")
     p.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
-    p.add_argument("--rig", choices=list(RIGS), default="ft891")
+    p.add_argument("--rig", choices=list(RIGS))
     p.add_argument("--serial",
                    help="CAT serial port, e.g. /dev/cu.usbserial-XXXXB0 -- "
                         "`ls /dev/cu.*` to find yours")
@@ -773,7 +810,7 @@ def main():
     p.add_argument("--max-key", type=float, default=40.0, help="PTT watchdog force-unkey")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--outdir", default="captures/ota")
-    args = p.parse_args()
+    args = flight_defaults(p.parse_args())
     if args.list_devices:
         list_devices(); return
     # Checked here rather than by `required=True` so --list-devices still runs

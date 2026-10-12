@@ -7,47 +7,82 @@ Two coding regimes exist and must not be conflated:
   stream keyed to the destination callsign, specified in
   [`04 §4.2`](04-frame-block-formats.md). They do not use the stages in this file.
   The one shared piece is the CRC (§3.4), which derives the PRNG seed.
-- **OFDM DATA waveform** (BW2300 link-setup and bulk data, host
-  `BITRATE (N) … bps`): §3.0–§3.5 apply. §3.6 specifies the BW500 DATA path, at
-  its base level (record 3) and the gear below it (record 2).
+- **DATA levels** of every family and bandwidth (index, tone and OFDM,
+  [`01 §1.0`](01-physical-layer.md); host `BITRATE (N) … bps`): §3.0–§3.4 apply to
+  all of them. §3.5 is the BW2300 index levels and the link-setup, §3.6 the BW500
+  base path, §3.7 the tone and OFDM levels.
 
 ## 3.0 Pipeline order
 
-| Stage order | Value |
-|-------------|-------|
-| BW2300 OFDM DATA, TX (bytes → cells) | `frame bytes → CRC-16/GENIBUS append → serialize to bits → turbo FEC encode → whiten (XOR PN) → block interleave → map to 64-entry constellation LUT → per-cell twiddle ⊗exp(j2π·S/128) on the 469·bin+col_rel raster → OFDM cell grid → WOLA synth`. RX is the exact inverse. The relative order of whitening and interleaving — and whether turbo encoding precedes both — is not confirmed here. |
-| MFSK handshake bursts | no FEC, interleave or whitener stage — PRNG-tone generator (see [`04 §4.2`](04-frame-block-formats.md)) |
+One chain serves every DATA level; only the last stage, bits to cells, belongs to
+the waveform family.
 
-## 3.1 Scrambler / randomizer (OFDM DATA)
+```
+frame    payload | control byte | CRC-16/GENIBUS(payload | control), big-endian
+bits     MSB first, zero-padded to the record's N info bits
+whiten   XOR the PN (§3.1) from index 0
+turbo    (13,15) on the record's stage-2 permutation (§3.2, §3.3)
+puncture group law to the record's coded length (§3.3); none at rate 1/2 or 1/3
+gather   onair[k] = coded[π1[k]], π1 the record's stage-1 permutation
+cells    index: bpc bits → Gray → one lit bin ([01 §2300])
+         tone:  2 bits → Gray quarter-turn increment per band ([01 §Tone family])
+         OFDM:  bpc bits → LUT column pos, then × exp(−j2π·S/128) ([01 §OFDM family])
+```
+
+RX is the exact inverse. The MFSK handshake bursts have no stage of this chain
+(see [`04 §4.2`](04-frame-block-formats.md)).
+
+## 3.1 Scrambler / randomizer (DATA)
 
 | Attribute                         | Value |
 |-----------------------------------|-------|
-| Present?                          | Yes (OFDM DATA waveform) |
-| Type (additive/multiplicative)    | Additive bit whitener (XOR with a fixed PN sequence) |
-| Polynomial / sequence             | Fixed **BW2300-specific PN table** (bandwidth-dependent; the 500 Hz PN differs). Bits: `bw2300/whitener_pn.u8` (0/1 per byte; valid ≈first 197958; see §3.5.4 for where the tables live). Reset to table start per coded block. |
-| Seed / init state                 | Reset to table start per coded block |
-| Reset boundary (per frame/block)  | Per coded block |
+| Present?                          | Yes, at every DATA level |
+| Type (additive/multiplicative)    | Additive bit whitener (XOR with a fixed PN sequence) over the N info bits, before the turbo encoder |
+| Polynomial / sequence             | VB6 `Rnd` from seed **29318**, `bit = state ≫ 23` (`tablegen.whitener()`, `whitener_pn.u8`). One sequence at every bandwidth |
+| Seed / init state                 | Restarts at index 0 for every frame |
+| Reset boundary (per frame/block)  | Per frame |
 
-## 3.2 Interleaver (OFDM DATA)
+The OFDM levels add a second, cell-domain scramble after modulation, drawn from
+the same seed (§3.7).
+
+## 3.2 Interleaver (DATA)
 
 | Attribute                          | Value |
 |------------------------------------|-------|
-| Present?                           | Yes (OFDM DATA waveform) |
-| Type (block/convolutional)         | Block, symbol-major (fills OFDM symbol carrier-slots in a fixed permutation) |
-| Geometry / depth                   | Maps coded bits onto the 65 active carriers × ~100 symbols of a BW2300 burst; **BW2300-specific map**, `bw2300/interleave_stage1.i32` (32585 rows × 17 seg-columns, row-major `[i·17+seg]`; column `[seg::17][:coded_len]` = exact bijection of `0..coded_len−1`) and the sibling `bw2300/interleave_stage2.i32` (26056 rows × 17; column `[seg::17][:N]` = exact bijection of `0..N−1`) — **full columns for all 17 records**. Cell-usage: `bw2300/usedmap.u8` (782 ones). Table locations: §3.5.4. |
-| Read/write order                   | Write coded bits sequentially, read out by the map into carrier-slots (frequency+time spread) |
-| Per-speed-level / -bandwidth variation | **Yes** — the map is bandwidth-dependent (BW500/BW2300/BW2750 each have their own) and level-dependent |
+| Present?                           | Yes, at every DATA level |
+| Type                               | Two permutations per record: **stage 1** over the coded length (the channel interleaver, applied as a gather `onair[k] = coded[π1[k]]`) and **stage 2** over N (the turbo encoder's internal interleaver) |
+| Generator                          | One VB6 `Rnd` chain per bandwidth (`tablegen.permutation`, `tablegen.BW500` / `BW2300` / `BW2750` as `(stage-1 seed, coded, N)` per record). Stage 2 continues stage 1's stream; after both come the record's **gap** draws (the index levels' bin tables, the tone pilots, the OFDM gap cells), and the gap closes exactly on the next record's stage-1 seed |
+| Tables                             | The BW2300 stage-1 / stage-2 columns are also VARA's 17-column `interleave_stage1.i32` / `interleave_stage2.i32` (`[i·17 + record]`); every column is used directly, never pruned (§3.5.5) |
+| Per-speed-level / -bandwidth variation | **Yes** — per record and per bandwidth. BW2750 shares BW2300's chain through record 8 (L1–9) and runs its own from L10, closing on 4061299 after L17 |
 
-## 3.3 Forward error correction (FEC) (OFDM DATA)
+## 3.3 Forward error correction (FEC) (DATA)
 
 | Attribute                                    | Value |
 |----------------------------------------------|-------|
 | Family (conv / LDPC / Turbo / RS / none)     | **Turbo** (parallel-concatenated convolutional) |
-| Code rate(s) per speed level                 | ≈**1/3** base; higher levels reach higher rate via puncturing |
-| Constituent generators (octal)               | **(13, 15)** octal constituent RSC encoders |
-| Puncturing pattern                           | Per-level puncture matrix (BW/level-dependent); base rate ~1/3 unpunctured |
-| Termination                                  | Not specified here for BW2300 (see §3.5.4); BW500 in §3.6.4 |
+| Constituent generators (octal)               | **(13, 15)** octal RSC encoders, 8 states (§3.6.4) |
+| Rates                                        | **1/3** (`coded = 3N + 12`, unpunctured) at records 0–1; **1/2** (`2N + 12`) at the base levels and every tone row; **2/3, 4/5, 5/6** by the group puncture at the OFDM rows |
+| Termination                                  | 12-bit dual tail `[s1,p1,s2,p2]×3`, both constituents flushed to state 0 |
 | Soft-decision handling                       | log-MAP (soft) decode |
+
+**Group puncture.** Wherever `coded < 3N + 12`:
+
+```
+q = coded − N − 12,  k = round(N / q)
+group g carries info bits s[kg .. kg+k−1] as   s[kg], P_g, s[kg+1], …, s[kg+k−1]
+P_g = p1[kg] for even g, p2[kg] for odd g      (constituent 1 / 2 parity at the group's first bit)
+then the 12-bit dual tail, then zeros up to coded
+```
+
+`k = 1` is the rate-1/2 mux (`s p1 s p2 …`); rate 2/3 reads `s p1 s | s p2 s`.
+`coding/turbo.py` `encode_punctured` / `decode_punctured`. Per OFDM level
+(the tone rows are all `k = 1`, pad 0):
+
+| bw | levels | k | zero pad (bits) |
+|---|---|---|---|
+| 2300 | L10–16 | 1 / 2 / 4 / 2 / 4 / 5 / 4 | 0 / 0 / 4 / 0 / 2 / 4 / 3 |
+| 2750 | L11–17 | 1 / 2 / 4 / 2 / 4 / 5 / 4 | 0 / 0 / 4 / 0 / 2 / 2 / 3 |
+| 500 | L7–13 | 1 / 2 / 4 / 2 / 4 / 5 / 4 | 0 / 0 / 1 / 0 / 0 / 2 / 3 |
 
 ## 3.4 CRC / error detection
 
@@ -57,28 +92,25 @@ Two coding regimes exist and must not be conflated:
 | Width                             | **16 bits** |
 | Polynomial                        | **CRC-16/GENIBUS**, poly **0x1021** |
 | Init / final-XOR / reflection     | init **0xFFFF**, xorout **0xFFFF**, refin=false, refout=false (i.e. GENIBUS = CCITT-FALSE with output inversion) |
-| Coverage (which bytes)            | Frame body — for the MFSK handshakes, the destination-callsign ASCII, whose CRC seeds the tone PRNG; for OFDM, frame body + appended CRC |
+| Coverage (which bytes)            | For the MFSK handshakes, the destination-callsign ASCII, whose CRC seeds the tone PRNG. For DATA, every frame byte before it — the payload and the control byte — appended big-endian |
 
-## 3.5 BW2300 OFDM coding
+## 3.5 BW2300 index levels and the link-setup
 
-The BW2300 OFDM waveform carries both the caller-ID link-setup burst and bulk
-data. §3.5.3 gives the chain and its framing, §3.5.4 the constant tables, §3.5.5
-the caller-ID link-setup frame.
+The BW2300 index levels carry both the caller-ID link-setup burst and the base
+level's data. §3.5.3 gives the chain and its framing, §3.5.4 the constant tables,
+§3.5.5 the caller-ID link-setup frame.
 
-### 3.5.3 BW2300 OFDM link-setup / DATA chain
+### 3.5.3 BW2300 index-level link-setup / DATA chain
 
-The BW2300 OFDM waveform (host `BITRATE (N) … bps`; VARA's general bulk-data
-waveform) uses the §3.0 pipeline with the **BW2300-specific coding tables**
-(interleave map, whitening PN, used-carrier map, twiddle-phase sequence `S`) —
-the 500 Hz assets do **not** apply. The forward (MOD) and inverse (DEMOD) chains,
-in functional terms (the raster index law is in [`01 §2300`](01-physical-layer.md)):
+The BW2300 index levels (host L1–4, records 0–3), the link-setup included, use
+the §3.0 chain with the index-family cell stage. In functional terms (the bin law
+is in [`01 §2300`](01-physical-layer.md)):
 
 ```
-DEMOD:  grid cell ⊗ reference[469·bin + col_rel]              # de-rotate (index law, spec/01)
-        → constellation demap (nearest of the 64-entry non-uniform-magnitude LUT)
-        → de-interleave (BW2300 block interleave map)
-        → de-whiten    (XOR BW2300 PN)
-        → turbo (13,15) log-MAP decode
+DEMOD:  per emission column, the lit bin → Gray⁻¹ → bpc on-air bits
+        → channel de-interleave (the record's stage-1 column, gather)
+        → turbo (13,15) log-MAP decode (the record's stage-2 column)
+        → de-whiten (XOR the PN, §3.1)
         → CRC-16/GENIBUS check  → frame → caller callsign + session params
 MOD  =  the exact inverse (forward) chain.
 ```
@@ -87,13 +119,12 @@ The modulation is index/position type — the coded value selects the carrier bi
 so RX is an argmax over the received energy grid.
 
 - **Framing.** A frame is **92 bytes = 736 bits**:
-  `[89 payload bytes][1 trailer/block byte][2-byte CRC, big-endian]`, with **no
+  `[89 payload bytes][1 control byte][2-byte CRC, big-endian]`, with **no
   header**. CRC-16/GENIBUS over `body[0:90]` equals `frame[90:92]` big-endian. The
   link-setup burst uses the same 92-byte framing law as a DATA over.
 - **Per-over payload slicing.** 89 consecutive payload bytes per over
   (`over_i = payload[89·i : 89·i+89]`); a 512-byte payload therefore occupies 6 overs.
-- **Whitener.** XOR with the BW2300 whitener PN table (0/1 per byte, MSB-first),
-  reset per block.
+- **Whitener.** XOR with the PN of §3.1, MSB-first, from index 0 per frame.
 - **Turbo.** Parallel (13,15)-octal RSC, **rate 1/2, N = 736 → 1484 coded bits**
   (= 2·736 + 12 dual-tail) at records 3 and 2, and **rate 1/3, `3N + 12`** at
   records 1 and 0 — 612 from 200 and 300 from 96. The internal interleaver is
@@ -102,8 +133,6 @@ so RX is an argmax over the received energy grid.
   **no pruning**.
 - **Channel interleaver.** `interleave_stage1.i32`
   column 3 (a 1484-entry permutation), applied as a GATHER: `onair[k] = coded[π[k]]`.
-- **Twiddle.** `exp(j2π·m/128)` — divisor 128, per
-  [`01 §2300`](01-physical-layer.md).
 
 ### 3.5.4 BW2300 coding data tables
 
@@ -117,13 +146,13 @@ forward (MOD) chain is fully specified by these tables plus the
 
 | Element | Value / pointer |
 |---------|-----------------|
-| Constellation LUT (bandwidth-independent) | 64-entry complex LUT `constellation_lut_64.c64`, value law `cell = LUT[pos + 6·coded]` — six constellation columns interleaved with period 6 (BPSK / QPSK / 8-PSK on the unit circle; 16-QAM, **32-QAM cross** and 64-QAM with outermost moduli 1.1 / 1.5 / 1.6). The table is a **truncated prefix of the raster** — column `pos` present only up to `coded = ⌊(63−pos)/6⌋` — so its zero entries are padding, not nulls, and entry 13 is QPSK `coded=2` (`−j`), not a dedicated pilot. (An earlier revision read the table as complete: "14 distinct moduli" and per-column APSK rings; both were truncation artifacts.) Demap = nearest point of the record's column. Full geometry and label law: [`06 §6.1c`](06-speed-gearshift.md) and `hfmodem/kestrel/rx/tablegen.py`. Byte-identical BW500↔BW2300. |
-| Whitener PN | `bw2300/whitener_pn.u8` |
+| Constellation LUT (bandwidth-independent) | 64-entry complex LUT `constellation_lut_64.c64`, value law `cell = LUT[pos + 6·coded]` — six constellation columns interleaved with period 6 (BPSK / QPSK / 8-PSK on the unit circle; 16-QAM, **32-QAM cross** and 64-QAM with outermost moduli 1.1 / 1.5 / 1.6). The table is a **truncated prefix of the raster** — column `pos` present only up to `coded = ⌊(63−pos)/6⌋` — so its zero entries are padding, not nulls, and entry 13 is QPSK `coded=2` (`−j`), not a dedicated pilot. (An earlier revision read the table as complete: "14 distinct moduli" and per-column APSK rings; both were truncation artifacts.) At the OFDM levels the raw bit group indexes a column directly, with no Gray pass (§3.7); all 32 pos-4 labels are observed on tape. Full geometry: [`06 §6.1c`](06-speed-gearshift.md) and `hfmodem/kestrel/rx/tablegen.py`. Byte-identical BW500↔BW2300. |
+| Whitener PN | `whitener_pn.u8`, `tablegen.whitener()`: VB6 `Rnd` from seed 29318, one sequence at every bandwidth (§3.1) |
 | Block-interleave map (stage 1 / stage 2) | `bw2300/interleave_stage1.i32`, `bw2300/interleave_stage2.i32`; cell-usage `bw2300/usedmap.u8` |
-| Twiddle-phase sequence `S` | `bw2300/twiddle_phase_S.u8` (values 0..254; valid ≈first 73744). `twiddle[k] = exp(j·2π·S[k]/128)` on the `469·bin + col_rel` raster ([`01 §2300`](01-physical-layer.md)). The divisor is **128** even though `S` spans 0..254. |
-| De-rotation reference (128×469) | `bw2300/derotation_reference.c64`. Unit-modulus (`|z|=1`, phases quantized `2π/128`); logical size 128×469 = 60032 (first ≈59904 clean; use table values directly — it is **not** index-aligned to `exp(±j2π·S/128)`). RX de-rotate: `cell ⊗ reference[469·bin + col_rel]`. Byte-identical BW500↔BW2300. |
+| Cell scramble `S` (OFDM levels) | `tablegen.scramble()`: `Int(Rnd·129)` from seed 29318, 62 bin rows × 409 columns; cells go on air `× exp(−j2π·S/128)` (§3.7) |
+| Tone grid rows | `tablegen.grid_row(b)`: rows 0/1 are the BW500 base's `grid480` reference, rows 2–12 measured literals ([`01 §Tone family`](01-physical-layer.md)) |
 | Base-record bin-placement tables | Record 3's is `9 + Int(Rnd*16)`, 395 draws from the gap after its own two permutations, closing on record 4's stage-1 seed ([`01 §2300`](01-physical-layer.md)). **Every record's gap holds exactly its own `ncols + 24` draws and closes on the next record's stage-1 seed** — 148 / 252 / 252 / 419 at rec0..rec3 — which is what fixes 124 / 228 / 228 / 395 emission columns and 24 reference columns at each. The stream is therefore identified at all four. **The table is generated only at record 3.** Below the base level `first_bin + Int(Rnd*span)` off the record's own gap lands within **−1..+3** of the true bin and never reliably on it — measured at all three, `{−1: 11, 0: 21, +1: 36, +2: 25, +3: 7}` over rec0's 100 data columns, `{3, 56, 83, 50, 12}` over rec1's 204 and `{9, 57, 77, 48, 13}` over rec2's — so records 0, 1 and 2 are demodulated from a measured table or not at all. All three are now measured (`tablegen.base_bins_col0/1/2`), read off the 2026-09-04 gear-down tapes. Records 0 and 1 need no known plaintext to be read: with `bpc` 3 at stride 2 an allocation reaches a quarter of a 64-bin comb and half of a 32-bin one, so overs of differing payloads intersect down to one bin a column. Record 2 spends 16 values at stride 2 on 32 bins, which is a whole parity of its comb, and had to be read from its payload. Reference columns: 24 at every record, at `(41k+33)//8` on rec0's 124 columns and `(104k+93)//11` on rec1's and rec2's 228 — records 1 and 2 share theirs position for position. |
-| Turbo (BW2300) constituents / termination | Same family as BW500 (§3.6): parallel-concatenated **(13,15)-octal RSC**, log-MAP; base rate ≈1/3, per-level puncturing. The BW2300 interleave and repetition tables above realize the level's rate. The exact BW2300 **puncture matrix and termination are not specified here.** In their place the reference implementation reuses BW500's (13,15) constituent and 12-bit dual-tail termination (§3.6); that is an implementation stopgap standing in for an unspecified value, not a property of VARA stated here. |
+| Turbo constituents / termination / puncture | Same as BW500 (§3.6.4): parallel-concatenated **(13,15)-octal RSC**, 12-bit dual tail, log-MAP. Rate 1/3 at records 0–1, 1/2 at records 2–8, the group puncture of §3.3 above that |
 
 ### 3.5.5 Caller-ID link-setup coding
 
@@ -228,12 +257,12 @@ above and in [`01 §500`](01-physical-layer.md).
 | Termination | **dual-tail, 12 trailing coded bits**: each constituent is flushed to state 0 with 3 tail steps (`u = reg1 ⊕ reg2`); tail bits interleaved `[s1,p1,s2,p2]×3` |
 | Soft-decision | log-MAP (max*) BCJR, ~12 iterations |
 | CRC | **CRC-16/GENIBUS** (poly 0x1021, init/xorout 0xFFFF, no reflection); over `frame[:44]`, appended big-endian as `frame[44:46]` |
-| Frame payload | **43 payload bytes** per frame (byte 43 = marker, 44:46 = CRC); message length is signaled out-of-band (trim the final short frame) |
+| Frame payload | **43 payload bytes** per frame (byte 43 = the control byte, 44:46 = CRC); message length is signaled out-of-band (trim the final short frame) |
 
 ### 3.6.5 TX/RX pipeline order (BW500 L4)
 
 ```
-TX:  frame(43B + marker) → CRC-16/GENIBUS append (2B, big-endian)
+TX:  frame(43B + control byte) → CRC-16/GENIBUS append (2B, big-endian)
      → serialize to 368 bits → XOR PN whitener
      → turbo (13,15) rate-1/2 encode (+12-bit dual-tail)   → 748 coded bits
      → Stage-1 raster place  P = IDX1[3::17][:748]
@@ -266,7 +295,7 @@ own tables.
 | Rate / cell budget | rate-1/2 as §3.6.4; `N = 297` input → `2N+12 = 606` coded |
 | Whitener | `frame_bits = decoded XOR PN[:297]` |
 | CRC | CRC-16/GENIBUS over `frame[:35]`, appended big-endian as `frame[35:37]` |
-| Frame payload | **34 payload bytes** (byte 34 = marker, 35:37 = CRC) |
+| Frame payload | **34 payload bytes** (byte 34 = the control byte, 35:37 = CRC) |
 
 Known from the two record-2 overs of the 2026-07-13 `bw500-zeros256` loopback
 session: every one of the 226 columns of both overs lights the bin these tables
@@ -291,3 +320,74 @@ training: energy in the comb for gain, timing and frequency. A transmitter keys
 the allocation with the draw at zero, and the 226 frame columns behind it are
 exact: rendered against the recording, the body correlates **0.99997** and the
 whole over **0.987**, the difference being those four columns alone.
+
+## 3.7 Tone and OFDM levels
+
+The coding half of the tone family (BW2300 L5–9, BW2750 L5–10, BW500 L5–6) and
+the OFDM family (BW2300 L10–16, BW2750 L11–17, BW500 L7–13). Their physical half
+is [`01 §1.0`](01-physical-layer.md) and the sections it points to; per-level
+`N`, `coded` and frame sizes are [`06`](06-speed-gearshift.md). Closed from
+known plaintext on the high speed capable bench tapes: every frame of every row decodes
+CRC-clean and byte-exact against the transcript
+(`evidence/KPA-bw2300-const.md`, `KPA-bw2300-subband.md`,
+`KPA-bw2750-const.md`, `KPA-bw500-const.md`, `KPA-tone-bw2750-bw500.md`).
+
+**Frame.** `floor(N/8)` bytes: payload, one control byte, then CRC-16/GENIBUS
+over both, big-endian; N bits are the frame zero-padded where N is not a byte
+multiple (2/4/2 bits at BW2300 L6/7/8). The control byte is the ARQ layer's
+per-frame field ([`04 §4.2B`](04-frame-block-formats.md)): `0x81` to `0x99` in
+steps of 4 on full frames, `0x19` on a session's first data over,
+`0x82` on a short one. A payload short of the row's capacity is filled ahead of
+the control byte:
+
+```
+spare ≥ 3   payload | 14 <caller CRC high> | 00 … | T | 82 | CRC
+spare = 2   payload | 14 T | 82 | CRC
+T = 06 at BW2300 and BW2750, 07 at BW500
+```
+
+`<caller CRC high>` is the high byte of CRC-16/GENIBUS of the session caller's
+callsign, as in every short over ([`04 §4.2B`](04-frame-block-formats.md)); the
+high speed capable tapes carry `09` (`N0CALL` calling) and `f6` (`W9SSJ`).
+
+**Chain.** §3.0 unchanged: whiten, turbo on the record's stage-2 permutation,
+group puncture where the rate is above 1/2 (§3.3; every tone row is rate 1/2),
+gather by the stage-1 permutation. The permutations are the bandwidth chain's own
+records (§3.2): BW2750 L5–9 are BW2300 records 4–8 outright, and BW500 L5–6 are
+BW500 records 4–5.
+
+**Tone cells.** Two on-air bits MSB first → Gray `[0,1,3,2]` → a quarter-turn
+increment, filled band-major (band 0's data columns in time order, then band 1's),
+skipping pilot columns ([`01 §Tone family`](01-physical-layer.md)).
+
+**Tone pilots** (`tablegen.tone_pilots`). Per band in order, draw
+`co = 5 + Int(Rnd·(ncols − 6))` from the record's gap, rejecting repeats, until the
+band has its count; `t = 8 + co`. The draws close on the next record's stage-1 seed:
+37 / 36 / 36 / 40 / 41 draws at L5–9 (BW2300 and BW2750 alike), 39 at BW2750 L10,
+38 and 36 at BW500 L5 and L6. BW500 record 3's 36 pilots (L4) are the same law.
+
+**OFDM cells.** `bpc` on-air bits MSB first as `v`, `cell = LUT[v]` from LUT
+column `pos` indexed by `v` directly (`tablegen._column(pos, v)`). There is no Gray
+pass in front at any column: the `clsparm` Gray rows belong to the index levels
+only, and all 32 labels of the pos-4 cross are observed on tape. Fill is
+bin-major, symbol order within a carrier.
+
+**Scramble** (`tablegen.scramble()`), OFDM only:
+
+```
+state ← 29318 (the whitener's seed)
+for k in 0..61 (FFT bin), c in 0..408 (column): state ← Rnd step; S[k][c] = Int(Rnd·129)
+on air: cell · exp(−j2π·S[k][c] / 128)
+c = s − 4 (PSK, column 0 the reference symbol) or s − 5 − 154·f (QAM, frame f)
+```
+
+So bin k column c is draw `1 + 409·k + c`: bin 8 column 0 is draw 3273 (BW2300),
+bin 3 draw 1228 (BW2750), bin 27 draw 11044 (BW500). The lead is not scrambled.
+
+**Gap cells** (`tablegen.gap_cells`), OFDM only. From the record's gap, carrier
+by carrier from the first bin, draw `7 + Int(Rnd·142)` (PSK: the symbol of a repeat
+cell, a +1 differential step) or `Int(Rnd·19)` (QAM: the pilot row whose next row
+holds an extra +1), redrawing a value its carrier already holds. One per carrier
+at BW2300 (49 draws) and BW2750 (59), four at BW500 (44 plus the redraws, 44–49).
+The draws close exactly on the next record's stage-1 seed, which is what fixes
+the gap as these cells.

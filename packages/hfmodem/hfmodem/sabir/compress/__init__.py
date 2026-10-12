@@ -3,10 +3,9 @@
 
 """DEFLATE (RFC 1951) payload records -- sabir's only compression, ever.
 
-§97.113(a)(4) forbids obscuring meaning; §97.309(a)(4) allows any publicly
-documented technique. DEFLATE is exactly that, so it is the one codec this
-modem will apply -- off by default, and explicitly signaled per record so a
-receiver never has to guess.
+DEFLATE is the one codec this modem applies: a publicly specified format with
+no dependency beyond the standard library. Compression is off by default and
+explicitly signaled per record so a receiver never has to guess.
 
 The host data stream crosses the link as self-delimiting records:
 ``[flags:1][length:3][body]``, flag 0 = raw, 1 = raw-DEFLATE body. A record

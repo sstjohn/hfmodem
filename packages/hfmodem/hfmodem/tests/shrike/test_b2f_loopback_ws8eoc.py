@@ -335,7 +335,11 @@ def run(host: PtcHost, gw: Ws8eoc, cycles: int = CYCLES) -> int:
         if host.arq.state is not arq.State.CONNECTED:
             gw.tape.append(f"--  the link left CONNECTED ({host.arq.state})")
             return 0
-        gw.key()
+        token = host.arq.begin_receive_opportunity()
+        try:
+            gw.key()
+        finally:
+            host.arq.finish_receive_opportunity(token)
         onair._mail_app_turns(host, host.app, wait_greeting=True)
         host.tick()
     return 0
@@ -375,7 +379,7 @@ def test_scene1_the_greeting_reaches_the_mail_client_byte_exact():
 
 def test_scene1_the_login_goes_out_once_and_in_order_behind_the_changeover():
     host, session, gw, cycles = exchange()
-    login = b";FW: W9SSJ\r[HFM-0.1-B2FHM$]\r; WS8EOC DE W9SSJ\rFF\r"
+    login = b";FW: W9SSJ\r" + session.sid.encode("ascii") + b"\r; WS8EOC DE W9SSJ\rFF\r"
     assert gw.rx.startswith(login), bytes(gw.rx)
     assert bytes(gw.rx).count(b";FW: W9SSJ") == 1
     first = next(b for b in gw.bursts if b[3])
@@ -731,20 +735,33 @@ def test_scene3_a_slot_that_is_gone_costs_the_cycle_and_not_the_login(tmp_path):
 # --------------------------------------------------------------------------- #
 # Where the budgets end: the arms that did not complete.
 
-def test_a_gateway_this_end_cannot_read_ends_the_link_rather_than_hanging():
-    """Round 25's 21:35 arm: 35 level-2 frames on the air, none decoded. The
-    link is not left holding a channel nothing is coming back on."""
+def test_a_gateway_returning_after_35_unread_copies_completes_the_message():
+    """Exercise qualified recovery or the existing physical absence limit."""
     msg, blob = offered()
     gw = Ws8eoc(cms_script(blob, msg.mid, len(msg.render())),
                 sl2_after=4, deaf=tuple(range(5, 40)))
     host, session = linked(gw)
-    assert run(host, gw) == 0
-    assert not session.inbox and session.stage == "awaiting greeting"
-    assert host.arq._qrt_pending or host.arq.state is not arq.State.CONNECTED
-    assert any("[not decoded]" in line for line in gw.tape)
+    assert run(host, gw) > 0
+    assert session.done and not session.failure
+    assert [item.render() for item in session.inbox] == [msg.render()]
 
 
-def test_a_cede_that_never_arrives_spends_the_retry_budget_and_says_goodbye():
+def test_a_gateway_absent_for_the_physical_lifetime_ends_unconfirmed():
+    """Exercise qualified recovery or the existing physical absence limit."""
+    msg, blob = offered()
+    gw = Ws8eoc(cms_script(blob, msg.mid, len(msg.render())),
+                sl2_after=4, deaf=tuple(range(5, CYCLES * 2)))
+    host, session = linked(gw)
+    assert run(host, gw) > 0
+    assert not session.inbox and session.failure
+    assert host.arq.state is arq.State.DISCONNECTED
+    assert host.arq.transfer_unconfirmed is not None
+    assert host.arq._p3_crc_wait_ticks == arq.P3_CRC_WAIT_TICKS
+    assert host.arq.transfer_unconfirmed["suffix"] == b""
+    assert host.arq.transfer_unconfirmed["field"] == b""
+
+
+def test_a_cede_returning_after_the_old_retry_budget_completes_the_message():
     """0913-2143's own ending, with the mail exchange standing behind it."""
     msg, blob = offered()
     gw = Ws8eoc(cms_script(blob, msg.mid, len(msg.render())))
@@ -760,10 +777,10 @@ def test_a_cede_that_never_arrives_spends_the_retry_budget_and_says_goodbye():
         cede()
 
     gw._cede = deaf_cede
-    assert run(host, gw) == 0
-    assert len(lost) > host.arq.cfg.max_retries
-    assert not session.inbox
-    assert any("max retries" in line for line in host.log_lines)
+    assert run(host, gw) > 0
+    assert len(lost) == host.arq.cfg.max_retries + 4
+    assert session.done and not session.failure
+    assert [item.render() for item in session.inbox] == [msg.render()]
 
 
 def test_a_message_of_ours_crosses_the_changeover_as_binary_and_byte_exact():

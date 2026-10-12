@@ -157,11 +157,11 @@ def test_each_over_draws_the_burst_it_asks_for(setting):
             pairs = MK.demod_tone_pairs(answer, VF.CONNECTED_ACK_NSYM)
             assert ([tuple(sorted(x)) for x in pairs[:4]]
                     == [tuple(sorted(x)) for x in VF.CONNECTED_ACK_PREAMBLE])
-        elif setting == VA.OVER_CONTINUE_CAPTURED:
+        elif setting == VA.OVER_CONTINUE_BURST:
             assert 0.32 <= secs <= 0.38, secs
             pairs = MK.demod_tone_pairs(answer, VF.OVER_CONTINUE_NSYM)
             assert ([tuple(sorted(x)) for x in pairs]
-                    == [tuple(sorted(x)) for x in VF.OVER_CONTINUE_CALLER_2300])
+                    == [tuple(sorted(x)) for x in VF.over_continue(d.called, "2300")[0]])
         elif setting == VA.OVER_CONTINUE_SHORT:
             assert 0.66 <= secs <= 0.70, secs
             assert (MK.demod_tones(answer, 16)

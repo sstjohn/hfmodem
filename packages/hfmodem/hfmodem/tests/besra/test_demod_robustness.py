@@ -21,6 +21,8 @@ is a single clean on-tune frame:
 from __future__ import annotations
 
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -31,6 +33,7 @@ from hfmodem.besra.phy import modulator as M
 from hfmodem.besra.radio import FS_RADIO, RollingDecoder
 from hfmodem.besra.frame import frame as F
 from hfmodem.tests import evidence
+from hfmodem.tests import d_evidence as E
 from . import groundtruth as gt
 
 SR = 12000
@@ -240,7 +243,7 @@ def test_a_type_minted_inside_a_frame_already_arriving_is_not_a_sighting():
 #: leader, and bearing this station's own 0x0d. It put a DATANAK on the air 1 ms
 #: later and it swallowed the real frame behind it, because the 3.9 s span its
 #: guessed type claims carries the acquisition cursor straight over it.
-_W6IDS_MINT = (evidence.LOGS / "onair" / "20260829T000632Z-besra-7060000.wav", 80.0, 90.0)
+_W6IDS_MINT = E.MINT  # Same event, tap 972–982 s; original receiver 80–90 s.
 
 
 def test_the_w6ids_midframe_mint_goes_and_the_frame_under_it_comes_back():
@@ -250,13 +253,10 @@ def test_the_w6ids_midframe_mint_goes_and_the_frame_under_it_comes_back():
     The session-id match is what the 2026-08-26 gate was credited with — and this
     one carries 0x0d, so `_addressed` passes it. What refuses it is the leader the
     audio does not have."""
-    wav, t0, t1 = _W6IDS_MINT
-    if not wav.exists():
-        pytest.skip("station recording not present")
     got = []
     rx = RollingDecoder(D.Demodulator(expect_session=lambda: 0x0D),
                         lambda _pos, f: got.append(f), resample=True)
-    for block in _blocks(wav, t0, t1):
+    for block in _blocks(_W6IDS_MINT):
         rx.push(block)
         rx.pump()
     rx.flush()
@@ -273,13 +273,13 @@ def test_the_w6ids_midframe_mint_goes_and_the_frame_under_it_comes_back():
 #: truncation sentinel and one at a quality of 7, so that a reading of q is not
 #: what separates them.
 _W6IDS = [
-    (evidence.LOGS / "onair" / "20260826T133925Z-besra-7060000.wav", 86.0, 96.0),
-    (evidence.LOGS / "onair" / "20260826T152426Z-besra-7060000.wav", 78.0, 88.0),
+    (E.PHANTOMS[0], 75, ("DATAACK", "4PSK.200.100.E", "BREAK", "DATAACK", "BREAK")),
+    (E.PHANTOMS[1], 79, ("DATAACK", "4PSK.200.100.E", "DATAACK", "BREAK")),
 ]
 
 
-@pytest.mark.parametrize("wav,t0,t1", _W6IDS)
-def test_the_w6ids_phantoms_go_and_the_session_keeps_its_frames(wav, t0, t1):
+@pytest.mark.parametrize("wav,quality,names", _W6IDS, ids=["133925Z", "152426Z"])
+def test_the_w6ids_phantoms_go_and_the_session_keeps_its_frames(wav, quality, names):
     """On the recordings, through the rolling windows the live path decodes in — a
     whole-capture pass does not reproduce these at all, because its silence gate is
     a fraction of the *capture's* peak (`RollingDecoder`).
@@ -290,14 +290,12 @@ def test_the_w6ids_phantoms_go_and_the_session_keeps_its_frames(wav, t0, t1):
     leader `_scan_header` now asks every header-only claim for is not addressed to
     anyone, so both arms lose them and the two agree: nothing here was ever a
     frame, whoever was listening."""
-    if not wav.exists():
-        pytest.skip("station recording not present")
     got = {None: [], 0x0D: []}
     for session in got:
         rx = RollingDecoder(
             D.Demodulator(expect_session=None if session is None else (lambda s=session: s)),
             lambda _pos, f, out=got[session]: out.append(f), resample=True)
-        for block in _blocks(wav, t0, t1):
+        for block in _blocks(wav):
             rx.push(block)
             rx.pump()
         rx.flush()
@@ -306,17 +304,14 @@ def test_the_w6ids_phantoms_go_and_the_session_keeps_its_frames(wav, t0, t1):
     assert not [f for f in got[0x0D] if f.name.startswith("16QAM")]
     assert {(f.name, f.session_id) for f in got[0x0D]} \
         == {(f.name, f.session_id) for f in got[None]}
+    assert tuple(f.name for f in got[None]) == names
+    assert [(f.quality, f.ok) for f in got[None] if f.name == "4PSK.200.100.E"] \
+        == [(quality, True)]
 
 
-def _blocks(wav, t0: float, t1: float):
-    """The recording between ``t0`` and ``t1`` as the sound card's own 0.1 s blocks."""
-    import wave
-
-    with wave.open(str(wav)) as w:
-        assert w.getframerate() == FS_RADIO
-        w.setpos(int(t0 * FS_RADIO))
-        au = np.frombuffer(w.readframes(int((t1 - t0) * FS_RADIO)), "<i2")
-    au = au.astype(np.float32) / 32768.0
+def _blocks(wav):
+    """The checked ten-second tap clip in the sound card's own 0.1 s blocks."""
+    au = E.card(wav)
     step = int(0.1 * FS_RADIO)
     return [au[i:i + step] for i in range(0, au.size, step)]
 
@@ -460,6 +455,27 @@ def test_leader_cfo_holds_its_hz_in_noise(snr):
         assert abs(got - hz) <= _CFO_ERROR_HZ, f"{snr} dB: {hz:+.1f} Hz read as {got:+.1f}"
 
 
+@pytest.mark.parametrize("hz", _CFO_TRUTHS)
+def test_a_decoded_frame_carries_the_offset_it_was_read_at(hz):
+    """The estimate reaches the frame instead of ending at the tone shift, so a
+    monitor can say how far off tune the sender was without decoding twice."""
+    pl = _pl(0x4A)
+    au = np.concatenate([_LEAD, M.render_frame(0x4A, payload=pl, session_id=0x2A), _TAIL])
+    (f,) = D.decode(_tune(au, hz))
+    assert f.ok and abs(f.cfo_hz - hz) <= _CFO_ERROR_HZ, f"{hz:+.1f} Hz read as {f.cfo_hz}"
+
+
+def test_a_clipped_leader_reports_the_shift_that_read_the_frame():
+    """KE8LVA sits +5 Hz off tune and its greeting's leader arrives clipped, which
+    aliases the leader estimate to -37 Hz. The body decodes on the +5 Hz retry, and
+    that is the offset the frame carries, not the aliased reading."""
+    import wave
+    with wave.open(str(Path(__file__).parent / "fixtures" / "offair_ke8lva_greeting.wav")) as w:
+        au = np.frombuffer(w.readframes(w.getnframes()), "<i2")
+    (f,) = [f for f in D.Demodulator().decode(au) if f.ok]
+    assert f.name == "4PSK.500.100.O" and f.cfo_hz == 5.0
+
+
 #: KN4LQN's leaders on 80 m, 2026-08-26: five inbound frames across the three arms,
 #: by the sample their two-tone leader starts at in the 12 kHz stream. The gateway's
 #: transmitter sits +8.3 Hz high on every one — measured off the tone pair itself,
@@ -485,7 +501,8 @@ def test_leader_cfo_reads_a_gateway_off_air(name, onset):
 
     wav = evidence.LOGS / "onair" / name
     if not wav.exists():
-        pytest.skip("station log not present")
+        pytest.skip("Needs ARDOP KN4LQN 80 m, 3590.5 kHz BW2000/500 flight with "
+                    "rig RX and tap: absolute +8.3 Hz CFO through our LO; Kiwi LO differs")
     with wave.open(str(wav)) as w:
         assert w.getframerate() == FS_RADIO
         card = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768.0
@@ -785,30 +802,24 @@ def test_cut_body_mints_no_phantom_controls():
     assert [(f.name, f.ok) for f in got] == [("ConReq500M", False)]
 
 
-# The recording that found the defect, kept as its regression: three connect
-# attempts to KE8LVA, eight ConAck2000 answers on tape, four of them clean
-# enough to read symbol-by-symbol (the other four are channel-mangled past any
-# alignment — no header decodes at any shift). Station-local audio, so this
-# skips where the log is absent.
-_KE8LVA_WAV = evidence.LOGS / "onair" / "20260802T233047Z-besra-7102000.wav"
-_KE8LVA_TX_ENDS = [11.35, 14.87, 18.70, 22.53, 26.38, 30.11,
-                   33.93, 37.76, 41.57, 45.40, 49.24]
+# Four Sep 24 KE8LVA arms: each clip is PTT OFF minus 0.35 to plus 1.6 s.
+# These six grants replace the lost Aug 2 session's four readable grants.
+_KE8LVA_GRANTS = (
+    "ke8lva-0924-135734-grant-4.flac",
+    "ke8lva-0924-142347-grant-1.flac",
+    "ke8lva-0924-151150-grant-4.flac",
+    "ke8lva-0924-154329-grant-4.flac",
+)
 
 
-@pytest.mark.skipif(not _KE8LVA_WAV.exists(), reason="station log not present")
 def test_offair_ke8lva_conacks_decode():
-    import wave
     from hfmodem.core.resample import from_card
 
-    with wave.open(str(_KE8LVA_WAV)) as w:
-        fs = w.getframerate()
-        au = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768.0
     grants = []
-    for te in _KE8LVA_TX_ENDS:
-        seg = from_card(au[int((te - 0.35) * fs):int((te + 1.6) * fs)], SR)
+    for name in _KE8LVA_GRANTS:
+        seg = from_card(E.card(name), SR)
         got = [f for f in D.decode(np.concatenate([seg, _TAIL])) if f.ok]
         assert all(f.name == "ConAck2000" and f.session_id == 0x51 for f in got)
         grants += got
-    # Measured: cycles 3, 4, 7 and 8 validate; more is improvement, fewer is loss.
-    assert len(grants) >= 4
-    assert all(f.conack_timing_ms in (220, 230) for f in grants)
+    assert len(grants) == 6
+    assert {f.conack_timing_ms for f in grants} == {210, 220, 240}

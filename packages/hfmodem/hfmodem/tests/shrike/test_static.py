@@ -19,9 +19,9 @@ Three classes of defect kept reaching the tree because nothing looked for them:
 The third one is a RATCHET rather than a pass/fail. Each category has a baseline;
 exceeding it fails, and a count below its baseline is reported so the baseline can
 be tightened in the same edit. The numbers live in the source rather than a data
-file, so a change to one shows up in the diff. Every category but one reads zero,
-so the mechanism is a floor: a term that comes back fails on the run that brings
-it back.
+file, so a change to one shows up in the diff. Every category reads zero; exact
+recording path literals are declared separately. A term that comes back fails
+on the run that brings it back.
 
 It reads the shipped SUITE as well as the package. The suites cross the
 publication boundary -- `publish/manifest.toml` includes them, on the grounds
@@ -44,6 +44,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hfmodem.tests.evidence import require_input
+
 ROOT = Path(__file__).resolve().parents[5]
 PKG = Path(__file__).resolve().parents[2]
 SRC = PKG / "shrike"
@@ -63,9 +65,15 @@ PY = sys.executable
 # force a baseline high enough to hide anything that arrived afterwards, which is
 # the opposite of what a floor is for.
 #
+# The robust C2 and normal-long rate suites check shrike against independent
+# models kept outside the distribution, and name them to say what to supply.
+# The same reasoning holds.
+#
 # This file states the patterns, so its text matches several of them; reading it
 # would measure nothing but itself.
 UNSCANNED = {"test_p1_oracle.py", "test_p2_oracle.py", "test_p3_oracle.py",
+             "robust_c2_oracle.py", "test_robust_c2_oracle_1004.py",
+             "test_p4_robust_c2_target_1004.py", "test_p4_long_rates_1003.py",
              Path(__file__).name}
 
 # Patterns whose presence in a shipped file would be working record rather than
@@ -105,12 +113,7 @@ PUBLICATION_BASELINE = {
     "disassembler symbol names": 0,
     "binary: citations": 0,
     "reference decoder named": 0,
-    # The one non-zero, and it is a PATH rather than prose: `test_rx.py` names the
-    # directory holding the soft-raster vectors it loads, under `working/`, which
-    # never crosses. A reader with the harness needs the real path and a reader
-    # without it sees the module skip. It reaches zero when that directory is
-    # renamed, which is a move across hundreds of files and not a comment fix.
-    "harness vocabulary": 1,
+    "harness vocabulary": 0,
     "disassembly vocabulary": 0,
     "method vocabulary": 0,
     "tooling names": 0,
@@ -145,22 +148,27 @@ def check(label: str, passed: bool, detail: str = "") -> None:
     print(f"  [{'PASS' if passed else 'FAIL'}] {label}" + (f": {detail}" if detail else ""))
 
 
-def main() -> int:
+def _ruff_check(ruff: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([str(ruff), "check", "--select", "F", str(SRC), str(SUITE)],
+                          cwd=ROOT, capture_output=True, text=True)
+
+
+def main(*, include_lint: bool = True) -> int:
     # In the monorepo an absent ruff means the gate is not running anywhere, which
     # is the state this file exists to prevent, so it is a failure and not a skip.
     # The distribution is the other tree: ruff is not in its documented install and
     # `tools/` -- which only a checkout has -- is how the two are told apart.
-    ruff = ROOT / ".venv" / "bin" / "ruff"
-    if ruff.exists():
-        r = subprocess.run([str(ruff), "check", "--select", "F", str(SRC), str(SUITE)],
-                           cwd=ROOT, capture_output=True, text=True)
-        check("no pyflakes findings (F: undefined names, dead imports/vars)",
-              r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout else "")
-    elif (ROOT / "tools").is_dir():
-        check("ruff is installed", False, f"{ruff} absent -- the lint gate cannot run")
-    else:
-        print(f"  [SKIP] pyflakes findings: no ruff at {ruff} -- "
-              f"`{ROOT}/.venv/bin/pip install ruff` turns this check on")
+    if include_lint:
+        ruff = ROOT / ".venv" / "bin" / "ruff"
+        if ruff.exists():
+            r = _ruff_check(ruff)
+            check("no pyflakes findings (F: undefined names, dead imports/vars)",
+                  r.returncode == 0, r.stdout.strip().splitlines()[-1] if r.stdout else "")
+        elif (ROOT / "tools").is_dir():
+            check("ruff is installed", False, f"{ruff} absent -- the lint gate cannot run")
+        else:
+            print(f"  [SKIP] pyflakes findings: no ruff at {ruff} -- "
+                  f"`{ROOT}/.venv/bin/pip install ruff` turns this check on")
 
     for mod in ENTRY_POINTS:
         r = subprocess.run([PY, "-m", f"hfmodem.shrike.{mod}", "--help"],
@@ -211,6 +219,12 @@ def event_kinds_declared() -> None:
           f"missing from _TAG: {unhandled}" if unhandled else f"{len(monitor._TAG)} kinds")
 
 
+HARNESS_INPUTS = {
+    SUITE / "archive.py": '"oracle"',
+    SUITE / "test_p4_bare_y27_0929.py": "'working/p4-oracle/kiwi/20260924/7101500/seg-0003.wav'",
+}
+
+
 def publication_ratchet() -> None:
     """Working-record material must not grow, in the package or in its suite.
 
@@ -232,14 +246,21 @@ def publication_ratchet() -> None:
     slack = []
     for name, pattern in PUBLICATION_PATTERNS.items():
         rx = re.compile(pattern, re.IGNORECASE if "vocab" in name else 0)
-        hits = sum(len(rx.findall(t)) for t in text.values())
+        scanned = text
+        if name == "harness vocabulary":
+            scanned = dict(text)
+            for path, literal in HARNESS_INPUTS.items():
+                check(f"the recording input in {path.name} is exact",
+                      scanned.get(path, "").count(literal) == 1)
+                scanned[path] = scanned.get(path, "").replace(literal, "")
+        hits = sum(len(rx.findall(t)) for t in scanned.values())
         base = PUBLICATION_BASELINE.get(name, 0)
         if hits > base:
             # EVERY file holding a hit, not the largest one. The counts are
             # usually 1 apiece, so `max` picked whichever the dict order put
             # first -- and named the baseline's own file for a marker somebody
             # else had just added, which is the reading that costs a search.
-            found = sorted(((len(rx.findall(t)), p.name) for p, t in text.items()
+            found = sorted(((len(rx.findall(t)), p.name) for p, t in scanned.items()
                             if rx.search(t)), key=lambda kv: (-kv[0], kv[1]))
             check(f"publication: {name} <= {base}", False,
                   f"{hits} now (+{hits - base}) in "
@@ -256,8 +277,14 @@ def publication_ratchet() -> None:
             print(f"       {name!r}: {hits},")
 
 
+def test_ruff() -> None:
+    ruff = require_input(ROOT / ".venv/bin/ruff")
+    r = _ruff_check(ruff)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 def test_main() -> None:
-    assert main() == 0
+    assert main(include_lint=False) == 0
 
 
 if __name__ == "__main__":

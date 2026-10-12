@@ -145,7 +145,7 @@ def test_recorded_cs3_emits_plain_cs1_with_selected_profile(
     assert not session.host.arq.entry_pending
 
 
-NOMINAL_REPLY_N = round(.890 * FS)
+NOMINAL_REPLY_N = round(onair.P3_REPLY_S * FS)
 
 
 @pytest.mark.parametrize("reference,lead", [(None, 0), ("pulse-center", 852)])

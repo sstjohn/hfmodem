@@ -30,12 +30,15 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import wave
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+from hfmodem.tests.evidence import require_input
 
 _TOOLS = Path(__file__).resolve().parents[5] / "tools"
 
@@ -44,6 +47,7 @@ pytestmark = pytest.mark.skipif(not _TOOLS.is_dir(),
 
 
 def _tool(name: str):
+    require_input(_TOOLS / f"{name}.py")
     spec = importlib.util.spec_from_file_location(f"_tool_{name}", _TOOLS / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
@@ -336,23 +340,38 @@ LOSS_MIN_WINDOWS = 40
 #: A keyed cycle hands the reader about 0.24 s of audio and a listening one the
 #: whole 1.25 s. Nothing on the record sits between 0.69 s and 1.00 s.
 KEYED_MAX_S = 0.9
+#: The population the finding below was made on: every session's date is in its
+#: directory name, and captures from 2026-09-20 on arrived after that reading
+#: was taken and are excluded so the count stays the one the finding cites.
+POPULATION_CUTOFF = "0920"
+
+_SESSION_DATE = re.compile(r"onair-(\d{4})-")
 
 
 def _windows():
-    """``(name, seconds, lost)`` per session, for every one long enough to read.
+    """``(name, seconds, lost)`` per session, for every one long enough to read
+    and dated before `POPULATION_CUTOFF`.
 
     `lost_samples` is cumulative at the moment a sidecar is written, so the step
     into window *n* is the loss taken while window *n* was being captured. The
     other reading -- charging it to the window before -- puts 209876 samples on
     keyed cycles that are quiet under this one, which is how the two are told
     apart.
+
+    The sidecars are `rx_0.json`, `rx_1.json`, ... `rx_N.json`, and a session of
+    100 or more windows sorts them lexically out of order (`rx_100.json` before
+    `rx_2.json`), which misreads the step at every boundary that crosses a digit
+    width. They are read back by the number in the name instead.
     """
     from hfmodem.tests import evidence
 
     out = []
     for directory in sorted(evidence.CAPTURES.glob("onair-*")):
+        date = _SESSION_DATE.match(directory.name)
+        if not date or date.group(1) >= POPULATION_CUTOFF:
+            continue
         facts = []
-        for side in sorted(directory.glob("rx_*.json")):
+        for side in sorted(directory.glob("rx_*.json"), key=lambda p: int(p.stem[3:])):
             fact = json.loads(side.read_text())
             if "lost_samples" not in fact:
                 break
@@ -378,9 +397,10 @@ def test_the_capture_loses_in_the_listening_cycles_and_never_in_a_keyed_one():
     Machine load has exactly this phase, which is why it was the wrong thing to
     rule out; a state of the converter does not, and stays ruled out.
 
-    Over 66 sessions of 40 windows or more, six days: 1381 keyed windows carrying
-    16.8 M samples lost NOTHING, and every one of the 871216 lost samples on the
-    record fell in one of the 1777 listening windows.
+    Over the 110 sessions of 40 windows or more this finding was made on --
+    captures dated before 2026-09-20, 14 days: 2290 keyed windows carrying
+    27.8 M samples lost NOTHING, and every one of the 871684 lost samples on the
+    record fell in one of the 2971 listening windows.
 
     ASSERTED ON THE CADENCE AND NOT ON THE WINDOW INDEX, which is what this used
     to say and what the 0829 and 0830 arms overturned. The reading was that the

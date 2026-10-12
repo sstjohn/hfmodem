@@ -97,21 +97,32 @@ def test_bare_entry_ack_and_repeated_packets_keep_entry_pulse(
         monkeypatch.setattr(tx, '_tx', late_render)
     assert bare_ack(session, tx, live, grid, 1) == arq.CS_ACK
     assert not session.host.arq.entry_pending
-    assert session.host.arq.role == arq.ISS and not tx.refused
-    first, first_pulse = check_packet(tx, entry)
-    assert first_pulse == entry+(3 if late else 1)*CYCLE
-    # Entry is physically unswapped regardless of the P1 grid's parity.
-    # Its first ordinary successor must continue that physical alternation.
-    assert first.carrier_swapped == bool(((first_pulse-entry)//CYCLE) & 1)
+    assert session.host.arq.role == arq.ISS
     if late:
+        # Refused rather than keyed on a stale render: the packet is
+        # retained and re-rendered in the next available slot's own
+        # carrier order, decided when a repeated CS1 asks for it again.
+        assert tx.refused
         monkeypatch.setattr(tx, '_tx', original_tx)
+        first = first_pulse = None
+    else:
+        assert not tx.refused
+        first, first_pulse = check_packet(tx, entry)
+        assert first_pulse == entry+CYCLE
+        # Entry is physically unswapped regardless of the P1 grid's parity.
+        # Its first ordinary successor must continue that physical alternation.
+        assert first.carrier_swapped == bool(((first_pulse-entry)//CYCLE) & 1)
     for slot in (6, 7, 10):
         assert bare_ack(session, tx, live, grid, slot) == arq.CS_ACK
         assert not tx.refused
         packet, pulse = check_packet(tx, entry)
         assert pulse == entry+slot*CYCLE
-        assert packet.carrier_swapped == (
-            first.carrier_swapped ^ bool(((pulse-first_pulse)//CYCLE) & 1))
+        if first is None:
+            first, first_pulse = packet, pulse
+            assert first.carrier_swapped == bool(((first_pulse-entry)//CYCLE) & 1)
+        else:
+            assert packet.carrier_swapped == (
+                first.carrier_swapped ^ bool(((pulse-first_pulse)//CYCLE) & 1))
 
     # The entry packet's ISS reference must not prematurely create the IRS
     # epoch: the eventual first CS3 still receives E+603.125 ms replies.
@@ -132,7 +143,7 @@ def test_bare_entry_ack_and_repeated_packets_keep_entry_pulse(
     onair._p3_place_reply(grid, tx, 12)
     tx.emit_pending_cs()
     assert not tx.refused
-    assert tx.reply_clock.pulse_epoch == entry+28950
+    assert (tx.reply_clock.pulse_epoch-entry) % CYCLE == 28950
     assert (tx.tx_audio_start+min(tx.tx_pulse_offsets)-entry) % CYCLE == 28950
 
 

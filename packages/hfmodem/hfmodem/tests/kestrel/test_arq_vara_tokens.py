@@ -23,7 +23,7 @@ from hfmodem.kestrel.arq import phy
 from hfmodem.kestrel.arq.fsm import ArqConfig
 from hfmodem.kestrel.arq.modem import AudioChannel, KestrelModem
 from hfmodem.kestrel.host.server import VaraServer
-from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.kestrel import turns_evidence as E
 from hfmodem.tests.kestrel.corpora import harness
 from hfmodem.kestrel.vara import vara_control as vc
 
@@ -134,7 +134,7 @@ class TestRealAcknowledgement(unittest.TestCase):
     """
 
     def _burst(self, path, t, lead=0.05, secs=0.75):
-        x = corpora.wav_mono(path)
+        x = E.samples(path)
         i = int((t - lead) * 48000)
         return x[i:i + int(secs * 48000)]
 
@@ -152,14 +152,12 @@ class TestRealAcknowledgement(unittest.TestCase):
         return out
 
     def test_a_real_gateways_acknowledgement_reaches_the_worker(self):
-        for path, t in corpora.ONAIR_BW2300_ACKS:
-            if not path.exists():
-                self.skipTest(f"{path.name} not present")
+        for path, t in E.ACKS:
             burst = self._burst(path, t)
             self.assertLess(len(burst), phy.CONTROL_TOKEN_MAX_SAMPLES)
             evs = self._read(burst, "2300")
             self.assertEqual(evs, [("rx_token", phy.ANSWER_2300)],
-                             f"{path.name} at {t} s was dropped by the rx loop")
+                             f"{path} at {t} s was dropped by the rx loop")
             self.assertIsNone(vc.detect_token(burst),
                               "the DBPSK table named a real BW2300 burst")
 
@@ -167,17 +165,15 @@ class TestRealAcknowledgement(unittest.TestCase):
         """The floor, on the recordings the acknowledgements came off: 200 random
         windows of the same length in each, away from the burst itself."""
         rng = np.random.default_rng(0)
-        for path, t in corpora.ONAIR_BW2300_ACKS:
-            if not path.exists():
-                self.skipTest(f"{path.name} not present")
-            x = corpora.wav_mono(path)
+        for path, t in E.ACKS:
+            x = E.samples(path)
             n = int(0.75 * 48000)
             for _ in range(200):
                 i = int(rng.integers(0, len(x) - n))
                 if abs(i - int(t * 48000)) < 2 * 48000:
                     continue
                 self.assertEqual(self._read(x[i:i + n], "2300"), [],
-                                 f"{path.name} read band noise at {i / 48000:.1f} s "
+                                 f"{path} read band noise at {i / 48000:.1f} s "
                                  "as an acknowledgement")
 
 

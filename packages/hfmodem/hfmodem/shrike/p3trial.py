@@ -23,31 +23,73 @@ entry epoch. Greeting reply placement is a separate timing decision.
 """
 
 
+def _write_result(directory, filename, result, capture_writer):
+    path = Path(directory, filename)
+    raw = json.dumps(result, indent=2)+'\n'
+    if capture_writer is None:
+        return path.write_text(raw)
+    component = path.stem
+    written = 0
+    def published():
+        nonlocal written
+        written = 1
+    try:
+        artifact = capture_writer.reserve(path.absolute().relative_to(capture_writer.root))
+        capture_writer.update_status(state='ongoing', pending=1, component=component)
+        artifact.publish(raw.encode('utf-8'), published=published)
+        capture_writer.update_status(state='finalized', written=1, component=component)
+    except BaseException:
+        capture_writer._status['failed'] = True
+        try:
+            capture_writer.update_status(state='partial', pending=1-written,
+                                         written=written, partial=1, component=component)
+        except BaseException as error:
+            capture_writer._status['journal_error'] = type(error).__name__
+        raise
+
+
 @dataclass
 class ReplyClock:
     """Mail receive clock, independent of the initial-turn experiment limits.
 
-    Start on the successful B +3.125 ms pulse epoch. After that, accepted
-    role changes rotate this epoch with the grid; a failed break-in does not.
-    This object neither grants TX permission nor ends an application turn.
+    Start on the successful B +3.125 ms pulse epoch. The first packet placed
+    against it fixes `gap`, the pulse's distance past the peer's packet, and
+    from then on the pulse rides the peer's measured raster at that gap, in
+    every receiving stint. Accepted role changes rotate the epoch with the
+    grid, which is only the first guess for a stint no packet has seated yet;
+    a failed break-in does not. Measured 0920-1015/1119/1233: the peer's
+    raster came back 601.7-607 ms on per round trip, not 600.0, and a pulse
+    rotated by the constant landed 2-7 ms earlier against each later stint's
+    packets. This object neither grants TX permission nor ends an application
+    turn.
     """
     entry_phase: int | None = None
     pulse_epoch: int | None = None
+    gap: int | None = None
 
     def entry(self, phase):
         if self.pulse_epoch is None:
             self.entry_phase = phase
 
-    def target(self, lead):
+    def target(self, lead, phase=None):
         if self.entry_phase is None:
             return None
         if self.pulse_epoch is None:
             self.pulse_epoch = self.entry_phase + ROTATION + 150
+        if phase is not None:
+            if self.gap is None:
+                self.gap = (self.pulse_epoch - phase) % CYCLE
+            self.pulse_epoch = phase + self.gap
         return self.pulse_epoch - lead
 
     def rotate(self, samples):
         if self.pulse_epoch is not None:
             self.pulse_epoch += samples
+
+    def slip(self, samples):
+        self.rotate(-samples)
+        if self.entry_phase is not None:
+            self.entry_phase -= samples
 
 
 @dataclass
@@ -183,7 +225,7 @@ class TimingTrial:
         return (f'P3 TIMING TRIAL {self.arm}{delay}: ordinary counters {counters}; '
                 f'{self.reason or "incomplete"}; local CRC evidence')
 
-    def write(self, directory):
+    def write(self, directory, *, capture_writer=None):
         result = asdict(self)
         result['limits'] = dict(opportunities=None if self.unbounded else LIMIT,
                                seconds=None if self.unbounded else SECONDS,
@@ -192,7 +234,7 @@ class TimingTrial:
         result['target_entry_rotation_ms'] = (600+self.reply_delay_ms if self.arm == 'B' else None)
         result['changeover_exited'] = bool(self.progress)
         result['progression'] = len(self.progress) >= 3
-        Path(directory, self.filename).write_text(json.dumps(result, indent=2)+'\n')
+        _write_result(directory, self.filename, result, capture_writer)
 
 
 @dataclass
@@ -243,11 +285,11 @@ class EntryTimingTrial(TimingTrial):
         return (f'P3 ENTRY TIMING TRIAL {self.arm}: {len(self.entries)} entries; '
                 f'{self.reason or "incomplete"}; greeting progression not tested')
 
-    def write(self, directory):
+    def write(self, directory, *, capture_writer=None):
         result = asdict(self)
         result.update(sample_rate=FS, entry_delay_ms=self.delay_ms,
             limits=dict(seconds_from_first_entry=SECONDS),
             p3_crc_verified=bool(self.packets), progression_tested=False,
             entries_before_first_p3=(sum(e['phase'] < self.opened for e in self.entries)
                                      if self.opened is not None else None))
-        Path(directory, self.filename).write_text(json.dumps(result, indent=2)+'\n')
+        _write_result(directory, self.filename, result, capture_writer)

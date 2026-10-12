@@ -1,0 +1,10 @@
+{
+  "source": "captures/onair-0926-1228/stream.flac",
+  "source_start_s": 35.94,
+  "rate": 12000,
+  "sha256": "cdaf6833a8fb66336fe41a04cb2c16bd86a994c9fd3f194068e021a4c749bc33",
+  "first_chip": 699,
+  "cfo_hz": -1.4097948552963038,
+  "data": "524d53205472696d6f646520312e342e342e300d0a573953534a2068617320",
+  "status": 0
+}

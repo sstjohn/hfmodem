@@ -44,7 +44,6 @@ from hfmodem.kestrel.rx import varahf2300 as rx
 from hfmodem.tests.kestrel import corpora
 from hfmodem.kestrel.tx import varahf2300_tx as tx
 from hfmodem.kestrel.vara import vara_arq as VA
-from hfmodem.kestrel.vara import vara_control as VC
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
 from hfmodem.kestrel.vara import vara_ofdm as OF
@@ -610,25 +609,15 @@ def test_an_over_that_will_not_decode_keys_the_measured_nak_at_bw2300():
     KC9GHZ. A register-and-reject bench on 2026-09-07 measured the real one — the
     receiver keys an 8-symbol burst and the sender drops a speed level and
     re-sends [see vara_frames.nak]. This station is the caller here, so it keys
-    the caller's burst of a W9SSJ-called link, and the over never reaches the host.
+    the caller's burst of its link, and the over never reaches the host.
     """
     hs, io = _connected()
     hs.on_rx_audio(_on_air(_undecodable_over()))
     assert io.keys == 1, f"the NAK did not go out: {io.msgs}"
     pairs = [tuple(sorted(p)) for p in MK.demod_tone_pairs(io.sent[-1], 8)]
-    assert pairs == list(VF.NAK_CALLER_2300), pairs
+    assert pairs == list(VF.nak(_CALLED, "2300")[0]), pairs
     assert any("tx NAK" in m for m in io.msgs), io.msgs
     assert not io.host, "an undecodable frame reached the host"
-
-
-def test_the_nak_this_station_does_have_is_one_a_peer_can_read():
-    """BW500's NAK is a promoted spec fact, read off the loopback corpus. It is not
-    reachable through an over — BW500 has no over recogniser — so it is asserted
-    where it lives, which is also the only place anything now keys a token."""
-    hs, io = _connected(bw="500")
-    assert hs._send_token("nak")
-    m = VC.detect_token(io.sent[-1])
-    assert m is not None and m.name == "nak", m
 
 
 def test_an_over_that_will_not_decode_is_reported_once_off_the_receive_stream():
@@ -725,8 +714,8 @@ def test_the_guard_threshold_sits_between_the_two_measured_populations():
 
 def test_the_check_stays_inside_the_per_burst_budget():
     """It runs inside a live ARQ turnaround, once per delivered burst, alongside the
-    connected-ack matcher's 0.28 s. Measured: 24 ms to reject a 6 s bracket, 35 ms
-    for 9 s, 41-55 ms to accept a real over (the decode is only reached once the
+    connected-ack matcher's 0.28 s. Measured: 70 ms to reject a 6 s bracket, 102 ms
+    for 9 s, 26 ms to accept a real over (the decode is only reached once the
     reference columns already line up, so noise never pays for it).
     """
     rng = np.random.default_rng(1)

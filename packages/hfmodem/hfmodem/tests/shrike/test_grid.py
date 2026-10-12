@@ -216,6 +216,7 @@ class _Bench:
         self.d_n = round(d * FS)
         self.peer = peer
         self.emissions: list[tuple[int, int]] = []
+        self.signal_ends: list[int] = []
         self.leads: list[float] = []      # PTT lead each burst actually got
         self.taken: list[tuple[int, int]] = []      # spans handed to the reader
         self.drained: list[tuple[int, int, int, int]] = []
@@ -341,7 +342,9 @@ class _Bench:
         self.floor = self.pos = self.now
 
     def transmit(self, audio, *, at=None, settle: float = 0.0, key=None,
-                 max_key: float = 40.0) -> tuple[int, int]:
+                 max_key: float = 40.0, admit=None) -> tuple[int, int]:
+        if admit is not None:
+            admit()
         earliest = self.samples + 3 * self._blk
         start = earliest if at is None else max(at - self.LAT, earliest)
         first = start + self.LAT
@@ -377,8 +380,11 @@ class _Bench:
         if key is not None:
             key(True)
             key(False)
+        # The peer runs its own clock: a P1 packet's held key is not a later
+        # drop for it to answer.
+        self.signal_ends.append(first + np.trim_zeros(audio, "b").size)
         if self.peer is not None:
-            self.peer(self, first + audio.size)
+            self.peer(self, self.signal_ends[-1])
         return first, first + audio.size
 
     def clock_report(self) -> str:
@@ -731,7 +737,7 @@ def _session(*, cycles: int, hold: int, charge: int, peer: bool,
         sys.argv = ["shrike.onair", "--transmit", "--hold", str(hold),
                     "--max-cycles", str(cycles), "--mycall", "W9SSJ",
                     "--dxcall", "K7ABC", "--dial", "7100000",
-                    "--serial", "/dev/null", "--outdir", tmp, *extra_argv]
+                    "--serial", "/dev/null", "--outdir", str(Path(tmp) / "out"), *extra_argv]
         try:
             with contextlib.redirect_stdout(log):
                 onair.main()
@@ -1311,7 +1317,7 @@ def _first_irs_answer(got: dict) -> tuple[float, float]:
     b = got["bench"]
     for i, (first, end) in enumerate(b.emissions):
         if i and end - first < FS // 2:
-            onset = b.emissions[i - 1][1] + b.d_n
+            onset = b.signal_ends[i - 1] + b.d_n
             aim = got["aimed"][i]
             return ((first - onset) / FS * 1e3,
                     (first - aim[0]) / FS * 1e3 if aim else float("nan"))
@@ -1508,7 +1514,7 @@ def the_decode_does_not_choose_the_window() -> None:
     answered. Holding audio is not dropping it.
     """
     print("\nThe cycle against a decode that costs more than the channel")
-    scene = dict(cycles=4, hold=10, peer=True, decode=True, quiet_after=3,
+    scene = dict(cycles=4, hold=10, peer=True, decode=True, quiet_after=2,
                  scale=True, charge=0)
     got = _session(**scene)
     keyed = [s for s, _w, _i in _landed(got)]
@@ -1746,8 +1752,12 @@ def the_cadence_instrument_reads_the_carriers() -> None:
     # before connection; its receive-only slot is not steady linked cadence.
     # Correct ACK handling now keeps this peer advancing without retry yields.
     easy = _session(cycles=6, hold=10, charge=0, peer=True)
-    inc = [b - a for a, b in zip(easy["tx"].slots_used,
-                                 easy["tx"].slots_used[1:])]
+    # The closing CW ID is not on the link's cadence: it waits past the peer.
+    check("the normally ended session keys its closing CW ID",
+          bool(easy["labels"]) and easy["labels"][-1].startswith("ID "),
+          str(easy["labels"][-1:]))
+    slots = easy["tx"].slots_used[:-1]
+    inc = [b - a for a, b in zip(slots, slots[1:])]
     check("a cycle that fits in its slot keys in every one of them",
           bool(inc) and set(inc) == {1}, f"increments {inc}")
 
@@ -1768,7 +1778,7 @@ def _quiet_run(got: dict) -> int:
 def a_linked_session_holds_its_cadence() -> None:
     """A gateway that answers and then fades must not be given up on by silence.
 
-    The hush takes the transmitter off the air for HUSH_CYCLES so a grid that
+    `--call-hush` takes the transmitter off the air so a grid that
     has never been answered can be placed by what it hears. Armed on a session
     that HAS been answered it is the opposite of a repair: a PACTOR IRS times
     its acknowledgement against a 1.25 s raster, so six cycles of nothing is
@@ -1784,12 +1794,13 @@ def a_linked_session_holds_its_cadence() -> None:
     960 ms packet alike, and in a dry run bursts that were written to a file.
     """
     print("\nA link held through a peer that goes quiet")
-    HUSH = onair._MasterGrid.HUSH_CYCLES
+    HUSH = 6
     # FIVE ANSWERED CYCLES, because a connect is no longer one codeword: the
     # search reads this station on the odd cycles and `_ConnectEvidence` wants
     # three of them before it will call it a link. Three answers left the scene
     # calling into cycle six and never reaching the hold this is about.
-    scene = dict(cycles=6, hold=40, charge=0, peer=True, quiet_after=5)
+    scene = dict(cycles=6, hold=40, charge=0, peer=True, quiet_after=5,
+                 extra_argv=("--call-hush", f"4,{HUSH}"))
     got = _session(**scene)
     check("a session that has been answered is never taken off the air for a hush",
           _quiet_run(got) < HUSH,
@@ -1880,14 +1891,15 @@ def a_hushed_cycle_stands_on_its_own_boundary() -> None:
     hushed and keyed alike. The peer is silent, which is what arms the hush.
     """
     print("\nWhere a hushed cycle says it stands")
-    got = _session(cycles=12, hold=0, charge=0, peer=False)
+    got = _session(cycles=12, hold=0, charge=0, peer=False,
+                   extra_argv=("--call-hush", "4,6"))
     offs: dict[bool, list[float]] = {True: [], False: []}
     for ln in got["log"].splitlines():
         m = re.search(r"off-grid ([+-][\d.]+) ms", ln)
         if m:
             offs["HUSHED" in ln].append(float(m.group(1)))
     check("a peer that never answers takes the session into a hush",
-          len(offs[True]) >= onair._MasterGrid.HUSH_CYCLES,
+          len(offs[True]) >= 6,
           f"{len(offs[True])} hushed lines, {len(offs[False])} keyed")
     worst = max(map(abs, offs[True]), default=float("inf"))
     check("a hushed cycle standing on its boundary says so",

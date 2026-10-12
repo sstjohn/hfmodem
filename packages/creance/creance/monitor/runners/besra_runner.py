@@ -14,6 +14,10 @@ carried as consecutive blocks with a lookback wide enough for the longest ARDOP
 frame (5.5 s, ``4FSK.2000.600``) to fall wholly inside one window, frames deduped
 across the overlap.
 
+``--centre HZ`` makes this a track's instance: the audio is cut to ``--bw`` around
+that centre and moved to 1500 Hz before it is decimated, and the leader offset
+is reported from where the track sits.
+
 ``normalize`` is pure and carries the confidence policy, and it is deliberately
 strict. An ARDOP frame is named by ten 4FSK symbols, and VARA and PACTOR energy
 reaches that bar often enough that besra needs a per-frame-class quality floor to
@@ -26,11 +30,15 @@ at all.
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 
-FS = 48000
+from hfmodem.monitor import FS
+
 BESRA_FS = 12000
+#: ARDOP's widest waveform, 2000 Hz, and the skirts, when no width is asked for
+BW_HZ = 2600.0
 READ_BYTES = 9600               # ~0.1 s of s16le
 BLOCK_S = 6.0                   # decode this much fresh audio at a time
 LOOKBACK_S = 6.0                # > the longest ARDOP frame, so one straddling a
@@ -49,7 +57,7 @@ _BARE = {"BREAK", "IDLE", "DISC", "END", "ConRejBusy", "ConRejBW",
 
 
 def normalize(t: float, name: str, ok: bool, detail: str = "",
-              station: str = "") -> dict | None:
+              station: str = "", offset_hz: float | None = None) -> dict | None:
     """A besra ``DecodedFrame`` -> a normalised detection dict, or None for a
     frame that proved nothing."""
     if not ok:
@@ -59,7 +67,8 @@ def normalize(t: float, name: str, ok: bool, detail: str = "",
     role = "caller" if name.startswith("ConReq") or name == "Ping" else ""
     return {"t": round(t, 3), "modem": "besra", "protocol": "ARDOP",
             "kind": name, "grade": grade, "station": station, "role": role,
-            "detail": detail}
+            "detail": detail,
+            "offset_hz": None if offset_hz is None else round(offset_hz, 1)}
 
 
 def _emit(obj: dict) -> None:
@@ -80,11 +89,19 @@ def _detail(f) -> str:
     return f"{len(f.payload)} B" if f.payload else ""
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     import numpy as np
     from scipy.signal import resample_poly
     from hfmodem.besra.phy.demodulator import Demodulator
 
+    from hfmodem.monitor.channel import tuned
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--centre", type=float)
+    ap.add_argument("--bw", type=float, default=BW_HZ)
+    args = ap.parse_args(argv)
+    chan = tuned(args.centre, args.bw)
+    shift = chan.offset if chan else (lambda hz: hz)
     demod = Demodulator()
     buf = np.zeros(0, dtype=float)
     base = 0                       # global sample index of buf[0], at FS
@@ -101,7 +118,8 @@ def main() -> int:
             t = t0 + f.offset / BESRA_FS
             if any(n == f.name and abs(t - pt) < DEDUP_S for pt, n in emitted):
                 continue
-            det = normalize(t, f.name, f.ok, _detail(f), f.caller or "")
+            det = normalize(t, f.name, f.ok, _detail(f), f.caller or "",
+                            shift(f.cfo_hz))
             if det:
                 # Only a detection takes a slot. The lookback is there so a frame
                 # cut by a block boundary is whole in the next window, and the cut
@@ -110,6 +128,8 @@ def main() -> int:
                 # at all, `normalize` having refused the only copy that reached it.
                 emitted.append((t, f.name))
                 _emit(det)
+        if chan:
+            _emit({"heard": round((base + hi) / FS - LOOKBACK_S, 3)})
         cutoff = (base + hi) / FS - (BLOCK_S + LOOKBACK_S)
         emitted = [(t, n) for t, n in emitted if t > cutoff]
 
@@ -126,7 +146,8 @@ def main() -> int:
         raw = stdin.read(READ_BYTES)
         if not raw:
             break
-        buf = np.concatenate([buf, np.frombuffer(raw, "<i2").astype(float)])
+        x = np.frombuffer(raw, "<i2").astype(float)
+        buf = np.concatenate([buf, chan.push(x) if chan else x])
         if len(buf) - done > MAX_LAG_S * FS:      # slower than realtime: skip stale
             skipped = (len(buf) - block) - done
             done = len(buf) - block
@@ -138,6 +159,8 @@ def main() -> int:
             decode(lo, hi)
             done = hi
             compact()
+    if chan:
+        buf = np.concatenate([buf, chan.flush()])
     if len(buf) > done:
         decode(max(0, done - lookback), len(buf))
     return 0

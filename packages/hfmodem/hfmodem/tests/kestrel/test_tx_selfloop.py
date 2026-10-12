@@ -65,9 +65,9 @@ def _selfloop(payload):
 
 
 @pytest.mark.parametrize("name,payload", [
-    ("counter", bytes(range(256))),
-    ("prbs15", _prbs15(256)),
-    ("random", os.urandom(256)),
+    pytest.param("counter", bytes(range(256)), id="counter"),
+    pytest.param("prbs15", _prbs15(256), id="prbs15"),
+    pytest.param("random", os.urandom(256), id="random"),
 ])
 def test_tx_selfloop_byte_exact(name, payload):
     decoded, c0s, all_crc = _selfloop(payload)

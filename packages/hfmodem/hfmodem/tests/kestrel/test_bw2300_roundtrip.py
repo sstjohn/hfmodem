@@ -3,9 +3,9 @@
 
 """BW2300 wideband OFDM codec round-trip — TX -> RX byte-exact, every speed level.
 
-kestrel BW2300 transmitter synthesises a burst at each speed level (the index-mod
-records 2 and 3 + the high-throughput ladder rec9-16); the BW2300 receiver recovers
-the exact payload bytes CRC-clean. Built from spec/01 §2300, spec/03 §3.5.3-3.5.4,
+kestrel BW2300 transmitter synthesises a burst at each index record; the BW2300
+receiver recovers the exact payload bytes CRC-clean. The OFDM levels are
+test_varaofdm.py. Built from spec/01 §2300, spec/03 §3.5.3-3.5.4,
 spec/06 §6.1c-6.1d. See kestrel/rx/varahf2300.py for the value-law families.
 
 A round trip is the weakest evidence there is — it says the two halves agree, not

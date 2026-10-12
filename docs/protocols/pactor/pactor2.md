@@ -9,7 +9,10 @@ Public sources are cited inline: `[M.1798]` for ITU-R Recommendation M.1798,
 `[sigidwiki]` for the sigidwiki PACTOR-2 signal page and its two published
 sample recordings (one ARQ, one FEC broadcast), `[SCS]` for SCS's *The PACTOR-2
 Protocol — A Technical Description* (1996), `[SCS-P3]` for *The PACTOR-3
-Protocol* (2004), and `[SCS-P4]` for *The PACTOR-4 Protocol*.
+Protocol* (2004), and `[SCS-P4]` for the SCS protocol reference.
+<!-- site:omit:start -->
+Its full title is *The PACTOR-4 Protocol*.
+<!-- site:omit:end -->
 
 `[SCS-P4]` is a PACTOR-2 source and not an analogy. Its §11 speed level is a
 two-carrier mode it states outright is "based on the PACTOR-2 speedlevel 1";
@@ -131,7 +134,7 @@ walking through the true one. `p2rx.measure_symbol_period` measures it.
 Two halves, and they are not equally strong. That the carriers **do not share a
 symbol boundary** is MEASURED on real PACTOR-2 audio, twice, by independent
 estimators (§1.4.1). That the offset is **exactly T/2** is published — for the
-PACTOR-4 speed level derived from PACTOR-2 speed level 1, not for PACTOR-2 in so
+speed level derived from PACTOR-2 speed level 1, not for PACTOR-2 in so
 many words, so for PACTOR-2 itself it is an inference, and a strong one.
 
 `[SCS-P4]` §11.7, describing the speed level §11 states is based on PACTOR-2
@@ -274,8 +277,8 @@ is also the code PACTOR-3 runs on its own case 0.
   0xFFFF, final complement, little-endian trailer — which with the reflected
   CCITT table is CRC-16/X-25, and is what `coding.crc16` computes and
   `pactor2.build_field` appends. `[SCS]` and `[M.1798]` name only "16-bit CCITT
-  Cyclic Redundancy Check", so this was carried from PACTOR-3 until the P4
-  document was read; it is no longer an assumption.
+  Cyclic Redundancy Check", so this was carried from PACTOR-3 until the SCS protocol
+  reference was read; it is no longer an assumption.
 - **Whitening: there is none.**  [MEASURED, 2026-08-01 — §5.10]
   No PACTOR document in the reference library — `[SCS]`, `[SCS-P3]`, `[SCS-P4]`,
   PT-III, `[M.1798]` -0/-1/-2, or the Wavecom tables — describes a scrambler,
@@ -1368,10 +1371,15 @@ successive bursts before decoding.
   vectors, Annex II the interleaver routine and its four depths.
 - `[SCS-P3]` SCS, *The PACTOR-3 Protocol* (2004). Figure 2 the per-level table
   including crest factors.
-- `[SCS-P4]` SCS, *The PACTOR-4 Protocol*. §5 the CRC, §11 the PACTOR-2-derived
+- `[SCS-P4]` SCS protocol reference. §5 the CRC, §11 the PACTOR-2-derived
   two-carrier speed level: §11.5 the code, §11.6 the interleaver, §11.7 the
   phase alphabet and the T/2 carrier stagger, §11.8 the symbol filter, §11.11
   and §11.12 the symbol counts and the packet arithmetic.
+
+<!-- site:omit:start -->
+Full bibliographic title of `[SCS-P4]`: SCS, *The PACTOR-4 Protocol*.
+<!-- site:omit:end -->
+
 - `[M.1798]` ITU-R Recommendation M.1798, *Characteristics of HF radio equipment
   for the exchange of digital data and electronic mail in the maritime mobile
   service*, editions -0 (2007), -1 (2010) and -2 (2021).

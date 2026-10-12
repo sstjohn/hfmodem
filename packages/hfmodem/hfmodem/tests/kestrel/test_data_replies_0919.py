@@ -54,7 +54,7 @@ def test_independent_stock_replies_match_the_full_link_tail(name):
     at, width = VA._widest(VA._cont_held(track[0], track[1], VA._live_track(x)))
     assert width >= VA._CONT_PLATEAU
     pairs = MK.demod_tone_pairs(x[(at + width // 2) * VA._ACK_GRID:], 8, band=band)
-    assert tuple(pairs) == VF.OVER_CONTINUE_RESPONDER_BY_LINK['W9SSJ', 'KC9GHZ', '2300']
+    assert tuple(pairs) == VF.over_continue('KC9GHZ', '2300')[1]
 
 
 def test_truncated_other_frames_and_missing_tail_do_not_retire_data():
@@ -62,8 +62,8 @@ def test_truncated_other_frames_and_missing_tail_do_not_retire_data():
     hs.turn = VA._TURN_OURS
     hs.send(b'A' * 89 + b'last')
     pending = hs._tx_pending
-    for pairs in (VF.NAK_RESPONDER_2300, VF.CONTROL_BURST_RESPONDER_2300,
-                  VF.OVER_CONTINUE_CALLER_2300):
+    for pairs in (VF.nak(hs.called, '2300')[1], VF.control_bursts(hs.caller, '2300')[1],
+                  VF.over_continue(hs.called, '2300')[0]):
         x = np.pad(MK.synth_tone_pairs(pairs)[MK.HOP:], (0, 4800))
         assert not hs._peer_head_cut_continue(x, VA._top3_track(x, band=hs._band))
     x = native('20260918T052953Z-over3')[:5 * MK.HOP]

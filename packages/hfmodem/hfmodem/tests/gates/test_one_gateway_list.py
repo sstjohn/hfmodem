@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import functools
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -79,11 +80,11 @@ pytestmark = pytest.mark.skipif(not TOOLS.is_dir(),
 EXPORT_HEADER = ("Timestamp,Callsign,BaseCallsign,GridSquare,Frequency,Mode,"
                  "Hours,Sysop,QTH")
 
-#: One canonical path per export. The VARA list sits at the root because that is
-#: where every reader that was already right had it, and because it is a fetched
-#: cache rather than a source artifact. The PACTOR list has only ever had one copy.
-CANONICAL = {REPO / "winlink-vara-gateways.csv",
-             REPO / "working" / "winlink-pactor-gateways.csv"}
+#: Fetched exports belong to the operator data cache; every reader and launcher
+#: honors the same HFMODEM_DATA_DIR override instead of a checkout-local copy.
+CACHE = Path(os.environ.get("HFMODEM_DATA_DIR", REPO / "operator-data")) / "cache"
+CANONICAL = {CACHE / "winlink-vara-gateways.csv",
+             CACHE / "winlink-pactor-gateways.csv"}
 
 #: Not searched: build spoil, and every hidden directory. The hidden ones hold
 #: git's internals, the virtualenv and the per-agent worktrees, which are separate
@@ -140,17 +141,18 @@ READERS = ("hfcapture", "vara_monitor", "kestrel_connect", "onair_session",
            "gwsurvey")
 
 
-def test_the_vara_list_has_exactly_one_definition():
-    canonical = REPO / "winlink-vara-gateways.csv"
-    for name in READERS:
-        assert _tool(name).GATEWAY_LIST == canonical, (
-            f"{name}.py resolves the gateway list to "
-            f"{_tool(name).GATEWAY_LIST}, not {canonical}")
-
-    # pick_targets holds the path rather than the module: it is stdlib-only on
-    # purpose, since it reaches the propagation feed and importing hfcapture would
-    # pull numpy in behind it. Membership is the check that costs it nothing.
-    assert canonical in _tool("pick_targets").LISTS
+@pytest.mark.parametrize("name", (*READERS, "pick_targets"))
+def test_the_vara_list_has_exactly_one_definition(name):
+    if not (TOOLS / f"{name}.py").is_file():
+        pytest.skip(f"optional development reader tools/{name}.py is not included in this distribution")
+    canonical = CACHE / "winlink-vara-gateways.csv"
+    reader = _tool(name)
+    if name == "pick_targets":
+        # This reader keeps the gateway path among its channel lists.
+        assert canonical in reader.LISTS
+    else:
+        assert reader.GATEWAY_LIST == canonical, (
+            f"{name}.py resolves the gateway list to {reader.GATEWAY_LIST}, not {canonical}")
 
 
 def test_a_fetch_lands_only_at_the_one_path(tmp_path, monkeypatch):
@@ -191,8 +193,8 @@ def test_no_launcher_names_a_path_of_its_own():
         for n, line in enumerate(script.read_text().splitlines(), 1):
             if "winlink-vara-gateways.csv" not in line:
                 continue
-            if '"$REPO/winlink-vara-gateways.csv"' not in line:
+            if '"${HFMODEM_DATA_DIR:-$REPO/operator-data}/cache/winlink-vara-gateways.csv"' not in line:
                 wrong.append(f"{script.relative_to(REPO).as_posix()}:{n}: {line.strip()}")
     assert not wrong, (
-        "a launcher names a gateway list other than $REPO/winlink-vara-gateways.csv:\n"
+        "a launcher names a gateway list outside the shared operator cache:\n"
         + "\n".join(wrong))

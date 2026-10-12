@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Station Logbook</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="summary.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+:root {
+  color-scheme:light;
+  --bg:#f5f4ef; --panel:#eeede7; --ink:#242522; --muted:#62635d; --line:#cdcec5;
+  --accent:#b63827; --accent-bg:#ecdcd3; --attempt:#8a8b82; --hover:#e6e4dc;
+  --sans:Arial,Helvetica,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark) {
+  :root {
+    color-scheme:dark;
+    --bg:#20221f; --panel:#292c27; --ink:#f0f0e7; --muted:#b3b6aa; --line:#4e5348;
+    --accent:#f18d74; --accent-bg:#44332c; --attempt:#8d9084; --hover:#30332d;
+  }
+  /* OSM has no dark tiles; inverting keeps the map from glaring beside the table. */
+  .leaflet-tile-pane { filter:grayscale(1) invert(1) brightness(.75) contrast(.9)!important; }
+}
+* { box-sizing:border-box; }
+html, body { height:100%; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 var(--sans); display:flex; flex-direction:column; }
+a { color:inherit; text-underline-offset:.2em; }
+a:hover { color:var(--accent); }
+header { padding:14px 20px 10px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:6px 28px; align-items:baseline; }
+h1 { margin:0; font-size:17px; font-weight:bold; letter-spacing:.01em; }
+h1 span { color:var(--muted); font-weight:normal; font-family:var(--mono); font-size:13px; margin-left:8px; }
+.counts { display:flex; flex-wrap:wrap; gap:4px 22px; font-family:var(--mono); font-size:12px; color:var(--muted); }
+.counts b { color:var(--ink); font-weight:normal; font-size:14px; }
+.counts .hot b { color:var(--accent); }
+.controls { padding:10px 20px; display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; border-bottom:1px solid var(--line); font-size:13px; }
+select, input[type=search], input[type=date] { font:13px var(--sans); color:var(--ink); background:var(--bg); border:1px solid var(--line); padding:5px 8px; border-radius:3px; }
+input[type=search] { width:14em; }
+select:focus, input:focus, button:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+label.toggle[hidden] { display:none; }
+label.toggle { display:flex; gap:6px; align-items:center; cursor:pointer; }
+label.toggle input { accent-color:var(--accent); }
+.chip { font:12px var(--mono); border:1px solid var(--accent); color:var(--accent); background:transparent; border-radius:12px; padding:3px 10px; cursor:pointer; }
+.export[hidden] { display:none; }
+.export { margin-left:auto; font-size:13px; text-decoration:none; border:1px solid var(--line); border-radius:3px; padding:5px 10px; }
+.export:hover { border-color:var(--accent); }
+.chip::after { content:" \00d7"; }
+main[hidden], section[hidden] { display:none; }
+main { flex:1; min-height:0; display:grid; grid-template-columns:minmax(320px,5fr) 7fr; }
+#map { min-height:320px; border-right:1px solid var(--line); background:var(--panel); }
+.book { overflow:auto; }
+table { border-collapse:collapse; width:100%; font-size:13px; }
+th { position:sticky; top:0; z-index:1; background:var(--bg); text-align:left; font-weight:normal; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); padding:8px 10px; border-bottom:1px solid var(--line); cursor:pointer; user-select:none; white-space:nowrap; }
+th[aria-sort=ascending]::after { content:" \2191"; }
+th[aria-sort=descending]::after { content:" \2193"; }
+th.n, td.n { text-align:right; }
+td { padding:6px 10px; border-bottom:1px solid var(--line); white-space:nowrap; font-variant-numeric:tabular-nums; }
+td.t, td.n { font-family:var(--mono); font-size:12px; }
+tr.row { cursor:pointer; }
+tr.row:hover, tr.row.open { background:var(--hover); }
+tr.row.attempt td { color:var(--muted); }
+tr.row.answered td.call { font-weight:bold; color:var(--ink); }
+tr.row.answered td:first-child { box-shadow:inset 3px 0 var(--accent); }
+.pill { display:inline-block; font:11px var(--mono); padding:1px 8px; border-radius:10px; border:1px solid var(--line); color:var(--muted); }
+.pill.hot { border-color:transparent; background:var(--accent-bg); color:var(--accent); }
+.pill.none { border-style:dashed; }
+tr.detail td { white-space:normal; padding:12px 16px 16px 20px; background:var(--panel); }
+.detail dl { display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; margin:0 0 12px; }
+.detail dt { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; padding-top:2px; }
+.detail dd { margin:0; }
+.detail .line { font-size:14px; margin:0 0 10px; max-width:60em; }
+.miles { display:flex; flex-wrap:wrap; gap:4px; }
+.recs { display:grid; grid-template-columns:max-content minmax(0,480px); gap:6px 14px; align-items:center; margin:0 0 10px; }
+.recs span { font-size:12px; color:var(--muted); }
+.detail audio { width:100%; height:36px; vertical-align:middle; }
+td.audio { font-size:11px; color:var(--muted); }
+.detail .id { font:11px var(--mono); color:var(--muted); }
+.empty { padding:40px; color:var(--muted); text-align:center; }
+.legend { background:var(--bg); color:var(--ink); border:1px solid var(--line); padding:6px 10px; font:12px var(--sans); line-height:1.8; }
+.legend i { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:-1px; }
+.leaflet-container { font:12px var(--sans); background:var(--panel); }
+.leaflet-tile-pane { filter:grayscale(.85) contrast(.9) brightness(1.04); }
+.leaflet-tooltip { background:var(--bg); color:var(--ink); border-color:var(--line); box-shadow:none; }
+.leaflet-tooltip-top::before { border-top-color:var(--line); }
+.leaflet-bar a { background:var(--bg); color:var(--ink); border-color:var(--line); }
+.leaflet-control-attribution { background:color-mix(in srgb,var(--bg) 80%,transparent)!important; color:var(--muted); }
+.leaflet-control-attribution a { color:var(--muted); }
+.view-button, .report-button { font:13px var(--sans); color:var(--ink); background:var(--bg); border:1px solid var(--line); border-radius:3px; padding:5px 10px; cursor:pointer; }
+.view-button[aria-pressed=true] { color:var(--accent); border-color:var(--accent); background:var(--accent-bg); }
+#summary { flex:1; min-height:0; overflow:auto; padding:20px; }
+.report-head { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
+.report-head h2 { margin:0; font-size:18px; }
+.report-note { color:var(--muted); max-width:95em; font-size:12px; }
+.report-cards { display:flex; flex-wrap:wrap; gap:12px; margin:18px 0; }
+.report-card { background:var(--panel); border:1px solid var(--line); padding:12px 16px; min-width:145px; }
+.report-card b { display:block; font:24px var(--mono); }
+.report-card span { color:var(--muted); font-size:12px; }
+.report-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,560px),1fr)); gap:20px; }
+.report-section { min-width:0; }
+.report-section { margin-bottom:12px; }
+.report-section h3 { margin:0 0 8px; font-size:15px; }
+.report-table { overflow:auto; border:1px solid var(--line); }
+.report-table th { cursor:default; }
+.report-table td:first-child { white-space:normal; min-width:100px; }
+.hour-chart { display:grid; grid-template-columns:repeat(24,minmax(18px,1fr)); gap:4px; height:145px; align-items:end; min-width:600px; padding-top:10px; }
+.hour-column { height:100%; display:flex; flex-direction:column; justify-content:end; text-align:center; font:10px var(--mono); }
+.hour-bars { height:110px; display:flex; align-items:end; justify-content:center; gap:2px; }
+.hour-bars i { width:40%; min-height:0; }
+.hour-bars .success { background:var(--accent); }
+.hour-bars .failure { background:var(--attempt); }
+.hour-key { font-size:12px; color:var(--muted); }
+.hour-key .success { color:var(--accent); }
+@media (max-width:900px) {
+  body { height:auto; display:block; }
+  main { display:block; }
+  #map { height:45vh; border-right:0; border-bottom:1px solid var(--line); }
+  header, .controls { padding-inline:16px; }
+  .col-power, .col-dial, .col-audio { display:none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Logbook <span id="me"></span></h1>
+  <div class="counts" id="counts"></div>
+</header>
+<div class="controls">
+  <button class="view-button" id="bookView" aria-pressed="true">Map &amp; log</button>
+  <button class="view-button" id="summaryView" aria-pressed="false">Summary</button>
+  <select id="protocol" aria-label="Protocol"><option value="">All protocols</option></select>
+  <select id="band" aria-label="Band"><option value="">All bands</option></select>
+  <select id="bw" aria-label="Bandwidth"><option value="">All widths</option></select>
+  <input type="search" id="q" placeholder="Search call" aria-label="Search call" autocomplete="off" spellcheck="false">
+  <label class="toggle"><input type="checkbox" id="answered"> Answered only</label>
+  <label>From <input type="date" id="since" aria-label="From date (UTC)"></label>
+  <label>Through <input type="date" id="until" aria-label="Through date (UTC)"></label>
+  <label>Hours <select id="hourFrom" aria-label="Starting hour"><option value="">Any start</option></select>
+    to <select id="hourThrough" aria-label="Ending hour (inclusive)"><option value="">Any end</option></select></label>
+  <label>Time zone <select id="timeZone" aria-label="Time zone for hour filter and summary"><option value="UTC">UTC</option></select></label>
+  <label class="toggle" id="sizeControl"><input type="checkbox" id="scaleDots"> Size dots by attempts</label>
+  <button class="chip" id="chip" hidden></button>
+  <a class="export" id="export" download hidden title="Completed contacts within the current filters">Export ADIF (LoTW)</a>
+</div>
+<main id="bookViewPanel">
+  <div id="map"></div>
+  <div class="book">
+    <table>
+      <thead><tr>
+        <th data-k="started_utc">UTC</th>
+        <th data-k="call">Call</th>
+        <th data-k="protocol">Mode</th>
+        <th data-k="band_m" class="n">Band</th>
+        <th data-k="dial_hz" class="n col-dial">Dial kHz</th>
+        <th data-k="bw_hz" class="n" title="Bandwidth in Hz: the width we called at (VARA, ARDOP), or the ARDOP session's once connected. PACTOR's width follows its mode and is not recorded.">BW</th>
+        <th data-k="speed" title="The fastest the link carried: the higher of the fastest the peer sent that we decoded and the fastest we sent that the peer acknowledged. VARA levels as our modem numbers them, PACTOR-1 baud, PACTOR-2/3 speed level or P4 once a PACTOR-4 packet of the peer's was read whole, ARDOP frame type.">Speed</th>
+        <th data-k="depth">Reached</th>
+        <th data-k="duration_s" class="n">Dur</th>
+        <th data-k="distance_km" class="n">km</th>
+        <th data-k="audio" class="col-audio" title="Recordings: tap (rig monitor, both sides), sdr (a remote KiwiSDR), rx (our receiver), sense (the channel check before keying)">Audio</th>
+        <th data-k="tx_w" class="n col-power" title="The TX power setting in effect when the arm keyed: RFPOWER read back over CAT, never measured output.">Power</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>Nothing matches.</div>
+  </div>
+</main>
+<section id="summary" aria-label="Logbook summary" hidden>
+  <div class="report-head"><h2>Connection summary</h2>
+    <button class="report-button" id="summaryCsv">Export summary CSV</button>
+  </div>
+  <p class="report-note">Uses the current filters, including the selected peer. Dates use UTC. A success reached connect; an imported QSO is counted separately. Answered includes replies that did not establish a connection. Failure means an ended attempt without connect; pending means no recorded teardown. Success rate = connected / (connected + failed). Each recorded session counts once. Unique peers combine callsign SSIDs. Hourly results use the session start time; hour windows include the ending hour and can wrap midnight. Peer rates describe recorded attempts; compare sample counts when choosing a peer. Imported logs usually omit failures and do not contribute to connection rates.</p>
+  <div id="reportCards" class="report-cards"></div>
+  <div id="reportPeers" class="report-section"></div>
+  <div id="reportHours"></div>
+  <div id="reportTables" class="report-grid"></div>
+</section>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const OURS = new Set(['cleared', 'keyed']);
+const state = {protocol: '', band: '', bw: '', q: '', answered: false, since: '', until: '', hourFrom: '', hourThrough: '', scaleDots: false, view: 'book', timeZone: 'UTC', call: null, key: 'started_utc', dir: -1, open: null};
+const SHORT = {'rig tap': 'tap', 'sdr witness': 'sdr', 'rig rx': 'rx', 'sense': 'sense'};
+let log, map, homes, shown = [], layers = {markers: L.layerGroup(), paths: L.layerGroup()}, markers = new Map();
+
+const fmtTime = t => t.slice(0, 16).replace('T', ' ');
+const fmtDur = s => s == null ? '' : s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}`;
+const kHz = hz => hz == null ? '' : (hz / 1e3).toFixed(1);
+const fmtW = w => +w.toFixed(1);
+const txPower = e => e.tx_w == null ? '' : e.tx_w_max ? `${fmtW(e.tx_w)}–${fmtW(e.tx_w_max)} W` : `${fmtW(e.tx_w)} W`;
+const presetPower = e => [e.level && `preset ${e.level}`, e.tx_w != null && `${txPower(e)} setting, not measured output`].filter(Boolean).join(', ') || null;
+const deepest = e => e.reached.at(-1);
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function pill(e) {
+  if (!e.ended_utc && !e.reached.length) return '<span class="pill none">no teardown</span>';
+  if (!e.reached.length) return '<span class="pill none">no answer</span>';
+  return `<span class="pill${e.answered ? ' hot' : ''}">${esc(deepest(e))}</span>`;
+}
+
+function matches(e, withCall = true) {
+  return (!state.protocol || e.protocol === state.protocol)
+    && (!state.band || e.band_m == state.band)
+    && (!state.bw || e.bw_hz == state.bw)
+    && (!state.answered || e.answered)
+    && (!state.since || e.started_utc.slice(0, 10) >= state.since)
+    && (!state.until || e.started_utc.slice(0, 10) <= state.until)
+    && LogSummary.inHours(e, state.hourFrom, state.hourThrough, state.timeZone)
+    && (!state.q || e.call.toUpperCase().includes(state.q.toUpperCase()))
+    && (!withCall || !state.call || e.call === state.call);
+}
+
+function geodesic(a, b, n = 48) {
+  const rad = Math.PI / 180, v = ([la, lo]) => [Math.cos(la * rad) * Math.cos(lo * rad), Math.cos(la * rad) * Math.sin(lo * rad), Math.sin(la * rad)];
+  const p = v(a), q = v(b), d = Math.acos(Math.min(1, p.reduce((s, x, i) => s + x * q[i], 0)));
+  if (d < 1e-6) return [a, b];
+  return Array.from({length: n + 1}, (_, i) => {
+    const t = i / n, A = Math.sin((1 - t) * d) / Math.sin(d), B = Math.sin(t * d) / Math.sin(d);
+    const [x, y, z] = p.map((c, j) => A * c + B * q[j]);
+    return [Math.atan2(z, Math.hypot(x, y)) / rad, Math.atan2(y, x) / rad];
+  });
+}
+
+function drawMap() {
+  layers.markers.clearLayers(); layers.paths.clearLayers(); markers.clear();
+  const stations = new Map();
+  for (const e of log.entries.filter(e => matches(e, false) && e.lat != null)) {
+    const s = stations.get(e.call) ?? {call: e.call, lat: e.lat, lon: e.lon, qth: e.qth, grid: e.grid, n: 0, heard: 0, from: new Set()};
+    s.n++; s.heard += e.answered;
+    if (e.answered) s.from.add(e.my_grid);
+    stations.set(e.call, s);
+  }
+  const accent = cssVar('--accent'), attempt = cssVar('--attempt'), bg = cssVar('--bg');
+  for (const s of [...stations.values()].sort((a, b) => b.n - a.n)) {
+    const hot = s.heard > 0, dim = state.call && state.call !== s.call;
+    for (const h of [...s.from].map(g => homes.get(g)))
+      L.polyline(geodesic([h.lat, h.lon], [s.lat, s.lon]), {color: accent, weight: 1.5, opacity: dim ? .15 : .55, interactive: false}).addTo(layers.paths);
+    const m = L.circleMarker([s.lat, s.lon], {
+      radius: LogSummary.radius(s.n, state.scaleDots), weight: 2, color: hot ? bg : attempt,
+      fillColor: hot ? accent : attempt, fillOpacity: hot ? .85 : .25, opacity: dim ? .3 : 1,
+    }).bindTooltip(`<b>${esc(s.call)}</b> ${esc(s.grid)}<br>${esc(s.qth || '')}<br>${s.n} entr${s.n > 1 ? 'ies' : 'y'}, ${s.heard} answered`, {direction: 'top', offset: [0, -6]})
+      .on('click', () => { state.call = state.call === s.call ? null : s.call; render(); });
+    if (dim) m.setStyle({fillOpacity: .12});
+    m.hot = hot;
+    markers.set(s.call, m.addTo(layers.markers));
+  }
+}
+
+function highlight(call, on) {
+  const m = markers.get(call);
+  if (!m) return;
+  m.setStyle(on ? {weight: 3, color: cssVar('--ink')} : {weight: 2, color: m.hot ? cssVar('--bg') : cssVar('--attempt')});
+  on ? (m.bringToFront(), m.openTooltip()) : m.closeTooltip();
+}
+
+function link(e) {
+  const s = e.speed;
+  const heard = way => e.rehear?.faster[way] ? ` ${source(e)}` : '';
+  const dirs = s && [s.decoded && `decoded ${s.decoded} from the peer${heard('decoded')}`,
+    s.acknowledged && `${s.acknowledged} acknowledged by the peer${heard('acknowledged')}`].filter(Boolean).join(', ');
+  return [e.bw_hz && `${e.bw_hz} Hz`, s && `up to ${s.top} (${dirs})`].filter(Boolean).map(esc).join(' &middot; ');
+}
+
+const P4 = {exchange: 'both ways', answered: "the peer's words answered ours", heard: 'from the peer only', probed: 'ours went unanswered'};
+const p4 = x => [`${P4[x.reached]}, from ${x.opening}`, x.peer.length && `the peer: ${x.peer.join(', ')}`,
+  x.ours.length && `ours: ${x.ours.join(', ')}`].filter(Boolean).map(esc).join(' &middot; ');
+
+function recordings(e) {
+  const playable = e.audio.filter(r => r.url);
+  if (!playable.length) return '';
+  return `<div class="recs">${playable.map(r => `<span>${esc(r.label)}${r.duration_s ? ` &middot; ${fmtDur(Math.round(r.duration_s))}` : ''}</span>
+    <audio controls preload="none" src="${esc(r.url)}"></audio>`).join('')}</div>`;
+}
+
+const source = e => `(from rehearing, decoders ${e.rehear.commit}, ${e.rehear.date})`;
+
+const messages = n => `${n} message${n === 1 ? '' : 's'}`;
+function mail(e) {
+  const m = e.mail ?? {};
+  const inbox = !m.delivered ? '' : m.delivered === m.sent ? ", delivered (the recipient's inbox confirms it)"
+    : `, ${m.delivered} delivered (the recipient's inbox confirms it)`;
+  return [m.sent && `sent ${messages(m.sent)}${inbox}`, m.received && `received ${messages(m.received)}`].filter(Boolean).join(' &middot; ');
+}
+
+function detail(e) {
+  const how = r => e.confirmed?.includes(r) ? " (delivered, confirmed by the recipient's inbox)"
+    : e.rederived?.includes(r) ? ' (read from transcript)' : e.reheard?.includes(r) ? ` ${source(e)}` : '';
+  const miles = e.reached.length ? e.reached.map(r => `<span class="pill${OURS.has(r) ? '' : ' hot'}">${esc(r + how(r))}</span>`).join('') : '<span class="pill none">none</span>';
+  return `<tr class="detail"><td colspan="12">
+    <p class="line">${esc(e.summary)}</p>
+    <dl>
+      <dt>Station</dt><dd>${esc(e.call)} &middot; ${esc(e.grid || 'no grid')}${e.qth ? ' &middot; ' + esc(e.qth) : ''}</dd>
+      <dt>Milestones</dt><dd class="miles">${miles}</dd>
+      <dt>Window</dt><dd>${esc(e.started_utc)} &ndash; ${esc(e.ended_utc || 'no teardown')}</dd>
+      <dt>On air</dt><dd>${[e.flymode, presetPower(e), e.dial_hz ? `dial ${kHz(e.dial_hz)} kHz` : `${kHz(e.centre_hz)} kHz`].filter(Boolean).map(esc).join(' &middot; ')}</dd>
+      ${e.bw_hz || e.speed ? `<dt>Link</dt><dd>${link(e)}</dd>` : ''}
+      ${e.p4 ? `<dt>PACTOR-4</dt><dd>${p4(e.p4)}</dd>` : ''}
+      ${mail(e) ? `<dt>Mail</dt><dd>${mail(e)}</dd>` : ''}
+      ${e.rehear?.limits.length ? `<dt>Limits</dt><dd>${esc(e.rehear.limits.join(' '))} (rehearing, decoders ${esc(e.rehear.commit)})</dd>` : ''}
+    </dl>
+    ${e.viewer ? `<p><a href="${esc(e.viewer)}">Inspect rehear →</a></p>` : ''}
+    ${recordings(e)}
+    ${e.transcript ? `<a href="${esc(e.transcript)}" target="_blank" rel="noopener">transcript</a>` : ''}
+    <div class="id">${esc(e.id)}</div>
+  </td></tr>`;
+}
+
+function render() {
+  const rows = log.entries.filter(e => matches(e));
+  const {key, dir} = state;
+  const val = e => key === 'depth' ? e.reached.length + 10 * e.answered
+    : key === 'speed' ? e.speed && `${e.protocol}${String(e.speed.rank * 100).padStart(8, '0')}`
+    : key === 'audio' ? e.audio.length || null : e[key];
+  rows.sort((a, b) => { const x = val(a), y = val(b); return x == null ? 1 : y == null ? -1 : (x < y ? -1 : x > y) * dir; });
+  $('rows').innerHTML = rows.map((e, i) => `<tr class="row ${e.answered ? 'answered' : 'attempt'}${state.open === e.id ? ' open' : ''}" data-i="${i}">
+    <td class="t">${fmtTime(e.started_utc)}</td><td class="call">${esc(e.call)}</td><td>${esc(e.protocol)}</td>
+    <td class="n">${e.band_m ?? ''}m</td><td class="n col-dial">${kHz(e.dial_hz)}</td>
+    <td class="n">${e.bw_hz ?? ''}</td><td class="t">${esc(e.speed?.top)}</td><td>${pill(e)}</td>
+    <td class="n">${fmtDur(e.duration_s)}</td><td class="n">${e.distance_km == null ? '' : Math.round(e.distance_km)}</td>
+    <td class="audio col-audio">${[...new Set(e.audio.map(r => SHORT[r.kind]))].join(' &middot; ')}</td>
+    <td class="n col-power">${esc(txPower(e))}</td></tr>${state.open === e.id ? detail(e) : ''}`).join('');
+  shown = rows;
+  $('empty').hidden = rows.length > 0;
+  document.querySelectorAll('th[data-k]').forEach(th => th.setAttribute('aria-sort', th.dataset.k === key ? (dir > 0 ? 'ascending' : 'descending') : 'none'));
+  $('chip').hidden = !state.call;
+  $('chip').textContent = state.call ?? '';
+  const only = Object.entries({protocol: state.protocol, band: state.band, bw: state.bw, call: state.call, q: state.q,
+    since: state.since, until: state.until, hourFrom: state.hourFrom, hourThrough: state.hourThrough, timeZone: state.timeZone}).filter(([, v]) => v !== '' && v != null);
+  if (log.lotw) $('export').href = log.lotw + '?' + new URLSearchParams(only);
+  const heard = rows.filter(e => e.answered);
+  const bands = [...new Set(rows.map(e => e.band_m))].sort((a, b) => b - a);
+  $('counts').innerHTML = `<span><b>${rows.length}</b> entries</span><span class="hot"><b>${heard.length}</b> answered</span>
+    <span><b>${new Set(rows.map(e => e.call)).size}</b> stations</span><span><b>${new Set(heard.map(e => e.call)).size}</b> answering</span>
+    <span><b>${bands.map(b => b + 'm').join(' ') || '-'}</b></span>`;
+  if (state.view === 'summary') renderSummary(rows);
+  if (state.view === 'book') drawMap();
+}
+
+
+function renderSummary(rows) {
+  const report = LogSummary.build(rows, state.timeZone), t = report.total;
+  const rate = n => n == null ? '—' : `${n.toFixed(1)}%`;
+  const cards = [[t.attempts, 'Connect attempts'], [t.connected, 'Connected'], [rate(t.rate), 'Success rate'],
+    [t.peers, 'Unique peers'], [t.successfulPeers, 'Peers with success / QSO'], [t.failed, 'Failed'],
+    [t.pending, 'Pending / no teardown'], [t.imported, 'Imported QSOs'],
+    [t.sent, 'Messages sent'], [t.received, 'Messages received'], [t.delivered, 'Confirmed delivered'],
+    [t.meanDuration == null ? '—' : fmtDur(Math.round(t.meanDuration)), 'Mean success duration'],
+    [t.longest == null ? '—' : `${Math.round(t.longest)} km`, 'Farthest success / QSO']];
+  $('reportCards').innerHTML = cards.map(([n, label]) => `<div class="report-card"><b>${esc(n)}</b><span>${esc(label)}</span></div>`).join('');
+  const table = (group, label) => `<div class="report-table"><table><thead><tr><th>${label}</th>
+    ${['Peers', 'Success peers', 'Attempts', 'Answered', 'Connected', 'Failed', 'Pending', 'Success %', 'QSOs'].map(h => `<th class="n">${h}</th>`).join('')}
+    </tr></thead><tbody>${group.map(g => `<tr><td>${esc(g.label)}</td>${[g.peers, g.successfulPeers, g.attempts, g.answered, g.connected, g.failed, g.pending, rate(g.rate), g.imported].map(n => `<td class="n">${esc(n)}</td>`).join('')}</tr>`).join('') || '<tr><td colspan="10">Nothing matches.</td></tr>'}</tbody></table></div>`;
+  $('reportPeers').innerHTML = `<h3>Peers by band · highest observed success rate first</h3>${table(report.peers, 'Peer · band')}`;
+  const sections = [['bands', 'By band', 'Band'], ['protocols', 'By protocol', 'Protocol'],
+    ['presets', 'By operating preset', 'Protocol · preset'], ['speeds', 'By highest link speed', 'Protocol · speed'],
+    ['outcomes', 'By deepest milestone', 'Protocol · reached']];
+  $('reportTables').innerHTML = sections.map(([key, title, label]) => `<div class="report-section"><h3>${title}</h3>${table(report[key], label)}</div>`).join('');
+  const peak = Math.max(1, ...report.hours.flatMap(h => [h.connected, h.failed]));
+  $('reportHours').innerHTML = `<h3>Time of day · ${esc(state.timeZone)}</h3>
+    <p class="hour-key"><span class="success">■ Connected</span> &nbsp; ■ Failed · counts, same scale</p>
+    <div style="overflow:auto"><div class="hour-chart">${report.hours.map(h => `<div class="hour-column" title="${h.label}: ${h.connected} connected, ${h.failed} failed, ${h.pending} pending, ${h.imported} imported QSOs">
+      <div class="hour-bars"><i class="success" style="height:${100 * h.connected / peak}%"></i><i class="failure" style="height:${100 * h.failed / peak}%"></i></div><span>${h.label.slice(0, 2)}</span></div>`).join('')}</div></div>
+    <details style="margin:12px 0 24px"><summary>Hourly counts and success rates</summary>${table(report.hours, 'Hour')}</details>`;
+}
+
+function setup() {
+  homes = new Map(log.station.homes.map(h => [h.grid, h]));
+  $('me').textContent = [log.station.call, ...homes.keys()].join(' ');
+  $('export').hidden = !log.lotw;
+  const opts = (id, vals, fmt) => $(id).insertAdjacentHTML('beforeend', vals.map(v => `<option value="${esc(v)}">${fmt(v)}</option>`).join(''));
+  opts('protocol', [...new Set(log.entries.map(e => e.protocol))].sort(), v => v.toUpperCase());
+  opts('band', [...new Set(log.entries.map(e => e.band_m).filter(Boolean))].sort((a, b) => b - a), v => `${v} m`);
+  opts('bw', [...new Set(log.entries.map(e => e.bw_hz).filter(Boolean))].sort((a, b) => a - b), v => `${v} Hz`);
+  for (const id of ['hourFrom', 'hourThrough']) opts(id, Array.from({length: 24}, (_, h) => h), h => `${String(h).padStart(2, '0')}:00`);
+  for (const id of ['protocol', 'band', 'bw', 'since', 'until', 'hourFrom', 'hourThrough']) $(id).onchange = () => { state[id] = $(id).value; render(); };
+  try { state.scaleDots = localStorage.getItem('logbook.scaleDots') === 'true'; } catch {}
+  $('scaleDots').checked = state.scaleDots;
+  $('scaleDots').onchange = () => {
+    state.scaleDots = $('scaleDots').checked;
+    try { localStorage.setItem('logbook.scaleDots', String(state.scaleDots)); } catch {}
+    drawMap();
+  };
+  const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (localZone !== 'UTC') opts('timeZone', [localZone], v => `Local (${esc(v)})`);
+  $('timeZone').onchange = () => { state.timeZone = $('timeZone').value; render(); };
+  for (const [id, view] of [['bookView', 'book'], ['summaryView', 'summary']]) $(id).onclick = () => {
+    state.view = view;
+    $('bookViewPanel').hidden = view !== 'book';
+    $('summary').hidden = view !== 'summary';
+    $('sizeControl').hidden = view !== 'book';
+    $('bookView').setAttribute('aria-pressed', String(view === 'book'));
+    $('summaryView').setAttribute('aria-pressed', String(view === 'summary'));
+    render();
+    if (view === 'book') map.invalidateSize();
+  };
+  $('summaryCsv').onclick = () => {
+    const report = LogSummary.build(log.entries.filter(e => matches(e)), state.timeZone);
+    const url = URL.createObjectURL(new Blob([LogSummary.csv(report, state.timeZone)], {type: 'text/csv;charset=utf-8'}));
+    const a = document.createElement('a'); a.href = url; a.download = 'logbook-summary.csv'; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  $('answered').onchange = () => { state.answered = $('answered').checked; render(); };
+  $('q').oninput = () => { state.q = $('q').value.trim(); render(); };
+  $('chip').onclick = () => { state.call = null; render(); };
+  document.querySelectorAll('th[data-k]').forEach(th => th.onclick = () => {
+    state.dir = state.key === th.dataset.k ? -state.dir : (th.dataset.k === 'call' || th.dataset.k === 'protocol' ? 1 : -1);
+    state.key = th.dataset.k; render();
+  });
+  const body = $('rows');
+  const rowOf = ev => ev.target.closest('tr.row');
+  body.onclick = ev => { const tr = rowOf(ev); if (!tr) return; const e = shown[tr.dataset.i]; state.open = state.open === e.id ? null : e.id; render(); };
+  body.onmouseover = ev => { const tr = rowOf(ev); if (tr && !tr.contains(ev.relatedTarget)) highlight(shown[tr.dataset.i].call, true); };
+  body.onmouseout = ev => { const tr = rowOf(ev); if (tr && !tr.contains(ev.relatedTarget)) highlight(shown[tr.dataset.i].call, false); };
+
+  map = L.map('map', {worldCopyJump: true, zoomSnap: .5});
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 18,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'}).addTo(map);
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+  layers.paths.addTo(map); layers.markers.addTo(map);
+  for (const h of homes.values())
+    L.circleMarker([h.lat, h.lon], {radius: 6, weight: 2, color: cssVar('--ink'), fillColor: cssVar('--bg'), fillOpacity: 1})
+      .bindTooltip(`<b>${esc(log.station.call)}</b> ${esc(h.grid)}<br>${h.first_utc.slice(0, 10)} &ndash; ${h.last_utc.slice(0, 10)}`, {direction: 'top'}).addTo(map);
+  const legend = L.control({position: 'bottomleft'});
+  legend.onAdd = () => Object.assign(L.DomUtil.create('div', 'legend'), {innerHTML:
+    `<div><i style="background:${cssVar('--accent')}"></i>answered</div><div><i style="border:2px solid ${cssVar('--attempt')}"></i>attempts only</div>`});
+  legend.addTo(map);
+  const pts = log.entries.filter(e => e.lat != null).map(e => [e.lat, e.lon]);
+  map.fitBounds(L.latLngBounds([...pts, ...[...homes.values()].map(h => [h.lat, h.lon])]).pad(.1));
+  render();
+}
+
+fetch('log.json').then(r => r.json()).then(d => { log = d; setup(); })
+  .catch(err => { $('counts').textContent = `Could not load log.json: ${err}`; });
+</script>
+</body>
+</html>

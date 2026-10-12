@@ -18,9 +18,10 @@ LATE_CS1 = Path(__file__).with_name('fixtures') / 'ws8eoc-0913-late-cs1.wav'
 
 
 def session(tmp_path, monkeypatch, *, replies=0, retries=20, cycles=2,
-            interrupt_tail=None, reply_delay=0, reply_audio=None):
+            interrupt_tail=None, reply_delay=0, reply_audio=None, cwid_optional=False):
     clock, rig, keys = Clock(), _Rig(), []
     monkeypatch.setattr(onair.ota, 'Rig', lambda *a, **kw: rig)
+    monkeypatch.setattr(onair.ota, 'ptt_device', lambda *a, **kw: None)
     monkeypatch.setattr(onair, 'find_device', lambda *a, **kw: 0)
     monkeypatch.setattr(onair, '_LiveInput', lambda *a, **kw: clock)
     monkeypatch.setattr(onair, '_save_capture_async', lambda *a, **kw: None)
@@ -58,11 +59,13 @@ def session(tmp_path, monkeypatch, *, replies=0, retries=20, cycles=2,
 
         monkeypatch.setattr(onair, '_listen_until_answer', interrupted)
     args = _parsed('--transmit', '--serial', '/dev/null', '--dial', '7100000',
-                   '--outdir', str(tmp_path), '--pactor1-only', '--hold', '2',
-                   '--max-cycles', str(cycles), '--retries', str(retries))
-    if isinstance(interrupt_tail, SystemExit):
-        with pytest.raises(SystemExit, match='SIGTERM'):
+                   '--outdir', str(tmp_path / 'capture'), '--pactor1-only', '--hold', '2',
+                   '--max-cycles', str(cycles), '--retries', str(retries),
+                   *(['--cwid-optional'] if cwid_optional else []))
+    if isinstance(interrupt_tail, (KeyboardInterrupt, SystemExit)):
+        with pytest.raises(type(interrupt_tail)) as stopped:
             onair.run(args)
+        assert stopped.value is interrupt_tail
     else:
         onair.run(args)
     assert clock.closed
@@ -82,14 +85,25 @@ def test_unanswered_budget_waits_two_full_cycles_without_more_calls(
     assert 'FINAL CALL LISTEN' in capsys.readouterr().out
 
 
+def closing_ids(keys):
+    ids = [k for k in keys if k[0].startswith('ID ')]
+    assert ids == keys[len(keys) - len(ids):], 'CW ID before the session closed'
+    return len(ids)
+
+
+@pytest.mark.parametrize('optional', [False, True])
+@pytest.mark.parametrize('replies', [5, 8, 12])
 @pytest.mark.parametrize('cycles,retries', [(2, 20), (20, 2)])
 def test_late_peer_connects_and_gets_data_instead_of_cw(
-        tmp_path, monkeypatch, capsys, cycles, retries):
-    keys = session(tmp_path, monkeypatch, replies=5, cycles=cycles, retries=retries)
+        tmp_path, monkeypatch, capsys, cycles, retries, replies, optional):
+    """Eight and twelve replies keep the peer on the air into the link's last
+    cycles, which the grid would project forward past the session's end."""
+    keys = session(tmp_path, monkeypatch, replies=replies, cycles=cycles,
+                   retries=retries, cwid_optional=optional)
     assert len([k for k in keys if k[0].startswith('connect->')]) == 3
     first_data = next(k for k in keys if k[0].startswith('P1 pkt#1'))
     assert (first_data[1] - keys[0][1]) % round(1.25 * onair.FS) == 0
-    assert not any(k[0].startswith('ID ') for k in keys)
+    assert closing_ids(keys) == (0 if optional else 1)
     assert '** CONNECTED to' in capsys.readouterr().out
 
 
@@ -105,7 +119,7 @@ def test_candidate_near_tail_deadline_gets_time_to_confirm(
         tmp_path, monkeypatch, capsys, delay):
     keys = session(tmp_path, monkeypatch, replies=5, reply_delay=delay)
     assert any(k[0].startswith('P1 pkt#1') for k in keys)
-    assert not any(k[0].startswith('ID ') for k in keys)
+    assert closing_ids(keys) == 1
     trace = capsys.readouterr().out
     assert 'exact candidate extends listening' in trace
     assert '** CONNECTED to' in trace
@@ -126,7 +140,7 @@ def test_recorded_late_cs1_can_corroborate_in_the_extended_listen(
     keys = session(tmp_path, monkeypatch, replies=5, reply_delay=1,
                    reply_audio=pcm.astype(np.float32) / 32768)
     assert any(k[0].startswith('P1 pkt#1') for k in keys)
-    assert not any(k[0].startswith('ID ') for k in keys)
+    assert closing_ids(keys) == 1
     assert 'exact candidate extends listening' in capsys.readouterr().out
 
 
@@ -143,7 +157,11 @@ def test_candidate_extensions_have_an_absolute_ceiling():
 
 
 @pytest.mark.parametrize('ending', [KeyboardInterrupt(), SystemExit('SIGTERM')])
-def test_interrupt_during_final_listen_closes_without_cw(tmp_path, monkeypatch, ending):
+def test_interrupt_during_final_listen_closes_without_cw(tmp_path, monkeypatch, capsys,
+                                                        ending):
     keys = session(tmp_path, monkeypatch, interrupt_tail=ending)
     assert len(keys) == 3
     assert all(k[0].startswith('connect->') for k in keys)
+    out = capsys.readouterr().out
+    assert out.count('IDENTIFICATION NOT CONFIRMED') == 1
+    assert out.index('PTT off.') < out.index('send W9SSJ by hand')

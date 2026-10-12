@@ -54,6 +54,16 @@ FECMODE_VALUES = (
 DATA_TAGS = ("ARQ", "FEC", "ERR", "IDF")
 
 
+def _hang_up(sock: socket.socket) -> None:
+    # Linux neither sends FIN nor wakes a recv or accept blocked in another
+    # thread on close() alone; shutdown does both.
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    sock.close()
+
+
 class Fault(Exception):
     """Raised by a command handler; the server renders it ``FAULT <text>``."""
 
@@ -170,7 +180,7 @@ class HostServer(ModemObserver):
             data, self._data_sock = self._data_sock, None
         for sock in (*self._listeners, cmd, data):
             if sock is not None:
-                sock.close()
+                _hang_up(sock)
         for t in self._accepting:
             t.join(timeout=1.0)
         self._listeners, self._accepting = [], []
@@ -209,7 +219,7 @@ class HostServer(ModemObserver):
         with self._cmd_lock:
             displaced, self._cmd_sock = self._cmd_sock, conn
         if displaced is not None:
-            displaced.close()          # its reader unwinds on the closed socket
+            _hang_up(displaced)
         buf = bytearray()
         try:
             while self._running:
@@ -277,7 +287,7 @@ class HostServer(ModemObserver):
         with self._data_lock:
             displaced, self._data_sock = self._data_sock, conn
         if displaced is not None:
-            displaced.close()
+            _hang_up(displaced)
         try:
             while self._running:
                 hdr = self._recv_exactly(conn, 2)

@@ -172,27 +172,100 @@ def test_the_working_record_shrike_is_measured_on_is_reachable():
 
 def test_the_gateway_packets_shrikes_p3_acquisition_is_read_from_are_reachable():
     _reachable(archive.ws8eoc_p3(),
-               repairable=archive.P3_FIXTURES.is_dir(),
+               repairable=evidence.private_source_tree(evidence.TREE, evidence.RECORD) or
+                          any(p.exists() for p in archive.WS8EOC_P3_INDEX),
                at=archive.P3_FIXTURES,
                what="WS8EOC PACTOR-3 cuts",
                how="git holds them, so `git checkout -- "
                    "packages/hfmodem/hfmodem/tests/shrike/fixtures` restores them "
-                   "on a source tree; the WAVs are a megabyte the publication "
-                   "boundary does not spend, so from a distribution the whole "
-                   "directory is gone by design.")
+                   "on a source tree; these indexes and their WAVs are excluded "
+                   "from the distribution by design.")
 
 
 def test_the_station_records_kestrels_live_results_rest_on_are_reachable():
+    lost = {p: flight for p, flight in corpora.STATION_LOST.items() if not p.exists()}
+    if lost:
+        warnings.warn(
+            f"LOST STATION RECORDINGS: {len(lost)} original recordings remain unavailable; "
+            "substitutes do not restore their receiver-specific evidence:\n  "
+            + "\n  ".join(f"{p}: restoring flight: {flight}" for p, flight in lost.items()),
+            stacklevel=2)
+    for manifest, _ in corpora.STATION_MANIFESTS:
+        if evidence.private_source_tree(evidence.TREE, evidence.RECORD):
+            assert manifest.is_file(), f"Missing station evidence manifest: {manifest}"
+    from hfmodem.tests import d_evidence
+    logs = d_evidence.FIXTURES / "logs.json"
+    if logs.is_file():
+        for row in evidence.manifest_rows(logs):
+            d_evidence.log(row["file"])
+    # Check tracked clips before external absence can skip the gate. Hash damage
+    # must also fail even if a different external recording is absent.
+    for path, manifest in corpora.STATION_CHECKED:
+        if manifest.name != "external.json" or path.exists():
+            evidence.checked_samples(path, manifest)
     _reachable(corpora.STATION_RECORDS,
-               repairable=any(d.is_dir() for d in (evidence.WORKING,
-                                                   evidence.LOGS,
-                                                   evidence.CAPTURES)),
+               repairable=any(d.is_dir() for d in
+                              (evidence.WORKING, evidence.LOGS, evidence.CAPTURES)),
                at=evidence.RECORD,
                what="this station's own session records",
-               how="They are written by a run, under gitignored working/, logs/ "
-                   "and captures/, so a clone never has them and only this "
-                   "station can produce more. Keep them or lose the results "
-                   "resting on them.")
+               how="The surviving originals and checked substitutes are declared "
+                   "in corpora.STATION_RECORDS and STATION_MANIFESTS. Install "
+                   "external manifest files create-only under captures/test-evidence; "
+                   "lost receiver-specific pins need the flights named by their skips. "
+                   "Missing files: " + ", ".join(str(p) for p in corpora.STATION_RECORDS
+                                                if not p.exists()))
+
+
+def test_every_lost_original_is_present_or_has_a_restoring_flight():
+    if not evidence.private_source_tree(evidence.TREE, evidence.RECORD):
+        pytest.skip(f"Station original recordings omitted from distribution: {evidence.WORKING}")
+    assert len(corpora.STATION_ORIGINALS) == 32
+    for path in corpora.STATION_ORIGINALS:
+        assert path.exists() or corpora.STATION_LOST.get(path), path
+    assert all(flight.strip() for flight in corpora.STATION_LOST.values())
+
+
+@pytest.mark.parametrize("repairable", [False, True], ids=["published", "station"])
+def test_missing_external_station_evidence_obeys_repairability(tmp_path, monkeypatch, repairable):
+    missing = tmp_path / "external.flac"
+    monkeypatch.setattr(corpora, "STATION_MANIFESTS", ())
+    monkeypatch.setattr(corpora, "STATION_CHECKED", ())
+    monkeypatch.setattr(corpora, "STATION_LOST", {})
+    monkeypatch.setattr(corpora, "STATION_RECORDS", (missing,))
+    for name in ("WORKING", "LOGS", "CAPTURES"):
+        monkeypatch.setattr(evidence, name, tmp_path / name)
+    if repairable:
+        evidence.CAPTURES.mkdir()
+        with pytest.raises(pytest.fail.Exception, match="external.flac"):
+            test_the_station_records_kestrels_live_results_rest_on_are_reachable()
+    else:
+        with pytest.warns(UserWarning, match="external.flac"), pytest.raises(pytest.skip.Exception):
+            test_the_station_records_kestrels_live_results_rest_on_are_reachable()
+
+
+@pytest.mark.parametrize("kind", ["source", "origin", "partial", "published"])
+def test_ws8eoc_absence_distinguishes_a_checkout_from_a_distribution(tmp_path, monkeypatch, kind):
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    (fixtures / "unrelated.json").write_text("{}")
+    indexes = (fixtures / "ws8eoc-0908-p3.json", fixtures / "ws8eoc-0909-p3.json")
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "working").mkdir()
+    origin = tmp_path / "origin"
+    if kind in {"source", "origin"}:
+        marker = (tmp_path if kind == "source" else origin) / "publish" / "manifest.toml"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("# development source")
+    if kind == "partial":
+        indexes[0].write_text("[]")
+    monkeypatch.setattr(evidence, "TREE", tmp_path)
+    monkeypatch.setattr(evidence, "RECORD", origin)
+    monkeypatch.setattr(archive, "P3_FIXTURES", fixtures)
+    monkeypatch.setattr(archive, "WS8EOC_P3_INDEX", indexes)
+    outcome = pytest.skip.Exception if kind == "published" else pytest.fail.Exception
+    with pytest.raises(outcome, match="(?i)WS8EOC PACTOR-3 cuts"):
+        test_the_gateway_packets_shrikes_p3_acquisition_is_read_from_are_reachable()
 
 
 def test_the_gateway_recordings_shrikes_schedules_are_run_against_are_reachable():
@@ -236,3 +309,12 @@ def test_the_recordings_sabir_was_first_heard_on_are_reachable():
                    "them and only this station can make more. Without them the "
                    "beacon rungs are measured on a channel with no fading in it, "
                    "which is what let beacon_short reach the air.")
+
+
+def test_public_robust_packet_recordings_are_reachable():
+    from hfmodem.tests.brubru import corpus
+
+    _reachable(corpus.RECORDINGS,
+               repairable=any(p.exists() for p in corpus.RECORDINGS),
+               at=corpus.ROOT, what="public Robust Packet recordings",
+               how="The three named public recordings remain external corpus inputs.")

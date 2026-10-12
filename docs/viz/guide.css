@@ -16,3 +16,19 @@ figcaption,.figsrc{font:12px/1.6 var(--mono);color:var(--ink-dim)}.diagram-key{f
 table{font-size:13px}td,th{padding:12px 14px}footer{font:12px/1.7 var(--mono);color:var(--ink-dim);padding-block:32px}.site-theme{display:none}
 @media(max-width:700px){.wrap,.site-header-inner{width:calc(100% - 36px)}.hero,.hero.wrap,header.hero,section{padding-block:32px}.grid,.split{grid-template-columns:minmax(0,1fr)}.flow,.pkt{flex-wrap:wrap}.flow .stg,.pkt .seg{min-width:100px}.frequency-chart{min-width:500px}.frequency-scroll{overflow-x:auto}.site-nav{gap:2px 16px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+/* Keyboard, switch and voice users use the same native controls as pointer users. */
+:focus-visible{outline:3px solid var(--ink)!important;outline-offset:4px!important}
+button,input,select,summary{min-height:44px;min-width:44px}
+button,input,select{max-width:100%}.seg,.seg-ctl{flex-wrap:wrap}
+.stage .ctl{flex-wrap:wrap;justify-content:flex-end;max-width:calc(100% - 24px)}
+.diagram-data{margin-block:14px}.diagram-data summary{padding:10px 0;font:13px/1.6 var(--mono)}
+.diagram-data caption{text-align:left;padding-block:12px;color:var(--ink-dim)}
+.diagram-data td,.diagram-data th{white-space:normal}.diagram-data table{min-width:420px}
+.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+@media(forced-colors:active){:focus-visible{outline-color:Highlight!important}button.on{border:3px solid Highlight}.stage canvas{border:1px solid CanvasText}}
+/* Family hues retain their identities with readable text in both themes. */
+:root{--shrike:#245fa5;--kestrel:#8a500a;--besra:#a9324e;--sabir:#766439;--mid:#775006;--pend:#a63251}
+@media(prefers-color-scheme:dark){:root{--shrike:#68a8f0;--kestrel:#f2b85e;--besra:#f584a0;--sabir:#c3b589;--mid:#ecc56b;--pend:#f18da8}}
+.bitbar span.fa,.bitbar span.fb,.bitbar span.fv,.bitbar span.fm,.bitbar span.fg{color:var(--ink)}
+.callout a{color:var(--ink);text-decoration:underline}

@@ -115,6 +115,11 @@ The names identify protocols, products and interoperability targets.
   SCS         The developer of the PACTOR controllers whose host command set is
               named descriptively where a modem here emulates it.
 
+  KiwiSDR     A networked HF receiver. hfhost opens one as an audio source,
+              speaking its stream protocol through code written here.
+              kiwiclient, the client its developers publish, carries no
+              licence, so none of it is copied into this project.
+
 The tests and the documents also name the software they were measured against or
 run beside -- ardopcf, M0LTE.Ardop, PMON, Hamlib, Winlink Express, RMS Trimode --
 in order to say what was compared with what. None of it is redistributed here.

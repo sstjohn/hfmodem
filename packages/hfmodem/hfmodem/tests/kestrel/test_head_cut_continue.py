@@ -50,7 +50,7 @@ def test_native_night_lead_is_deaf_and_seven_pairs_match_stock():
     hs, _ = pending()
     x = recorded('night-caller-over2')
     assert strict(x) == 0
-    assert VF.OVER_CONTINUE_RESPONDER_BY_LINK[('W9SSJ', 'KC9GHZ', '2750')] == PAIRS
+    assert VF.over_continue('KC9GHZ', '2750')[1] == PAIRS
     assert hs._peer_over_continue(x)
 
 
@@ -96,7 +96,7 @@ def test_strong_wrong_tail_and_incomplete_tail_do_not_advance():
 
 
 @pytest.mark.parametrize('field,value', [
-    ('caller', 'OTHER'), ('called', 'KB5LZK'), ('bw', '2300'),
+    ('called', 'KB5LZK'), ('bw', '2300'),
     ('state', VA.VaraState.CONNECTING), ('role', 'responder'),
     ('turn', VA._TURN_PEER), ('turn', VA._TURN_ASKED),
     ('_tx_pending', None), ('_txq', []),
@@ -113,12 +113,23 @@ def test_short_pending_body_is_not_an_intermediate_full_frame():
     assert not hs._peer_over_continue(recorded('night-caller-over2'))
 
 
+def test_a_lowered_record_reads_the_same_head_cut_tail():
+    hs, _ = pending()
+    lower = phy.lower_level(hs.bw, hs._tx_pending[2])
+    size = phy.body_size(hs.bw, lower)
+    body = phy.vara_body(b'A' * (size - 1), hs.caller, tail=0x89, body_len=size)
+    hs._tx_pending = (body, 2, lower)
+    x = recorded('night-caller-over2')
+    assert hs._peer_head_cut_continue(x, VA._top3_track(x, band=hs._band))
+    assert hs._peer_over_continue(x)
+
+
 def test_known_nak_and_ack_vetoes_still_precede_the_fallback(monkeypatch):
     hs, _ = pending()
     x = recorded('night-caller-over2')
-    monkeypatch.setattr(hs, '_peer_nak', lambda *a, **kw: True)
+    monkeypatch.setattr(hs, '_peer_nak_at', lambda *a, **kw: 4800)
     assert not hs._peer_over_continue(x)
-    monkeypatch.setattr(hs, '_peer_nak', lambda *a, **kw: False)
+    monkeypatch.setattr(hs, '_peer_nak_at', lambda *a, **kw: None)
     monkeypatch.setattr(VA, '_ack_plateau', lambda *a, **kw: VA._ACK_PLATEAU)
     assert not hs._peer_over_continue(x)
 

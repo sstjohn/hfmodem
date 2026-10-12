@@ -99,7 +99,7 @@ def test_unsolicited_request_queries_but_does_not_acknowledge_final_data():
     # it asks, so a turn-request behind it retires the over [see vara_arq
     # _took_turn_request; test_caller_in_peer_turn]. This case keeps the 2300
     # INTERMEDIATE shape, which still retains the turn and retries the data.
-    ('2750', 89, False), ('2750', 79, True), ('2300', 79, True), ('500', 12, False),
+    ('2750', 89, False), ('2750', 79, True), ('2300', 79, True),
 ])
 def test_unmeasured_pending_shapes_close_without_blind_data_retry(bw, payload, extra):
     hs, io = pending(bw, payload, extra)
@@ -111,6 +111,17 @@ def test_unmeasured_pending_shapes_close_without_blind_data_retry(bw, payload, e
     assert hs.state == VA.VaraState.DISCONNECTED
     assert not np.array_equal(io.sent[0], io.sent[1])
     assert hs._final_query_attempts == 0
+
+
+def test_a_narrow_close_is_queried_rather_than_closed_on():
+    """BW500 has no final query, and a stock receiver that missed the close
+    answers the ordinary query with its over-NAK  [test_bw500_oracle_0923]."""
+    hs, io = pending('500', 12)
+    original = hs._tx_pending
+    hs._retry_data_over(final_query=True)
+    assert hs._tx_pending == original and hs._tx_retries == 0
+    assert hs.state == VA.VaraState.CONNECTED and len(io.sent) == 2
+    assert hs._intermediate_query_attempts == 1
 
 
 def test_corrupted_final_ack_does_not_retire_or_solicit_on_noise():
@@ -183,11 +194,11 @@ def test_reply_after_query_window_opens_another_query_not_a_false_ack(age_source
     assert is_burst(io.sent[-1], VF.SESSION_FINAL_ANSWER_QUERY)
 
 
-def test_explicit_nak_retries_data_and_invalidates_query():
+def test_a_peer_asked_retry_repeats_data_and_invalidates_query():
     hs, io = pending()
     original = hs._tx_pending
     hs._retry_data_over(final_query=True)
-    hs._took_nak()
+    hs._retry_data_over(peer_asked=True)
     assert np.array_equal(io.sent[0], io.sent[-1])
     assert hs._tx_pending == original and hs._final_query_for is None
 

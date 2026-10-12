@@ -45,10 +45,8 @@ def _check(label: str, ok: bool, detail: str) -> bool:
 def gate_roundtrip() -> bool:
     print("Gate 1 - round-trip on shrike's own connect TX")
     ok = True
-    # 1..7 chars: a 7-char callsign fills the address image up to its 0x0F
-    # terminator at T[8]; an 8-char one leaves no room for the terminator in the
-    # 9-byte 100-Bd address section, which the encoder cannot represent standalone.
-    for call in ["W1AW", "DL6MAA", "K7ABC", "N0CALL", "VK2XYZ", "AB1CDEF"]:
+    for call in ["W1AW", "DL6MAA", "K7ABC", "N0CALL", "VK2XYZ", "AB1CDEF",
+                 "N3HYM-10"]:
         audio = pactor1.connect_signal(call)
         c = p1rx.decode_connect(audio)
         got = c.callsign if c else None

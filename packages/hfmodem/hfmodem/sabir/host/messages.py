@@ -62,7 +62,7 @@ RS_LINK_FAILED = 3                 # rebuild limit / no progress
 RS_REFUSED = 4                     # negotiation CFAIL (NEGOTIATION.md §4.3)
 
 # -- operating-profile codes (§7) --------------------------------------------
-PF_AMATEUR = 1                     # US Part 97
+PF_AMATEUR = 1                     # amateur profile label
 PF_UNRESTRICTED = 2
 
 # -- error codes (§5) --------------------------------------------------------

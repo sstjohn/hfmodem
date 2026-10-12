@@ -10,6 +10,9 @@ opinion or the RF; it proves everything nearer than those.
 """
 from __future__ import annotations
 
+import numpy as np
+import pytest
+
 from hfmodem.station.mail import ArdopLoopback, ArdopMail
 from hfmodem.winlink import B2FSession, MailClient, MailExchange, compose
 
@@ -262,3 +265,270 @@ def test_a_radio_mail_run_refuses_to_start_unarmed(tmp_path):
         capture_output=True, text=True, timeout=60, cwd=tmp_path)
     assert r.returncode == 2
     assert "pass --transmit" in r.stderr
+
+
+# The closing identification at the rig: the real `RadioLink` with its audio
+# devices replaced, each burst it plays written down in order with the modem's
+# own edges.
+
+class _Wired(_WiredModem):
+    expected_session = rx_epoch = None
+
+    def __init__(self, rms, events):
+        super().__init__(rms)
+        self.events = events
+
+    def connect(self, target, repeats=5):
+        from hfmodem.besra.phy.modulator import render_frame
+        self.events.append("connect")
+        self.audio_out(render_frame(0x50, bytes(range(64)), session_id=1).astype(np.float32))
+        super().connect(target, repeats)
+
+    def disconnect(self):
+        self.events.append("disconnect")
+        if self.fail:
+            raise RuntimeError("modem fault")
+        super().disconnect()
+
+    def stop(self):
+        self.events.append("stop")
+        if getattr(self, "stop_failure", False):
+            raise RuntimeError("modem stop failed")
+
+    def status(self, text):
+        pass
+
+    fail = False
+
+
+def _closing(monkeypatch, tmp_path, *flags, played=None, interrupt=False, fail=False,
+             first_failure=None, cleanup=None, refuse=False, diagnostics=None):
+    import sys
+    from hfmodem.besra import radio
+    from hfmodem.besra.host import run_server
+    events = []
+    modem = _Wired(B2FSession("K7ABC", role="answering", target="W9SSJ"), events)
+    modem.fail = fail
+    modem.stop_failure = cleanup == "modemstop"
+    edges = []
+
+    class Rig:
+        line_ptt, settle = False, 0.0
+
+        def ptt(self, on):
+            edges.append("key" if on else "unkey")
+            if not on and cleanup == "unkey":
+                raise RuntimeError("unkey failed")
+            return not (on and refuse)
+
+        def stop(self):
+            edges.append("rigstop")
+            if cleanup == "stop":
+                raise RuntimeError("rig stop failed")
+
+    link = radio.RadioLink(modem, rig=Rig() if diagnostics is not None else None)
+    if diagnostics is not None:
+        diagnostics.update(link=link, edges=edges, events=events)
+
+    def play(audio, fs, device):
+        if first_failure is not None and "stop" not in events:
+            raise first_failure
+        if interrupt and "stop" in events:
+            raise KeyboardInterrupt
+        events.append(("play", len(audio)))
+        if played is not None:
+            played.append(audio)
+
+    monkeypatch.setattr(radio, "play_drained", play)
+    monkeypatch.setattr(radio, "warm_output", lambda device: None)
+    monkeypatch.setattr(run_server, "_radio_modem", lambda args: (modem, link))
+    if cleanup == "report":
+        def failed_report():
+            raise RuntimeError("host report failed")
+        monkeypatch.setattr(run_server.rates, "host_report", failed_report)
+    monkeypatch.setattr(sys, "argv", ["besra", "--radio", "ft891", "--transmit",
+        "--call", "K7ABC", "--mycall", "W9SSJ", "--mail-fetch",
+        "--mail-out", str(tmp_path), *flags])
+    run_server.main()
+    return events
+
+
+def _id_samples():
+    from hfmodem.besra import radio
+    from hfmodem.core import cwid
+    return round(len(cwid.audio("W9SSJ", fs=radio.SAMPLE_RATE)) * radio.FS_RADIO
+                 / radio.SAMPLE_RATE)
+
+
+def test_an_ardop_mail_run_identifies_straight_after_the_modem_stops(monkeypatch, tmp_path):
+    events = _closing(monkeypatch, tmp_path)
+    assert events[0] == "connect" and events[1][0] == "play"
+    assert events[events.index("stop") + 1:] == [("play", _id_samples())]
+    assert events.index("disconnect") < events.index("stop")
+
+
+def test_cwid_optional_leaves_identification_to_ardop(monkeypatch, tmp_path):
+    events = _closing(monkeypatch, tmp_path, "--cwid-optional")
+    assert events[-1] == "stop"
+
+
+@pytest.mark.parametrize('optional', [False, True])
+def test_tactical_call_and_distinct_closing_cw(monkeypatch, tmp_path, optional):
+    from hfmodem.besra.frame.callsign import pack_callsign, unpack_callsign
+    from hfmodem.tests.kestrel.test_station_id import _decode
+    from hfmodem.besra import radio
+    from hfmodem.core import cwid
+    calls, played = [], []
+    original = _WiredModem.set_mycall
+    def set_mycall(modem, call):
+        calls.append(unpack_callsign(pack_callsign(call)))
+        return original(modem, call)
+    monkeypatch.setattr(_WiredModem, 'set_mycall', set_mycall)
+    flags = ['--mycall=TACTIC', '--idcall=K1ABC'] + (['--cwid-optional'] if optional else [])
+    _closing(monkeypatch, tmp_path, *flags, played=played)
+    assert calls == ['TACTIC']
+    assert _decode(played[-1], cwid.WPM, fs=radio.FS_RADIO) == 'K1ABC'
+
+
+def test_distinct_optional_unwind_names_cw_call(monkeypatch, tmp_path, capsys):
+    with pytest.raises(RuntimeError, match='modem fault'):
+        _closing(monkeypatch, tmp_path, '--mycall=TACTIC', '--idcall=K1ABC',
+                 '--cwid-optional', fail=True)
+    output = capsys.readouterr().out
+    assert output.count('send K1ABC by hand') == 1 and 'send TACTIC by hand' not in output
+
+
+def test_bad_cw_call_refuses_before_ardop_hardware(monkeypatch):
+    import sys
+    from hfmodem.besra.host import run_server
+    monkeypatch.setattr(run_server, '_radio_modem', lambda *a: pytest.fail('modem opened'))
+    monkeypatch.setattr(sys, 'argv', ['besra', '--radio', 'ft891', '--transmit',
+                                    '--call', 'K7ABC', '--mycall', 'TACTIC',
+                                    '--idcall=ß', '--mail-fetch'])
+    with pytest.raises(SystemExit) as exc:
+        run_server.main()
+    assert exc.value.code == 2
+
+
+def test_an_interrupted_ident_says_identify_by_hand_and_still_ends_the_run(
+        monkeypatch, tmp_path, capsys):
+    with pytest.raises(KeyboardInterrupt):
+        _closing(monkeypatch, tmp_path, interrupt=True)
+    assert "send W9SSJ by hand" in capsys.readouterr().out
+
+
+def test_a_run_that_fails_after_keying_says_identify_by_hand(monkeypatch, tmp_path, capsys):
+    with pytest.raises(RuntimeError, match="modem fault"):
+        _closing(monkeypatch, tmp_path, fail=True)
+    assert capsys.readouterr().out.count("send W9SSJ by hand") == 1
+
+
+def test_an_identification_that_does_not_play_says_identify_by_hand(
+        monkeypatch, capsys):
+    from hfmodem.besra import radio
+    from hfmodem.besra.host import run_server
+
+    class _Refusing:
+        def ptt(self, on):
+            return False if on else True
+        line_ptt, settle = False, 0.0
+
+    monkeypatch.setattr(radio, "warm_output", lambda device: None)
+    link = radio.RadioLink(_Wired(None, []), rig=_Refusing())
+    link.bursts_sent, link.burst_level = 1, (.3, .6)
+    run_server._identify(link, "W9SSJ", 500)
+    assert link.bursts_sent == 1
+    assert "send W9SSJ by hand" in capsys.readouterr().out
+
+
+def test_the_closing_id_sounds_at_the_channel_centre_and_the_data_level(
+        monkeypatch, tmp_path):
+    from hfmodem.besra import radio
+    from hfmodem.core import levels
+    played = []
+    diagnostics = {}
+    _closing(monkeypatch, tmp_path, played=played, diagnostics=diagnostics)
+    data, ident = played[0], played[-1]
+    spectrum = np.abs(np.fft.rfft(ident))
+    assert np.fft.rfftfreq(ident.size, 1 / radio.FS_RADIO)[spectrum.argmax()] == \
+        pytest.approx(1500, abs=2)
+    assert levels.sounding_rms(ident) == pytest.approx(levels.sounding_rms(data), rel=.02)
+    assert np.abs(ident).max() < np.abs(data).max()
+    assert diagnostics["link"].burst_level[0] == pytest.approx(levels.sounding_rms(data))
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit("SIGTERM"),
+                                    RuntimeError("first playback failed")])
+@pytest.mark.parametrize("cleanup", [None, "stop", "report", "modemstop", "unkey"])
+def test_first_ardop_burst_unwind_warns_after_unkey_and_preserves_signals(
+        monkeypatch, tmp_path, capsys, failure, cleanup):
+    diagnostics = {}
+    expected = type(failure) if not isinstance(failure, Exception) or cleanup is None \
+        else RuntimeError
+    with pytest.raises(expected) as stopped:
+        _closing(monkeypatch, tmp_path, first_failure=failure, cleanup=cleanup,
+                 diagnostics=diagnostics)
+    if not isinstance(failure, Exception) or cleanup is None:
+        assert stopped.value is failure
+    link = diagnostics["link"]
+    assert diagnostics["edges"] == ["key", "unkey", "rigstop"]
+    assert link.bursts_sent == 0 and link.burst_level is None
+    assert capsys.readouterr().out.count("send W9SSJ by hand") == 1
+
+
+@pytest.mark.parametrize("cleanup", [None, "stop"])
+def test_the_host_report_keeps_session_threads_but_prints_after_radio_close(
+        monkeypatch, tmp_path, capsys, cleanup):
+    import threading
+    from hfmodem.besra import radio
+    from hfmodem.besra.host import run_server
+
+    retired = threading.Event()
+    worker = threading.Thread(target=retired.wait, name="test-session-rx")
+    worker.start()
+    sample = run_server.rates.host_report
+    close = radio.RadioLink.close
+    reports = []
+
+    def assembled_report():
+        assert worker.is_alive(), "session threads retired before the host sample"
+        report = sample()
+        reports.append(report)
+        return report
+
+    def retire(link):
+        assert len(reports) == 1
+        assert reports[0] not in capsys.readouterr().out
+        try:
+            close(link)
+        finally:
+            retired.set()
+            worker.join(timeout=1)
+            assert not worker.is_alive()
+            print("radio teardown finished")
+
+    monkeypatch.setattr(run_server.rates, "host_report", assembled_report)
+    monkeypatch.setattr(radio.RadioLink, "close", retire)
+    try:
+        if cleanup is None:
+            _closing(monkeypatch, tmp_path, diagnostics={})
+        else:
+            with pytest.raises(RuntimeError, match="rig stop failed"):
+                _closing(monkeypatch, tmp_path, cleanup=cleanup, diagnostics={})
+        out = capsys.readouterr().out
+        assert out.count(reports[0]) == 1
+        assert out.index("radio teardown finished") < out.index(reports[0])
+    finally:
+        retired.set()
+        worker.join(timeout=1)
+
+
+def test_an_ardop_session_with_only_refused_keys_warns_without_keying_id(
+        monkeypatch, tmp_path, capsys):
+    diagnostics = {}
+    _closing(monkeypatch, tmp_path, refuse=True, diagnostics=diagnostics)
+    assert diagnostics["link"].bursts_sent == 0
+    assert diagnostics["edges"] == ["key", "unkey", "rigstop"]
+    out = capsys.readouterr().out
+    assert "no completed data burst for identification level" in out
+    assert out.count("send W9SSJ by hand") == 1

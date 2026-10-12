@@ -48,6 +48,7 @@ from hfmodem.core.audio import AudioError, StationAudio, StreamLane
 from hfmodem.core.config import StationConfig
 from hfmodem.core.ptt import PttError, RtsPtt
 from hfmodem.core.rates import CARD_RATE_HZ
+from hfmodem.core.rigs import RIGS, resolve_rig
 from hfmodem.core.rig import Cat, Rig, RigError, unkey_on_signal
 
 #: How long each stream is listened to before its level is believed.
@@ -79,8 +80,8 @@ STARVED_FRACTION = 0.5
 #: measured figure for the FT-891, with the slack its own gate used. It lives
 #: here because the unified station has no cycle budget yet and this is the only
 #: thing that checks the number; it belongs beside that budget when there is one.
-TR_RECOVERY_S = 0.055
-TR_RECOVERY_SLACK_S = 0.015
+TR_RECOVERY_S = RIGS[resolve_rig()]["tr_switch_s"]
+TR_RECOVERY_SLACK_S = RIGS[resolve_rig()]["tr_recovery_slack_s"]
 
 #: A crystal is out by tens of ppm. Three orders of magnitude past that is not a
 #: crystal — it is a card running at a rate nobody asked for, and every sample
@@ -125,6 +126,8 @@ class Line:
 
 def run(cfg: StationConfig) -> int:
     """Measure the station. 0 only when every line was measured and passed."""
+    if cfg.selected_rig != "ft891":
+        cfg.require_audio("preflight", input=True, output=True, drive=True, floor=True)
     return Preflight(cfg).run()
 
 

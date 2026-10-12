@@ -55,10 +55,14 @@ class ElapsedPCM:
     def clamp_late(self, at):
         return max(0, self.samples + self.key_notice - at)
 
-    def transmit(self, audio, *, at, settle, key, max_key):
+    def transmit(self, audio, *, at, settle, key, max_key, admit=None):
         assert not self.clamp_late(at), "production guard allowed late RF"
         assert len(audio) / FS <= max_key
-        self.keyed_at = max(self.samples, at - round(settle * FS))
+        keyed_at = max(self.samples, at - round(settle * FS))
+        self.wait_until(keyed_at)
+        if admit is not None:
+            admit()
+        self.keyed_at = keyed_at
         self.keyed_s = (at + len(audio) - self.keyed_at) / FS
         self.emissions.append((at, at + len(audio), self.keyed_at))
         self.samples = at + len(audio)
@@ -165,25 +169,102 @@ def test_cs6_then_retry_acks_keep_monotonic_clock_and_command_epoch(
     assert s.host.rcvd_total == len(b' Trim')
 
 
+def _drain_fault(s, tx, clock, monkeypatch, *, sustained):
+    bridge, render = s.rx.bridge, tx._render_p3_control
+    reads, attempts = [], []
+
+    def stalled_bridge(audio):
+        before = clock.samples
+        bridge(audio)
+        charge = round(.035 * FS) if sustained or not reads else 0
+        clock.samples += charge
+        reads.append((clock.pos, len(audio), before, clock.samples, charge))
+
+    def traced_render(*args, **kwargs):
+        slot = tx.slot
+        first = len(reads)
+        result = render(*args, **kwargs)
+        attempts.append((slot, clock.pos, clock.samples, tx.refused,
+                         reads[first:]))
+        return result
+
+    monkeypatch.setattr(s.rx, 'bridge', stalled_bridge)
+    monkeypatch.setattr(tx, '_render_p3_control', traced_render)
+    return reads, attempts
+
+
 def test_stall_in_final_buffer_drain_refuses_cs6_without_recording_emission(
         tmp_path, monkeypatch):
-    tape = np.zeros(8 * FS)
+    # All three bounded attempts must have real queued input at their drains.
+    # The former8s tape truncated the last wait at384000 rather than403584;
+    # even charging35ms then left the fake clock early enough to key slot7.
+    tape = np.zeros(20 * FS)
     s, tx, g, _ = _arm(tmp_path, tape)
     clock = _duplex(tx, s, tape, 1536)
     tx.aim(g, 3)
-    bridge = s.rx.bridge
-
-    def stalled_bridge(audio):
-        bridge(audio)
-        clock.samples += round(.035 * FS)
-
-    monkeypatch.setattr(s.rx, 'bridge', stalled_bridge)
+    reads, attempts = _drain_fault(s, tx, clock, monkeypatch, sustained=True)
+    retained = s.host.sent_total, s.host.rcvd_total
     tx.send_cs(arq.CS_CYCLE_TOG)
+    assert tx._pending_p3_cs == arq.CS_CYCLE_TOG and not clock.emissions
     tx.emit_pending_cs()
+    assert len(attempts) == onair.REGRID_TRIES
+    assert [(slot, pos, elapsed, refused) for slot, pos, elapsed, refused, _ in attempts] == [
+        (3, 163584, 165264, True),
+        (5, 283584, 285264, True),
+        (7, 403584, 405264, True)]
+    assert all(len(drains) == 1 and drains[0][1] > 0
+               and drains[0][4] == round(.035 * FS)
+               for _, _, _, _, drains in attempts)
+    assert all(n > 0 and charge == round(.035 * FS)
+               for _, n, _, _, charge in reads)
+    assert clock.pos < len(tape) and clock.clamp_late(g.boundary(7)) == 1200
     assert tx.refused
     assert not clock.emissions and not tx.keyed and not tx.slots_used
     assert g._p3_command_slot == 0  # retain the previous actual CS6 epoch
     assert not list(tmp_path.glob('tx_*.json'))
+    assert tx._pending_p3_cs == arq.CS_CYCLE_TOG
+    assert (s.host.sent_total, s.host.rcvd_total) == retained
+
+
+@pytest.mark.parametrize('sustained', [False, True], ids=['transient', 'held-until-recovery'])
+def test_final_drain_recovery_keys_once_at_permitted_boundary(
+        tmp_path, monkeypatch, sustained):
+    tape = np.zeros(20 * FS)
+    s, tx, g, _ = _arm(tmp_path, tape)
+    clock = _duplex(tx, s, tape, 1536)
+    tx.aim(g, 3)
+    retained = s.host.sent_total, s.host.rcvd_total
+    with monkeypatch.context() as fault:
+        _, attempts = _drain_fault(s, tx, clock, fault, sustained=sustained)
+        tx.send_cs(arq.CS_CYCLE_TOG)
+        tx.emit_pending_cs()
+        if sustained:
+            assert len(attempts) == onair.REGRID_TRIES
+            assert not clock.emissions and not tx.keyed and not tx.slots_used
+            assert g._p3_command_slot == 0 and not list(tmp_path.glob('tx_*.json'))
+            assert tx._pending_p3_cs == arq.CS_CYCLE_TOG
+        else:
+            assert [a[0] for a in attempts] == [3, 4]
+            assert attempts[0][3] and not attempts[1][3]
+    if sustained:
+        # A held command is still owed. After fault removal, only the next
+        # permitted boundary can renew the actual emitted command epoch.
+        tx.aim(g, 8)
+        tx.emit_pending_cs()
+    slot = 8 if sustained else 4
+    assert not tx.refused and tx.slots_used == [slot]
+    assert len(clock.emissions) == len(tx.keyed) == 1
+    assert clock.emissions[0][0] == g.boundary(slot)
+    assert g._p3_command_slot == slot and s.host.arq.cycle_command_emitted
+    assert tx._pending_p3_cs is None
+    files = list(tmp_path.glob('tx_*.json'))
+    assert len(files) == 1
+    meta = json.loads(files[0].read_text())
+    assert meta['audio_start'] == g.boundary(slot)
+    assert meta['pulse_offsets'][0] == meta['pulse_offsets'][1]
+    assert (s.host.sent_total, s.host.rcvd_total) == retained
+    tx.emit_pending_cs()
+    assert len(clock.emissions) == len(tx.keyed) == 1 and tx.slots_used == [slot]
 
 
 @requires_recorded
@@ -252,6 +333,7 @@ def _enqueue_clock(samples):
     native = object.__new__(onair._LiveInput)
     native._duplex, native.fs, native._blk, native._lat = True, FS, 128, 1152
     native.tx_latency_n = 0
+    native.geometry_n = 0
     native.samples, native._tx = samples, None
     native._tx_done = SimpleNamespace(
         clear=lambda: pytest.fail('a stale explicit-at burst reached callback arming'))
@@ -285,3 +367,63 @@ def test_stall_after_final_guard_leaves_no_emission_records(tmp_path):
     assert g.keyed_slot == old_slot and tx.tx_end == old_end
     assert g._p3_command_slot == 0 and not clock.emissions
     assert not list(tmp_path.glob('tx_*.json'))
+
+
+@pytest.mark.parametrize("veto", [False, True])
+def test_elapsed_pcm_admits_once_after_wait_before_key(veto):
+    pcm = ElapsedPCM(np.zeros(round(3 * FS), np.float32), notice=0)
+    waveform = np.zeros(round(FS / 10), np.float32)
+    calls = []
+    at = FS
+    settle = .04
+    before_key = at - round(settle * FS)
+
+    def admit():
+        calls.append((pcm.sample_now(), len(pcm.emissions)))
+        assert not hasattr(pcm, "keyed_at")
+        assert not hasattr(pcm, "keyed_s")
+        if veto:
+            raise RuntimeError("test admission veto")
+
+    if veto:
+        with pytest.raises(RuntimeError, match="test admission veto"):
+            pcm.transmit(waveform, at=at, settle=settle, key=True,
+                         max_key=1., admit=admit)
+        assert pcm.samples == before_key
+        assert pcm.emissions == []
+        assert not hasattr(pcm, "keyed_at")
+        assert not hasattr(pcm, "keyed_s")
+    else:
+        assert pcm.transmit(waveform, at=at, settle=settle, key=True,
+                            max_key=1., admit=admit) == (at, at + len(waveform))
+        assert pcm.keyed_at == before_key
+        assert pcm.keyed_s == (at + len(waveform) - before_key) / FS
+        assert pcm.emissions == [(at, at + len(waveform), before_key)]
+    assert calls == [(before_key, 0)]
+
+
+def test_elapsed_pcm_wait_can_revoke_before_key(monkeypatch):
+    pcm = ElapsedPCM(np.zeros(round(3 * FS), np.float32), notice=0)
+    waveform = np.zeros(round(FS / 10), np.float32)
+    allowed = [True]
+    calls = []
+    wait = pcm.wait_until
+
+    def charged_wait(until):
+        result = wait(until)
+        allowed[0] = False
+        return result
+
+    def admit():
+        calls.append(pcm.sample_now())
+        if not allowed[0]:
+            raise RuntimeError("test owner revoked during wait")
+
+    monkeypatch.setattr(pcm, "wait_until", charged_wait)
+    with pytest.raises(RuntimeError, match="test owner revoked during wait"):
+        pcm.transmit(waveform, at=FS, settle=.04, key=True,
+                     max_key=1., admit=admit)
+    assert calls == [FS - round(.04 * FS)]
+    assert pcm.emissions == []
+    assert not hasattr(pcm, "keyed_at")
+    assert not hasattr(pcm, "keyed_s")

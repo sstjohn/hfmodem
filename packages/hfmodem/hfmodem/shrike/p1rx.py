@@ -32,7 +32,8 @@ section at 200 Bd (the Memory-ARQ secondary copy).
 
 The parser rotates each on-air byte  T[i] = (raw[i]>>1) | (bit0(raw[i+1])<<7),
 recovering the address image T = [0x55 sync] + ASCII callsign + 0x0F fill; the
-callsign is T[1] up to the 0x0F terminator, each char validated in (0x2C, 0x5A].
+callsign ends at the fill or the eight-character field boundary, each char
+validated in (0x2C, 0x5A]. Full fields require the six-byte redundancy copy.
 """
 
 from __future__ import annotations
@@ -169,17 +170,14 @@ def _rotate(raw: np.ndarray) -> np.ndarray:
 
 def _locked(T: np.ndarray) -> np.ndarray:
     """Which rows of a (k, n) uint8 address image are a lock: T[0] is the sync and
-    T[2:] is a valid character run ending in the 0x0F terminator. T[1] is left free
-    so a Longpath (bit-inverted first character) still locks."""
+    T[2:] is a valid character run ending in 0x0F or filling the address field.
+    A full field also needs the redundancy check in `decode_connect`. T[1] is
+    left free so a Longpath (bit-inverted first character) still locks."""
     body = T[:, 2:]
-    stop = (body <= 0x2C) | (body > 0x5A)      # the terminator is itself a stop
-    first = body[np.arange(len(T)), np.argmax(stop, axis=1)]
-    # PRECONDITION, not an observation: this finds the first stop and asks whether
-    # it IS the terminator, so it is correct only while TERM lies outside the valid
-    # character range -- 0x0F <= 0x2C, so it does. The scalar form this replaced
-    # tested for TERM *before* validity and held for any TERM. If TERM ever moves
-    # inside the range, this silently stops locking rather than failing loudly.
-    return ((T[:, 0] == SYNC[0]) | (T[:, 0] == SYNC[1])) & (first == TERM)
+    stop = (body <= 0x2C) | (body > 0x5A)
+    padding = np.maximum.accumulate(stop, axis=1)
+    return (((T[:, 0] == SYNC[0]) | (T[:, 0] == SYNC[1]))
+            & (~padding | (body == TERM)).all(axis=1))
 
 
 def _redundancy_first(audio: np.ndarray, start: int, sps_r: int,
@@ -251,6 +249,8 @@ class Connect:
     variant: str          # "Normal" | "Longpath" | "Robust" | "FreeSignal..."
     callsign: str
     inverted: bool        # global FSK polarity was inverted (sync decoded as 0xAA)
+    offset_hz: float = 0.0
+    errors: int = 0
 
     def report(self) -> str:
         return f"###CONNECT: [{_LABEL.get(self.variant, self.variant + ' Call')}:" \
@@ -418,44 +418,20 @@ largest 2.1 ms out, so no codeword of ours has ever been placed outside it
 else's receiver and a property of ours."""
 
 CS_SEARCH_HALF_S = 0.015
-"""How far either side of a PREDICTED instant this receiver looks for the word.
+"""First search around the predicted control-word onset.
 
-Three half-bits, and the width is the operating point of a curve rather than a
-tolerance. The curve was swept from 5 to 145 ms against 20 measured answers of a
-live gateway, the same answers read from a displaced anchor, and 16 201 twelve-bit
-reads of quiet audio from nine recordings; `tests.shrike.test_cssearch` holds the
-point it landed on.
+Keep a readable word here ahead of any wider alignment: CS4 casts a CS3 alias
+two bits later, and the tail score alone can prefer it on a noisy recording.
+"""
 
-WHAT THE PREDICTION IS ACTUALLY WORTH. Across 755 tracked cycles in 45 sessions
-the burst the grid was steering on landed further than half a bit from the
-predicted instant in 23% of them, further than 10 ms in 8.7%, and never further
-than 21.4 ms -- an independent instrument, the burst detector, whose own onset
-sits within 5 ms of the codeword in 56 of 62 corpus bursts. Half a bit was never
-the error budget; it was the budget the reader could position within.
+CS_RECOVER_HALF_S = 0.025
+"""Late edge of recovery when the first search reads nothing.
 
-WIDENING WITHOUT SEARCHING IS NOT WIDENING. The reader used to take the
-best-scoring alignment and decode it once, and over the 20 measured answers that
-holds 14 at 5 ms, 13 at 7.5 and 3 at 10: past half a bit the eye score cannot say
-which bit period the word is in and it wanders off. So the window widened only
-once the reader decoded every alignment in it and took the best-scoring one that
-IS a codeword, which is what the 1990 description has its master do over the
-0.29 s `Fenster fuer Kontrollsignalempfang` (`pactor.txt:159`, `:272-274`).
-
-WHY IT STOPS HERE AND NOT AT THE DESCRIPTION'S WINDOW. The searched reader holds
-every real answer at every width tried, and adds six the point read missed --
-20 of 20, all six on the cycle parity and inside the session's own CS1-then-CS4
-partition. What widening costs is false locks, strictly linearly: 1.54 per 1000
-quiet reads at 5 ms, 3.58 here, 4.44 at 20, 23.95 at 145, against 1.11 for the
-point read. And at 20 ms two of the twenty answers stop being themselves -- the
-CS3 that every CS4 casts two bits along wins the score at exactly +20 ms. So the
-knee is a WRONG WORD and not a rate, it sits at 20 ms, and 15 leaves half a bit
-in front of it. The description's window is not free and was not taken.
-
-The cost is stated rather than argued: a phantom every 280 silent cycles where
-the point read manufactures one every 900, and 26 of those 58 phantoms are the
-break-in. Nothing here is a recording of a peer answering off-anchor, which the
-record does not hold and which is the only thing that would settle what a real
-station does with one."""
+0929-2204 missed CS4 at 18.605 s and the acceptance CS1 at 22.355 s;
+the latter needed a +19.6 ms grid correction. Only +16.25..+25 ms alignments
+are recovered, at `EYE_MIN` (0.50) rather than the ordinary reader's 0.35.
+An earlier exact word at a two- or four-bit slip vetoes an ambiguous recovery.
+"""
 
 CS_SEARCH_EYE_MIN = 0.35
 """The eye every searched codeword must clear, assigned or not.
@@ -687,7 +663,7 @@ def nearest_cs(window: list[int]) -> CS:
 
 
 CS_ALIAS_BITS = 2
-"""The slip at which one control signal casts another, and the only one that does.
+"""The two-bit slip of the ideal CS4/CS3 alias.
 
 CS4 read two bit periods late IS CS3, bit for bit, in the same shift sense. Ten
 slots hold the tail of the codeword and the last two hold the silence after the
@@ -695,7 +671,9 @@ burst, and the fill is not free to go either way: the ten real bits already carr
 weight 6 or 4, `_cs_decide` splits twelve slots six and six, so the two silent
 ones are FORCED to the value that completes the other word. Searching every slip
 in +/-3 bits with every fill over all four signals in both senses, this pair is
-the whole of it -- CS1 and CS2 cast nothing at any slip.
+the whole of that idealized three-bit sweep. Real recovered alignments can
+also cast an opposite-shift CS1/CS2 alias four bits away (0923-1851), which
+the recovery path checks separately.
 
 WHAT IT COSTS IS THE CHANNEL. CS3 is the break-in, so a CS4 read two bit periods
 late hands the link to a station that asked for nothing:
@@ -713,6 +691,17 @@ the two is on the air, and `cs_anchored` asks the silence instead."""
 
 
 def cs_anchored(audio: np.ndarray, t0: float, fs: int = FS) -> CS | None:
+    """Read at the grid first; recover a displaced word only at a stronger eye."""
+    got = _cs_anchored(audio, t0, fs, CS_SEARCH_HALF_S, CS_SEARCH_EYE_MIN)
+    if got is not None:
+        return got
+    # Recovery can choose CS1's opposite-shift CS2 alias. Extend only the
+    # late edge and check recovered words for earlier conflicting words.
+    return _cs_anchored(audio, t0, fs, CS_RECOVER_HALF_S, EYE_MIN, bare_only=True)
+
+
+def _cs_anchored(audio: np.ndarray, t0: float, fs: int,
+                 half_s: float, eye_min: float, *, bare_only: bool = False) -> CS | None:
     """The control signal the GRID says is at `t0`, or None.
 
     `cs_bits` reads a burst a detector found and spends `CS_SEARCH_S` looking for
@@ -720,8 +709,9 @@ def cs_anchored(audio: np.ndarray, t0: float, fs: int = FS) -> CS | None:
     input: it is already a bit grid, carried a cycle at a time and trimmed
     sub-bit by `cs_time_dev`. What it is not is exact. Over 755 tracked cycles the
     burst the grid was steering on sat further than half a bit from the predicted
-    instant in 23% of them, so this searches `CS_SEARCH_HALF_S` either side --
-    three half-bits -- and the constant carries the curve that width came off.
+    instant in 23% of them, so this searches `half_s` either side --
+    three half-bits initially, then only beyond the late edge out to five
+    half-bits at a stronger eye floor.
 
     A SEARCH AND NOT A WIDER BRACKET. Every alignment is decoded and the
     best-scoring one that IS a codeword wins, which is what the 1990 description
@@ -736,7 +726,7 @@ def cs_anchored(audio: np.ndarray, t0: float, fs: int = FS) -> CS | None:
     Three things separate it from `cs_bits`, and they are one claim about the
     input:
 
-      * the window is `CS_SEARCH_HALF_S` rather than the detector's guard, and
+      * the window is `half_s` rather than the detector's guard, and
         the alignment is chosen by what decodes rather than by the eye alone;
       * the bits are DECIDED by `_cs_decide`'s split rather than by comparing the
         two tones, which is what a peer whose tones arrive at different levels
@@ -760,13 +750,13 @@ def cs_anchored(audio: np.ndarray, t0: float, fs: int = FS) -> CS | None:
     # alignments nothing and the early ones the real thing, which is a half-bit
     # bias dressed as a guard -- it moved the whole capture range one bit early.
     span = CS_BIT_S * (pactor1.CS_BITS + CS_TAIL_BITS)
-    want = int((t0 - CS_SEARCH_HALF_S) * fs)
+    want = int((t0 - half_s) * fs)
     # CS_ALIAS_BITS of HISTORY, and not one alignment more of SEARCH. The shadow
     # test needs the two bit periods in front of the earliest candidate, which the
     # bracket alone does not hold; `base` puts the first candidate back exactly
     # where it was, so the set of alignments that can be ACCEPTED is unchanged.
     lo = max(0, want - int(CS_ALIAS_BITS * CS_BIT_S * fs))
-    hi = min(audio.size, int((t0 + span + CS_SEARCH_HALF_S) * fs))
+    hi = min(audio.size, int((t0 + span + half_s) * fs))
     x = _to_fs(np.asarray(audio[lo:hi], dtype=float), fs)
     base = max(0, int(round((want - lo) * FS / fs)))
     if x.size - base < pactor1.CS_BITS * sps:
@@ -778,7 +768,7 @@ def cs_anchored(audio: np.ndarray, t0: float, fs: int = FS) -> CS | None:
     # The searched window and not one sample more. The slice is longer than that
     # -- it has to hold the tail slots -- so the width is stated here rather than
     # inferred from what happens to fit.
-    top = min(2 * int(CS_SEARCH_HALF_S * FS),
+    top = min(2 * int(half_s * FS),
               T.n - base - (pactor1.CS_BITS + CS_TAIL_BITS - 1) * sps - 1)
     if top < 0:
         return None
@@ -799,7 +789,11 @@ def cs_anchored(audio: np.ndarray, t0: float, fs: int = FS) -> CS | None:
         # through it. Measured over the 560 quiet reads of the WS8EOC windows: the
         # one read that manufactures an unassigned word scores 0.19 where the real
         # ones score 0.56 to 0.93, the DL6MAA grant at 0.93.
-        floor = EYE_MIN if got.unassigned else CS_SEARCH_EYE_MIN
+        # Recovery is for bare answers. A displaced break-in belongs to
+        # cs_head, which checks the leading silence and the following packet.
+        if bare_only and got.index == pactor1.CS_CHANGEOVER:
+            return None
+        floor = EYE_MIN if got.unassigned else eye_min
         if _eye(T, np.array([start]), sps, pactor1.CS_BITS)[0] < floor:
             return None
         return got
@@ -808,7 +802,9 @@ def cs_anchored(audio: np.ndarray, t0: float, fs: int = FS) -> CS | None:
     # search works at and the one `acquire_control_signal` already uses. An eighth
     # of a bit: finer buys nothing a matched filter can tell apart and costs
     # trials the eye gate has to pay for.
-    starts = base + np.arange(0, top + 1, max(1, int(ACQUIRE_HOP_S * FS)))
+    hop = max(1, int(ACQUIRE_HOP_S * FS))
+    first = int((half_s + CS_SEARCH_HALF_S) * FS) + hop if bare_only else 0
+    starts = base + np.arange(first, top + 1, hop)
     eye = starts[:, None] + np.arange(pactor1.CS_BITS) * sps
     tail = starts[:, None] + (pactor1.CS_BITS + np.arange(CS_TAIL_BITS)) * sps
     score = (np.abs(T.mark[eye] - T.space[eye]).sum(axis=1)
@@ -828,7 +824,26 @@ def cs_anchored(audio: np.ndarray, t0: float, fs: int = FS) -> CS | None:
         # turnaround ahead and 840 ms of the new sender's packet behind. So the
         # two energies are compared to each other -- no level, no threshold, and
         # scale-free -- and only the loud-ahead-quiet-behind case is refused.
-        if (got.index == pactor1.CS_CHANGEOVER and starts[k] >= CS_ALIAS_BITS * sps
+        if bare_only:
+            # On 0923-1851, displaced CS1 also casts opposite-shift CS2
+            # four bits late. Check every recovered word against both slips;
+            # an earlier, different exact word makes recovery ambiguous. The
+            # two eyes can peak a hop apart (0929-1318), so bracket each slip.
+            shadowed = False
+            for bits in (CS_ALIAS_BITS, 4):
+                for offset in (-hop, 0, hop):
+                    earlier = int(starts[k]) - bits * sps + offset
+                    if earlier < 0:
+                        continue
+                    cast = read(earlier)
+                    if cast is not None and (cast.index, cast.sense) != (got.index, got.sense):
+                        shadowed = True
+                        break
+                if shadowed:
+                    break
+            if shadowed:
+                continue
+        elif (got.index == pactor1.CS_CHANGEOVER and starts[k] >= CS_ALIAS_BITS * sps
                 and T.env[ahead[k]].sum() > T.env[tail[k]].sum()):
             cast = read(int(starts[k]) - CS_ALIAS_BITS * sps)
             if cast is not None and cast.index == pactor1.CS_SPEED \
@@ -1187,15 +1202,187 @@ def acquire_control_signal(audio: np.ndarray, t0: float, dur: float,
     return None
 
 
+ROBUST_CS_BITS = 20
+ROBUST_CS_SHORT = 12
+ROBUST_CS_MAX_ERRORS = 2
+
+ROBUST_CS_HEARD: dict[int, tuple[int, str]] = {
+    0: (spec.CONTROL_SIGNALS[0], "FSK: KB5LZK 0923, VE3KPG 0923; P2: AI4Y Kiwi 0925"),
+    3: (spec.CONTROL_SIGNALS[3], "FSK: KB5LZK onair-0926-1430, +190 Hz"),
+    6: (spec.ROBUST_CONTROL_SIGNALS[6], "P2: AI4Y Kiwi 0925 after K4MCK call packet"),
+}
+"""Robust Connect answer words heard on the air, by their index in the modem's
+sixteen-entry 20-bit CS-burst table, each with where it was heard. LSB first on
+the air, MARK a one. Only these are recognised; a word joins when a station is
+heard sending it.
+
+The table's first six entries are the PACTOR-3 control signals CS1..CS6 in
+order, so one of those joins as `spec.CONTROL_SIGNALS[entry]`. Entry 0, CS1, is
+KB5LZK answering this station's first robust call: 100 Bd FSK, 54 ms after each
+call ended, complemented on alternate cycles, for fourteen cycles."""
+
+ROBUST_CS_FORMS = {0: frozenset(("FSK", "P2")), 3: frozenset(("FSK",)),
+                   6: frozenset(("P2",))}
+ROBUST_CS_WORDS = {entry: word for entry, (word, _) in ROBUST_CS_HEARD.items()
+                   if "FSK" in ROBUST_CS_FORMS[entry]}
+ROBUST_P2_ENTRIES = tuple(e for e in ROBUST_CS_HEARD if "P2" in ROBUST_CS_FORMS[e])
+
+
+@dataclass(frozen=True)
+class RobustAnswer:
+    """A Robust Connect answer: which table entry, in which shift, how well.
+
+    `bits` is 20 for the whole word and 12 for the prefix form, which the answering
+    station sends when our next call is due inside the word. `at` is the burst's
+    onset, seconds into the audio it was read from. `tone` is 0 where both FSK
+    tones were read, else the one tone a fade left to read it on.
+    """
+    entry: int
+    word: int
+    sense: int
+    bits: int
+    errors: int
+    at: float
+    tone: int = 0
+    offset_hz: float = 0.0
+
+    def __str__(self) -> str:
+        return (f"robust answer: {self.entry} ({self.word:06X}) "
+                f"{'inverted' if self.sense else 'normal'} {self.bits}-bit "
+                f"{self.errors} errs" + (f" on {self.tone} Hz alone" if self.tone else ""))
+
+
+ROBUST_ONE_TONE_DB = 6.0
+"""How far one FSK tone's peak has to stand over the other's before the word is
+read on that tone alone. VE3KPG on 40 m (onair-0923-1513) lost MARK by 9-11 dB
+in two slots of seventeen and SPACE by 10 in a third; both tones read at 0 errors
+everywhere else."""
+
+ROBUST_ONE_TONE_ERRORS = 1
+
+
+def _nearest_word(read: np.ndarray, words: dict[int, int]):
+    """(errors, entry, sense, word, unique) for the table word nearest `read`."""
+    n = read.size
+    scored = sorted(
+        (int((read != (np.array([(w >> j) & 1 for j in range(n)], bool) ^ bool(sense))).sum()),
+         entry, sense, w)
+        for entry, w in words.items() for sense in (0, 1))
+    return (*scored[0], len(scored) < 2 or scored[1][0] != scored[0][0])
+
+
+def acquire_robust_answer(audio: np.ndarray, t0: float, span: float,
+                          fs: int = FS,
+                          words: dict[int, int] | None = None) -> RobustAnswer | None:
+    """The answer to a Robust Connect, if one starts in `[t0, t0 + span)`.
+
+    ONE READ PER BURST, NOT ONE PER ALIGNMENT. The sixteen words and their
+    complements sit as close as two bits apart, so a sliding search tolerating
+    errors would read an accept out of band noise in half its windows. The burst's
+    own envelope edge places it instead, the bit phase is the one that spreads
+    the discriminator widest, and its length picks the form: twenty bits read with
+    up to `ROBUST_CS_MAX_ERRORS`, a shorter burst only as an exact prefix. A P1
+    control signal is twelve bits too, and every one of them sits at least two
+    bits from every prefix, so a clean one never reads as this.
+
+    A word one tone of which has faded breaks the envelope into pieces and the
+    discriminator into noise, so it is read again on the surviving tone: see
+    `_one_tone`.
+    """
+    from scipy.signal import butter, filtfilt, hilbert
+
+    words = ROBUST_CS_WORDS if words is None else words
+    sps = int(CS_BIT_S * fs)
+    lo = max(0, int(t0 * fs))
+    hi = min(audio.size, int((t0 + span) * fs) + (ROBUST_CS_BITS + 1) * sps)
+    if hi - lo < ROBUST_CS_SHORT * sps or span <= 0:
+        return None
+    x = audio[lo:hi].astype(float)
+    b, a = butter(4, [1200 / (fs / 2), 1800 / (fs / 2)], btype="band")
+    z = hilbert(filtfilt(b, a, x))
+    k = int(0.0015 * fs)
+    fi = np.convolve(np.diff(np.unwrap(np.angle(z))) / (2 * np.pi) * fs,
+                     np.ones(k) / k, "same")
+    env = np.convolve(np.abs(z), np.ones(sps) / sps, "same")
+    above = env > env.max() / 2
+    starts = np.flatnonzero(above[:int(span * fs)])
+    if not starts.size:
+        return None
+    on = int(starts[0])
+    below = np.flatnonzero(~above[on:])
+    n = round((below[0] if below.size else above.size - on) / sps)
+    got = None
+    if ROBUST_CS_SHORT <= n <= ROBUST_CS_BITS + 1:
+        got = _both_tones(fi, on, min(n, ROBUST_CS_BITS), sps, words, lo, fs)
+    return got or _one_tone(x, on, sps, words, lo, fs)
+
+
+def _both_tones(fi, on: int, n: int, sps: int, words, lo: int, fs: int):
+    phases = [on + p for p in range(-sps // 4, sps // 4 + 1, max(1, sps // 20))
+              if on + p >= 0 and on + p + sps // 2 + (n - 1) * sps < fi.size]
+    if not phases:
+        return None
+    # Clipped at the shift, so a click's wild instantaneous frequency cannot
+    # outvote the bits.
+    dev = np.minimum(np.abs(fi - (MARK + SPACE) / 2), (SPACE - MARK) / 2)
+    centres = max(([c + sps // 2 + np.arange(n) * sps for c in phases]),
+                  key=lambda c: dev[c].sum())
+    full = n >= ROBUST_CS_BITS - 1
+    errors, entry, sense, word, unique = _nearest_word(
+        fi[centres] < (MARK + SPACE) / 2, words)
+    if errors > (ROBUST_CS_MAX_ERRORS if full else 0) or not unique:
+        return None
+    return RobustAnswer(entry, word, sense, ROBUST_CS_BITS if full else n,
+                        errors, (lo + on) / fs)
+
+
+def _one_tone(x: np.ndarray, on: int, sps: int, words, lo: int, fs: int):
+    """The word read as on-off keying of the one tone a fade left standing.
+
+    Held to more than the two-tone read, because it has less to stand on: the
+    whole twenty bits, at most `ROBUST_ONE_TONE_ERRORS`, the tones at least
+    `ROBUST_ONE_TONE_DB` apart, and the surviving tone keyed both on and off at
+    least four times each, so a steady carrier is not a word of ones. Where the
+    first bit is the faded tone's the envelope starts late, so the word is tried
+    starting up to three bits before it -- exactly, because a shifted read is a
+    second chance at a foreign word.
+    """
+    t = np.arange(sps) / fs
+    ref = {f: np.exp(-2j * np.pi * f * t) for f in (MARK, SPACE)}
+    best = None
+    for back in range(4):
+        start = on - back * sps
+        if start < 0 or start + ROBUST_CS_BITS * sps > x.size:
+            continue
+        bits = x[start:start + ROBUST_CS_BITS * sps].reshape(ROBUST_CS_BITS, sps)
+        mag = {f: np.abs(bits @ r) for f, r in ref.items()}
+        db = 20 * np.log10(mag[MARK].max() / max(mag[SPACE].max(), 1e-12))
+        if abs(db) < ROBUST_ONE_TONE_DB:
+            continue
+        tone = MARK if db > 0 else SPACE
+        keyed = mag[tone] > mag[tone].max() / 2
+        if min(keyed.sum(), (~keyed).sum()) < 4:
+            continue
+        errors, entry, sense, word, unique = _nearest_word(
+            keyed if tone == MARK else ~keyed, words)
+        if unique and errors <= (0 if back else ROBUST_ONE_TONE_ERRORS) \
+                and (best is None or errors < best.errors):
+            best = RobustAnswer(entry, word, sense, ROBUST_CS_BITS, errors,
+                                (lo + start) / fs, int(tone))
+    return best
+
+
 def decode_connect(audio: np.ndarray, fs: int = FS,
                    tones: "_Tones | None" = None) -> Connect | None:
     """Recover (variant, callsign) from a PACTOR-1 connect burst, or None.
 
-    Locks the 9-byte 100-Bd address section by sync + terminator, refines the
+    Locks the 9-byte 100-Bd address section by sync + terminator (or a full
+    address with an exact six-byte redundancy copy), refines the
     baud phase to the centre of the lock plateau (the coarse onset runs early,
     which 100-Bd integration tolerates but the 200-Bd redundancy section does
     not), then reads the redundancy section to fix the first character and split
-    Normal from Longpath.
+    Normal from Longpath. The rotated lock is one 100-Bd symbol before the
+    on-air bytes; a plain redundancy read starts one symbol after its boundary.
 
     `tones` is this audio's 100 Bd `tone_series` when the caller already has one.
     """
@@ -1218,22 +1405,36 @@ def decode_connect(audio: np.ndarray, fs: int = FS,
             good = cand[_locked(_rotate(tones.read(cand, sps, ADDR_LEN, invert)))]
             if good.size == 0:
                 continue
-            start = int(good[0] + good[-1]) // 2
-            T = _rotate(tones.read(np.array([start], np.int64), sps,
-                                   ADDR_LEN, invert))[0].tobytes()
+            for plateau in np.split(good, np.flatnonzero(np.diff(good) > 1) + 1):
+                start = int(plateau[0] + plateau[-1]) // 2
+                T = _rotate(tones.read(np.array([start], np.int64), sps,
+                                       ADDR_LEN, invert))[0].tobytes()
 
-            red_first = _redundancy_first(audio, start + ADDR_LEN * 8 * sps,
-                                          sps_r, invert)
+                red_start = start + ADDR_LEN * 8 * sps
+                if TERM not in T[2:]:
+                    seg = audio[red_start + sps:red_start + sps + RED_LEN * 8 * sps_r]
+                    if seg.size < RED_LEN * 8 * sps_r:
+                        continue
+                    if bool(tones.mark[red_start] > tones.space[red_start]) != invert:
+                        continue
+                    red = _Tones(seg, sps_r).read(
+                        np.zeros(1, np.int64), sps_r, RED_LEN, invert)[0].tobytes()
+                    if (red[1:] != T[2:1 + RED_LEN] or not _valid_char(red[0])
+                            or T[1] not in (red[0], red[0] ^ 0xFF)):
+                        continue
+                    red_first = red[0]
+                else:
+                    red_first = _redundancy_first(audio, red_start, sps_r, invert)
 
-            variant, first = _classify(T[1], red_first)
-            chars = [first]
-            for i in range(2, len(T)):
-                if T[i] == TERM:
-                    break
-                chars.append(T[i])
-            if not all(_valid_char(c) for c in chars):
-                continue
-            return Connect(variant, "".join(chr(c) for c in chars), invert)
+                variant, first = _classify(T[1], red_first)
+                chars = [first]
+                for i in range(2, len(T)):
+                    if T[i] == TERM:
+                        break
+                    chars.append(T[i])
+                if not all(_valid_char(c) for c in chars):
+                    continue
+                return Connect(variant, "".join(chr(c) for c in chars), invert)
     return None
 
 
@@ -1405,6 +1606,132 @@ def decode_call_b_all(audio: np.ndarray, fs: int = FS,
                       centre: float | None = None) -> list[tuple[float, Connect]]:
     """Every branch-B frame in a recording, as (seconds into the audio, connect)."""
     return _call_b_scan(audio, fs, None, centre)
+
+
+# --- the called station's search -------------------------------------------
+
+CALL_OFFSETS = np.arange(-250.0, 251.0, 50.0)
+# Eight timing candidates a bit where SCS takes three: on weak calls heard off
+# the air the exact compare's error-free run is 54-130 samples wide, and a
+# third of a bit, 160 samples, stepped over it in ten recordings out of ten.
+CALL_PHASES = 8
+CALL_ERRORS = 15
+CALL_ERRORS_STRICT = 6
+CALL_N = ADDR_LEN * 8 * (FS // 100) + RED_LEN * 8 * (FS // 200)
+CALL_B_N = CALL_B_LEN * 8 * (FS // 100)
+_TERM_ALT = np.unpackbits(np.uint8(0x55), bitorder="little").astype(bool)
+
+
+def _bits(data: bytes) -> np.ndarray:
+    return np.unpackbits(np.frombuffer(data, np.uint8), bitorder="little").astype(bool)
+
+
+def _normal_hits(X: np.ndarray, image: np.ndarray, n: int):
+    """(rows, longpath, inverted) where the address section names our call exactly.
+
+    SCS's long-form compare: the sync, every character, and the
+    byte after the call either the 0x0F fill or 0x55. A first character that
+    matches only complemented is the Longpath marker; the whole frame
+    complemented is the other shift.
+    """
+    M = X ^ image
+    sync, first = M[:, :8].sum(1), M[:, 8:16].sum(1)
+    rest = M[:, 16:8 + 8 * n].sum(1)
+    if n < ADDR_LEN - 1:
+        term, alt = M[:, -8:].sum(1), (X[:, -8:] ^ _TERM_ALT).sum(1)
+    else:
+        term = alt = np.zeros(len(X), int)
+    plain = (sync == 0) & (rest == 0) & ((term == 0) | (alt == 0))
+    flipped = (sync == 8) & (rest == 8 * (n - 1)) & ((term == 8) | (alt == 8))
+    whole = (first == 0) | (first == 8)
+    rows = np.flatnonzero((plain | flipped) & whole)
+    return rows, (first[rows] == 8) ^ flipped[rows], flipped[rows]
+
+
+def _line_offset(frame: np.ndarray, near: float) -> float:
+    """Where the caller's tone pair sits, from the frame's own spectral lines.
+
+    Continuous-phase FSK at an integer modulation index -- 200 Hz at 100 and
+    200 Bd -- carries a discrete line at each tone, so the frame measures its
+    offset to a fraction of a hertz, where the 50 Hz search grid alone leaves
+    up to 25. The two lines are taken together, 200 Hz apart, within 75 Hz of
+    the grid point that found the call: a weak call can be found a bin off, and
+    a lone carrier nearby is one line where the pair is two.
+    """
+    per_hz = 8
+    power = np.abs(np.fft.rfft(frame * np.hanning(frame.size), per_hz * FS)) ** 2
+    shifts = np.arange(round((near - 75) * per_hz), round((near + 75) * per_hz) + 1)
+    pair = power[round(MARK * per_hz) + shifts] + power[round(SPACE * per_hz) + shifts]
+    return float(shifts[np.argmax(pair)]) / per_hz
+
+
+def search_calls(audio: np.ndarray, mycall: str, fs: int = FS,
+                 strict: bool = False) -> list[tuple[float, Connect]]:
+    """Every call to `mycall` in `audio`, as (seconds at the frame's end, connect).
+
+    SCS's standby search, which a called station runs instead of
+    the monitor's decode: eleven tone pairs 50 Hz apart across +-250 Hz, several
+    timing candidates a bit, both shifts, and two images of our own call. The
+    Normal and Longpath address section is compared exactly. The robust frame,
+    whose 88 bits are fully known once the callsign is, is correlated and
+    forgiven up to `CALL_ERRORS` bit errors, or `CALL_ERRORS_STRICT` under
+    CONIntegrity 1.
+
+    The connect carries where the caller keyed: `offset_hz` from the frame's
+    spectral lines near the strongest pair (`_line_offset`), and the frame's
+    end as the time, which is what the called station's cycle runs from.
+    """
+    audio = _to_fs(audio, fs)
+    sps = FS // 100
+    hop = sps // CALL_PHASES
+    call = mycall.upper()
+    thr = CALL_ERRORS_STRICT if strict else CALL_ERRORS
+    images = (("Robust", _bits(pactor1.call_b_bytes(call)), CALL_B_N),
+              ("Normal", _bits(pactor1.address_image(call)[:len(call) + 2]), CALL_N))
+    envs, hits = [], []
+    for o, off in enumerate(CALL_OFFSETS):
+        tones = _Tones(audio, sps, MARK + off, SPACE + off)
+        g = (tones.mark > tones.space)[::hop]
+        envs.append(tones.env[::hop])
+        for variant, image, frame_n in images:
+            span = (image.size - 1) * CALL_PHASES + 1
+            if g.size < span:
+                continue
+            X = np.lib.stride_tricks.sliding_window_view(g, span)[:, ::CALL_PHASES]
+            if variant == "Robust":
+                d = (X ^ image).sum(1)
+                rows = np.flatnonzero((d <= thr) | (d >= image.size - thr))
+                found = ((k, o, variant, bool(d[k] > image.size // 2),
+                          int(min(d[k], image.size - d[k])), frame_n) for k in rows)
+            else:
+                rows, longpath, flipped = _normal_hits(X, image, len(call))
+                found = ((k, o, "Longpath" if lp else variant, bool(fl), 0, frame_n)
+                         for k, lp, fl in zip(rows, longpath, flipped))
+            hits.extend(found)
+    if not hits:
+        return []
+
+    def energy(k: int, o: int) -> float:
+        e = envs[o][k:k + (CALL_B_LEN * 8 - 1) * CALL_PHASES + 1:CALL_PHASES]
+        return float(e.mean()) if e.size else 0.0
+
+    hits.sort(key=lambda h: h[0])
+    bursts: list[list] = [[hits[0]]]
+    for h in hits[1:]:
+        if (h[0] - bursts[-1][0][0]) * hop < CALL_B_N // 2:
+            bursts[-1].append(h)
+        else:
+            bursts.append([h])
+    out = []
+    for burst in bursts:
+        best = min(burst, key=lambda h: (h[4], -energy(h[0], h[1])))
+        k0, o, variant, inverted, errors, frame_n = best
+        plateau = [h[0] for h in burst if h[1:5] == best[1:5]]
+        k = (min(plateau) + max(plateau)) // 2
+        offset = _line_offset(audio[k * hop:k * hop + frame_n], CALL_OFFSETS[o])
+        out.append((float(k * hop + frame_n) / FS,
+                    Connect(variant, call, inverted, round(float(offset), 1), errors)))
+    return out
 
 
 # --- data decode -----------------------------------------------------------
@@ -1987,3 +2314,106 @@ def _to_fs(audio: np.ndarray, fs: int) -> np.ndarray:
 
 def load_wav(path: str) -> np.ndarray:
     return session.load_wav(path, FS)
+
+
+def acquire_robust_answer_search(audio, t0, span, fs=FS):
+    """Envelope-placed FSK read with a bounded +/-200 Hz carrier estimate.
+
+    Estimate the pair once from its spectrum instead of multiplying the bit
+    search by a frequency ladder. The ordinary on-frequency read stays first.
+    """
+    from dataclasses import replace
+    from scipy.signal import hilbert
+    got = acquire_robust_answer(audio, t0, span, fs)
+    if got is not None and got.errors == 0 and not got.tone:
+        return got
+    lo = max(0, round(t0 * fs))
+    hi = min(len(audio), round((t0 + span + .21) * fs))
+    x = np.asarray(audio[lo:hi], float)
+    if len(x) < round(.12 * fs) or not np.any(x):
+        return got
+    nfft = max(16384, 1 << (len(x)-1).bit_length())
+    power = abs(np.fft.rfft(x * np.hanning(len(x)), n=nfft)) ** 2
+    freq = np.fft.rfftfreq(nfft, 1/fs)
+    offsets = np.arange(-200., 201., 1.)
+    score = (np.interp(MARK + offsets, freq, power)
+             + np.interp(SPACE + offsets, freq, power))
+    hz = float(offsets[int(np.argmax(score))])
+    if abs(hz) < 3:
+        return got
+    shifted = (hilbert(np.asarray(audio, float)) *
+               np.exp(-2j*np.pi*hz*np.arange(len(audio))/fs)).real
+    moved = acquire_robust_answer(shifted, t0, span, fs)
+    if moved is not None and (got is None or moved.errors < got.errors
+                              or (got.tone and not moved.tone and moved.errors == got.errors)):
+        return replace(moved, offset_hz=hz)
+    return got
+
+
+HELD_ANSWER_SEARCH_S = 0.005
+HELD_ANSWER_CONTRAST = 3.0
+"""How far the keyed tone must stand over the unkeyed one, bit for bit (median).
+
+The 09-28 80 m bridge arms' held answers, faded or clipped, read 3.9-17 on
+both tones and 2.8-32 on one; their pre-answer slots read 1.9-3.5 on both.
+The word, its polarity and the instant do most of the rejecting; this keeps a
+noise window from offering them a read at all."""
+
+
+def read_held_answer(audio, at: int, fs: int = FS, *, sense: int | None = None,
+                     offset_hz: float = 0.0,
+                     words: dict[int, int] | None = None) -> RobustAnswer | None:
+    """The answer a held robust link repeats, read where it is known to be.
+
+    `acquire_robust_answer` finds the first answer by its envelope edge; once
+    it is found, the peer keeps its phase in every slot (KB5LZK 930 ms,
+    WS8EOC 946-950 ms, AI4Y 991 ms), and its polarity follows the slot parity.
+    A fade that takes one tone out breaks that envelope, and so does our own
+    receive chain clipping: WS8EOC 80 m on 09-28 arrived with its third
+    harmonics over its fundamentals. The edge read then lost 9 slots in 10 of
+    answers a witness and a fixed-phase read both take at 0 errors.
+
+    So this reads the twenty bits tone by tone at `at` (samples into `audio`),
+    within `HELD_ANSWER_SEARCH_S`: on both tones, and on each tone alone as
+    on-off keying. The word must carry `sense` when it is given (the slot
+    parity), no more than `ROBUST_CS_MAX_ERRORS` (`ROBUST_ONE_TONE_ERRORS` on
+    one tone, where a pre-answer noise window once read entry 3 at 2), and a bit contrast of
+    `HELD_ANSWER_CONTRAST`, which is what keeps noise out: a single known word
+    in a known polarity at a known instant offers the bits no search to win.
+    """
+    words = ROBUST_CS_WORDS if words is None else words
+    sps = int(CS_BIT_S * fs)
+    n = ROBUST_CS_BITS * sps
+    t = np.arange(sps) / fs
+    refs = [np.exp(-2j * np.pi * (f + offset_hz) * t) for f in (MARK, SPACE)]
+    step = max(1, sps // 20)
+    reach = round(HELD_ANSWER_SEARCH_S * fs)
+    tables = {e: np.array([(w >> j) & 1 for j in range(ROBUST_CS_BITS)], bool)
+              for e, w in words.items()}
+    best = None
+    for d in range(-reach, reach + 1, step):
+        s0 = at + d
+        if s0 < 0 or s0 + n > len(audio):
+            continue
+        bits = np.asarray(audio[s0:s0 + n], float).reshape(ROBUST_CS_BITS, sps)
+        mark, space = (np.abs(bits @ r) for r in refs)
+        reads = [(mark > space, float(np.median(np.maximum(mark, space)
+                                                 / (np.minimum(mark, space) + 1e-12))), 0)]
+        for tone, mag in ((int(MARK), mark), (int(SPACE), space)):
+            on = mag > np.median(mag)
+            if on.all() or not on.any():
+                continue
+            contrast = float(np.median(mag[on]) / (np.median(mag[~on]) + 1e-12))
+            reads.append((on if tone == MARK else ~on, contrast, tone))
+        for read, contrast, tone in reads:
+            if contrast < HELD_ANSWER_CONTRAST:
+                continue
+            limit = ROBUST_ONE_TONE_ERRORS if tone else ROBUST_CS_MAX_ERRORS
+            for entry, ref in tables.items():
+                for sn in ((0, 1) if sense is None else (sense,)):
+                    errors = int(np.count_nonzero(read != (ref ^ bool(sn))))
+                    if errors <= limit and (
+                            best is None or (errors, tone != 0) < (best.errors, best.tone != 0)):
+                        best = RobustAnswer(entry, words[entry], sn, ROBUST_CS_BITS,
+                                            errors, s0 / fs, tone, offset_hz)
+    return best

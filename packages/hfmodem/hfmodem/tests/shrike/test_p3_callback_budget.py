@@ -21,6 +21,10 @@ class BatchedStream(_Stream):
     Three adjoining 128-frame callbacks arrive together; requesting the first
     sample in the next batch blocks until all 384 samples are delivered.
     """
+    # _Stream's timing-pin helper now skips reads. This fixture needs the real
+    # take_until -> read path so a batched delivery can advance its clock.
+    take_until = onair._LiveInput.take_until
+
     def __init__(self, phase):
         super().__init__(tx_latency_n=960)
         self.phase = phase
@@ -103,6 +107,9 @@ def test_recovered_reply_reserves_ordinary_tick_and_render_before_last_drain(tmp
     tx.defer_p3_cs = True
     tx.prekey_cost_n = 96
     tx.breakin_due = False
+    # Seat the comb first, so the clock below stands against the key instant
+    # the reply keys at and not against one the placement is about to move.
+    grid.p3_reply_shift(44)
     tx.aim(grid, 44)
     stream = tx.live
     stream._callback_timing = callbacks()

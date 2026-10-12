@@ -1,10 +1,34 @@
 # On-air readiness — shrike, confirmed back
 
+Select the radio with `HFMODEM_RIG=ftdx10` or `--rig ftdx10` where offered;
+use `ft891` for the FT-891. `HFMODEM_STATION` selects the station TOML. Explicit
+CAT/PTT and device options take precedence over the selected profile.
+
+The FTDX10 profile uses Hamlib model 1042 at 38400 baud and its built-in USB
+audio codec. The FT-891 profile uses model 1036 with an external audio interface.
+Configure your own serial endpoints rather than copying another station's
+adapter IDs. Put FTDX10 endpoints and timing in `[rig.profiles.ftdx10]`, and
+input/output devices, drive and measurements in `[audio.chains.ftdx10_usb]`.
+The flat `[audio]` remains the FT-891 chain. Profile entries for X6100 and G90
+are planned support, with incomplete timing and readback qualification.
+
+FTDX10 operation was confirmed by the operator on 2026-10-02, including two
+PTT tail checks that recorded the radio identity and clean unkey. Those
+observations apply to that station's configured ports and audio chain; they
+are not calibration measurements for a different installation. Missing
+calibration can use provisional settings and warns accordingly. Existing
+transmit authorization, identity, occupancy, clipping and unkey checks apply.
+Help and console dry runs resolve configuration without opening devices.
+
+For console installation, data directories and launch examples, see the
+[operator guide](CONSOLE.md).
+
 > This is the historical July–August 2026 experiment record. Present-tense
-> claims below describe those sessions, not current readiness. For the September
-> mail-delivery milestones and remaining limits, read [Development status](STATUS.md).
-> PACTOR-3 mail sent through WS8EOC was confirmed received in Gmail by the
-> operator on 2026-09-20; the unsuccessful early attempts below remain historical.
+> claims below describe those sessions, not current readiness. The station now
+> uses a Yaesu FTDX10; the FT-891 remains supported through rig profiles.
+> PACTOR-3 Winlink mail has been sent and received through WS8EOC. Read
+> [implementation evidence](STATUS.md) for current results and the
+> [station guide](STATION.md) for setup. The early attempts below remain historical.
 
 Everything below was checked on this machine, not asserted from memory.
 
@@ -160,7 +184,7 @@ The rendered TX decodes back through shrike's own receiver as
 | Audio | USB-DigiMode 3 ("USB Audio Device") |
 | Power | **≤ 50 W** — never above without the operator present |
 | Band | 40 m |
-| Target | **WS8EOC** (EN72QQ, 274 mi, az 97°, Pactor 3/4) — dial **7.100.00**, centre 7.101.50 |
+| Target | **WS8EOC** (EN72QQ, 274 mi, az 97°, PACTOR gateway) — dial **7.100.00**, centre 7.101.50 |
 | Alternate | **W6IDS** (EM79NV, 432 mi, az 142°) — Pactor **2** on dial 7.060.00, Pactor 3 on 7.102.30 |
 
 Frequencies are from `pat rmslist --mode pactor --band 40m --sort-distance`, and

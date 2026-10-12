@@ -51,7 +51,7 @@ The discipline:
   and a completing IRS with traffic answers with its own DATA over, the
   final ACK piggybacked ahead of the header -- no separate control over
   at all on a healthy two-way link.
-- **Station ID (§97.119).** Every callsign-bearing control block (connect,
+- **Station ID.** Every callsign-bearing control block (connect,
   disconnect, the dedicated ID block) restamps the clock; either side
   transmitting with ``id_interval_s`` elapsed emits an ID block first, and
   DISC/DISC_ACK carry the callsign so a session always ends identified.
@@ -141,7 +141,7 @@ class ArqConfig:
     fast_ctrl_on_db: float = 6.0     # SNR (3 kHz) to enter the fast tier
     fast_ctrl_off_db: float = 3.0    # below this, back to the floor burst
     max_rung: int = len(DATA_LADDER) - 1   # host bandwidth cap on the ladder
-    id_interval_s: float = 540.0     # §97.119 cadence, with a frame in hand
+    id_interval_s: float = 540.0     # identification cadence, with a frame in hand
     inactivity_timeout_s: float = 180.0  # receiver-local silent-peer expiry
     max_turn_reqs: int = 6
     advertise_gears: tuple = ()      # additional receive-profile names

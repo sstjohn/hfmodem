@@ -68,6 +68,7 @@ S = corpora.harness("onair_session")
 KC = corpora.harness("kestrel_connect")
 RIG = corpora.harness("vara_rig_bridge")
 from hfmodem.core import cwid as SID
+from hfmodem.core import wav
 
 _TOOLS = corpora.TOOLS
 _FAKE_AUDIO = Path(__file__).resolve().parent / "fakeaudio"
@@ -456,7 +457,7 @@ def test_a_gateway_that_answers_produces_a_connect(rigctld, session):
     assert "Peer receipt is unconfirmed" in s.out, s
     assert "NOT DISCONNECTED" not in s.out, s
 
-    # And the link being down, the §97.119 identification is keyed rather than
+    # And the link being down, the scheduled identification is keyed rather than
     # withheld: Morse into a live ARQ session is a transmission out of turn,
     # but this session no longer holds one.
     assert "NOT identifying" not in s.out, s
@@ -485,17 +486,18 @@ def test_a_session_records_everything_it_heard(rigctld, session):
     assert s.rc == 1, s
 
     kept = {p.name: p for p in s.recorded}
-    listens = [p for n, p in kept.items() if n.endswith("-listen.wav")]
-    attempts = [p for n, p in kept.items() if n.endswith(".wav") and p not in listens]
+    audio = [p for p in kept.values() if p.suffix in (".wav", ".flac")]
+    listens = [p for p in audio if p.stem.endswith("-listen")]
+    attempts = [p for p in audio if p not in listens]
     logs = [p for n, p in kept.items() if n.endswith(".log")]
     assert len(listens) == 1, f"the listen window was not kept: {sorted(kept)}"
     assert len(attempts) == 1, f"the attempt's receive audio was not kept: {sorted(kept)}"
     assert len(logs) == 1, f"the attempt's output was not kept: {sorted(kept)}"
 
-    with wave.open(str(listens[0])) as w:
+    with wave.open(wav.source(listens[0])) as w:
         assert w.getframerate() == 48000
         assert w.getnframes() / 48000 == pytest.approx(5.0, abs=0.2)
-    with wave.open(str(attempts[0])) as w:
+    with wave.open(wav.source(attempts[0])) as w:
         assert w.getnframes() / 48000 > 10.0, "an attempt's audio stops before it does"
 
     # The transcript is the whole of what the child said, not the tail the session
@@ -647,7 +649,12 @@ def test_the_key_brackets_the_audio_closely_at_both_edges(rigctld, session):
 
     played = _transmissions(s)
     ident = [e for e in played if e["pid"] == s.proc.pid]
-    bursts = [e for e in played if e["pid"] != s.proc.pid]
+    attempt = [e for e in played if e["pid"] != s.proc.pid]
+    assert attempt, "the attempt never played anything"
+    closing = np.fromfile(attempt[-1]["audio"], dtype=np.float32)
+    assert _decode(closing, SID.WPM) == MYCALL, (
+        "the attempt did not finish with the whole closing callsign")
+    bursts = attempt[:-1]
     assert bursts, "the attempt never played anything"
     assert ident, "the session never identified, so the lead is unproven where it was"
     for e in played:
@@ -679,7 +686,7 @@ def test_the_key_brackets_the_audio_closely_at_both_edges(rigctld, session):
 
 
 def test_the_callsign_the_transmitter_carried_is_the_whole_callsign(rigctld, session):
-    """§97.119 asks for the callsign, not for most of it.
+    """The identification needs to carry the whole callsign.
 
     The bracket test above says the key was held long enough; this says what came out
     of the other end. The device is the one that knows: the fake card is a fifth of a
@@ -810,7 +817,7 @@ def test_a_channel_that_never_answers_is_an_honest_no_connect(rigctld, session,
     assert _keyed(server) > 0, "the attempt never reached the air, so this proves nothing"
     assert server.ptt == 0
 
-    # §97.119: the session transmitted and no link was left open, so the callsign is
+    # The identification schedule: the session transmitted and no link was left open, so the callsign is
     # keyed — once, at the end of the communication, after everything else has stopped.
     ident = s.events("play", pid=s.proc.pid)
     assert len(ident) == 1 and ident[0]["secs"] > 1.0, (
@@ -833,7 +840,7 @@ def test_the_channel_sense_decides_on_real_receiver_audio(rigctld, session,
     pinned, and they are pinned on audio through this rig and this codec.
 
     The occupied side is 7096.5 kHz at 16:34 UTC on 2026-08-14, monitored with this
-    station's transmitter off: a VARA 500 exchange 600 Hz wide on the registered
+    station's transmitter off: a VARA 500 exchange 600 Hz wide on the high speed capable
     channel, whose two callsigns and mode a second source names. It is the occupant
     this gate exists for — narrower than the 610-2405 Hz our own BW2300 call would
     fill, so a session that judged only its own centre would key straight over it —

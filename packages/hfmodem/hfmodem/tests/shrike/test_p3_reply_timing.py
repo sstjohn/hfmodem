@@ -212,11 +212,14 @@ def test_p3_answers_are_queued_until_the_loop_emits(tmp_path, monkeypatch):
     emitted = []
     def capture(audio, what, **timing):
         assert min(timing["pulse_offsets"]) == timing["lead_n"]
+        if tx._p3_tx_admit is not None:
+            tx._p3_tx_admit()
         emitted.append(what)
+        tx.n += 1
         # A stub that advances nothing reads as a refusal, which a refused
         # answer is now held for -- so this one reports the air it used.
         tx.tx_end = (tx.tx_end or 0) + len(audio)
-    monkeypatch.setattr(tx, "_tx", capture)
+    monkeypatch.setattr(tx, "_tx_admitted", capture)
     # The aim lead only equals the pulse offset under pulse-center placement.
     tx.p3_control_placement = "pulse-center"
     tx.defer_p3_cs = True

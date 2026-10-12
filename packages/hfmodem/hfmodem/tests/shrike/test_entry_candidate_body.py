@@ -192,7 +192,7 @@ def test_first_recorded_candidate_emits_one_correctly_ordered_ack(tmp_path,monke
     # Pin the existing target phase against the recorded head, including the
     # decoder's neighboring valid alignments. The CS5 pilot changes no timing;
     # this is not evidence of the stock peer's receive-window tolerance.
-    assert abs(phase-(1008780+round(.890*FS))) <= round(.005*FS)
+    assert abs(phase-(1008780+round(onair.P3_REPLY_S*FS))) <= round(.005*FS)
     assert live.keyed_at > 1008780+round(.810*FS)
     # Read back the actual submitted PCM against both physical-order controls.
     # This exercises RadioTx's render, trim, admission and duplex enqueue.

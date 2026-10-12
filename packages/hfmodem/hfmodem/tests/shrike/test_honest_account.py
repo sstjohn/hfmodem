@@ -229,6 +229,8 @@ def test_a_peer_transmitting_data_while_we_send_still_takes_the_channel():
     from hfmodem.shrike.arq import ArqConfig, ArqIO, PactorArq
 
     class _Air(ArqIO):
+        _p3_traffic_log = None
+
         def __init__(self):
             self.lines: list[str] = []
 

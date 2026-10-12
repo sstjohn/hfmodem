@@ -67,7 +67,7 @@ def test_long_sl2_nak_to_sl1_preserves_bytes_and_long_clock():
     assert host.arq.speed_level == 1 and host.arq.cycle_long
 
 
-def test_long_peer_clock_survives_breakin_through_ack_and_ordinary_long_sl1():
+def test_long_peer_clock_places_breakin_but_ack_starts_short_transmit_turn():
     host, tx = linked(role=arq.IRS, long=True)
     host.arq.on_host_data(PAYLOAD)
     host.arq.on_host_breakin()
@@ -81,6 +81,10 @@ def test_long_peer_clock_survives_breakin_through_ack_and_ordinary_long_sl1():
     acked = len(host.arq._inflight.payload)
     host.arq.on_rx_cs(arq.CS_ACK)
     row('breakin-ACK', host, tx, PAYLOAD[acked:])
+    assert not host.arq.cycle_long
+    assert len(host.arq._inflight.payload) == 5
+    host.arq.on_rx_cs(arq.CS_CYCLE_TOG)
+    row('new-turn-CS6', host, tx, PAYLOAD[acked + 5:])
     assert host.arq.cycle_long
 
 
@@ -94,7 +98,7 @@ def test_sl1_ordinary_qrt_keeps_long_clock_and_can_close():
     assert host.arq.goodbye_acked and host.arq.state == arq.State.DISCONNECTED
 
 
-def test_first_ordinary_qrt_after_long_breakin_ack_uses_long_clock():
+def test_first_ordinary_qrt_after_long_breakin_ack_uses_short_clock():
     host, tx = linked(role=arq.IRS, long=True)
     host.arq.on_host_data(b'abc')
     host.arq.on_host_breakin()
@@ -107,7 +111,7 @@ def test_first_ordinary_qrt_after_long_breakin_ack_uses_long_clock():
     host.arq.on_rx_cs(arq.CS_ACK)
     row('QRT-after-breakin-ACK', host, tx, b'')
     assert host.arq.said_goodbye and not host.arq._inflight.breakin
-    assert host.arq.cycle_long
+    assert not host.arq.cycle_long
     host.arq.on_rx_cs(arq.CS_ACK)
     assert host.arq.goodbye_acked and host.arq.state == arq.State.DISCONNECTED
 
@@ -158,7 +162,7 @@ def test_cs6_ack_of_last_sl1_payload_leaves_next_idle_slot_long():
 
 
 @pytest.mark.parametrize('trigger', ['CS5', 'breakin ACK'])
-def test_driver_keeps_next_slot_and_answer_window_long_at_sl1(trigger):
+def test_driver_places_next_slot_and_answer_window_for_new_cycle_at_sl1(trigger):
     if trigger == 'CS5':
         host, tx = linked(sl=2, long=True)
         host.arq.on_host_data(PAYLOAD)
@@ -183,10 +187,13 @@ def test_driver_keeps_next_slot_and_answer_window_long_at_sl1(trigger):
     grid.regear(True)
     tx.aim(grid, 3)
     assert grid.rx_due(3) - grid.boundary(3) == round(3.390 * 48000)
-    host.arq.on_rx_cs(answer)  # Production PtcHost/RadioTx renders long SL1.
-    assert host.arq.cycle_long and tx.frames[-1][0].startswith('SL1 LONG pkt')
+    host.arq.on_rx_cs(answer)
+    long = trigger == 'CS5'
+    assert host.arq.cycle_long == long
+    assert tx.frames[-1][0].startswith('SL1 LONG pkt' if long else 'SL1 pkt')
     next_slot, _ = onair._regear_next_slot(
         grid, grid.next_slot(tx.slot), host.arq.cycle_long)
-    assert next_slot == tx.slot + 3 == 6 and grid.ticks == 3
-    assert grid.rx_due(next_slot) - grid.boundary(next_slot) == round(3.390 * 48000)
+    ticks = 3 if long else 1
+    assert next_slot == tx.slot + ticks and grid.ticks == ticks
+    assert grid.rx_due(next_slot) - grid.boundary(next_slot) == round((3.390 if long else .890) * 48000)
     assert tx.key_instant(grid, next_slot) == grid.boundary(next_slot)

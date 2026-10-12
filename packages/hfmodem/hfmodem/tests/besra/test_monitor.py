@@ -29,6 +29,7 @@ from scipy.signal import resample_poly
 
 import hfmodem.besra.radio as R
 from hfmodem.tests import evidence
+from hfmodem.core import wav as recordings
 from hfmodem.core.resample import to_card
 from hfmodem.besra import monitor
 from hfmodem.besra.phy import demodulator as D
@@ -144,7 +145,7 @@ def test_live_records_one_unbroken_wav(tmp_path, capsys):
     blocks = _card(stream)
     _live(blocks, tmp_path, capsys)
 
-    with wave.open(str(tmp_path / "cap.wav")) as w:
+    with wave.open(recordings.source(tmp_path / "cap.wav")) as w:
         assert (w.getframerate(), w.getnchannels(), w.getsampwidth()) == (R.FS_RADIO, 1, 2)
         rec = np.frombuffer(w.readframes(w.getnframes()), "<i2")
     want = np.concatenate(blocks)
@@ -317,5 +318,8 @@ def test_sigterm_still_writes_the_level_sidecar(tmp_path):
 
     sidecar = wav.with_suffix(".json")
     assert sidecar.exists(), "SIGTERM dropped the sidecar"
-    assert wav.exists() and wav.stat().st_size > 44
+    stored = recordings.stored(wav)
+    assert stored.exists() and stored != wav, "SIGTERM dropped the recording"
+    with wave.open(recordings.source(wav)) as w:
+        assert w.getnframes() > 0
     assert json.loads(sidecar.read_text())["railed_pct"] == 0.0

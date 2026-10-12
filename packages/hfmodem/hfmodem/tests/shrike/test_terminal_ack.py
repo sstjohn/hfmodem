@@ -85,10 +85,12 @@ def test_refused_terminal_ack_retries_without_pretending_close(tmp_path):
 @pytest.mark.parametrize("long_cycle", [False, True])
 def test_terminal_ack_wait_is_bounded_even_when_peer_repeats_qrt(tmp_path, long_cycle):
     host, rx, tx, grid, bench = harness(tmp_path)
-    host.arq.cycle_long = long_cycle
     ticks = arq.LONG_TICKS if long_cycle else 1
     event = _packet(spec.STATUS_QRT)
     host.on_rx_event(event)
+    # The changeover opens the turn short (`arq._give_link`); the peer's
+    # repeats are what run on the long cycle here.
+    host.arq.cycle_long = long_cycle
     for attempt in range(arq.GOODBYE_CYCLES + 1):
         host.on_rx_event(event)
         for _ in range(ticks):

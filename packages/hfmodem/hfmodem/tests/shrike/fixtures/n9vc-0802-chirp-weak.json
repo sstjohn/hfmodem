@@ -1,0 +1,22 @@
+{
+  "file": "n9vc-0802-chirp-weak.wav",
+  "source": "logs/onair/20260802T230833Z-W9SSJ-K5DAT-13.wav",
+  "source_start": 83805600,
+  "samples": 175200,
+  "rate": 48000,
+  "header_rate": 48000,
+  "source_start_s": 1745.95,
+  "sha256": "c5ae938e80d3ed55a9592cdfc665c9516c79e7fc50c8e597803e510275531a22",
+  "link": "N9VC (BPQ32, EN54BH) answering a P1 Normal connect at 1690.5 s, robust shorts A13 B13 A49 B49 A53 at 1717.41-1722.41 s, then twelve P4 SL1 chirp packets every 3.75 s from 1723.66 s, CW-ID at 1768.8 s; the whole link sits +400 Hz up the passband",
+  "note": "the weakest of the eleven good chirps on the blind two-lane header, 0.36",
+  "chirps": [
+    {
+      "start_s": 0.213,
+      "offset_hz": 400,
+      "crc": true,
+      "data": "[BPQ-6.0.25.1-B2FWIHJM",
+      "counter": 1,
+      "protocol": "SPEED_UP"
+    }
+  ]
+}
