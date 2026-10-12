@@ -297,6 +297,7 @@ def test_the_bar_sits_above_the_whole_burst_rule():
 
 
 # --------------------------------------------------------------------------- #
+@pytest.mark.realtime
 def test_the_fallback_stays_inside_the_per_burst_budget():
     """It runs inside a live ARQ turnaround, on whatever the segmenter brackets —
     up to its 6 s force-close, and more if the gate is held open."""

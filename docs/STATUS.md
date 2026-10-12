@@ -185,3 +185,28 @@ and message `NL03TXWQ8SGL` for VARA through KB8AY, plus message `2KX2HWM919HR`
 for ARDOP through WW2MI. Named reference decoders and
 remote receivers provide the independent observations identified above.
 Simulation results use two instances of hfmodem.
+
+## Release qualification
+
+Python 3.13 is the supported minimum. Release qualification tests that minimum
+on macOS and Linux and records the interpreter, dependencies and source files
+used. GitHub runs the functional regression suite and checks the distribution
+archives before uploading to PyPI.
+
+Elapsed-time tests use the `realtime` marker. Shared GitHub runners do not
+provide a fixed performance baseline, so these checks run separately before
+release tagging, on the local macOS and Linux qualification machines. Their
+limits stay unchanged. With no competing test workers, run all four checks:
+
+```sh
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  nice -n 19 python -m pytest -c pyproject.toml -q -n 0 \
+  packages/hfmodem/hfmodem/tests/shrike/test_offset_fine_estimate.py::test_an_awkward_window_length_is_what_the_pad_is_for \
+  packages/hfmodem/hfmodem/tests/shrike/test_offset_fine_estimate.py::test_the_refinement_is_not_a_cost_the_cycle_can_feel \
+  packages/hfmodem/hfmodem/tests/kestrel/test_response_by_payload.py::test_the_fallback_stays_inside_the_per_burst_budget \
+  packages/hfmodem/hfmodem/tests/shrike/test_rxcost.py::test_the_cycles_own_read_fits_it
+```
+
+All four must pass, without a marker filter or skipped cases. A pass records
+performance on the tested machine; it does not establish a speed guarantee for
+every computer.

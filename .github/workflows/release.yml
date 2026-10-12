@@ -27,11 +27,19 @@ jobs:
       - name: Check package versions and release tag
         run: |
           python - <<'EOF'
-          import os, sys, tomllib
+          import ast, os, sys, tomllib
+          from pathlib import Path
           versions = {}
           for name in ("hfhost", "hfmodem", "creance"):
               with open(f"packages/{name}/pyproject.toml", "rb") as f:
                   versions[name] = tomllib.load(f)["project"]["version"]
+              module = ast.parse(Path(f"packages/{name}/{name}/__init__.py").read_text())
+              runtime = [ast.literal_eval(node.value) for node in module.body
+                         if isinstance(node, ast.Assign) and any(
+                             isinstance(target, ast.Name) and target.id == "__version__"
+                             for target in node.targets)]
+              if runtime != [versions[name]]:
+                  sys.exit(f"{name}: module version {runtime} disagrees with metadata {versions[name]}")
           if len(set(versions.values())) != 1:
               sys.exit(f"package versions disagree: {versions}")
           if os.environ["GITHUB_REF_TYPE"] == "tag":
@@ -87,16 +95,13 @@ jobs:
           -e 'packages/creance[dev]'
           pytest-xdist
       - name: Run release tests
+        # Hosted runners do not guarantee station-class timing. The unchanged
+        # realtime budgets are qualified serially on macOS and Linux before
+        # tagging; see docs/STATUS.md#release-qualification.
         run: >-
           nice -n 19 python -m pytest -c pyproject.toml -q -n auto --dist loadfile
           -m "not slow and not realtime and not corpus and not hardware and not ardopcf"
           packages
-      - name: Run wall-clock cost checks without competing test workers
-        run: >-
-          nice -n 19 python -m pytest -c pyproject.toml -q -n 0
-          packages/hfmodem/hfmodem/tests/shrike/test_offset_fine_estimate.py::test_an_awkward_window_length_is_what_the_pad_is_for
-          packages/hfmodem/hfmodem/tests/shrike/test_offset_fine_estimate.py::test_the_refinement_is_not_a_cost_the_cycle_can_feel
-
   publish:
     needs: [build, test]
     # A branch dispatch rehearses build and test; a tag dispatch can recover a

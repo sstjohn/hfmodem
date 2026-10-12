@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "creance"
-version = "0.2.0"
+version = "0.2.1"
 description = "Conformance and performance harness for the radio flock (kestrel, shrike, sabir)"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE", "NOTICE"]
@@ -24,7 +24,7 @@ It runs a transfer between two modem instances over a simulated channel and sums
 both ends to prove the same bytes arrived, so a claim about a protocol is
 something you can re-run rather than something you read. Pre-alpha.
 """ }
-dependencies = ["hfhost>=0.2.0"]
+dependencies = ["hfhost>=0.2.1"]
 
 [project.urls]
 Homepage = "https://hfmodem.ssj.lol"

@@ -33,7 +33,7 @@ def test_mark_idle_rejects_keying_even_when_the_other_tone_is_outside_the_pair(f
 
 @pytest.mark.parametrize('fs,centre,complex_input,centres', [
     (4000, 900, False, [897.5, 829.5, 975.0, 1066.5]),
-    (4000, -24, True, [-31.0, 45.5, -106.0, 108.0]),
+    (4000, -24, True, [-26.5, -94.5, 51.0, 142.5]),
     (6000, 900, False, [897.5, 829.5, 975.0, 738.5]),
     (6000, -24, True, [-26.5, -94.5, 51.0, -185.5]),
     (6000, 2240, False, [2237.5, 2169.5, 2315.0, 2078.5]),
@@ -56,7 +56,11 @@ def test_tone_search_baseband_conversion_preserves_candidates(fs, centre, comple
     samples = rtty.modulate('THE QUICK BROWN FOX 12345\n', fs=fs,
                             mark_hz=prototype_centre + 85, space_hz=prototype_centre - 85)
     if complex_input:
-        samples = hilbert(samples) * np.exp(2j * np.pi * (centre - 900) * np.arange(len(samples)) / fs)
+        # The one-second windows have almost equal in-band energy. A complex64
+        # Hilbert transform can change which wins across FFT implementations;
+        # construct the reference fixture in double precision before mixing.
+        samples = hilbert(samples.astype(np.float64)) * np.exp(
+            2j * np.pi * (centre - 900) * np.arange(len(samples)) / fs)
     pairs = fsk.tone_pairs(samples, fs, shift=170, near=centre, span=265,
                            tol=1, max_s=3, keyed=keyed)
     assert [hz for hz, _ in pairs] == (centres[:1] if keyed else centres)

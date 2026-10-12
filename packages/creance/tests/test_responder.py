@@ -217,6 +217,53 @@ def test_init_runs_with_surviving_subset(tmp_path, modem):
         dead.stop()
 
 
+def test_stop_waits_for_a_session_worker_to_start(tmp_path, modem, monkeypatch):
+    starting, release, finished = (threading.Event() for _ in range(3))
+    original_start = threading.Thread.start
+
+    def gated_start(thread):
+        if thread.name == "responder-session-a":
+            starting.set()
+            assert release.wait(5.0), "test did not release session startup"
+        original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", gated_start)
+    d = Daemon(tmp_path, [("a", modem)])
+    d.start()
+    ticker = d.r._ticker
+    errors = []
+
+    def shutdown():
+        try:
+            d.stop()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    stopper = threading.Thread(target=shutdown)
+    try:
+        connect(modem)
+        assert starting.wait(2.0)
+        # Remove the unrelated ticker join so it cannot mask the worker-start
+        # interleaving. Its thread is still stopped and joined in cleanup.
+        d.r._ticker = None
+        stopper.start()
+        assert d.r._stop.wait(2.0)
+        assert not finished.wait(0.2), errors
+        release.set()
+        stopper.join(5.0)
+        assert not stopper.is_alive()
+        assert errors == []
+        assert not d.r.worker_alive
+    finally:
+        release.set()
+        if stopper.ident is not None:
+            stopper.join(5.0)
+        d.stop()
+        ticker.join(2.0)
+
+
 # -- ARBITRATING --------------------------------------------------------------
 
 def test_spurious_pending_then_cancelpending(daemon, modem, modem2):

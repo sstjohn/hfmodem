@@ -227,6 +227,7 @@ def _deep_scan_cost(sl: int, long_cycle: bool) -> tuple[float, float, bool]:
     return blind, tracked, len(sess.events) >= 2
 
 
+@pytest.mark.realtime
 def test_the_cycles_own_read_fits_it() -> None:
     """Every level the peer may send, at both cycle lengths, on this box.
 

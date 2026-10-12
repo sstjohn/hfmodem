@@ -249,6 +249,7 @@ class Responder:
         self._cancel = threading.Event()
         self._cancel_reason = "complete"
         self._worker: threading.Thread | None = None
+        self._session_start_lock = threading.Lock()
         self._result: ScenarioResult | None = None
         self._deadline = 0.0
         self._hangups_at = 0
@@ -319,11 +320,16 @@ class Responder:
         its transcript survives and metrics.from_files() reconstructs it."""
         self._stop.set()
         self._events.put((EV_STOP, None, None))
-        self._cancel.set()
+        # A session can be starting on the loop thread while stop is called
+        # from another thread. Wait until its worker has actually started
+        # before cancelling/joining it or closing its client and transcript.
+        with self._session_start_lock:
+            self._cancel.set()
+            worker = self._worker
         if self._ticker is not None:
             self._ticker.join(timeout=self.tick_s + 1.0)
-        if self._worker is not None:
-            self._worker.join(timeout=self.join_timeout_s)
+        if worker is not None:
+            worker.join(timeout=self.join_timeout_s)
         if self._sweeper is not None:
             self._sweeper.join(timeout=self.tick_s + 1.0)
         for client in self._links.values():
@@ -566,6 +572,11 @@ class Responder:
     # -- session -----------------------------------------------------------
 
     def _begin_session(self, modem: str, connected_raw: str) -> None:
+        with self._session_start_lock:
+            if not self._stop.is_set():
+                self._start_session(modem, connected_raw)
+
+    def _start_session(self, modem: str, connected_raw: str) -> None:
         self._winner = modem
         self._pending.clear()
         client = self._links[modem]
@@ -602,11 +613,12 @@ class Responder:
         fan = self._fanin.get(modem)
         self._hangups_at = fan.hangups if fan is not None else 0
         self.state = SESSION
-        self._worker = threading.Thread(
+        worker = threading.Thread(
             target=self._session_worker,
             args=(client, t, sid, self._cancel, client.epoch),
             name=f"responder-session-{modem}", daemon=True)
-        self._worker.start()
+        worker.start()
+        self._worker = worker
 
     def _session_worker(self, client: Link, t: Transcript, sid: str,
                         cancel: threading.Event, epoch: int) -> None:

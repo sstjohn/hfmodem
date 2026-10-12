@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — 2026-10-12
+
+- Fixed release-test portability across FFT implementations.
+- Fixed responder shutdown during session-worker startup.
+- Fixed release checks for shared CI runners while retaining separate receiver
+  performance qualification with the existing timing requirements.
+
+Python 3.13 or later is required. Modem behavior is unchanged from 0.2.0.
+
 ## 0.2.0 — 2026-10-11
 
 Changes since 0.1.0:

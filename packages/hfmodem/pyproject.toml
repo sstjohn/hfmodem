@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hfmodem"
-version = "0.2.0"
+version = "0.2.1"
 maintainers = [{ email = "hfmodem@ssj.lol" }]
 description = "Experimental HF modems, receive monitors and shared radio station tools."
 # Inline, not a file path: this package directory carries no README.md, and
@@ -42,7 +42,7 @@ classifiers = [
 # hfhost supplies the config primitives and the client the station probes itself
 # through. The dependency runs one way only and tests/gates/test_import_direction.py
 # enforces it: hfhost must stay able to drive a modem it knows nothing about.
-dependencies = ["hfhost>=0.2.0", "creance>=0.2.0", "numpy>=1.24", "scipy>=1.10", "sounddevice>=0.4", "pyserial>=3.5"]
+dependencies = ["hfhost>=0.2.1", "creance>=0.2.1", "numpy>=1.24", "scipy>=1.10", "sounddevice>=0.4", "pyserial>=3.5"]
 
 [project.urls]
 Homepage = "https://hfmodem.ssj.lol"
