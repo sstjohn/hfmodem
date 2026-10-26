@@ -6,5 +6,5 @@
 ``controller`` runs scanning and exchanges; ``modem`` and ``host`` attach it
 to the station. ``lp`` handles AL-1/AL-2, ``directory`` labels monitored
 traffic, and ``hflink``/``gpr`` supply network conventions and position text.
-The interoperability limits are in docs/protocols/bateleur/ALE.md.
+The interoperability limits are in docs/implementation/bateleur/ALE.md.
 """

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The PACTOR profile: the assessed flight, and every flag an arm may vary from it.
 
 `FLOWN` is the profile that flew every assessed arm and is not an adjustment.
@@ -14,7 +16,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from hfmodem.core.config import client_sid
 from pathlib import Path
 import re
 import shlex
@@ -24,7 +25,8 @@ from hfmodem.shrike.compress import supervisor_block
 
 from .modes import (ANSWERED, CLEARED, NOT_ATTEMPTED, NO_REPLY, Assessment, Mode, Readout,
                     highest, spoken)
-from .station import CAT_PORT, ROOT
+from . import claim, station
+from .station import ROOT
 
 from .operator import mode_root
 HERE = mode_root('pactor')
@@ -343,7 +345,6 @@ def flags(peer, level, args, directory, send):
     """The launcher words between the shared head and the shared witness/force tail."""
     # An explicit --tx-drive/--p1-drive wins; short of that, the chosen level's own
     # figure does, ahead of any hard-coded default.
-    from . import station
     if getattr(args, 'selected_rig', station.RIG_NAME) == 'ft891' and not getattr(args, 'selected_audio', None):
         if args.tx_drive is None:
             args.tx_drive = level['tx_drive']
@@ -722,7 +723,7 @@ def flags(peer, level, args, directory, send):
     if not timing_trial and not entry_trial and mail_eligible and not no_mail:
         words += ['--mail-fetch', '--no-mail-wait-greeting' if args.no_wait_greeting
                   else '--mail-wait-greeting']
-        words += ['--mail-sid', client_sid(),
+        words += ['--mail-sid', args.client_sid,
                   '--mail-out', str(directory / 'mail')]
     if send:
         words += ['--mail-send', str(send)]
@@ -992,7 +993,7 @@ def _p2_mail_flags(level, args, directory, send):
              '--tx-drive', f'{args.tx_drive:g}', '--p1-drive', f'{args.p1_drive:g}',
              '--long-cycle' if args.long_cycle else '--no-long-cycle',
              '--mail-fetch', '--no-mail-wait-greeting' if args.no_wait_greeting
-             else '--mail-wait-greeting', '--mail-sid', client_sid(),
+             else '--mail-wait-greeting', '--mail-sid', args.client_sid,
              '--mail-out', str(directory / 'mail')]
     words += _password_flags(args)
     for flag, watts in (('--p1-watts', level['p1_watts']), ('--p3-watts', level['p3_watts'])):
@@ -1066,10 +1067,8 @@ def assess(mode, peer, dwell_s=WINDOW_S):
     short = f' (a {dwell_s:g}s dwell was asked for; this instrument reads {WINDOW_S:g}s)' \
         if dwell_s < WINDOW_S else ''
     try:
-        heard = subprocess.run(['bash', '-c', script], cwd=ROOT, text=True,
-                               capture_output=True, timeout=WINDOW_S + 180,
-                               env=dict(os.environ, CAT_PORT=CAT_PORT,
-                                        DXCALL=peer['call']))
+        heard = claim.assess('assessment', script, timeout=WINDOW_S + 180,
+                             env=dict(CAT_PORT=station.CAT_PORT, DXCALL=peer['call']))
     except (subprocess.SubprocessError, OSError) as trouble:
         return Assessment(occupied=None, instrument=INSTRUMENT,
                           detail=f'the sense did not run ({type(trouble).__name__}); '

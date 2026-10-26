@@ -710,7 +710,8 @@ def packet_signal(payload: bytes = b"", baud: int = 100, *, packet_count: int = 
                   header: int | None = None, amp: float = 0.11,
                   invert: bool = False, changeover_request: bool = False,
                   qrt: bool = False, lead_s: float = 0.05, tail_s: float = 0.05,
-                  phase0: float = 1.22, bits45: int = 0) -> np.ndarray:
+                  phase0: float = 1.22, bits45: int = 0,
+                  data_type: int = spec.DataType.ASCII_8BIT) -> np.ndarray:
     """ONE PACTOR-1 data packet as audio (float32, FS=48 kHz).
 
     The caller's half of link setup. The description is explicit about what
@@ -726,7 +727,7 @@ def packet_signal(payload: bytes = b"", baud: int = 100, *, packet_count: int = 
     `qrt` ends the link. Both were unreachable from here, so shrike could open a
     PACTOR-1 session and had no way to give the far end a turn in it.
     """
-    pkt = data_packet(payload, baud, packet_count, header=header, bits45=bits45,
+    pkt = data_packet(payload, baud, packet_count, data_type, header=header, bits45=bits45,
                       changeover_request=changeover_request, qrt=qrt)
     burst = _fsk_burst(pkt, baud, phase0, amp, invert)
     return np.concatenate([np.zeros(int(lead_s * FS)), burst,
@@ -802,9 +803,11 @@ def breakin_packet(payload: bytes = b"", baud: int = 100, *,
 def breakin_signal(payload: bytes = b"", baud: int = 100, *, packet_count: int = 0,
                    amp: float = 0.11, invert: bool = False, qrt: bool = False,
                    lead_s: float = 0.05, tail_s: float = 0.05,
-                   phase0: float = 1.22) -> np.ndarray:
+                   phase0: float = 1.22,
+                   data_type: int = spec.DataType.ASCII_8BIT) -> np.ndarray:
     """One changeover packet as audio -- the IRS taking the link by force."""
-    pkt = breakin_packet(payload, baud, packet_count=packet_count, qrt=qrt)
+    pkt = breakin_packet(payload, baud, packet_count=packet_count, qrt=qrt,
+                         data_type=data_type)
     burst = _fsk_burst(pkt, baud, phase0, amp, invert)
     return np.concatenate([np.zeros(int(lead_s * FS)), burst,
                            np.zeros(int(tail_s * FS))]).astype(np.float32)

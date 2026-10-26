@@ -1,0 +1,12 @@
+{
+  "source_session": "20261024T195517145066Z",
+  "runtime_commit": "712278a58",
+  "source_snapshot_sha256": "c242ed41db8e76126d05fd29976ba5d9b2d31ba5273826b1a0ddeb97131fb475",
+  "samples": [
+    140116992,
+    140185088
+  ],
+  "corpus_path": "kq4qwh-turn-loop-1024/final-ack.wav",
+  "sha256": "44aeb8d3831223d610d346efb7eeebb2da9cac4870f46531eb2ed09493ef2e84",
+  "description": "KQ4QWH caller-role frame0 after our42byteDATA; all11pairs at soft alignment, firstpreamble weakerpower2.64percentmedian"
+}

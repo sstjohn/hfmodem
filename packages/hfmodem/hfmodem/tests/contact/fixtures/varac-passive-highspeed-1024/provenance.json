@@ -1,0 +1,39 @@
+{
+  "source": "/Users/saul/src/radio/hfmodem/operator-data/working/vara-chat/sessions/20261024T153733654022Z/receive.wav",
+  "source_size_before": 91784236,
+  "source_mtime_ns": 1792857229074546209,
+  "source_header_hex": "524946462484780557415645666d7420100000000100010080bb000000770100020010006461746100847805",
+  "start_sample": 37500000,
+  "end_sample": 43500000,
+  "sample_rate": 48000,
+  "range_read_twice_identical": true,
+  "raw_range_sha256": "820a8aa70426bb211cc78fc759541f5498de8c728a288ec126a75acd65ab68f7",
+  "copy_sha256": "a5ac7a798ddbdd44ed850926f16af524c05504384cd0ae9319718d30451b8dce",
+  "logs": {
+    "arm.log": {
+      "bytes": 52538,
+      "sha256": "64a93c404b6ccb13f167daadd049b5e0120c5fba114e3d5c496020e031f48bdd"
+    },
+    "host.jsonl": {
+      "bytes": 25568,
+      "sha256": "8f4b59764ebc6e7cfd704bfe20055afb085cb7d55a878f5716852836572fe7ae"
+    },
+    "events.jsonl": {
+      "bytes": 22574,
+      "sha256": "6349bc8fe05945c90363e13b7ddc93911b13a924268f7f7b3c8f9bfa419604c1"
+    },
+    "provenance.json": {
+      "bytes": 4490,
+      "sha256": "54c867b9ac113c7f7bdb2085f37375b8109a75fdbaaa3a474c5d5f520db90906"
+    }
+  },
+  "note": "Original live recording opened read-only. Fixed complete historical range only; original not modified.",
+  "flac_sha256": "17c559926de09821ac0d335423a8783332c795331dadcf1200f7301e480b5c9a",
+  "corpus_path": "varac-passive-highspeed-1024/slot1-vmail.flac",
+  "expected_levels": [
+    6,
+    7,
+    6,
+    5
+  ]
+}

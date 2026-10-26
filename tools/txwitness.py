@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Record and read this station's own transmission, off its own monitor.
 
 WHY THIS EXISTS. Until 2026-08-14 the only way to hear what this station put on
@@ -685,6 +687,10 @@ def measure(path: str) -> int:
 from hfmodem.core.capture_producer import restore_signals, owned_record
 
 
+from hfcapture import device_claim, device_opened
+from hfmodem.core import claim
+
+
 @restore_signals
 @owned_record
 def record(seconds: float, path: str, device: str, *, ownership=None) -> int:
@@ -712,39 +718,41 @@ def record(seconds: float, path: str, device: str, *, ownership=None) -> int:
     for sig in FATAL_SIGNALS:
         signal.signal(sig, stop)
 
-    dev = find_device(device, "in")
-    name = sd.query_devices()[dev]["name"]
-    print(f"  recording {seconds:g} s from {name} — {path} is readable while it runs")
-    tap = wav.CaptureRecorder(path, rate=FS, source=name, **({"ownership": ownership} if ownership else {}))
-    lost = 0
+    with device_claim("txwitness", devices=claim.Devices(capture=device)):
+        dev = find_device(device, "in")
+        name = sd.query_devices()[dev]["name"]
+        print(f"  recording {seconds:g} s from {name} — {path} is readable while it runs")
+        tap = wav.CaptureRecorder(path, rate=FS, source=name, **({"ownership": ownership} if ownership else {}))
+        lost = 0
 
-    def heard(block, _frames, _time, status):
-        nonlocal lost
-        lost += bool(status.input_overflow)
-        tap.push(block[:, 0].copy())
+        def heard(block, _frames, _time, status):
+            nonlocal lost
+            lost += bool(status.input_overflow)
+            tap.push(block[:, 0].copy())
 
-    stalled = False
-    try:
-        with sd.InputStream(samplerate=FS, channels=1, device=dev, callback=heard):
-            last = time.monotonic()
-            while tap.seconds < seconds:
-                time.sleep(DRAIN_S)
-                before = tap.seconds
-                tap.drain()
-                if tap.seconds > before:
-                    last = time.monotonic()
-                elif time.monotonic() - last > STALL_S:
-                    stalled = True
-                    break
-    finally:
-        tap.facts["xruns"] = lost
-        tap.close()
-        print(f"  saved {path}: {tap.seconds:.1f} s"
-              + (f", {lost} overflows" if lost else ""))
-    if stalled:
-        print(f"  *** the card delivered nothing for {STALL_S:g} s and the tap "
-              f"stopped there — the interface went away ***")
-    return 1 if stalled else 0
+        stalled = False
+        try:
+            with sd.InputStream(samplerate=FS, channels=1, device=dev, callback=heard):
+                device_opened()
+                last = time.monotonic()
+                while tap.seconds < seconds:
+                    time.sleep(DRAIN_S)
+                    before = tap.seconds
+                    tap.drain()
+                    if tap.seconds > before:
+                        last = time.monotonic()
+                    elif time.monotonic() - last > STALL_S:
+                        stalled = True
+                        break
+        finally:
+            tap.facts["xruns"] = lost
+            tap.close()
+            print(f"  saved {path}: {tap.seconds:.1f} s"
+                  + (f", {lost} overflows" if lost else ""))
+        if stalled:
+            print(f"  *** the card delivered nothing for {STALL_S:g} s and the tap "
+                  f"stopped there — the interface went away ***")
+        return 1 if stalled else 0
 
 
 def main() -> int:

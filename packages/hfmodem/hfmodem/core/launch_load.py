@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """A single startup observation; these values never grant timing permission."""
 import math
 from numbers import Integral, Real

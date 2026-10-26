@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Recorded cycle changes and 17 repeat requests through the production seams."""
 from dataclasses import replace
 import hashlib
@@ -172,6 +174,7 @@ def pending_turn(tmp_path):
     a = s.host.arq
     a._inflight = arq._Packet(status=0, payload=b';FW', sl=1, breakin=True)
     a._next_seq, a._buffer_raw = 1, 3
+    a.payload_ledger.queue(a._inflight.payload)
     tx.aim(g, 31)
     tx.breakin_due = True
     tx.live.now = tx.live.pos = 1888800

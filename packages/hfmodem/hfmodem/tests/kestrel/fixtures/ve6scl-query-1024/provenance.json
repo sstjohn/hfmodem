@@ -1,0 +1,34 @@
+{
+  "corpus_path": "ve6scl-query-1024/reply-frame5.wav",
+  "sha256": "6f5a58ff1a5f7afb3ee68a4d6f91d86dd563dc35e24047fa029651fbda489c0b",
+  "source": "operator-data/working/vara-chat/sessions/20261024T205647140033Z/receive.flac",
+  "samples": [
+    43464192,
+    43548672
+  ],
+  "source_runtime": "09155f912",
+  "evidence": "working/varac-on-air/ve6scl-2111-1024/all-replies/frame5-all.json",
+  "classification": "W9SSJ called-keyed seed60/preadv311, 32/32 exact",
+  "stock": {
+    "8": {
+      "corpus_path": "ve6scl-query-1024/stock-frame8.wav",
+      "sha256": "109adaaf7841440d8aa189c0ad8fc8c56b11442a797b2d1a795c70754a33425b",
+      "source": "/Users/saul/src/radio/hfmodem/working/varac-on-air/ve6scl-2111-1024/stock-20261024T213105Z/lost-continue/stock-output.wav",
+      "samples": [
+        1133122,
+        1208258
+      ],
+      "exact_tones": 32
+    },
+    "18": {
+      "corpus_path": "ve6scl-query-1024/stock-frame18.wav",
+      "sha256": "8412e06cfc2b53ab132cd369d141ecfa1b7fd2d4e596e46ebe7a817cea35444b",
+      "source": "/Users/saul/src/radio/hfmodem/working/varac-on-air/ve6scl-2111-1024/stock-20261024T213105Z/missing-data/stock-output.wav",
+      "samples": [
+        1131025,
+        1206161
+      ],
+      "exact_tones": 32
+    }
+  }
+}

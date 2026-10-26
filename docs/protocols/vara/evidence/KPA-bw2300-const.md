@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # BW2300 levels 10-16 closed from known plaintext
 
 `kpa_bw2300_const.py` prints every table and result below (about 80 s, nothing written). It demodulates

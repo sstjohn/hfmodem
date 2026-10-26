@@ -3,6 +3,7 @@
 """K4MSU 1003-0033: current-cycle SL3 ACKs on the retained PCM and budget."""
 import contextlib
 from functools import lru_cache
+import gc
 import hashlib
 import io
 import json
@@ -26,6 +27,14 @@ PINS = json.loads(evidence.require_input(
     Path(__file__).with_name('fixtures') / 'p3-irs-sl3-ack-1003.json',
     allow_module_level=True).read_text())
 CROPS = {p['hold']: p for p in PINS['crops']}
+
+
+@contextlib.contextmanager
+def receive_gc():
+    with onair._receive_gc() as enabled:
+        yield
+    if enabled:
+        gc.collect(2)
 
 
 @lru_cache(maxsize=3)
@@ -116,9 +125,11 @@ def listen_current(s, audio, origin, allowance=18.):
     peer.raster = irs_grid(anchor=s.rx._p3_row0+60000-4320)
     peer.slot = 204
     peer.key_instant = lambda *args: round(allowance*48)
-    held = onair._listen_until_answer(live, len(audio), s.host, s.rx, 0)
-    onair._scan_frame(s.rx, held, origin, tracked_only=True)
-    return (time.perf_counter()-live.started)*1000
+    with receive_gc():
+        held = onair._listen_until_answer(live, len(audio), s.host, s.rx, 0)
+        onair._scan_frame(s.rx, held, origin, tracked_only=True)
+        elapsed = (time.perf_counter()-live.started)*1000
+    return elapsed
 
 
 @pytest.fixture(scope='module')
@@ -331,6 +342,7 @@ def test_pending_sl3_preserves_narrow_fallback(sl, swapped):
                                           (202, 18.), (207, 18.),
                                           (202, 22.), (207, 22.),
                                           (202, 14.), (207, 14.)])
+@pytest.mark.wall_clock
 def test_recorded_current_ack_with_real_wall_budget(audio_callback_load, hold, allowance):
     audio, p = crop(hold)
     costs = []
@@ -340,24 +352,100 @@ def test_recorded_current_ack_with_real_wall_budget(audio_callback_load, hold, a
         peer.raster = irs_grid(anchor=s.rx._p3_row0 + 60000 - 4320)
         peer.slot = 204
         peer.key_instant = lambda *args: round(allowance * 48)
-        started = time.perf_counter()
-        peer.live = SimpleNamespace(transmit=True,
-            clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
-        if hold in (201, 206):
-            elapsed = listen_current(s, audio, p['origin'], allowance)/1000
-        else:
-            onair._scan_frame(s.rx, audio, p['origin'], tracked_only=True)
-            elapsed = time.perf_counter() - started
-        costs.append(elapsed * 1000)
-        ev, = s.packets
-        assert ev.packet[:2] == (3 if hold in (201, 206) else 2, 0x23)
-        assert s.host.peer.sent == [('cs', arq.CS_REQUEST)]
-        assert elapsed + onair.P3_DECODE_RESERVE_S < allowance / 1000
-        assert s.rx._p3_acquisition_fits(0)
+        with receive_gc():
+            started = time.perf_counter()
+            peer.live = SimpleNamespace(transmit=True,
+                clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
+            if hold in (201, 206):
+                elapsed = listen_current(s, audio, p['origin'], allowance)/1000
+            else:
+                onair._scan_frame(s.rx, audio, p['origin'], tracked_only=True)
+                elapsed = time.perf_counter() - started
+            costs.append(elapsed * 1000)
+            ev, = s.packets
+            assert ev.packet[:2] == (3 if hold in (201, 206) else 2, 0x23)
+            assert s.host.peer.sent == [('cs', arq.CS_REQUEST)]
+            assert elapsed + onair.P3_DECODE_RESERVE_S < allowance / 1000
+            assert s.rx._p3_acquisition_fits(0)
     print(f'ACK_METRIC hold={hold} allowance={allowance:g} scan={max(costs):.3f}')
 
 
+@pytest.mark.wall_clock
+def test_gen2_cannot_steal_current_sl2_ack(audio_callback_load, monkeypatch):
+    audio, p = crop(207)
+    events = []
+    collection_started = None
+
+    def collection(phase, info):
+        nonlocal collection_started
+        if info['generation'] != 2:
+            return
+        if phase == 'start':
+            collection_started = time.perf_counter()
+        else:
+            time.sleep(max(0., .013 - (time.perf_counter() - collection_started)))
+        events.append((phase, time.perf_counter()))
+
+    enabled = gc.isenabled()
+    gc.enable()
+    try:
+        gc.callbacks.append(collection)
+        try:
+            for protected in (False, True):
+                s = receiver(p['row'])
+                peer = s.host.peer
+                peer.raster = irs_grid(anchor=s.rx._p3_row0 + 60000 - 4320)
+                peer.slot = 204
+                peer.key_instant = lambda *args: round(18. * 48)
+                fits = s.rx._p3_acquisition_fits
+                interval = []
+
+                def admission(reserve):
+                    if not interval:
+                        interval.append(time.perf_counter())
+                        if gc.isenabled():
+                            gc.collect(2)
+                        interval.append(time.perf_counter())
+                    return fits(reserve)
+
+                monkeypatch.setattr(s.rx, '_p3_acquisition_fits', admission)
+                scope = onair._receive_gc() if protected else contextlib.nullcontext()
+                with scope:
+                    started = time.perf_counter()
+                    peer.live = SimpleNamespace(transmit=True,
+                        clamp_late=lambda deadline:
+                            (time.perf_counter() - started) * onair.FS > deadline)
+                    onair._scan_frame(s.rx, audio, p['origin'], tracked_only=True)
+                    elapsed = time.perf_counter() - started
+                    assert len(interval) == 2
+                    during = [(phase, at) for phase, at in events
+                              if interval[0] <= at <= interval[1]]
+                    if protected:
+                        assert not during
+                        assert not [at for _, at in events if started <= at <= started + elapsed]
+                        ev, = s.packets
+                        assert ev.packet[:2] == (2, 0x23)
+                        assert len(ev.packet[2]) == 23 and ev.packet[3]
+                        assert hashlib.sha256(ev.packet[2]).hexdigest()[:12] == '6aa3fa0af6fc'
+                        assert peer.sent == [('cs', arq.CS_REQUEST)]
+                        assert elapsed + onair.P3_DECODE_RESERVE_S < .018
+                        assert s.rx._p3_acquisition_fits(0)
+                    else:
+                        assert [phase for phase, _ in during] == ['start', 'stop']
+                        assert during[1][1] - during[0][1] >= .013
+                        assert not s.packets and not peer.sent
+            after = time.perf_counter()
+            gc.collect(2)
+            assert [phase for phase, at in events if at >= after] == ['start', 'stop']
+        finally:
+            gc.callbacks.remove(collection)
+    finally:
+        if not enabled:
+            gc.disable()
+
+
 @pytest.mark.parametrize('swapped', [False, True])
+@pytest.mark.wall_clock
 def test_unaffordable_sl3_reads_sl1_with_real_wall_budget(audio_callback_load, monkeypatch,
                                                        swapped):
     audio = np.pad(placement.link_packet(1, b'fresh', 0x23, swapped=swapped),
@@ -372,19 +460,21 @@ def test_unaffordable_sl3_reads_sl1_with_real_wall_budget(audio_callback_load, m
         def forbid(*args, **kwargs):
             pytest.fail('unaffordable SL3 reader started')
         monkeypatch.setattr(s.rx.sync, 'wideband_packet_at', forbid)
-        started = time.perf_counter()
-        peer.live = SimpleNamespace(transmit=True,
-            clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
-        onair._scan_frame(s.rx, audio, 0, tracked_only=True)
-        elapsed = time.perf_counter() - started
-        ev, = s.packets
-        assert ev.packet == (1, 0x23, b'fresh', True)
-        assert s.host.peer.sent == [('cs', arq.CS_REQUEST)]
-        assert elapsed + onair.P3_DECODE_RESERVE_S < .012
-        assert s.rx._p3_acquisition_fits(0)
+        with receive_gc():
+            started = time.perf_counter()
+            peer.live = SimpleNamespace(transmit=True,
+                clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
+            onair._scan_frame(s.rx, audio, 0, tracked_only=True)
+            elapsed = time.perf_counter() - started
+            ev, = s.packets
+            assert ev.packet == (1, 0x23, b'fresh', True)
+            assert s.host.peer.sent == [('cs', arq.CS_REQUEST)]
+            assert elapsed + onair.P3_DECODE_RESERVE_S < .012
+            assert s.rx._p3_acquisition_fits(0)
 
 
 @pytest.mark.parametrize('hold', [201, 206])
+@pytest.mark.wall_clock
 def test_staged_sl3_loaded_post_capture_budget(audio_callback_load, hold):
     audio, p = crop(hold)
     preparation, finish, scan = [], [], []
@@ -559,6 +649,7 @@ def test_carrier_requalification_waits_for_room_and_expires_on_turn_change(monke
 
 
 @pytest.mark.parametrize('allowance', [14., 18., 22.])
+@pytest.mark.wall_clock
 def test_faded_sl2_keeps_fallback_budget_under_callback_load(audio_callback_load, allowance):
     audio = np.pad(placement.link_packet(2, b'fresh', 0x23), (4800, 4800))
     row = 4800 + (placement.protocol_config().pulse().size - 1) // 2 + 4320
@@ -570,15 +661,16 @@ def test_faded_sl2_keeps_fallback_budget_under_callback_load(audio_callback_load
         peer.raster = irs_grid(anchor=row - 4320)
         peer.slot = 204
         peer.key_instant = lambda *args: round(allowance * 48)
-        started = time.perf_counter()
-        peer.live = SimpleNamespace(transmit=True,
-            clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
-        with contextlib.redirect_stdout(io.StringIO()):
-            onair._scan_frame(s.rx, audio, 0, tracked_only=True)
-        ev, = s.packets
-        assert ev.packet == (2, 0x23, b'fresh', True)
-        assert peer.sent == [('cs', arq.CS_REQUEST)]
-        assert s.rx._p3_acquisition_fits(0)
+        with receive_gc():
+            started = time.perf_counter()
+            peer.live = SimpleNamespace(transmit=True,
+                clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
+            with contextlib.redirect_stdout(io.StringIO()):
+                onair._scan_frame(s.rx, audio, 0, tracked_only=True)
+            ev, = s.packets
+            assert ev.packet == (2, 0x23, b'fresh', True)
+            assert peer.sent == [('cs', arq.CS_REQUEST)]
+            assert s.rx._p3_acquisition_fits(0)
 
 
 @pytest.mark.parametrize('level,hz,role,long_cycle,command,expected_ms', [
@@ -602,6 +694,7 @@ def test_speculative_sl3_reserves_every_reachable_fallback(
 
 
 @pytest.mark.parametrize('hold', [201, 206])
+@pytest.mark.wall_clock
 def test_recorded_sl3_at_18_ms_is_declined_under_callback_load(audio_callback_load, hold):
     audio, p = crop(hold)
     for _ in range(5):
@@ -610,12 +703,13 @@ def test_recorded_sl3_at_18_ms_is_declined_under_callback_load(audio_callback_lo
         peer.raster = irs_grid(anchor=p['row'] - 4320)
         peer.slot = 204
         peer.key_instant = lambda *args: round(18. * 48)
-        started = time.perf_counter()
-        peer.live = SimpleNamespace(transmit=True,
-            clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
-        with contextlib.redirect_stdout(io.StringIO()):
-            onair._scan_frame(s.rx, audio, p['origin'], tracked_only=True)
-        assert not s.packets and not peer.sent
+        with receive_gc():
+            started = time.perf_counter()
+            peer.live = SimpleNamespace(transmit=True,
+                clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
+            with contextlib.redirect_stdout(io.StringIO()):
+                onair._scan_frame(s.rx, audio, p['origin'], tracked_only=True)
+            assert not s.packets and not peer.sent
 
 
 @pytest.mark.parametrize('hz,allowance,admitted', [
@@ -639,6 +733,7 @@ def test_speculative_sl3_admission_boundary_preserves_sl1(monkeypatch, hz, allow
 
 
 @pytest.mark.parametrize('p', PINS['live'], ids=lambda p: str(p['hold']))
+@pytest.mark.wall_clock
 def test_live_sl1_repeats_keep_22_ms_wall_budget(audio_callback_load, p):
     raw = stream('1003-0045')[p['origin']:p['end']]
     assert hashlib.sha256(raw.tobytes()).hexdigest() == p['pcm_sha256']
@@ -650,11 +745,12 @@ def test_live_sl1_repeats_keep_22_ms_wall_budget(audio_callback_load, p):
         peer.raster = irs_grid(anchor=p['row'] - 4320)
         peer.slot = 204
         peer.key_instant = lambda *args: round(22. * 48)
-        started = time.perf_counter()
-        peer.live = SimpleNamespace(transmit=True,
-            clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
-        with contextlib.redirect_stdout(io.StringIO()):
-            onair._scan_frame(s.rx, audio, p['origin'], tracked_only=True)
-        assert s.packets[0].packet[0] == 1
-        assert peer.sent
-        assert s.rx._p3_acquisition_fits(0)
+        with receive_gc():
+            started = time.perf_counter()
+            peer.live = SimpleNamespace(transmit=True,
+                clamp_late=lambda deadline: (time.perf_counter() - started) * onair.FS > deadline)
+            with contextlib.redirect_stdout(io.StringIO()):
+                onair._scan_frame(s.rx, audio, p['origin'], tracked_only=True)
+            assert s.packets[0].packet[0] == 1
+            assert peer.sent
+            assert s.rx._p3_acquisition_fits(0)

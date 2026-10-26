@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Constant-table generation and verification
 
 The receiver tables use deterministic generators, closed-form expressions and

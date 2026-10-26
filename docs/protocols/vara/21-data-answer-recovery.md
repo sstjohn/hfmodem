@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # DATA acknowledgements and lost-answer recovery
 
 Measured with VARA HF 4.9.0, including new BW2300 stock-to-stock and
@@ -30,7 +32,7 @@ BW2750 sequence: queries 683, 745, 683, 745; replies 1, 1, 1, 311.
 The full-DATA phase advances on every successfully keyed full frame, including
 a NAK retry. Queries, refused writes and unrelated idles do not advance it.
 A two-stock double-loss experiment exposed the retry case; see
-[lower-record recovery](24-lower-record-recovery.md).
+[lower-record recovery](../../implementation/vara/24-lower-record-recovery.md).
 
 The implementation starts the intermediate query deadline 1.8 seconds after
 DATA unkey. It allows 4.5 seconds per intermediate query reply and at most three
@@ -157,7 +159,7 @@ The two-ACK-loss B2F run used the production CLI defaults. Existing
 script compatibility; wideband state queries no longer require them.
 
 These runs used virtual audio, not RF. Recovery includes the base-record wideband caller states measured here and
-the [qualified lower records](24-lower-record-recovery.md).
+the [qualified lower records](../../implementation/vara/24-lower-record-recovery.md).
 Unsupported bandwidth/record/queue states close with bytes unconfirmed rather
 than speculatively retransmitting or advancing them. Fresh solicited NAKs at a full base frame can now trigger the measured
 [lower-record repacketization](23-nak-repacketization.md); other NAK retries

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """THE CAMPAIGN REPORT: how far the night got, and what to do next.
 
 The tally this replaces printed "5 of 9 answered" and named the cycle each

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """VARA 4.9 link compression, independently implemented from bench findings.
 
-FILES is block-framed raw deflate. TEXT uses a partially known static code;
-its encoder is available for generated tests, not enabled on live links.
+FILES is block-framed raw deflate. TEXT uses the 4.9.0 dictionaries and state
+transitions, transmitting through the prose code with plain fallback.
 No stock captures or binaries are required by this module.
 """
 from __future__ import annotations
@@ -19,15 +19,17 @@ MODE_BITS = {'OFF': 0, 'TEXT': 2, 'FILES': 4}
 
 
 def validate_mode(mode: str) -> str:
+    if mode == 'ON':
+        mode = 'TEXT'  # Stock's legacy host command selects TEXT on the wire.
     if mode not in MODES:
         raise ValueError(f'unknown compression mode: {mode!r}')
     return mode
 
 
 def caller_mode(mode: str, high_speed: bool) -> str:
-    """TEXT advertisement remains disabled until all receive tables are known."""
+    """Advertise the selected encoding when the link supports compression."""
     mode = validate_mode(mode)
-    return 'FILES' if high_speed and mode == 'FILES' else 'OFF'
+    return mode if high_speed else 'OFF'
 
 
 def setup_mode(marker: int) -> str:
@@ -70,13 +72,107 @@ _BYTE_ROWS = (
 )
 BYTE_CODES = {b: c for chars, row in _BYTE_ROWS
               for b, c in zip(chars, row.split(), strict=True)}
-TOKENS = {b' VARA': '101101001', b' has ': '01010011'}
+TOKENS = {b' VARA': '101101001', b' has ': '01010011', b'& ': '1110100000'}
 ESC = '1011101100'
 LF = '10000'
 PROSE = '10101101'
 SYMBOLS = {code: bytes([b]) for b, code in BYTE_CODES.items()}
 SYMBOLS.update({code: word for word, code in TOKENS.items()})
+PROSE_PHRASES = {
+    '10000110': b'Welcome to the ', '01010010': b' RMS Trimode',
+    '01010001': b' minutes remaining with ',
+    '101101101': b' Connected to CMS\r', '101101111': b' RMS Relay',
+    '111010011': b'forwarded to the recipient via HF radio',
+    '110111000': b' through the Internet ', '010100000': b' >\r',
+    '1011110010': b' //WL2K ',
+}
+SYMBOLS.update(PROSE_PHRASES)
 PREFIXES = {code[:n] for code in (*SYMBOLS, ESC) for n in range(1, len(code))}
+
+# FW line form, initially measured by synthetic stock-interface substitutions.
+FW_PREFIX = '000'
+COMMENT_PREFIX = '011'
+PQ_PREFIX = '1011'
+PR_PREFIX = '1100'
+PM_PREFIX = '10100'
+CMS_PREFIX = '1101'
+FW_ESC = '01100101'
+FW_SPACE = '0110011'
+FW_CODES = dict(zip(b'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-\r', (
+    '10101 10000 111001 00111 01011 111101 111000 100010 100101 '
+    '110001 1101 101110 00000 11101 100011 011000 1011001 111111 '
+    '010000 111110 1001001 110000 10100 001100 1011000 010001 '
+    '001101 111100 00001 00011 10011 00101 00010 01101 101101 00100 '
+    '0111 10010001').split(), strict=True))
+FW_SYMBOLS = {code: bytes([b]) for b, code in FW_CODES.items()}
+FW_SYMBOLS.update({'01001': b' DE ', '110011': b' (', '101111': b')\r', '110010': b' >\r'})
+FW_SYMBOLS.update({'10010000': b'WL2K', '01100100': b'IS0GRB', '01010': b'\r'})
+FW_PREFIXES = {code[:n] for code in (*FW_SYMBOLS, FW_ESC, FW_SPACE)
+               for n in range(1, len(code))}
+
+WORD_CODES = dict(zip(b'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 \r', (
+    '01011 01110 00100 01000 00000 00110 00101 01101 01100 '
+    '01001 10001 00001 10010 00111 01010 01111 00010 10000 '
+    '00011 110011 111111 110001 110110 110100 110000 110010 '
+    '111110 111001 110101 111100 111000 111010 111011 111101 110111 100111 '
+    '1010 1011').split(), strict=True))
+WORD_ESC = '100110'
+WORD_SYMBOLS = {code: bytes([b]) for b, code in WORD_CODES.items()}
+WORD_PREFIXES = {code[:n] for code in (*WORD_SYMBOLS, WORD_ESC) for n in range(1, len(code))}
+
+NUMBER_CODES = dict(zip(b'0123456789 \r', (
+    '111110 00 010110 111111 01000 010111 01010 111100 111101 01001 10 011'
+).split(), strict=True))
+NUMBER_ESC = '1110'
+NUMBER_SYMBOLS = {code: bytes([b]) for b, code in NUMBER_CODES.items()}
+NUMBER_SYMBOLS['110'] = b' 0\r'
+NUMBER_PREFIXES = {code[:n] for code in (*NUMBER_SYMBOLS, NUMBER_ESC)
+                   for n in range(1, len(code))}
+
+# Stock-interface SID digit/capability substitutions, extended with the
+# remaining version, whitespace and table-transition forms.
+SID_PREFIX = '1110'
+SID_ESC = '1011001'                       # returns to the FW table
+SID_COMMENT = '1000'                      # emits '; ' and selects FW
+SID_CODES = dict(zip(b'0123456789.\n', (
+    '1001100 011 1001101 1001111 1001010 101111 1011010 1001001 1011000 1001011 11 1010'
+).split(), strict=True))
+SID_SYMBOLS = {code: bytes([byte]) for byte, code in SID_CODES.items()}
+SID_SYMBOLS.update({'000': b'-B2FWIHJM$]\r', '010': b'-B2FHM$]\r'})
+SID_SYMBOLS.update({
+    '0010': b';PQ: ', '0011': b';PR: ', '101110': b'-B2FIHJM$]\r',
+    '1011011': b'-B2FWIHM$]\r', '1001110': b' ', '1001000': b'\r',
+})
+SID_PREFIXES = {code[:n] for code in (*SID_SYMBOLS, SID_ESC, SID_COMMENT)
+                for n in range(1, len(code))}
+
+# The remaining dictionary and transitions are protocol facts from the pinned
+# distributed 4.9.0 binary. No vendor
+# executable code or captured frames are embedded here.
+SFI_ESC = '01000'
+SFI_SYMBOLS = dict(zip((
+    '1001 0111 00 101 1100 1000 0110 0101 11110 11111 01001 11100 '
+    '11010 11011 11101').split(), (
+    b' On 20', b'UTC}\r\n', b'0', b'-', b' ', b':', b'1', b'2', b'3',
+    b'4', b'5', b'6', b'7', b'8', b'9'), strict=True))
+SFI_PREFIXES = {code[:n] for code in (*SFI_SYMBOLS, SFI_ESC)
+               for n in range(1, len(code))}
+
+# A line prefix emits its literal and selects the following symbol table.
+# Table zero continues reading prefixes, including complete lines and LF.
+LINE_SYMBOLS = {
+    '000': (b';FW: ', 7), '011': (b'; ', 7),
+    '010': (b'[RMS Express-', 4), '1110': (b'[WL2K-', 4),
+    '1111': (b'FF\r', 0), '1011': (b';PQ: ', 6),
+    '1100': (b';PR: ', 6), '1101': (b'CMS via ', 7),
+    '0010': (b'RMS Trimode ', 4), '0011': (b'{SFI = ', 3),
+    '10100': (b';PM: ', 7), '10010': (b'FC EM ', 5), '10011': (b'F> ', 5),
+    '101010': (b';WL2K-Radio/Internet_Network\r', 0),
+    '100010': (b'[RMS Relay-', 4), '1010111': (b'[BPQ-', 4),
+    '1000111': (b';FR:\r', 0), '1000110': (b'*** ', 7),
+    '10101100': (b'de ', 7), PROSE: (b'', 1), LF: (b'\n', 0),
+}
+LINE_PREFIXES = {code[:n] for code in LINE_SYMBOLS for n in range(1, len(code))}
 
 
 @dataclass(frozen=True)
@@ -96,6 +192,7 @@ def decode_text(payload: bytes) -> Decoded:
         return Decoded(b'', 'invalid TEXT padding')
     out = bytearray()
     p = 0
+    table = 1
 
     def read(n: int, what: str) -> str:
         nonlocal p
@@ -105,16 +202,28 @@ def decode_text(payload: bytes) -> Decoded:
         p += n
         return s
 
-    def line_header() -> None:
-        header = read(8, 'line header')
-        if header != PROSE:
-            raise ValueError(f'unsupported line header 0x{int(header, 2):02x}')
-
-    def after_cr() -> None:
+    def optional_lf() -> None:
         nonlocal p
         if p + len(LF) <= end and bits.startswith(LF, p):
             out.append(10)
             p += len(LF)
+
+    def line_header() -> None:
+        nonlocal table
+        table = 0
+        while table == 0:
+            code = ''
+            while code not in LINE_SYMBOLS:
+                code += read(1, 'line prefix')
+                if code not in LINE_SYMBOLS and code not in LINE_PREFIXES:
+                    raise ValueError(f'unknown line prefix {code}')
+            literal, table = LINE_SYMBOLS[code]
+            out.extend(literal)
+            if p == end:
+                return
+
+    def after_cr() -> None:
+        optional_lf()
         if p < end:
             line_header()
 
@@ -123,6 +232,8 @@ def decode_text(payload: bytes) -> Decoded:
         raw = header == '010'
         if header == '000':
             line_header()
+        elif header in ('011', '100', '101', '110', '111'):
+            table = int(header, 2)
         elif header not in ('001', '010'):
             raise ValueError(f'unsupported over header {header}')
         while p < end:
@@ -134,19 +245,53 @@ def decode_text(payload: bytes) -> Decoded:
                     after_cr()
                 continue
             code = ''
+            symbols, prefixes = {
+                1: (SYMBOLS, PREFIXES), 3: (SFI_SYMBOLS, SFI_PREFIXES),
+                4: (SID_SYMBOLS, SID_PREFIXES),
+                5: (WORD_SYMBOLS, WORD_PREFIXES),
+                6: (NUMBER_SYMBOLS, NUMBER_PREFIXES), 7: (FW_SYMBOLS, FW_PREFIXES),
+            }[table]
             while True:
                 code += read(1, 'symbol')
-                if code == ESC:
+                if table == 4 and code in (SID_ESC, SID_COMMENT):
+                    if code == SID_COMMENT:
+                        out.extend(b'; ')
+                    table = 7
+                    break
+                if ((table == 3 and code == SFI_ESC)
+                        or (table == 7 and code == FW_ESC)
+                        or (table == 5 and code == WORD_ESC)
+                        or (table == 6 and code == NUMBER_ESC)):
+                    table = 1
+                    break
+                if table == 7 and code == FW_SPACE:
+                    out.append(32)
+                    table = 5
+                    break
+                if table == 1 and code == ESC:
                     raw = True
                     # A complete ESC may end an over; the next one opens 010.
                     break
-                if code in SYMBOLS:
-                    symbol = SYMBOLS[code]
+                if code in symbols:
+                    symbol = symbols[code]
                     out.extend(symbol)
-                    if symbol == b'\r':
+                    if table == 5 and symbol == b' ':
+                        table = 6
+                    elif table == 1 and code == '01010001':
+                        table = 7
+                    elif table == 4 and symbol in (b';PQ: ', b';PR: '):
+                        table = 6
+                    elif table == 4 and symbol == b' ':
+                        table = 1
+                    elif table == 3 and symbol == b'UTC}\r\n':
+                        if p < end:
+                            line_header()
+                    # SID suffix tokens include CR but stay in their table;
+                    # stock uses explicit FW/prose escapes for following text.
+                    if symbol.endswith(b'\r') and (table != 4 or symbol == b'\r'):
                         after_cr()
                     break
-                if code not in PREFIXES:
+                if code not in prefixes:
                     raise ValueError(f'unknown code {code}')
     except ValueError as exc:
         return Decoded(bytes(out), str(exc), p)
@@ -154,7 +299,7 @@ def decode_text(payload: bytes) -> Decoded:
 
 
 def encode_text(data: bytes, *, first: bool = True, raw: bool = False) -> bytes:
-    """Generated prose-table over, for tests; live TEXT transmission is gated.
+    """Encode one independent over using the measured prose table and escapes.
 
     The caller splits input only between symbols, raw bytes or complete CRLF
     framing. ``raw`` describes an escape run continuing from a previous over.

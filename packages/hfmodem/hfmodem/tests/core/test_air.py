@@ -71,7 +71,10 @@ def _station(recording: np.ndarray) -> Station:
     raw["protocols"] = {"sabir": dict(raw["protocols"]["sabir"], enabled=True)}
     st = Station(config.parse(raw), replay=recording)
     st.open_audio()
-    st.build_lanes()
+    from hfmodem.station.link import SabirLink
+    link = st.lanes["sabir"] = SabirLink(st)
+    st.audio.subscribe(link.lane)
+    link.start()
     return st
 
 
@@ -167,3 +170,24 @@ def test_a_recording_of_noise_produces_no_session(sabir_station):
     _run(st, seconds=2.0, until=lambda a: False)   # nothing should happen
     assert modem.link.fsm.state == SessionState.LISTENING
     assert air.bursts == 0, f"the segmenter opened {air.bursts} times on noise"
+
+
+def test_air_stop_retains_a_worker_that_did_not_join():
+    import threading
+    from hfmodem.core.audio import StreamLane
+    from hfmodem.core.operations import LeaseTimeout
+    from hfmodem.station.air import StationAir
+
+    air = StationAir(None, StreamLane(FS))
+    release = threading.Event()
+    worker = threading.Thread(target=release.wait)
+    air._thread = worker
+    worker.start()
+    try:
+        with pytest.raises(LeaseTimeout, match='worker did not stop'):
+            air.stop(timeout=.01)
+        assert air._thread is worker
+    finally:
+        release.set()
+        air.stop(timeout=1)
+    assert air._thread is None

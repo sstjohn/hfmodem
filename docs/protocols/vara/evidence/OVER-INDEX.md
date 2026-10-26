@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Over index: high speed capable VARA bench corpus
 
 `cut_overs.py` reads every bench tape (5 manifest sessions, 57 sweep ladders) and writes

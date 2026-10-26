@@ -163,7 +163,9 @@ def device_source(device: str) -> CommandSource:
     — see :mod:`creance.monitor.runners.capture_runner` for the six that measured
     it.
     """
-    return CommandSource([_interpreter(),
+    from .runners.claimed_source import ClaimedSource
+
+    return ClaimedSource([_interpreter(),
                           str(RUNNERS / "capture_runner.py"), device])
 
 

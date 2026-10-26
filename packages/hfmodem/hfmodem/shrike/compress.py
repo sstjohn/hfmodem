@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""PACTOR online data compression, receive side: Huffman, PMC and run length.
+"""PACTOR field compression: Huffman, PMC and run length.
 
 The published protocol description prints the decoder skeletons and the whole of
 both coding tables, and states that PACTOR-2, -3 and -4 share them (SCS PACTOR-4
@@ -17,8 +17,8 @@ the low byte. `REFTAB[c]` is the offset of the context tree to use after
 emitting `c`, or zero for the 112 characters that fall back to plain Huffman.
 Bits are consumed least-significant first within each byte.
 
-Traffic transmits ASCII_8BIT (`spec.DataType`); `pmc` encodes the robust
-bridge callsign in PMC English. A receiver
+`encode_field` applies the selected transmit policy while `pmc` encodes the
+robust bridge callsign in PMC English. A receiver
 reads what the peer's status byte declares, and a real station declares all of
 it: the DL6MAA recording in the regression corpus carries PMC German, PMC
 English and case-swapped fields in one transfer. The supervisor layer above the
@@ -47,9 +47,11 @@ Three facts the printed skeletons do not state, each measured on that recording
     0x81 + "gbar", 0x94 in "m*glich", 0x84 in "sch*dliche", byte for byte.
     `decompress` returns the 8-bit stream; render it with `.decode("cp437")`.
 
-PACTOR-1 declares its data mode in two status bits rather than three, and its
-original Huffman table is not printed in the reference held here; whether it
-matches the plain tree below is open. Winlink PACTOR-1 traffic measures type 0,
+PACTOR-1 declares its data mode in two status bits rather than three. The ARRL
+PACTOR annex's 128 numeric entries match the base tree apart from its duplicated
+closing-bracket entry (and its printed n/ASCII typo). That ambiguous symbol
+uses ASCII fallback. Stock modern P1 transmission remains a separate gate.
+Previously observed Winlink PACTOR-1 traffic measures type 0,
 8-bit ASCII -- but "8-bit" does not mean transparent. 0x1E is IDLE and 0x1C
 opens a supervisor block. The SCS reference decoder also expands raw 0x1D runs
 in uncompressed P3 fields (2026-09-20 saved mail transfers); `transparent` quotes all three.
@@ -57,6 +59,7 @@ in uncompressed P3 fields (2026-09-20 saved mail transfers); `transparent` quote
 from __future__ import annotations
 
 from functools import lru_cache
+from dataclasses import dataclass
 
 from . import spec
 
@@ -315,6 +318,118 @@ def pmc(text: str, *, field_bytes: int | None = None) -> bytes:
     bits = bits[:size*8]
     return bytes(sum(b << j for j, b in enumerate(bits[i:i + 8]))
                  for i in range(0, len(bits), 8))
+
+
+@dataclass(frozen=True)
+class EncodedField:
+    data: bytes
+    data_type: int
+    consumed: int
+    bits: int
+
+
+@lru_cache(maxsize=16)
+def encode_field(chars: bytes, field_bytes: int, *, mode: int,
+                 protocol=spec.Protocol.PACTOR3) -> EncodedField:
+    """Fit a prefix of the transparent character stream into one physical field.
+
+    MODE 0 is ASCII, MODE 1 adds plain Huffman, MODE 2 adds the context/case
+    trees and runs. P1 MODE 2 uses MODE 1 and never runs. Context and padding
+    restart per field; the caller retains the original prefix for peer credit.
+    Unsupported coded symbols fall back to ASCII, including P3's literal DEL
+    and the ambiguous closing-bracket entry in the published P1 annex.
+    """
+    if mode not in (0, 1, 2) or field_bytes <= 0:
+        raise ValueError('invalid encoding policy or field size')
+    protocol = spec.Protocol(protocol)
+    if protocol == spec.Protocol.PACTOR1:
+        mode = min(mode, 1)
+    types = [spec.DataType.ASCII_8BIT]
+    if mode:
+        types.append(spec.DataType.HUFFMAN)
+    if mode == 2:
+        types.extend(t for t in _PARTS if t != spec.DataType.HUFFMAN)
+    candidates = [_encode_candidate(chars, field_bytes, t, False, protocol) for t in types]
+    if mode == 2:
+        candidates.extend(_encode_candidate(chars, field_bytes, t, True, protocol)
+                          for t in types)
+    return max(candidates, key=lambda c: (c.consumed, -c.bits))
+
+
+def _encode_candidate(chars, size, data_type, runs, protocol):
+    pmc, english, swapped = _PARTS.get(data_type, (False, False, False))
+    ascii_mode = data_type == spec.DataType.ASCII_8BIT
+
+    def emit(symbols, context):
+        out = []
+        for symbol in symbols:
+            if swapped:
+                symbol = _SWAP[symbol]
+            if ascii_mode:
+                out.extend((symbol >> b) & 1 for b in range(8))
+                continue
+            if protocol == spec.Protocol.PACTOR3:
+                if symbol == ESCAPE:
+                    raise ValueError('literal DEL has no coded representation')
+                high = symbol >= 128
+            else:
+                # These codes denote umlauts below P3; raw control bytes and
+                # other high bytes must retain their eight-bit ASCII value.
+                if symbol >= 128 or symbol in (14, 15, 16, 20, 21, 22, 23):
+                    raise ValueError('symbol requires ASCII fallback')
+                if protocol == spec.Protocol.PACTOR1 and symbol == 93:
+                    raise ValueError('published P1 bracket code is ambiguous')
+                high = False
+            coded = ESCAPE if high else symbol
+            out.extend(_codes(context)[coded])
+            if high:
+                out.extend((symbol >> b) & 1 for b in range(7))
+            if pmc:
+                ref = REFTAB[coded]
+                context = ref + ENGLISH_BIAS if ref and english else ref
+        return out, context
+
+    bits, context, consumed = [], 0, 0
+    budget = size * 8
+    while consumed < len(chars):
+        symbol = chars[consumed]
+        count = 1
+        if runs:
+            while (count < 96 and consumed+count < len(chars)
+                   and chars[consumed+count] == symbol):
+                count += 1
+        taken = None
+        if count >= 4:
+            for n in range(count, 3, -1):
+                # Counts 1..30 use printable bias. 31 uses the literal count
+                # to avoid P3's reserved 0x7F escape; 32..96 are literal.
+                sent = n + 0x60 if n <= 30 else n
+                try:
+                    coded, next_context = emit((RUN_PREFIX, symbol, sent), context)
+                    direct, _ = emit(bytes((symbol,))*n, context)
+                except ValueError:
+                    continue
+                if len(coded) < len(direct) and len(bits)+len(coded) <= budget:
+                    taken = coded, next_context, n
+                    break
+        if taken is None:
+            try:
+                coded, next_context = emit((symbol,), context)
+            except ValueError:
+                break
+            if len(bits)+len(coded) > budget:
+                break
+            taken = coded, next_context, 1
+        coded, context, n = taken
+        bits.extend(coded)
+        consumed += n
+    used = len(bits)
+    while len(bits) < budget:
+        padding, context = emit((spec.IDLE,), context)
+        bits.extend(padding)
+    data = bytes(sum(bit << b for b, bit in enumerate(bits[i:i+8]))
+                 for i in range(0, budget, 8))
+    return EncodedField(data, data_type, consumed, used)
 
 
 def _symbols(data: bytes, pmc: bool, english: bool, escape: bool):

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Identity resolution and policy, including the boundaries before hardware."""
 from dataclasses import replace
 from pathlib import Path
@@ -108,12 +110,14 @@ def test_station_interlock_receives_cw_identity(monkeypatch):
     cfg = replace(cfg, station=replace(cfg.station, transmit=True, mycall='TACTIC', idcall='W1AW'),
                   rig=replace(cfg.rig, ptt=replace(cfg.rig.ptt, port='/dev/mock')))
     rig, line = Mock(), Mock()
+    monkeypatch.setattr(process, 'RigctldCat', lambda *a, **kw: Mock())
     monkeypatch.setattr(process, 'RtsPtt', lambda *a: line)
     monkeypatch.setattr(process, 'Rig', lambda **kw: rig)
     seen = []
     monkeypatch.setattr(process, 'TxArbiter', lambda *a, **kw: seen.append(kw['identity']) or Mock())
     st = process.Station(cfg)
     st.open_rig()
+    st.build_arbiter()
     assert _decode(seen[0].burst(), cwid.WPM) == 'W1AW'
     assert seen[0].interval_s == cfg.station.id_interval_s
     assert st.cw_identity.digital_call == 'TACTIC'

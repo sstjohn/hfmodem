@@ -41,11 +41,14 @@ not touch.
 from __future__ import annotations
 
 import math
+import re
 import time
+from collections import deque
 from dataclasses import dataclass, field, replace
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Callable, Optional
 
-from . import compress, hostmode, p1rx, pactor1, placement, spec
+from . import compress, hostmode, host_cwid, p1rx, pactor1, placement, spec
 from .arq import (CS_ACK, CS_BREAKIN, CS_REQUEST, CS_SPEED_UP, IRS, ISS, LADDERS,
                   P1_SPEED_LEVEL, P3_CS6_HOLD_REPEATS, REFUSED, ArqIO, PactorArq, State)
 from .p4host import P4LateFrame
@@ -187,15 +190,24 @@ LINK_DISCONNECTED, LINK_SETUP, LINK_DISCONNECT_REQ, LINK_INFO = 0, 1, 3, 4
 # Terminal commands whose canonical spelling we know; the capitals are the
 # minimum abbreviation the PTC accepts, exactly as the manual writes them.
 _CANONICAL = [
-    "MYcall", "PTCHn", "MAXError", "REMote", "CHOBell", "TONes", "MARk", "SPAce",
-    "CWid", "CONType", "CONIntegrity", "Connect", "Disconnect", "DD",
-    "MODe", "DAte", "TIme",
-    "STatus", "LIsten", "MAXSum",
-    "SERBaud", "TXdelay", "PDuplex", "HCr", "ADDlf", "TERm", "BAud", "FSKAmpl",
+    "MYcall", "PTChn", "MAXError", "REMote", "CHOBell", "TOnes", "MARk", "SPAce",
+    "CWid", "CWSpeed", "CONType", "CONIntegrity", "Connect", "Disconnect", "DD",
+    "MOde", "CLr", "DAte", "TIme",
+    "STatus", "Listen", "MAXSum",
+    "SERBaud", "TXdelay", "PDuplex", "HCr", "ADdlf", "TERm", "BAud", "FSKAmpl",
     "PSKAmpl", "MYSelcall", "MYLevel", "MAXErr", "CHeck", "CMsg", "Quit",
-    "RESTart", "VERsion", "JHOST", "PT", "PR", "PAC",
+    "RESTart", "VERsion", "JHOST", "PT", "PR", "PAC", "AES",
+    "ESCchr", "BKchr", "CHOchr", "QRTChr",
+    "LICENSE", "ARX", "BRightn", "LFignore", "TRX", "UMlauts", "CSDelay",
 ]
 _ABBREV = {c.upper(): "".join(ch for ch in c if ch.isupper()) for c in _CANONICAL}
+
+# This PACTOR endpoint has no AMTOR, remote command/mailbox, automatic text
+# conversion or automatic duplex implementation. Below P3 the encoder already
+# uses ASCII fallback for umlauts rather than the optional German code symbols.
+# Advertise the actual disabled profiles instead of accepting ineffective enables.
+_DISABLED_SETTINGS = ('ARX', 'CHOBELL', 'CMSG', 'REMOTE', 'LFIGNORE',
+                      'ADDLF', 'PDUPLEX', 'HCR', 'UMLAUTS')
 
 
 def _split_command(text: str) -> tuple[str, str]:
@@ -214,9 +226,14 @@ class _Channel:
     """One hostmode channel's outbound queues."""
     link: list[str] = field(default_factory=list)      # code 3 events, oldest first
     rx: bytearray = field(default_factory=bytearray)   # code 7 payload
+    echo: bytearray = field(default_factory=bytearray) # code 8 confirmed payload
 
     def pending(self) -> bool:
-        return bool(self.link or self.rx)
+        return bool(self.link or self.rx or self.echo)
+
+
+class _TerminalEvent(str):
+    """Link-history text whose host delivery must follow the contact's output."""
 
 
 class PtcHost(ArqIO):
@@ -232,11 +249,29 @@ class PtcHost(ArqIO):
     busy_until: Optional[float] = None
     """How long the channel goes on counting as busy after a decoded signal [6.90]."""
 
-    _wait_armed = False
-
-    def __init__(self, peer=None, mycall: str = "SCSPTC", ptchn: int = 4):
+    def __init__(self, peer=None, mycall: str = "SCSPTC", ptchn: int = 4, *,
+                 calendar_clock=time.monotonic):
         self.peer = peer
-        self.settings: dict[str, str] = {"MYCALL": mycall.upper(), "PTCHN": str(ptchn)}
+        self._owner = None
+        self._calendar_clock = calendar_clock
+        self._calendar_at = datetime.now(timezone.utc)
+        self._calendar_tick = calendar_clock()
+        self.rf_scope = None
+        self.settings: dict[str, str] = {"MYCALL": mycall.upper(), "PTCHN": str(ptchn), "AES": "0", "TERM": "0"}
+        self.settings.update({name: '0' for name in _DISABLED_SETTINGS})
+        self.settings.update(TONES='4', MARK='1400', SPACE='1600', BRIGHTN='6',
+                             CWID='0 0', TRX_SCAN='0', TRX_DUMP='0')
+        self._cw_schedule = None  # Owned by one native contact driver only.
+        self.settings.update(ESCCHR='27', BKCHR='25', CHOCHR='25', QRTCHR='4')
+        if peer is None:
+            self.settings['CWSPEED'] = '160'  # logical SCS default [6.29]
+            self.settings['CSDELAY'] = '5'  # logical SCS default [6.24]
+        elif callable(getattr(peer, 'get_host_control', None)):
+            self.settings['CWSPEED'] = str(peer.get_host_control('CWSPEED'))
+            try:
+                self.settings['CSDELAY'] = str(peer.get_host_control('CSDELAY'))
+            except ValueError:
+                pass  # An older backend has no response-phase capability.
         # The announcement's callsign case. Both completions on tape send it
         # lowercase (`1dl6maa`, `1w4dna`); every arm of ours sent it upper.
         self.announce_lower = True
@@ -270,6 +305,7 @@ class PtcHost(ArqIO):
         self._idle_packets = 0
         self._idle_field: tuple[object, bytes] | None = None
         self.hostmode = False
+        self._attachment_started = False
         self.listening = False
         self.autostatus = False
         self.arq = PactorArq(self)
@@ -443,6 +479,7 @@ class PtcHost(ArqIO):
         # Once per link, and armed for `upgrade` to spend on the next
         # acknowledgement -- which is the one the grant itself carries.
         self._grant_taken = False
+        self._entry_grant = None
         self._grant_pending = False
         # An UNINVITED PACTOR-3 phase is open and nothing has come back from it.
         # The granted half of the same state is `arq.entry_pending`, which stays
@@ -471,7 +508,12 @@ class PtcHost(ArqIO):
         self.p3_host_data_active = False
         self._p4_sf8_admit = None
         self._modem = hostmode.Modem(self._dispatch)
+        self._wait_reply_key = None
         self._line = bytearray()
+        self._terminal_discard = False
+        self._terminal_converse = self._terminal_command = False
+        self._terminal_pending = bytearray()
+        self.terminal_retired = deque(maxlen=16)
         self._channels: dict[int, _Channel] = {}
         self._txbuf = 0            # bytes accepted from the host, not yet acked
         self._setup_bytes = b""    # the PACTOR-1 announcement, while it is owed
@@ -493,6 +535,12 @@ class PtcHost(ArqIO):
         does, and with none of it here the rig is never written to at all.
         """
         self.sent_total = 0
+        self.wire_sent_total = 0
+        self.host_output_limit = 65536
+        self.host_output_timeout = 30.0
+        self.host_output_deadline = None
+        self.host_output_failure = None
+        self._host_output_abort_pending = False
         self._sent_base = 0
         self.rcvd_total = 0
         self._laststatus: Optional[bytes] = None
@@ -504,6 +552,59 @@ class PtcHost(ArqIO):
         self._callsigns: dict[int, str] = {}
         if peer is not None:
             peer.attach(self)
+
+    def enable_owner(self, *, limit=64, defer_connect=False):
+        """Opt into same-thread controls at PACTOR operation boundaries."""
+        if self._owner is not None:
+            raise ValueError('PTC contact owner is already configured')
+        if self.arq.state not in (State.DISCONNECTED, State.LISTENING) or not self.contact_ready():
+            raise ValueError('PTC owner requires an idle channel with retired output')
+        if defer_connect and not callable(getattr(self.peer, 'connect_burst', None)):
+            raise ValueError('PTC deferred connect requires a transmit producer')
+        from .owner import PtcOwner
+        self._owner = PtcOwner(self, limit=limit, defer_connect=defer_connect)
+        self.rf_scope = self._owner.operation
+        return self._owner
+
+    def reopen_owner(self):
+        """Start a fresh serial attachment after the previous owner fully retired.
+
+        Controller settings and unconfirmed history survive a serial reopen;
+        parser/output/CRC state was disposed by attachment_lost. The station
+        must retire its old producer/capture before opening the new endpoint.
+        """
+        previous = self._owner
+        if previous is None:
+            raise ValueError('PTC attachment has no owner to reopen')
+        previous.check(retired_ok=True)
+        if (not previous.retired or not previous._retirement_done
+                or previous.in_operation or previous._draining or previous.contact_active
+                or self.arq.state not in (State.DISCONNECTED, State.LISTENING)
+                or not self.contact_ready()):
+            raise ValueError('previous PTC attachment has not fully retired')
+        port = getattr(self.peer, 'live', None)
+        if port is not None and getattr(port, 'closed', False) is not True:
+            raise ValueError('previous PTC capture port has not retired')
+        from .owner import PtcOwner
+        owner = PtcOwner(self, limit=previous.limit, defer_connect=previous.defer_connect)
+        self._owner, self.rf_scope = owner, owner.operation
+        return owner
+
+    def _check_owner(self):
+        if self._owner is not None:
+            self._owner.check()
+
+    def _request_host(self, name, *args, **kwargs):
+        if self._owner is not None:
+            return self._owner.request(name, *args, **kwargs)
+        return getattr(self.arq, 'on_host_' + name)(*args, **kwargs)
+
+    def _host_control(self, ch, name):
+        try:
+            self._request_host(name)
+        except ValueError as exc:
+            return hostmode.reply_text(ch, hostmode.FAIL, str(exc))
+        return hostmode.reply(ch, hostmode.OK)
 
     # -- which protocol this link is in -----------------------------------
     @property
@@ -520,6 +621,8 @@ class PtcHost(ArqIO):
 
     @protocol.setter
     def protocol(self, p: Protocol) -> None:
+        if not self.allows_protocol(p):
+            raise ValueError("protocol exceeds the host MYLevel ceiling")
         self._protocol = p
         if p in LADDERS:
             self.arq.ladder = LADDERS[p]
@@ -679,10 +782,37 @@ class PtcHost(ArqIO):
         PACTOR-1, and that contradiction is what makes the second rung worth
         keying at all. `offer_pactor2` is where the null this stands on is
         written down."""
+        targets = ((Protocol.PACTOR2,) if self.pactor2_only else
+                   UPGRADE_TARGETS + ((Protocol.PACTOR2,) if self.offer_pactor2 else ()))
+        return tuple(p for p in targets if self.allows_protocol(p))
+
+    def allows_protocol(self, protocol: Protocol | str) -> bool:
+        # Experimental arms retain their runtime policy until the host chooses
+        # MYLevel. Once chosen, no operator flag overrides the ceiling.
+        return int(protocol[-1]) <= int(self.settings.get("MYLEVEL", "4"))
+
+    def p1_announcement_bits(self, requested: int) -> int:
+        """Intersect native announcement experiments with the host ceiling.
+
+        An explicit level-1 ceiling announces no upgrade. The experimental P2
+        entry has its own one-bit announcement; do not turn an ordinary P3
+        announcement into a P2 offer unless that entry path is actually armed.
+        Arms without a host ceiling retain their existing wire experiment.
+        """
+        if 'MYLEVEL' not in self.settings:
+            return requested
+        if not self.allows_protocol(Protocol.PACTOR2):
+            return 0
         if self.pactor2_only:
-            return (Protocol.PACTOR2,)
-        return UPGRADE_TARGETS + ((Protocol.PACTOR2,) if self.offer_pactor2
-                                  else ())
+            return requested & 1
+        if not self.allows_protocol(Protocol.PACTOR3):
+            return 0
+        return requested
+
+    def _retire_entry_listen(self) -> None:
+        """Release only the retired entry window, before any synchronous TX."""
+        if hasattr(self.peer, '_p3_entry_listen_slot'):
+            self.peer._p3_entry_listen_slot = None
 
     def _entry_answered(self, *, keep_speed: bool = False) -> None:
         """Finish entry, retaining its speed unless explicitly overridden.
@@ -729,7 +859,10 @@ class PtcHost(ArqIO):
                 or not (self.arq.entry_pending or self._uninvited_entry):
             return
         self._uninvited_entry = False
+        self.arq.note_entry_window_truncated(False)
         self.arq.entry_pending = False
+        self._entry_grant = None
+        self._retire_entry_listen()
         if self.protocol is Protocol.PACTOR3:
             self.arq._p3_entry_confirmed = True
         if not keep_speed:
@@ -772,6 +905,14 @@ class PtcHost(ArqIO):
         if self.protocol is not Protocol.PACTOR1:
             return self._fall_back_to_pactor1(why, rule_out=rule_out)
 
+    def note_entry_grant_repeat(self, reply_token=None) -> None:
+        a = self.arq
+        if (self._entry_grant is None or self.protocol != Protocol.PACTOR3
+                or a.state != State.CONNECTED or a.role != ISS
+                or not a.entry_pending or a.terminal_pending):
+            return
+        a.note_entry_grant_repeat(reply_token)
+
     def prepare_p1_entry_goodbye(self) -> bool:
         """Select P1 only for terminal QRT after a current owned entry grant."""
         a = self.arq
@@ -791,6 +932,8 @@ class PtcHost(ArqIO):
             a._next_seq = a._inflight.seq
         a._inflight = None
         a.entry_pending = self._uninvited_entry = False
+        self._entry_grant = None
+        self._retire_entry_listen()
         a._unanswered_upgrade = None
         a._upgrade_granted = a._upgrade_asked = False
         a._upgrade_reply_owed = a._upgrade_owned_grant = False
@@ -849,6 +992,7 @@ class PtcHost(ArqIO):
             self._grant_taken = False
         self.protocol = Protocol.PACTOR1
         self.arq.cycle_long = False          # PACTOR-1 has no long cycle
+        self._entry_grant = None
         # The entry packet holds the buffer back, and a link that has stopped
         # trying to enter has to let it go again or it keys empty PACTOR-1
         # packets at a peer that can read them. The entry packet itself does not
@@ -859,6 +1003,7 @@ class PtcHost(ArqIO):
         if self.arq.entry_pending:
             self.arq.requeue_inflight()
             self.arq.entry_pending = False
+        self._retire_entry_listen()
         self.arq.rechunk_inflight()
         self._phase_power(Protocol.PACTOR1, "the link fell back")
         self.log(f"{why} -> link falls back to PACTOR-1")
@@ -914,6 +1059,8 @@ class PtcHost(ArqIO):
         `on_rx_event`.
         """
         heard = None if protocol is None else Protocol(protocol)
+        if heard is not None and not self.allows_protocol(heard):
+            return
         if self.pactor2_only and heard not in (None, Protocol.PACTOR1, Protocol.PACTOR2):
             return
         if heard is None or heard is self.protocol:
@@ -1027,6 +1174,9 @@ class PtcHost(ArqIO):
         told where to look.
         """
         experimental = self.p1_6a9 or self.pactor2_only
+        target = Protocol.PACTOR2 if experimental else Protocol.PACTOR3
+        if not self.allows_protocol(target):
+            return
         expected = pactor1.CS_6A9 if experimental else pactor1.CS_59A
         if not self.p1_act_on_grant or ev.spare != expected:
             return
@@ -1052,6 +1202,10 @@ class PtcHost(ArqIO):
                      "no new entry and the goodbye deadline is unchanged")
             return
         self._grant_taken = self._grant_pending = True
+        self._retire_entry_listen()
+        if not experimental and ev.protocol == Protocol.PACTOR1:
+            self._entry_grant = (expected, getattr(ev, 'sense', None),
+                                 getattr(getattr(self.peer, 'live', None), 'lost', 0))
         # AND IT OVERRULES WHAT SILENCE IMPLIED. `_ruled_out` is inference: the
         # peer answered an uninvited PACTOR-3 in PACTOR-1, or stopped answering,
         # and neither says it cannot read one. `0x59A` is the peer saying it can,
@@ -1082,7 +1236,8 @@ class PtcHost(ArqIO):
         100 Bd FSK form of CS1, and the entry's own answer comes back as an
         ordinary P3 control signal.
         """
-        if self._grant_taken or self.stay_in_pactor1 or self.arq.robust_answer is None:
+        if (not self.allows_protocol(Protocol.PACTOR3) or self._grant_taken
+                or self.stay_in_pactor1 or self.arq.robust_answer is None):
             return
         self._grant_taken = self._grant_pending = True
         self._ruled_out.clear()
@@ -1092,7 +1247,8 @@ class PtcHost(ArqIO):
 
     def enter_robust_bridge(self) -> bool:
         """Own the P2 setup exchange without imposing a P2 protocol ceiling."""
-        if (self.arq.terminal_pending or self.arq.robust_answer is None
+        if (not self.allows_protocol(Protocol.PACTOR2)
+                or self.arq.terminal_pending or self.arq.robust_answer is None
                 or self.protocol is not Protocol.PACTOR1):
             return False
         self.protocol = Protocol.PACTOR2
@@ -1106,7 +1262,7 @@ class PtcHost(ArqIO):
 
     def take_bridge_grant(self, *, forced: bool = False) -> bool:
         """Commit the confirmed P2 grant as a P3 SL1 entry, once."""
-        if self.arq.terminal_pending:
+        if not self.allows_protocol(Protocol.PACTOR3) or self.arq.terminal_pending:
             self._grant_pending = False
             self.log("entry 6 ignored: disconnect pending")
             return False
@@ -1153,44 +1309,57 @@ class PtcHost(ArqIO):
         its init script while serving inbound connects all day -- so `%L 0`
         leaves the FSM where it is.
         """
+        self._check_owner()
         self.listening = on
         self.settings["LISTEN"] = "1" if on else "0"
         if on:
-            self.wait_until = None
             self.arq.on_host_listen(True)
 
-    def enter_wait(self) -> None:
+    def begin_scan_hold(self) -> bool:
+        if self.peer is None:
+            return True  # A host-only logical engine has no transmitter.
+        acquire = getattr(self.peer, 'begin_scan_hold', None)
+        release = getattr(self.peer, 'end_scan_hold', None)
+        return bool(callable(acquire) and callable(release) and acquire())
+
+    def end_scan_hold(self) -> None:
+        if self.peer is not None:
+            self.peer.end_scan_hold()
+
+    def enter_wait(self) -> bool:
         """Take no calls while the scanner retunes [10.4.37]."""
-        if self.wait_until is None:      # a second %W0 extends it, it does not
-            self._wait_armed = self.arq.state == State.LISTENING   # forget the state
+        if not self.arq.acquire_scan_hold():
+            return False
         self.wait_until = time.monotonic() + WAIT_SECONDS
-        self.arq.on_host_listen(False)
+        return True
 
     def release_wait(self) -> None:
         """%W1, or the state's own ten-second lapse [10.4.37]."""
-        if self.wait_until is None:
-            return
+        self.arq.release_scan_hold()
         self.wait_until = None
-        if self._wait_armed:
-            self.arq.on_host_listen(True)
+        self._modem.retire_response(self._wait_reply_key)
+        self._wait_reply_key = None
 
     # ==================================================================== #
     # Serial byte stream
     # ==================================================================== #
     def open(self) -> bytes:
         """Bytes the modem emits when the port comes up."""
+        self._check_owner()
         return (BANNER + PROMPT).encode("latin-1")
 
     def feed(self, chunk: bytes) -> bytes:
         """Consume host bytes, return what the modem answers."""
+        self._check_owner()
+        self.service_host_output()
         if self.hostmode:
             return self._modem.feed(chunk)
-        out = bytearray()
+        out = bytearray(self.drain_terminal_output())
         for i, b in enumerate(chunk):
             if self.hostmode:                       # JHOST4 mid-chunk
                 return bytes(out) + self._modem.feed(chunk[i:])
             out += self._terminal_byte(b)
-        return bytes(out)
+        return bytes(out) + self.drain_terminal_output()
 
     def tick(self, *, elapsed_ticks: int = 1, cycle_ticks: int = 1) -> None:
         """Age base slots and service one opportunity; never replay missed TX.
@@ -1199,15 +1368,16 @@ class PtcHost(ArqIO):
         as ``cycle_ticks`` and the actual elapsed slots as ``elapsed_ticks``.
         The default remains one tick on the 1.25 s grid.
         """
-        if self.wait_until is not None and time.monotonic() >= self.wait_until:
-            self.release_wait()
+        self._check_owner()
+        self.service_host_output()
         if self.protocol == Protocol.PACTOR3 and self.arq.state in (State.CONNECTED, State.DISCONNECTING):
             if not self.arq.settle_peer_presence(elapsed_ticks=elapsed_ticks):
                 return
-            from ..winlink import MailClient
-            if isinstance(self.app, MailClient) and self.app.progress is None:
-                from .p3progress import MailProgress
-                self.app.progress = MailProgress(self.app, self.arq)
+            if self.app is not None:
+                from ..winlink import MailClient
+                if isinstance(self.app, MailClient) and self.app.progress is None:
+                    from .p3progress import MailProgress
+                    self.app.progress = MailProgress(self.app, self.arq)
             progress = getattr(self.app, 'progress', None)
             if progress is not None:
                 progress.poll(qualified=self.arq.peer_qualified)
@@ -1251,6 +1421,16 @@ class PtcHost(ArqIO):
         """Drive the FSM from one decoded rxfront event. Shared by feed_audio (a
         whole buffer at once) and the streaming sound-card loop in shrike.live, so a
         live session and a replayed WAV take the identical path into PactorArq."""
+        # Refusing a protocol *transition* is insufficient: the same event can
+        # still acknowledge originals, deliver data or change role in ARQ.
+        # Apply the ceiling before every special receive path as well.
+        heard = ('PACTOR-4' if getattr(ev, 'p4', None) is not None else
+                 ev.protocol if ev.kind in ('cs', 'packet') else None)
+        if heard is not None and (not self.allows_protocol(heard)
+                or self.pactor2_only and heard not in (Protocol.PACTOR1, Protocol.PACTOR2)):
+            self.busy_until = time.monotonic() + BUSY_HOLD_S
+            self.log(f'{heard} ignored: exceeds the local PACTOR ceiling')
+            return
         if self.arq._mail_cs4_wait is not None:
             if ev.kind == "cs" and ev.protocol == Protocol.PACTOR3:
                 self.arq.on_rx_cs(self._counter_logical_cs(ev))
@@ -1279,12 +1459,6 @@ class PtcHost(ArqIO):
         # Anything the front end reports is a signal on the channel that is not
         # noise, which is what the status byte's Channel-Busy means [6.90].
         self.busy_until = time.monotonic() + BUSY_HOLD_S
-        if (self.pactor2_only and ev.kind in ("cs", "packet")
-                and ev.protocol not in (Protocol.PACTOR1, Protocol.PACTOR2)):
-            # A higher-mode frame must not acknowledge bytes, change roles,
-            # extend retries, or select a renderer in a level-2 session.
-            self.log(f"{ev.protocol} ignored: local maximum is PACTOR-2")
-            return
         if ev.kind in ("cs", "packet") and self.arq.state == State.CONNECTING \
                 and ev.protocol != Protocol.PACTOR1:
             # NOT AN ANSWER TO OUR CALL, whatever it decoded to. Every PACTOR-2
@@ -1546,7 +1720,10 @@ class PtcHost(ArqIO):
                 selected = (pactor1.CS_6A9 if self.p1_6a9 or self.pactor2_only
                             else pactor1.CS_59A)
                 if ev.spare == selected:
-                    self.arq.note_upgrade_unread(p1=ev.protocol == Protocol.PACTOR1)
+                    self.arq.note_upgrade_unread(
+                        p1=ev.protocol == Protocol.PACTOR1
+                        and getattr(self, '_entry_reply_current', True),
+                        reply_token=getattr(self, '_entry_reply_token', None))
                 self._take_grant(ev)
                 # AND IT IS THE PEER BEING THE IRS. Twelve bits at zero errors
                 # in the slot the receiving station owes us is that station
@@ -1582,16 +1759,69 @@ class PtcHost(ArqIO):
     # ==================================================================== #
     # Terminal mode -- the cmd: prompt
     # ==================================================================== #
+    def _calendar_now(self):
+        return self._calendar_at + timedelta(seconds=self._calendar_clock() - self._calendar_tick)
+
+    def _set_calendar(self, name, argument):
+        # IIIusb 4.1 §§6.33/6.93 require two digits in every position and
+        # allow omitted separators. Trimode uses colons in DATE as well.
+        separator = '[.:]?' if name == 'DATE' else ':?'
+        match = re.fullmatch(r'(\d{2})(' + separator + r')(\d{2})\2(\d{2})',
+                             argument, re.ASCII)
+        if match is None:
+            raise ValueError(f'invalid {name} format')
+        first, _, second, third = match.groups()
+        a, b, c = int(first), int(second), int(third)
+        current = self._calendar_now()
+        if name == 'DATE':
+            current = current.replace(year=(1900 if c >= 90 else 2000) + c, month=b, day=a)
+        else:
+            current = current.replace(hour=a, minute=b, second=c, microsecond=0)
+        self._calendar_at, self._calendar_tick = current, self._calendar_clock()
+        return current.strftime('%d.%m.%y' if name == 'DATE' else '%H:%M:%S')
+
     def _terminal_byte(self, b: int) -> bytes:
+        if b == int(self.settings['ESCCHR']):
+            self._line.clear()
+            self._terminal_discard = False
+            self._terminal_command = True
+            return PROMPT.encode()
+        if self._terminal_converse and not self._terminal_command:
+            try:
+                if b == int(self.settings['QRTCHR']):
+                    self._request_host('disconnect')
+                elif b in (int(self.settings['BKCHR']), int(self.settings['CHOCHR'])):
+                    action = ('breakin' if b == int(self.settings['BKCHR']) and self.arq.role == IRS
+                              else 'over' if b == int(self.settings['CHOCHR']) else 'breakin')
+                    self._request_host(action)
+                else:
+                    self._admit_terminal(bytes([b]))
+            except ValueError as exc:
+                return f'\r\n*** ERROR: {exc}\r\n'.encode('latin-1')
+            return b''  # TERM 0 uses local echo; TERM 1 waits for peer credit.
+        if self._terminal_discard:
+            if b == 13:
+                self._terminal_discard = False
+                return b"\r\n*** ERROR: command line too long\r\n" + PROMPT.encode()
+            return b""
         if b == 10:                                  # <LF> ignored on input [5.1]
             return b""
         if b == 13:
             line, self._line[:] = bytes(self._line), b""
-            return b"\r\n" + self._command(line.decode("latin-1")) + PROMPT.encode()
+            was_converse = self._terminal_converse
+            answer = self._command(line.decode("latin-1"))
+            self._terminal_command = self._terminal_converse and answer.startswith(b'*** ERROR:')
+            prompt = (not self._terminal_converse or self._terminal_command) and not (
+                was_converse and not self._terminal_converse and self.channel(self.ptchn).pending())
+            return b'\r\n'+answer+(PROMPT.encode() if prompt else b'')
         if b == 8:
             if self._line:
                 del self._line[-1]
                 return b"\b \b"
+            return b""
+        if len(self._line) >= 4096:
+            self._line.clear()
+            self._terminal_discard = True
             return b""
         self._line.append(b)
         return bytes((b,)) if 32 <= b < 127 else b""
@@ -1605,6 +1835,8 @@ class PtcHost(ArqIO):
             return b""
         name = self._resolve(word)
         if name is None:
+            if word.isascii() and all(32 <= ord(c) < 127 for c in word):
+                return b'*** ERROR: unsupported command\r\n'
             # Unreadable input -- a stray hostmode frame, line noise. The host is
             # mid-handshake; answering with an error would only confuse it.
             return b""
@@ -1613,8 +1845,18 @@ class PtcHost(ArqIO):
             # the CRC one [10.4.6]; 5 differs only in a FAX channel we do not
             # have, so it is served as 4 [unknowns.HOST_JHOST5].
             param = word[5:] or arg
+            if param not in ('0', '1', '4', '5') or word[5:] and arg:
+                return b'*** ERROR: supported host modes are 0, 1, 4 and 5\r\n'
             if param in ("1", "4", "5"):
+                if self._attachment_started:
+                    if self._owner is not None and self._owner.in_operation:
+                        self._owner.request('abort')
+                        return b'*** ERROR: HOSTMODE REENTRY WAITS FOR ARQ OPERATION\r\n'
+                    self.attachment_lost(reentry=True)
+                self._attachment_started = True
                 self.hostmode = True
+                self._retire_typeahead('hostmode entry')
+                self._terminal_converse = self._terminal_command = False
                 self._modem.reset(crc=param != "1")   # [10.9.6]
                 self.settings["%M"] = "0"            # reset at hostmode start [10.4.32]
                 self.channel(0).rx += BANNER.encode("latin-1")
@@ -1623,33 +1865,71 @@ class PtcHost(ArqIO):
             return b"*** ERROR: no submenu active\r\n"   # already in the main menu
         if name == "VERSION":
             return f"*** {self._version()}\r\n".encode("latin-1")
+        if name == 'LICENSE':
+            # PTC-IIIusb 4.1 6.46: P3 is always enabled; this command has
+            # no argument and returns a dummy string. Use the manual's example
+            # for this declared emulation, never an installed key or agreement.
+            if arg:
+                return b'*** ERROR: LICENSE takes no argument\r\n'
+            return b'LICENSE: 010000141714CB53 ABCDEFGHIJKL\r\n'
         if name == "RESTART":
             self.settings["%M"] = "0"
             return BANNER.encode("latin-1")
         if name == "CONNECT":
+            if not self.contact_ready():
+                return b"*** ERROR: previous contact output not retired\r\n"
             return self._call(arg)
         if name == "DISCONNECT":               # [6.37], and DD [6.34]
-            self.arq.on_host_disconnect()
+            try:
+                self._request_host('disconnect')
+            except ValueError as exc:
+                return f'*** ERROR: {exc}\r\n'.encode('latin-1')
             return b""
         if name == "DD":
-            self.arq.on_host_abort()
+            self._request_host('abort')
             return b""
-        if name in ("PT", "PR", "PAC"):
+        if name == "CLR":
+            self._retire_typeahead('terminal CLR')
+            self.arq.clear_unsent()
             return b""
+        if name in ('PR', 'PAC'):
+            return b'*** ERROR: packet personality is not implemented on this endpoint\r\n'
+        if name == 'PT':
+            if arg:
+                return b'*** ERROR: PT takes no argument\r\n'
+            return b""
+        if name == 'TRX':
+            # Express disables the internal scanner and dump path at startup.
+            # Neither is the station's independently owned radio/scanner.
+            match = re.fullmatch(r'([A-Z]+)\s*0', arg.upper())
+            command = match[1] if match else ''
+            if command and 'SCAN'.startswith(command):
+                self.settings['TRX_SCAN'] = '0'
+            elif command.startswith('DU') and 'DUMP'.startswith(command):
+                self.settings['TRX_DUMP'] = '0'
+            else:
+                return b'*** ERROR: only TRX SCAN 0 and TRX DUMP 0 are supported\r\n'
+            return b''
         if arg:
             try:
                 self._store(name, arg)
             except ValueError as exc:
                 return f"*** ERROR: {exc}\r\n".encode("latin-1")
             return b""
+        if name in ('CWSPEED', 'CSDELAY') and name not in self.settings:
+            return f'*** ERROR: {name} is not supported by this transmitter\r\n'.encode('ascii')
+        if name in ('DATE', 'TIME'):
+            value = self._calendar_now().strftime('%d.%m.%y' if name == 'DATE' else '%H:%M:%S')
+            return f'*** {name}: {value}\r\n'.encode('ascii')
         return f"*** {name}: {self.settings.get(name, '0')}\r\n".encode("latin-1")
 
     def _call(self, arg: str) -> bytes:
         """Terminal `C [%|!]CALL`, and a bare `C` re-dials [PTC-IIIusb 4.1 §6.22]."""
         try:
-            self.arq.on_host_connect(self.mycall, arg.split()[0] if arg else "")
+            self._request_host('connect', self.mycall, arg.split()[0] if arg else "")
         except ValueError as exc:
             return f"*** ERROR: {exc}\r\n".encode("latin-1")
+        self._terminal_converse = True
         # The manual prints the operator it took -- "(ROBUST CONNECT)" is its
         # wording; the longpath marker follows its shape.
         marker = {"robust": " (ROBUST CONNECT)", "longpath": " (LONGPATH)"}
@@ -1657,8 +1937,101 @@ class PtcHost(ArqIO):
                 f"{marker.get(self.arq.connect_variant, '')}\r\n").encode("latin-1")
 
     def _store(self, name: str, arg: str) -> None:
-        """Keep a setting. The two acceptance settings also reach the ARQ, where
-        `CONType` decides which calls this station answers."""
+        """Validate and apply effective settings before recording readback."""
+        if name in _DISABLED_SETTINGS and arg != '0':
+            raise ValueError(f'{name} supports the disabled profile only')
+        if name == 'CWID':
+            arg = host_cwid.parse(arg)
+            if (arg != self.settings['CWID'] and (
+                    self.arq.state not in (State.DISCONNECTED, State.LISTENING)
+                    or self._owner is not None and self._owner.contact_active)):
+                raise ValueError('CWID changes require an idle contact')
+            if arg == '4 2':
+                host_cwid.validate_call(self.mycall, 'PTC CWID MYCALL')
+                if int(self.settings.get('CWSPEED', '160')) > 100:
+                    raise ValueError('CWID requires CWSpeed at most 100 letters/minute')
+        if name == 'MYCALL' and self.settings['CWID'] == '4 2':
+            host_cwid.validate_call(arg, 'PTC CWID MYCALL')
+            if ((self.arq.state not in (State.DISCONNECTED, State.LISTENING)
+                 or self._owner is not None and self._owner.contact_active)
+                    and arg.upper() != self.mycall):
+                raise ValueError('CWID identity changes require an idle contact')
+        if name == 'CWSPEED' and self.settings['CWID'] == '4 2' and int(arg) > 100:
+            raise ValueError('CWID requires CWSpeed at most 100 letters/minute')
+        if name == 'TONES' and arg != '4':
+            raise ValueError('the native transmitter supports TONES 4 only')
+        if name in ('MARK', 'SPACE', 'BRIGHTN'):
+            low, high = (0, 7) if name == 'BRIGHTN' else (300, 2700)
+            if not arg.isascii() or not arg.isdecimal() or not low <= int(arg) <= high:
+                raise ValueError(f'{name} must be {low}..{high}')
+            # MARK/SPACE are saved parameters used only by TONES 2 [6.54/6.88].
+            # TONES 4 fixes the actual pair. BRightn has no function on IIIusb
+            # [6.16]; 0 is the retained consumer startup compatibility value.
+            arg = str(int(arg))
+        if name == 'AES' and arg != '0':
+            raise ValueError('AES encryption is not implemented')
+        if name == 'TERM':
+            if arg not in ('0', '1'):
+                raise ValueError('supported terminal modes are TERM 0 and TERM 1')
+        if name in ('ESCCHR', 'BKCHR', 'CHOCHR', 'QRTCHR'):
+            value = int(arg)
+            if not 1 <= value <= 127 or (name in ('BKCHR','CHOCHR') and value in (8,13,32,30,17,19)):
+                raise ValueError('invalid terminal control character')
+            for other in ('ESCCHR', 'BKCHR', 'CHOCHR', 'QRTCHR'):
+                if other != name and {other, name} != {'BKCHR','CHOCHR'} and value == int(self.settings[other]):
+                    raise ValueError('terminal control characters conflict')
+            arg = str(value)
+        validate = getattr(self.peer, 'validate_host_setting', None)
+        if validate is not None:
+            validate(name, arg)
+        if name in ('DATE', 'TIME'):
+            arg = self._set_calendar(name, arg)
+        if name in ('FSKAMPL', 'PSKAMPL', 'TXDELAY', 'CWSPEED', 'CSDELAY'):
+            value = int(arg)
+            low, high = {'TXDELAY': (1, 31), 'CSDELAY': (1, 31),
+                         'CWSPEED': (40, 1200)}.get(name, (30, 3000))
+            if not low <= value <= high:
+                raise ValueError(f'{name} must be {low}..{high}')
+            arg = str(value)
+            if (self.arq.state not in (State.DISCONNECTED, State.LISTENING)
+                    and arg != self.settings.get(name)):
+                raise ValueError(f'{name} changes require an idle channel')
+            if (name == 'CSDELAY' and self._owner is not None and self._owner.contact_active
+                    and arg != self.settings.get(name)):
+                raise ValueError('CSDelay changes require an idle contact')
+            if self.peer is not None:
+                apply = getattr(self.peer, 'set_host_control', None)
+                if apply is None:
+                    raise ValueError(f'{name} is not supported by this transmitter')
+                apply(name, value)
+        if name == 'MAXERROR':
+            value = int(arg)
+            if not 30 <= value <= 255:
+                raise ValueError('MAXError must be 30..255')
+            if (self.arq.state not in (State.DISCONNECTED, State.LISTENING)
+                    and value != self.arq.cfg.host_error_limit):
+                raise ValueError('MAXError changes require an idle channel')
+            self.arq.cfg = replace(self.arq.cfg, host_error_limit=value)
+            arg = str(value)
+        if name == "PTCHN":
+            if not 1 <= int(arg) <= 31:
+                raise ValueError("PTChn must be 1..31")
+            if int(arg) != self.ptchn and (self.arq.state not in
+                    (State.DISCONNECTED, State.LISTENING) or not self.contact_ready()):
+                raise ValueError("channel has an active contact or unread output")
+        if name == "MODE":
+            if arg not in ('0', '1', '2'):
+                raise ValueError('MODE must be 0, 1 or 2')
+            if (self.arq.state not in (State.DISCONNECTED, State.LISTENING)
+                    and arg != self.settings.get('MODE', '0')):
+                raise ValueError('MODE changes require an idle channel')
+        if name == "MYLEVEL":
+            if not 1 <= int(arg) <= 3:
+                raise ValueError("MYLevel must be 1..3")
+            if (self.arq.state not in (State.DISCONNECTED, State.LISTENING)
+                    and arg != self.settings.get("MYLEVEL")):
+                raise ValueError("MYLevel changes require an idle channel")
+            self.level_digit = int(arg)
         if name in ("CONTYPE", "CONINTEGRITY"):
             # Validated by the config's own rules, and before it is stored: a
             # value the ARQ refuses is one the host never gets told we took.
@@ -1673,7 +2046,7 @@ class PtcHost(ArqIO):
 
     def _resolve(self, word: str) -> Optional[str]:
         """Map a possibly-abbreviated command word to its canonical upper-case name."""
-        if not word.replace("%", "").replace("@", "").isalnum():
+        if not word.isascii() or not word.replace("%", "").replace("@", "").isalnum():
             return None
         w = word.upper()
         if w.startswith("JHOST"):
@@ -1681,10 +2054,7 @@ class PtcHost(ArqIO):
         for canon, abbrev in _ABBREV.items():
             if canon.startswith(w) and w.startswith(abbrev):
                 return canon
-        # Unknown settings are stored, not rejected: refusing a command a client
-        # believes is essential aborts the session, while quietly accepting one
-        # we do not model costs nothing.
-        return w if w.isalpha() else None
+        return None
 
     def _version(self) -> str:
         return f"SCS PTC-IIIusb Firmware {FIRMWARE} BIOS {BIOS}"
@@ -1695,10 +2065,19 @@ class PtcHost(ArqIO):
     def _dispatch(self, pkt: hostmode.Packet) -> bytes:
         # JHOST0 hands the port back to the terminal parser from any channel, so
         # a client that reconnects can re-run its whole open sequence [10.2].
-        if pkt.is_command and pkt.text.strip().upper().startswith("JHOST0"):
+        if pkt.is_command and pkt.text.strip().upper() == "JHOST0":
             self.hostmode = False
+            self._terminal_converse = self.arq.state in (State.CONNECTING, State.CONNECTED, State.DISCONNECTING)
+            self._terminal_command = False
             return hostmode.reply(pkt.channel, hostmode.OK)
+        if (pkt.is_command and pkt.channel in (0, self.ptchn)
+                and pkt.text.strip().upper().startswith('AES')):
+            # Trimode sends the full terminal verb directly in hostmode. It
+            # must not become WA8DED setting A with the argument "ES 0".
+            return self._setting(pkt.channel, 'AES', pkt.text.strip()[3:].strip())
         if pkt.channel == 255:
+            if not pkt.is_command or pkt.text.strip().upper() != 'G':
+                return hostmode.reply_text(255, hostmode.FAIL, 'EXPECTED G')
             return self._poll_all()
         if pkt.channel == 254:
             return self._status(pkt)
@@ -1718,8 +2097,11 @@ class PtcHost(ArqIO):
 
     def _status(self, pkt: hostmode.Packet) -> bytes:
         """Status channel: G[0..3] returns that many status bytes plus one [10.6]."""
-        arg = pkt.text[1:].strip()
-        n = int(arg) + 1 if arg.isdigit() else 1
+        text = pkt.text.strip().upper()
+        arg = text[1:].strip()
+        if not pkt.is_command or not text.startswith('G') or arg not in ('', '0', '1', '2', '3'):
+            return hostmode.reply_text(254, hostmode.FAIL, 'EXPECTED G0..G3')
+        n = int(arg or '0') + 1
         self._laststatus = self._status_bytes()
         return hostmode.reply(254, hostmode.DATA, self._laststatus[:n])
 
@@ -1775,7 +2157,7 @@ class PtcHost(ArqIO):
             # [10.7, unknowns.HOST_TRX_CHANNEL].
             return hostmode.reply(pkt.channel, hostmode.FAIL)
         if not pkt.is_command:
-            return hostmode.reply(pkt.channel, hostmode.OK)
+            return hostmode.reply_text(pkt.channel, hostmode.FAIL, "NO PAYLOAD CHANNEL")
         text = pkt.text.strip()
         verb, arg = _split_command(text)
         if verb == "G":
@@ -1792,8 +2174,15 @@ class PtcHost(ArqIO):
     def _pactor(self, pkt: hostmode.Packet) -> bytes:
         ch = pkt.channel
         if not pkt.is_command:
+            if (self.arq.state != State.CONNECTED or self.arq._qrt_pending
+                    or self.arq._p3_app_failed or self.host_output_failure
+                    or self._owner is not None and not self._owner.admitting_data):
+                return hostmode.reply_text(ch, hostmode.FAIL, "CHANNEL NOT ACCEPTING DATA")
+            if self.arq.payload_ledger.pending + len(pkt.data) > 65536:
+                return hostmode.reply_text(ch, hostmode.FAIL, "TRANSMIT BUFFER FULL")
+            if not self.arq.on_host_data(pkt.data):
+                return hostmode.reply_text(ch, hostmode.FAIL, "CHANNEL NOT ACCEPTING DATA")
             self.p3_host_data_active = bool(pkt.data) or self.p3_host_data_active
-            self.arq.on_host_data(pkt.data)
             return hostmode.reply(ch, hostmode.OK)
 
         text = pkt.text.strip()
@@ -1801,7 +2190,9 @@ class PtcHost(ArqIO):
             # BPQ32's SCS driver calls this "a hidden feature where you can send
             # any normal mode command in host mode by preceding it with a #", and
             # sends its dirty disconnect and its MYLevel that way.
-            self._command(text[1:])
+            response = self._command(text[1:])
+            if response.startswith(b"*** ERROR:"):
+                return hostmode.reply(ch, hostmode.FAIL, response.rstrip(b"\r\n"))
             return hostmode.reply(ch, hostmode.OK)
 
         verb, arg = _split_command(text)
@@ -1813,8 +2204,10 @@ class PtcHost(ArqIO):
             if self.arq.state in (State.CONNECTED, State.DISCONNECTING):
                 return hostmode.reply_text(ch, hostmode.FAIL,
                                            "CHANNEL ALREADY CONNECTED")
+            if not self.contact_ready():
+                return hostmode.reply_text(ch, hostmode.FAIL, "PREVIOUS CONTACT OUTPUT NOT RETIRED")
             try:
-                self.arq.on_host_connect(self.call_for(ch),
+                self._request_host('connect', self.call_for(ch),
                                          arg.split()[0] if arg else "")
             except ValueError as exc:
                 return hostmode.reply_text(ch, hostmode.FAIL, str(exc))
@@ -1823,18 +2216,17 @@ class PtcHost(ArqIO):
             # Not in chapter 10, but ptc-go's forceDisconnect sends exactly this
             # and BPQ32 sends `#DD`, so the verb stays
             # [unknowns.HOST_UNDOCUMENTED_COMMANDS].
-            self.arq.on_host_abort()
-            return hostmode.reply(ch, hostmode.OK)
+            return self._host_control(ch, 'abort')
         if verb == "D":
             # "If the Disconnect command is given twice, one after the other,
             # then the link is broken immediately" [10.4.2]. "One after the
             # other" is per link, not per packet: every client polls G and L
             # between its commands, so spending the first D on a poll would put
             # the hard break out of reach of the clients it is there for.
-            (self.arq.on_host_abort if self._disconnect_asked
-             else self.arq.on_host_disconnect)()
-            self._disconnect_asked = True
-            return hostmode.reply(ch, hostmode.OK)
+            response = self._host_control(ch, 'abort' if self._disconnect_asked else 'disconnect')
+            if response == hostmode.reply(ch, hostmode.OK):
+                self._disconnect_asked = True
+            return response
         if verb == "I":
             return self._callsign(ch, arg)
         if verb == "V":
@@ -1869,21 +2261,22 @@ class PtcHost(ArqIO):
             if arg == "1":
                 self.release_wait()
                 return hostmode.reply_text(ch, hostmode.MSG, "")
-            free = self.arq.state in (State.DISCONNECTED, State.LISTENING)
+            free = self.enter_wait()
             if free:
-                self.enter_wait()
+                self._wait_reply_key = self._modem.response_key
             return hostmode.reply_text(ch, hostmode.MSG, "1" if free else "0")
         if code == "M":
             if not arg:
                 return hostmode.reply_text(ch, hostmode.MSG,
                                            self.settings.get("%M", "0"))
-            if arg != "0":
-                # "an error message (code byte=2) which contains the maximum
-                # possible argument value" [10.4.32]. No expansion level is
-                # implemented here, so the maximum this modem can honour is 0 --
-                # a client that set %M1 would wait for code-8 echoes for ever.
-                return hostmode.reply_text(ch, hostmode.FAIL, "0")
+            if arg not in ("0", "1"):
+                return hostmode.reply_text(ch, hostmode.FAIL, "1")
+            if arg == "0" and self.channel(ch).echo:
+                return hostmode.reply_text(ch, hostmode.FAIL, "SENT ECHO STILL PENDING")
             self.settings["%M"] = arg
+            return hostmode.reply(ch, hostmode.OK)
+        if code == "C":
+            self.arq.clear_unsent()
             return hostmode.reply(ch, hostmode.OK)
         # Changeover [PTC hostmode manual]: %O reverses the link either way -- it
         # breaks in when receiving, and hands over when the transmit buffer has
@@ -1891,15 +2284,12 @@ class PtcHost(ArqIO):
         # over: it puts an over token at the end of the transmit buffer and never
         # breaks in.
         if code == "O":
-            self.arq.on_host_changeover()
-            return hostmode.reply(ch, hostmode.OK)
+            return self._host_control(ch, 'changeover')
         if code == "I":
-            self.arq.on_host_breakin()
-            return hostmode.reply(ch, hostmode.OK)
+            return self._host_control(ch, 'breakin')
         if code == "Q":
-            self.arq.on_host_over()
-            return hostmode.reply(ch, hostmode.OK)
-        return hostmode.reply(ch, hostmode.OK)
+            return self._host_control(ch, 'over')
+        return hostmode.reply_text(ch, hostmode.FAIL, 'UNSUPPORTED COMMAND')
 
     def _answer_link_status(self, ch: int, arg: str) -> bytes:
         """L, for the channel in the argument or the one the packet arrived on.
@@ -1922,6 +2312,18 @@ class PtcHost(ArqIO):
         """I, the station callsign, which is set per channel [10.4.5]."""
         if not arg:
             return hostmode.reply_text(ch, hostmode.MSG, self.call_for(ch))
+        if self.settings['CWID'] == '4 2':
+            try:
+                host_cwid.validate_call(arg, 'PTC CWID MYCALL')
+                if ((self.arq.state not in (State.DISCONNECTED, State.LISTENING)
+                     or self._owner is not None and self._owner.contact_active)
+                        and arg.upper() != self.call_for(ch)):
+                    raise ValueError('CWID identity changes require an idle contact')
+                validate = getattr(self.peer, 'validate_host_setting', None)
+                if validate is not None:
+                    validate('MYCALL', arg)
+            except ValueError as exc:
+                return hostmode.reply_text(ch, hostmode.FAIL, str(exc))
         if ch == 0:
             self.settings["MYCALL"] = arg.upper()
         else:
@@ -1929,15 +2331,26 @@ class PtcHost(ArqIO):
         return hostmode.reply(ch, hostmode.OK)
 
     def _setting(self, ch: int, verb: str, arg: str) -> bytes:
-        """Any other parameter command: store it, or read it back.
+        """Only implemented host parameters may enter the settings map.
 
         "If the command is successful and returns information (like any command
         without an argument), a code 1 transmission will be the reply" [WA8DED
         guide]; every hostmode parameter in 10.4 is documented with such a
         read-back form.
         """
+        # M N disables AX.25 monitoring in the consumer startup. This PACTOR
+        # personality has no packet monitor; enabling filters is unsupported.
+        # The M vocabulary is documented separately from terminal commands
+        # [10.4.9]; a generic one-letter store invents unsupported effects.
+        if verb == 'M':
+            if not arg:
+                return hostmode.reply_text(ch, hostmode.MSG, 'N')
+            if arg.upper() == 'N':
+                return hostmode.reply(ch, hostmode.OK)
+        if verb != 'AES':
+            return hostmode.reply_text(ch, hostmode.FAIL, 'UNSUPPORTED PARAMETER')
         if not arg:
-            return hostmode.reply_text(ch, hostmode.MSG, self.settings.get(verb, "0"))
+            return hostmode.reply_text(ch, hostmode.MSG, self.settings['AES'])
         try:
             self._store(verb, arg)
         except ValueError as exc:
@@ -1945,36 +2358,188 @@ class PtcHost(ArqIO):
         return hostmode.reply(ch, hostmode.OK)
 
     def _get(self, ch: int, text: str) -> bytes:
-        """G poll: link status events first, then received data [WA8DED guide]."""
+        """Establishment precedes payload; retirement follows RX and echo."""
         arg = text[1:].strip()
         chan = self.channel(ch)
-        if chan.link and arg != "0":
-            return hostmode.reply_text(ch, hostmode.LINK, chan.link.pop(0))
+        if (chan.link and arg != "0" and not (
+                isinstance(chan.link[0], _TerminalEvent) and (chan.rx or chan.echo))):
+            event = chan.link.pop(0)
+            if not chan.pending():
+                self.host_output_deadline = None
+            return hostmode.reply_text(ch, hostmode.LINK, event)
         if chan.rx and arg != "1":
             n = min(len(chan.rx), hostmode.MAX_DATA)
             blob, chan.rx[:] = bytes(chan.rx[:n]), chan.rx[n:]
             return hostmode.reply(ch, hostmode.DATA, blob)
+        if chan.echo and arg != "1":
+            n = min(len(chan.echo), hostmode.MAX_DATA)
+            blob, chan.echo[:] = bytes(chan.echo[:n]), chan.echo[n:]
+            return hostmode.reply(ch, hostmode.SENT_ECHO, blob)
         return hostmode.reply(ch, hostmode.OK)
 
+    def contact_ready(self) -> bool:
+        return not self.channel(self.ptchn).pending() and not self.host_output_failure and not self._terminal_pending
+
+    def _admit_terminal(self, blob):
+        if (self.host_output_failure or self.arq._qrt_pending or self.arq._p3_app_failed
+                or self._owner is not None and not self._owner.admitting_data):
+            raise ValueError('CHANNEL NOT ACCEPTING DATA')
+        if len(self._terminal_pending)+self.arq.payload_ledger.pending+len(blob) > 65536:
+            raise ValueError('TRANSMIT BUFFER FULL')
+        if self.arq.state == State.CONNECTING:
+            self._terminal_pending += blob
+        elif self.arq.state == State.CONNECTED and self.arq.on_host_data(blob):
+            self.p3_host_data_active = bool(blob) or self.p3_host_data_active
+        else:
+            raise ValueError('CHANNEL NOT ACCEPTING DATA')
+
+    def _retire_typeahead(self, reason):
+        if self._terminal_pending:
+            self.terminal_retired.append(dict(remote=self.arq.dxcall, original=bytes(self._terminal_pending), reason=reason))
+            self.log(f'{len(self._terminal_pending)} terminal typeahead bytes retained without delivery credit: {reason}')
+            self._terminal_pending.clear()
+
+    def payload_confirmed(self, blob: bytes) -> None:
+        self.sent_total += len(blob)
+        if ((self.hostmode and self.settings.get("%M", "0") == "1")
+                or (not self.hostmode and self.settings['TERM'] == '1')):
+            self._queue_host_output(self.channel(self.ptchn).echo, blob)
+
+    def wire_confirmed(self, n: int) -> None:
+        self.wire_sent_total += n
+
+    def _queue_host_output(self, queue: bytearray, blob: bytes) -> None:
+        chan = self.channel(self.ptchn)
+        limit = self.host_output_limit
+        if not self.hostmode and self.settings['TERM'] == '0' and (self._line or self._terminal_command):
+            limit = min(limit, 2000)  # SCS 4.1 6.92 command-input receive hold
+        if (self.host_output_failure
+                or len(chan.rx) + len(chan.echo) + len(blob) > limit):
+            self.host_output_failure = self.host_output_failure or "HOST OUTPUT OVERFLOW"
+            self.log(f"{self.host_output_failure}: {len(blob)} output bytes retired")
+            if self.arq.state in (State.CONNECTED, State.CONNECTING, State.DISCONNECTING):
+                # A settlement/delivery callback runs inside an ARQ transition.
+                # Retire the link at the next owner servicing boundary instead
+                # of clearing its inflight packet out from under that transition.
+                self._host_output_abort_pending = True
+            return
+        queue += blob
+
+    def drain_terminal_output(self) -> bytes:
+        """Return one bounded asynchronous output item on the modem owner.
+
+        The serial endpoint services this without waiting for input or ticking
+        ARQ. TERM 0 pauses received text during command entry. Establishment
+        precedes payload; final link text follows all RX and confirmed echo.
+        Hostmode output remains exclusively polled through its G commands.
+        """
+        self._check_owner()
+        if self.hostmode or self.settings['TERM'] == '0' and (self._line or self._terminal_command):
+            return b''
+        chan = self.channel(self.ptchn)
+        if chan.link and not isinstance(chan.link[0], _TerminalEvent):
+            return ('\r\n'+chan.link.pop(0)+'\r\n').encode('latin-1')
+        for queue in (chan.rx, chan.echo):
+            if queue:
+                data = bytes(queue[:4096])
+                del queue[:4096]
+                if not chan.pending():
+                    self.host_output_deadline = None
+                return data
+        if chan.link:
+            event = chan.link.pop(0)
+            if not chan.pending():
+                self.host_output_deadline = None
+            return ('\r\n'+event+'\r\n'+PROMPT).encode('latin-1')
+        self.host_output_deadline = None
+        return b''
+
+    def service_host_output(self) -> None:
+        """Owner-clock servicing: a stopped poller never retains RF state."""
+        self._check_owner()
+        if self.wait_until is not None and time.monotonic() >= self.wait_until:
+            self.release_wait()
+        if (self.arq.state == State.CONNECTED and self._terminal_pending
+                and not self.host_output_failure and not self.arq._qrt_pending
+                and not self.arq._p3_app_failed
+                and (self._owner is None or self._owner.admitting_data)):
+            pending = bytes(self._terminal_pending)
+            if self.arq.on_host_data(pending):
+                self._terminal_pending.clear()
+                self.p3_host_data_active = True
+        if self._host_output_abort_pending:
+            self._host_output_abort_pending = False
+            self._request_host('abort')
+        if (self.host_output_deadline is not None
+                and time.monotonic() >= self.host_output_deadline
+                and self.channel(self.ptchn).pending()):
+            if not self.host_output_failure:
+                self.host_output_failure = "HOST OUTPUT DRAIN TIMEOUT"
+                self.log(self.host_output_failure)
+            self.host_output_deadline = None
+
+    def attachment_lost(self, *, reentry=False) -> None:
+        """Explicit output disposition on endpoint loss or hostmode reentry."""
+        if self._owner is not None:
+            if reentry:
+                self._owner.reset()
+            else:
+                self._owner.retire()
+            return
+        self._attachment_lost_now()
+
+    def _attachment_lost_now(self) -> None:
+        self.release_wait()
+        if self.arq.state in (State.CONNECTED, State.CONNECTING, State.DISCONNECTING):
+            self.arq.on_host_abort()
+        if any(c.pending() for c in self._channels.values()):
+            self.log("attachment retired unread host output")
+        self._channels.clear()
+        self.host_output_deadline = self.host_output_failure = None
+        self._host_output_abort_pending = False
+        self.settings["%M"] = "0"
+        # Neither a partial terminal command nor a CRC retransmission belongs
+        # to the next attachment. JHOST reentry immediately selects its new
+        # framing again; a closed serial endpoint returns to the prompt.
+        self.hostmode = False
+        self._attachment_started = False
+        self._line.clear()
+        self._terminal_discard = False
+        self._retire_typeahead('attachment lost')
+        self._terminal_converse = self._terminal_command = False
+        self._modem.reset()
+
     def _link_status(self) -> str:
-        """The L command's six fields [WA8DED guide, confirmed by ptc-go]."""
+        """Six-field L layout, separating queued work from an actual RF offer.
+
+        The declared PACTOR profile counts queued hostmode-sized wire chunks and one
+        successfully offered payload field. An unkeyed/refused construction is
+        still queued work; idle/control packets never hold host flow control.
+        Exact SCS buffer allocation remains a separate stock comparison.
+        """
         state = {State.CONNECTING: LINK_SETUP, State.CONNECTED: LINK_INFO,
                  State.DISCONNECTING: LINK_DISCONNECT_REQ}.get(
                      self.arq.state, LINK_DISCONNECTED)
         chan = self.channel(self.ptchn)
-        unsent = math.ceil(self._txbuf / hostmode.MAX_DATA)
+        packet = self.arq._inflight
+        offered = (len(packet.payload) if packet is not None and packet.sent_at_level else 0)
+        unsent = math.ceil(max(0, self._txbuf-offered) / hostmode.MAX_DATA)
+        unacked = int(bool(offered))
+        retries = packet.retries if unacked else 0
         return " ".join(str(v) for v in (
             len(chan.link),                                    # a: link msgs waiting
             math.ceil(len(chan.rx) / hostmode.MAX_DATA),       # b: rx frames waiting
             unsent,                                            # c: not transmitted
-            1 if unsent else 0,                                # d: not acknowledged
-            0,                                                 # e: retries
+            unacked,                                           # d: not acknowledged
+            retries,                                           # e: retries
             state))                                            # f: link state
 
     # ==================================================================== #
     # ArqIO -- the FSM's view of us
     # ==================================================================== #
     def connect_burst(self, mycall: str, dxcall: str) -> None:
+        if self._owner is not None and self._owner.defer_connect_burst(mycall, dxcall):
+            return
         if self.peer is not None:
             self.peer.connect_burst(mycall, dxcall)
 
@@ -2067,7 +2632,59 @@ class PtcHost(ArqIO):
         return (self.pactor2_only and not self._p2_setup_acked
                 and not self._grant_taken and Protocol.PACTOR2 not in self._ruled_out)
 
+    def _coding_capacity(self, sl, *, breakin=False, maximum=None):
+        if self.protocol == Protocol.PACTOR1:
+            capacity = (pactor1.BREAKIN_FIELD if breakin else pactor1.DATA_FIELD)[self.p1_baud]
+        elif self.protocol == Protocol.PACTOR2:
+            from . import pactor2
+            paths = (pactor2.PATHS_LONG if self.arq.cycle_long
+                     and hasattr(self.peer, 'send_p2_long_packet') else pactor2.PATHS)
+            capacity = paths[sl-1].crc_bytes - 3
+        else:
+            from . import placement
+            paths = (placement.LONG_PATHS if self.arq.cycle_long
+                     and hasattr(self.peer, 'send_long_packet') else placement.SPEED_PATHS)
+            capacity = (placement.CHANGEOVER if breakin else paths[sl]).crc_bytes - 3
+        return capacity if maximum is None else min(maximum, capacity)
+
+    def payload_count(self, payload, capacity, *, breakin=False):
+        mode = int(self.settings.get('MODE', '0'))
+        if not mode or self.arq.entry_pending or self.arq.p2_entry_pending or not payload:
+            return min(len(payload), capacity)
+        capacity = self._coding_capacity(self.arq._sl, breakin=breakin, maximum=capacity)
+        # Bound per-field work even for a highly repetitive full host queue.
+        return compress.encode_field(payload[:capacity*32], capacity, mode=mode,
+                                     protocol=self.protocol).consumed
+
+    def coded_packet(self, sl, payload, status, *, breakin=False):
+        """Pure original-character-to-field conversion, also used by previews."""
+        mode = int(self.settings.get('MODE', '0'))
+        if (not mode or not payload or self.arq.entry_pending or self.arq.p2_entry_pending
+                or (status >> 2) & 7 or self.protocol == Protocol.PACTOR1
+                and status & spec.STATUS_QRT):
+            return payload, status, None
+        capacity = self._coding_capacity(sl, breakin=breakin)
+        field = compress.encode_field(payload, capacity, mode=mode, protocol=self.protocol)
+        return field.data, (status & ~(7 << 2)) | (int(field.data_type) << 2), field
+
     def send_packet(self, sl: int, payload: bytes, status: int,
+                    breakin: bool = False) -> Optional[int]:
+        if (self._cw_schedule is not None and self.arq.role == ISS
+                and self.arq.state == State.CONNECTED and not self.arq.entry_pending
+                and not self.arq.p2_entry_pending and self._cw_schedule.defer_data()):
+            return REFUSED  # The owner will identify; originals remain pending.
+        coded, status, field = self.coded_packet(sl, payload, status, breakin=breakin)
+        result = self._send_packet_wire(sl, coded, status, breakin=breakin)
+        if field is None or result == REFUSED:
+            return result
+        if result is not None and result < len(coded):
+            self.host_output_failure = 'ENCODED TRANSMIT FIELD TRUNCATED'
+            self._host_output_abort_pending = True
+            self.log(self.host_output_failure)
+            return REFUSED
+        return field.consumed
+
+    def _send_packet_wire(self, sl: int, payload: bytes, status: int,
                     breakin: bool = False) -> Optional[int]:
         """Send a data packet in whatever protocol the link is actually in.
 
@@ -2100,7 +2717,7 @@ class PtcHost(ArqIO):
         report a truncation that never happened. `arq.PactorArq._sent` reads
         whatever the seam says, and a seam that says nothing is unmeasured.
         """
-        if self.robust_entry_exhausted:
+        if self.robust_entry_exhausted or self.host_output_failure:
             return REFUSED
         if self.peer is None:
             return None
@@ -2138,7 +2755,8 @@ class PtcHost(ArqIO):
                 self._hispeed_tries = 1
             return self.peer.send_p1_breakin(
                 payload, self.p1_baud, status & spec.STATUS_SEQ,
-                qrt=bool(status & spec.STATUS_QRT))
+                qrt=bool(status & spec.STATUS_QRT),
+                **({'data_type': (status >> 2) & 7} if (status >> 2) & 7 in (1, 2) else {}))
         if p1 and hasattr(self.peer, "send_p1_packet"):
             # The first packet after BK is #1/head55. That reverses the header
             # phase for the WHOLE sending turn, including repeats: #2 must then
@@ -2149,7 +2767,8 @@ class PtcHost(ArqIO):
             return self.peer.send_p1_packet(
                 payload, self.p1_baud, status & spec.STATUS_SEQ, header=header,
                 changeover_request=bool(status & spec.STATUS_CHANGEOVER),
-                qrt=bool(status & spec.STATUS_QRT))
+                qrt=bool(status & spec.STATUS_QRT),
+                **({'data_type': (status >> 2) & 7} if (status >> 2) & 7 in (1, 2) else {}))
         # The cycle length is link state the FSM holds, not a flag in the status
         # byte -- bit 5 is the REQUEST, and a long packet can carry it clear
         # (DL6MAA at 47.87 s) while a short one carries it set (16.61 s). The
@@ -2287,7 +2906,7 @@ class PtcHost(ArqIO):
             # lowest level anyway ("daher wird jede Verbindung zunaechst auf dem
             # kleinsten Level (1) gestartet").
             self._setup_bytes = self.p1_setup_payload()
-            self.arq.on_host_data(self._setup_bytes)
+            self.arq.queue_protocol_data(self._setup_bytes)
 
     def p1_setup_payload(self) -> bytes:
         call = self.mycall.lower() if self.announce_lower else self.mycall
@@ -2734,6 +3353,8 @@ class PtcHost(ArqIO):
         return self._counter_cs_for(cs_index)
 
     def connected(self, mycall: str, dxcall: str) -> None:
+        if not self.hostmode and self.app is None:
+            self._terminal_converse = True
         # A connect burst names only the called station. SCS's firmware names
         # the caller off the first line it sends -- the announcement, `1W9SSJ`
         # -- and reports the link once it has.
@@ -2841,6 +3462,9 @@ class PtcHost(ArqIO):
         says so by answering in PACTOR-1, and that says nothing about the next
         station we call" -- which was true of the comment and not of the code.
         """
+        self._retire_typeahead('contact ended before transmission')
+        self._terminal_converse = self._terminal_command = False
+        self._line.clear()
         peer = self.arq.dxcall or "?"
         # A call that never came up did not disconnect, it failed, and that is
         # the distinction a client's retry logic reads [10.4.10].
@@ -2849,14 +3473,15 @@ class PtcHost(ArqIO):
             # One terminal event carries both the client's failure discriminator
             # and the reason. A normal disconnect first can make a client stop
             # polling before it sees a separate unconfirmed notice.
-            self.channel(self.ptchn).link.append(
+            self.channel(self.ptchn).link.append(_TerminalEvent(
                 f"({self.ptchn}) LINK FAILURE with {peer}: transfer unconfirmed; "
                 f"counter {retained['counter']}, field {len(retained['field'])}B "
                 f"and suffix {len(retained['suffix'])}B retained in modem history; "
-                "not queued for retry")
+                "not queued for retry"))
         else:
             event = ("DISCONNECTED fm" if self._link_up else "LINK FAILURE with")
-            self.channel(self.ptchn).link.append(f"({self.ptchn}) {event} {peer}")
+            self.channel(self.ptchn).link.append(_TerminalEvent(f"({self.ptchn}) {event} {peer}"))
+        self.host_output_deadline = time.monotonic() + self.host_output_timeout
         progress = getattr(self.app, "progress", None)
         if progress is not None:
             progress.link_down()
@@ -2899,6 +3524,8 @@ class PtcHost(ArqIO):
         # A grant is spent once per contact, not once per modem process.
         # Hostmode clients reuse this object when calling the next gateway.
         self._grant_taken = self._grant_pending = False
+        self._entry_grant = None
+        self._retire_entry_listen()
         self._p2_setup_acked = False
         self.p2_announcement_end = None
         self._uninvited_entry = False
@@ -3007,7 +3634,7 @@ class PtcHost(ArqIO):
         if self.app is not None:
             self.app.on_link_data(blob)
         else:
-            self.channel(self.ptchn).rx += blob
+            self._queue_host_output(self.channel(self.ptchn).rx, blob)
         # The channel buffer serves a hostmode client; an onair session has none,
         # so without this line received data reached nobody -- a link could carry
         # a whole message and the operator never saw a byte of it. The link layer
@@ -3036,8 +3663,8 @@ class PtcHost(ArqIO):
         return rest
 
     def buffer(self, nbytes: int) -> None:
-        if nbytes < self._txbuf:
-            self.sent_total += self._txbuf - nbytes
+        # RF queue size includes escapes and protocol bytes. Only the explicit
+        # payload_confirmed callback may credit %T or delayed sent echoes.
         self._txbuf = nbytes
 
     def log(self, msg: str) -> None:
@@ -3067,9 +3694,27 @@ class SimPeer:
         self._far.on_host_listen(True)
         self._to_far: list[tuple] = []
         self._to_near: list[tuple] = []
+        self.controls: dict[str, int] = {}  # logical simulation, no audio output
 
     def attach(self, host: PtcHost) -> None:
         self.host = host
+
+    def set_host_control(self, name: str, value: int) -> None:
+        self.controls[name] = value
+
+    def get_host_control(self, name: str) -> int:
+        if name == 'CWSPEED':
+            return self.controls.get(name, 160)
+        if name == 'CSDELAY':
+            return self.controls.get(name, 5)
+        raise ValueError(f'unsupported simulator control {name}')
+
+    def begin_scan_hold(self) -> bool:
+        # A queued receive/connect is already owner work, not idle standby.
+        return not self._to_near and not self._to_far
+
+    def end_scan_hold(self) -> None:
+        pass
 
     @property
     def role(self) -> Optional[str]:
@@ -3158,51 +3803,47 @@ class _FarIO(ArqIO):
 # Serial front end
 
 def serve(host: PtcHost, device: Optional[str] = None, *,
-          verbose: bool = True) -> None:
-    """Run `host` on a pty (or on `device`, an existing serial port) until closed."""
-    import os
-    import select
-    import termios
-    import tty
+          verbose: bool = True, stop_event=None,
+          on_ready: Optional[Callable[[str], None]] = None,
+          output_limit: int = 256 * 1024, drain_timeout: float = 30.0) -> None:
+    """Serve one trusted, exclusive serial attachment until closed or stopped.
 
-    if device:
-        fd = os.open(device, os.O_RDWR | os.O_NOCTTY)
-        name = device
-    else:
-        fd, replica = os.openpty()
-        name = os.ttyname(replica)
-        tty.setraw(replica)
-    tty.setraw(fd, termios.TCSANOW)
+    The PTY is a local Unix endpoint, not a Windows COM implementation. After
+    the first client bytes, closing its last descriptor retires this endpoint;
+    callers create a fresh endpoint for another attachment. The owner never
+    blocks on host output, and missed wall-clock slots age once without
+    replaying historical transmissions. This demo clock is not the production
+    station's sample-clock driver.
+    """
+    from .serial_endpoint import PtcSerialEndpoint
 
-    # A modem on a wire is a modem that answers: Listen defaults to 1 [6.49,
-    # 10.4.31], and a client that wants it off says so. Until this was applied a
-    # served PtcHost took no inbound call until some client sent %L1, which
-    # neither of the two drivers we can read ever sends.
-    host.set_listen(True)
-
-    if verbose:
-        print(f"PTC-IIIusb (fw {FIRMWARE}) on {name}   MYCALL {host.mycall} "
-              f"PTCHN {host.ptchn}")
-    os.write(fd, host.open())
-
-    next_tick = time.monotonic() + host.arq.slot_s
+    endpoint = PtcSerialEndpoint(host, output_limit=output_limit,
+                                 drain_timeout=drain_timeout)
     try:
-        while True:
-            timeout = max(0.0, next_tick - time.monotonic())
-            ready, _, _ = select.select([fd], [], [], timeout)
-            if ready:
-                chunk = os.read(fd, 4096)
-                if chunk:
-                    out = host.feed(chunk)
-                    if out:
-                        os.write(fd, out)
-            if time.monotonic() >= next_tick:
-                host.tick()
-                next_tick += host.arq.slot_s
+        name = endpoint.open(device)
+        if verbose:
+            print(f"PTC-IIIusb (fw {FIRMWARE}) on {name}   MYCALL {host.mycall} "
+                  f"PTCHN {host.ptchn}", flush=True)
+        slot = host.arq.slot_s
+        next_tick = time.monotonic() + slot
+        if on_ready is not None:
+            on_ready(name)
+        while stop_event is None or not stop_event.is_set():
+            now = time.monotonic()
+            if not endpoint.service(timeout=max(0.0, min(0.1, next_tick - now))):
+                break
+            now = time.monotonic()
+            if now >= next_tick:
+                elapsed = 1 + int((now - next_tick) // slot)
+                host.tick(elapsed_ticks=elapsed)
+                next_tick += elapsed * slot
+                if host.arq.slot_s != slot:
+                    slot = host.arq.slot_s
+                    next_tick = time.monotonic() + slot
     except KeyboardInterrupt:
         pass
     finally:
-        os.close(fd)
+        endpoint.close()
 
 
 def main() -> int:

@@ -12,7 +12,10 @@ window stay `hardware`.
 from __future__ import annotations
 
 import ast
+from hashlib import sha256
+import json
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pytest
@@ -198,27 +201,23 @@ def test_finishing_a_burst_advances_every_lane_past_our_own_carrier(monkeypatch)
     assert b._buf.size == 0
 
 
-def test_the_station_transmit_latency_moves_the_emission_and_not_the_index(monkeypatch):
-    """`lat` is the driver's half of the loop and the codec's own delay is not in
-    it. On 2026-09-14 that put every burst this station keyed about 20 ms later
-    on the air than the index it was armed at — read off the peer's PACTOR-1
-    answer position and off the PACTOR-3 witness chain, agreeing to 1 ms.
-    `loop_lat` is the whole path, so the audio goes out that much earlier while
-    `at` still names the capture sample it lands on.
-
-    One counter for both halves, so the output frame a sample is written to IS
-    its index here."""
+def test_finite_dac_placement_reports_on_air_endpoint(monkeypatch):
+    """The arbiter subtracts TX latency before arm_burst; the callback only
+    removes the driver offset. finish_burst includes TX latency for RX flushes.
+    """
     def lead(tx_latency_n: int) -> int:
         sa, _ = station(monkeypatch)
         sa.tx_latency_n = tx_latency_n
         s = FakeStream(sa._callback, lat=1152)
         sa._stream = s
         s.run(audio._LAT_MEDIAN_N)
-        at = sa.arm_burst(np.ones(480, np.float32),
-                          at=sa.samples + 3000 + tx_latency_n)
+        on_air = sa.samples + 5000
+        sa.arm_burst(np.ones(480, np.float32), at=on_air - tx_latency_n)
         s.run(40)
-        assert sa.finish_burst() == at + 480
-        return at - int(np.flatnonzero(np.concatenate(s.out_history))[0])
+        assert sa.finish_burst() == on_air + 480
+        first_frame = int(np.flatnonzero(np.concatenate(s.out_history))[0])
+        assert first_frame + sa.lat + tx_latency_n == on_air
+        return on_air - first_frame
 
     assert lead(0) == 1152
     assert lead(960) == 1152 + 960
@@ -707,6 +706,150 @@ def _transmit_path(text: str) -> tuple[dict[str, str], int]:
             sum(1 for n in ast.walk(tree) if _hands_audio_out(n)))
 
 
+def _audio_archives():
+    ledger = REPO / "working/audio-source-archives.json"
+    if not ledger.is_file():
+        return {}
+    return {REPO / row["path"]: row["sha256"]
+            for row in json.loads(ledger.read_text())["archives"]}
+
+
+def _attested_basetemp(directory: Path):
+    """Only an adjacent completed pytest report can attest a generated fixture tree."""
+    status = directory / "status.json"
+    report = directory / "results.xml"
+    log = directory / "stdout.log"
+    if not all(p.is_file() for p in (status, report, log)):
+        return None
+    try:
+        record = json.loads(status.read_text())
+        command = record["command"]
+        if (record.get("finished") is None or not isinstance(record.get("exit_code"), int)
+                or not isinstance(command, list) or not log.stat().st_size):
+            return None
+        if not any(isinstance(arg, str) and "pytest" in Path(arg).name for arg in command):
+            return None
+        if "--basetemp" in command:
+            target_arg = command[command.index("--basetemp") + 1]
+        else:
+            target_arg = next(arg.split("=", 1)[1] for arg in command
+                              if isinstance(arg, str) and arg.startswith("--basetemp="))
+        target = Path(target_arg).resolve()
+        if not target.is_relative_to(directory.resolve()) or target == directory.resolve():
+            return None
+        if f"--junitxml={report.resolve()}" not in command:
+            return None
+        if not ET.parse(report).findall(".//testcase"):
+            return None
+        return target
+    except (ValueError, KeyError, IndexError, TypeError, OSError, ET.ParseError, StopIteration):
+        return None
+
+
+def _python_sources(root: Path):
+    """Maintained instruments, excluding independent repos and attested artifacts.
+
+    Exact-hash historical sources remain unchanged as evidence, without being
+    certified as current live instruments. Changed bytes are always scanned.
+    """
+    archives = _audio_archives()
+    basetemps = set()
+    for directory, subdirs, files in root.walk():
+        attested = _attested_basetemp(directory)
+        if attested is not None:
+            basetemps.add(attested)
+
+        def separate_repository(name):
+            candidate = directory / name
+            return ((candidate / ".git").exists()
+                    or all((candidate / marker).is_file() for marker in (
+                        "pyproject.toml", "packages/hfmodem/pyproject.toml",
+                        "packages/hfmodem/hfmodem/core/audio.py")))
+
+        subdirs[:] = sorted(name for name in subdirs if not separate_repository(name)
+                            and (directory / name).resolve() not in basetemps)
+        for name in sorted(files):
+            src = directory / name
+            if src.suffix == ".py" and src.is_file():
+                if src in archives and sha256(src.read_bytes()).hexdigest() == archives[src]:
+                    continue
+                yield src
+
+
+def test_python_source_walk_keeps_instruments_inside_py_named_directories(tmp_path):
+    artifact = tmp_path / "reported-case.py"
+    artifact.mkdir()
+    instrument = artifact / "instrument.py"
+    instrument.write_text("import sounddevice as sd\nsd.play([1])\n")
+    ordinary = tmp_path / "ordinary.py"
+    ordinary.write_text("value = 1\n")
+    copied = tmp_path / "independent-copy"
+    copied_audio = copied / "packages/hfmodem/hfmodem/core/audio.py"
+    copied_audio.parent.mkdir(parents=True)
+    copied_audio.write_text("import sounddevice as sd\nsd.play([1])\n")
+    (copied / "pyproject.toml").write_text("[project]\nname='copy'\n")
+    (copied / "packages/hfmodem/pyproject.toml").write_text("[project]\nname='hfmodem'\n")
+    worktree = tmp_path / "independent-worktree"
+    worktree.mkdir()
+    (worktree / ".git").write_text("gitdir: /historical/worktree\n")
+    (worktree / "instrument.py").write_text(instrument.read_text())
+
+    sources = list(_python_sources(tmp_path))
+    assert set(sources) == {instrument, ordinary}
+    assert any(_hands_audio_out(node) for node in ast.walk(ast.parse(instrument.read_text())))
+
+
+def test_audio_source_archives_are_exact_and_do_not_cover_neighbors(tmp_path, monkeypatch):
+    monkeypatch.setattr(__import__(__name__, fromlist=["REPO"]), "REPO", tmp_path)
+    working = tmp_path / "working"
+    working.mkdir()
+    archived = working / "saved.py"
+    neighbor = working / "current.py"
+    bad = "import sounddevice as sd\nsd.play([1])\n"
+    archived.write_text(bad)
+    neighbor.write_text(bad)
+    (working / "audio-source-archives.json").write_text(json.dumps({"archives": [{
+        "path": "working/saved.py", "sha256": sha256(archived.read_bytes()).hexdigest()}]}))
+    assert list(_python_sources(working)) == [neighbor]
+    archived.write_text(bad + "# changed\n")
+    sources = list(_python_sources(working))
+    assert set(sources) == {archived, neighbor}
+    assert all(any(_hands_audio_out(n) for n in ast.walk(ast.parse(p.read_text())))
+               for p in sources)
+
+
+@pytest.mark.parametrize("joined", [False, True])
+def test_audio_source_walk_requires_completed_adjacent_pytest_provenance(tmp_path, joined):
+    fixture = tmp_path / "temporary/candidate.py"
+    fixture.parent.mkdir()
+    fixture.write_text("intentionally invalid fixture\n")
+    instrument = tmp_path / "instrument.py"
+    instrument.write_text("import sounddevice as sd\nsd.play([1])\n")
+    status = tmp_path / "status.json"
+    report = tmp_path / "results.xml"
+    report.write_text('<testsuites><testsuite><testcase name="fixture"/></testsuite></testsuites>')
+    (tmp_path / "stdout.log").write_text("1 passed\n")
+    record = {"finished": 1, "exit_code": 0, "command": ["python", "-m", "pytest",
+        "--basetemp", str(fixture.parent), f"--junitxml={report}"]}
+    if joined:
+        record["command"][3:5] = [f"--basetemp={fixture.parent}"]
+    status.write_text(json.dumps(record))
+    assert list(_python_sources(tmp_path)) == [instrument]
+    if joined:
+        record["command"][3] = f"--basetemp={tmp_path.parent / 'outside'}"
+    else:
+        record["command"][4] = str(tmp_path.parent / "outside")
+    status.write_text(json.dumps(record))
+    assert set(_python_sources(tmp_path)) == {fixture, instrument}
+    if joined:
+        record["command"][3] = f"--basetemp={fixture.parent}"
+    else:
+        record["command"][4] = str(fixture.parent)
+    record.pop("finished")
+    status.write_text(json.dumps(record))
+    assert set(_python_sources(tmp_path)) == {fixture, instrument}
+
+
 def test_only_core_audio_hands_a_transmission_to_a_sound_card():
     """One transmit call, and `sd.play` is only one of the ways of not being it.
 
@@ -726,12 +869,18 @@ def test_only_core_audio_hands_a_transmission_to_a_sound_card():
     transmitted short for exactly as long as this walk stopped at `tools/`. A
     transmit path that does not drain is not a measurement instrument, whichever
     directory it sits in.
+
+    Independent repository copies are separate candidates. Exact-hash archived
+    source in the maintained private ledger is historical evidence, not a
+    certified current live instrument; changed bytes and unlisted neighbors are
+    scanned. Adjacent completed pytest reports can attest their exact descendant
+    fixture directory, which may deliberately contain invalid Python.
     """
     one = Path(audio.__file__).resolve()
     blessed = _transmit_path(one.read_text(encoding="utf-8"))
     hits = []
     for root in (REPO / "packages", REPO / "tools", REPO / "working"):
-        for src in sorted(root.rglob("*.py")):
+        for src in _python_sources(root):
             rel = src.relative_to(REPO).as_posix()
             if ({"tests", "__pycache__", "build", "dist"} & set(src.parts)
                     or src.resolve() == one or _sealed(rel)):
@@ -812,3 +961,79 @@ def test_stream_flush_never_delivers_empty_chunks_or_loses_faults(queued):
     assert chunk.samples.dtype == np.float32 and len(chunk.samples) == 128
     assert [(f.index, f.cause) for f in chunk.faults] == [(128, 'flush')]
     assert lane.poll() == []
+
+
+def test_dac_anchor_uses_each_callback_not_startup_median(monkeypatch):
+    sa, _ = station(monkeypatch)
+    stream = FakeStream(sa._callback)
+    stream.run(audio._LAT_MEDIAN_N)
+    median = sa.lat
+    stream.run(1, lat=median + 64)
+    timestamp, frame = sa._dac
+    assert timestamp == pytest.approx(sa._last[0] + (median + 64) / 48000)
+    assert sa.lat == median
+    assert sa.dac_time(frame + 480) == pytest.approx(timestamp + .01)
+    assert sa.dac_frame_at(timestamp + .01) == pytest.approx(frame + 480)
+
+
+def test_dac_wait_uses_live_deadline_health_and_cancellation(monkeypatch):
+    sa = StationAudio(input_device=None, output_device=None)
+    sa._dac = (10., 1000)
+    now = [10.]
+    monkeypatch.setattr(audio.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(audio.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(sa, 'sample_now', lambda: 10**9)
+    checks = []
+    monkeypatch.setattr(sa, 'check_callbacks', lambda: checks.append(1))
+    sa.wait_until_dac(1480, healthy=True, deadline=11)
+    assert now[0] >= 10.01 and checks
+    with pytest.raises(BurstInvalidated, match='cancelled'):
+        sa.wait_until_dac(0, cancelled=lambda: True)
+    with pytest.raises(BurstInvalidated, match='deadline'):
+        sa.wait_until_dac(48000, deadline=now[0])
+
+
+def test_cancel_discards_stream_and_closes_the_old_writer(monkeypatch):
+    sa, stream = _streaming(monkeypatch)
+    tx = sa.arm_stream(sa.samples, capacity=1000)
+    tx.write(np.ones(900))
+    sa.cancel_burst()
+    assert sa._tx_stream is None and tx.closed
+    stream.out_history.clear()
+    stream.run(20)
+    assert not any(np.any(block) for block in stream.out_history)
+    with pytest.raises(AudioError, match='closed'):
+        tx.write(np.ones(1))
+
+
+@pytest.mark.parametrize('consumed,elapsed,valid', [(100, True, True), (99, True, False),
+                                                   (100, False, False)])
+def test_reserved_completion_uses_dac_and_keeps_emission_end(monkeypatch, consumed, elapsed, valid):
+    sa = StationAudio(input_device="fake-in", output_device="fake-out", tx_latency_n=960)
+    sa.lat = 1152
+    sa._dac = (10., 0)
+    at = sa.reserve_burst(np.ones(100), at=3000, deadline=10000)
+    sa._consumed = consumed
+    deadline = sa.dac_time(at - sa.loop_lat + 100)
+    monkeypatch.setattr(audio.time, 'monotonic', lambda: deadline + (.001 if elapsed else -.001))
+    monkeypatch.setattr(sa, 'check_callbacks', lambda: None)
+    monkeypatch.setattr(sa, 'sample_now', lambda: at + 100 - 960)
+    if valid:
+        assert sa.finish_burst() == at + 100
+    else:
+        with pytest.raises(BurstInvalidated):
+            sa.finish_burst()
+
+
+def test_silence_idle_allows_holes_but_not_device_underruns(monkeypatch):
+    sa, stream = _streaming(monkeypatch)
+    tx = sa.arm_stream(sa.samples, capacity=1000)
+    tx.idle = 'silence'
+    tx.write(np.ones(100))
+    stream.run(30)
+    assert tx.starved_at is not None and not sa._tx_invalid
+    tx.write(np.ones(100))
+    stream.run(1, status=_Status(underflow=True))
+    assert sa._tx_invalid
+    with pytest.raises(BurstInvalidated):
+        sa.finish_burst()

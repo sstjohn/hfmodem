@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Receive-first setup and gateway selection without opening a radio."""
 import argparse
 import os
@@ -21,7 +23,7 @@ def onboarding(monkeypatch, tmp_path):
 
 def station(onboarding, rig='ft891', licence='general', transmit=True):
     path = Path(os.environ['HFMODEM_STATION'])
-    onboarding.write_station(path, rig=rig, call='W1TEST', grid='FN31', cat='/dev/fixture0', ptt='/dev/fixture1', audio_in='USB Fixture', audio_out='USB Fixture', licence=licence, regulatory='part97', because='', drive=.25, power=20, transmit=transmit)
+    onboarding.write_station(path, rig=rig, call='W1TEST', grid='FN31', cat='/fixture/cat', ptt='/fixture/ptt', audio_in='USB Fixture', audio_out='USB Fixture', licence=licence, regulatory='part97', because='', drive=.25, power=20, transmit=transmit)
     return config.load(path)
 
 
@@ -29,7 +31,7 @@ def test_ft891_saved_connections_and_audio(onboarding):
     station(onboarding)
     args = argparse.Namespace(rig='ft891', serial=None, ptt_port=None, audio_in=None, audio_out=None)
     rigs.flight_defaults(args)
-    assert (args.serial, args.ptt_port, args.audio_in, args.audio_out) == ('/dev/fixture0', '/dev/fixture1', 'USB Fixture', 'USB Fixture')
+    assert (args.serial, args.ptt_port, args.audio_in, args.audio_out) == ('/fixture/cat', '/fixture/ptt', 'USB Fixture', 'USB Fixture')
     assert Path(os.environ['HFMODEM_STATION']).stat().st_mode & 0o777 == 0o600
 
 
@@ -144,7 +146,7 @@ def test_data_preparation_is_verified_before_keying(onboarding, rig, monkeypatch
     def execute(argv, **kwargs):
         calls.append((argv, kwargs['input']))
         return SimpleNamespace(returncode=0, stdout='', stderr='')
-    monkeypatch.setattr(radio.subprocess, 'run', execute)
+    monkeypatch.setattr(radio, 'native_command', execute)
     expected = radio._MAIL_DATA_SETTINGS[rig]
     monkeypatch.setattr(radio, 'rig_settings', lambda **kwargs: dict(menu=expected, levels={'RFPOWER': '.2'}, mode='PKTUSB 3000'))
     plan = {'env': {'HFMODEM_STATION': str(Path(os.environ['HFMODEM_STATION']))}}

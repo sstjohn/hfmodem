@@ -42,6 +42,7 @@ and called it the live path's view.
 from __future__ import annotations
 
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -149,7 +150,30 @@ def test_the_live_arm_claims_no_answer_the_ungated_arm_cannot_reproduce(name, tm
         if not path.exists():
             pytest.skip(f"{name} is not in this tree")
     r = K.rehear(path)
-    assert r.live, r.note
+    if name == "ONAIR_GATEWAY_ANSWER":
+        assert sha256(path.read_bytes()).hexdigest() == (
+            "9c2817dc709a0b2ed8592faed6e7fe4494a05217f5d9e3e0e66bdf79723ee957")
+        assert not r.live, r.note
+        assert [hit.at for hit in r.ungated] == pytest.approx([52.2, 60.6, 69.0])
+        assert all(hit.detail == "our own search, ungated" for hit in r.ungated)
+
+        # Exact winning FFT histories observed on this hash-pinned recording.
+        # Each starts under a modeled TX mask and loses about 0.59 s before
+        # the live front resets. This pins modeled visibility loss, not what
+        # the physical station heard; the three ungated hits keep it nonvacuous.
+        histories = ((2432576, 2479680), (2838432, 2885536),
+                     (3242944, 3290048))
+        x = K._load(path)
+        ours = [at for at, res in K._scanned(x, ["KC9GHZ", "W9SSJ"])
+                if res.kind == "CR" and res.gateway == "KC9GHZ"]
+        masks = K._our_overs(x, ours)
+        for start, end in histories:
+            overlaps = [(min(end, b) - start) / K.FS
+                        for a, b in masks if a <= start < b]
+            assert len(overlaps) == 1
+            assert 0.58 < overlaps[0] < 0.61
+    else:
+        assert r.live, r.note
     assert not r.only_live(), (
         f"{path.name}: the gated arm accepts {r.only_live()} and the ungated arm, "
         f"shown strictly more audio by the same search, does not — the replay has "

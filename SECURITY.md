@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Security
 
 hfmodem can key a radio transmitter, and it carries a Winlink secure-login

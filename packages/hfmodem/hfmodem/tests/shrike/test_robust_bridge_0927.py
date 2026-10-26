@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The recorded robust-call P2 bridge, including failure and stop handling."""
 from hfmodem.tests.evidence import require_input
 from pathlib import Path

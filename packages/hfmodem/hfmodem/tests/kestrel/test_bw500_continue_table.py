@@ -164,7 +164,8 @@ def test_a_state_never_on_tape_keys_the_generated_continue(called, state):
     hs, io = _station(called)
     hs._peer_over_state = state
     assert hs._tx_continue_answer(VA.OVER_CONTINUE_BURST) == VA.OVER_CONTINUE_BURST
-    assert _tones(io.sent[0]) == list(VF.over_continue_frames(called, "500", (0,))[0][0])
+    frame = 5 if state[1] == 0x81 else 0
+    assert _tones(io.sent[0]) == list(VF.over_continue_frames(called, "500", (frame,))[frame][0])
 
 
 def test_no_over_read_never_gets_an_eight_symbol_tail_on_the_ladder():

@@ -39,9 +39,10 @@ NACK_TIMEOUT = 0.25                     # manual 10.9.3, a minimum
 # modem -> host response codes (manual 10.6 / WA8DED guide)
 OK, MSG, FAIL, LINK = 0, 1, 2, 3
 MON_HEADER, MON_HEADER_INFO, MON_INFO, DATA = 4, 5, 6, 7
+SENT_ECHO = 8                           # SCS %M1 expansion
 
 _STRING_CODES = (MSG, FAIL, LINK, MON_HEADER, MON_HEADER_INFO)
-_COUNTED_CODES = (MON_INFO, DATA)
+_COUNTED_CODES = (MON_INFO, DATA, SENT_ECHO)
 
 
 class PtcError(Exception):

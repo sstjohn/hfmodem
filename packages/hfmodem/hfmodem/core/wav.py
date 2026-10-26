@@ -34,6 +34,7 @@ every reader opens: a recording named `x.wav` is found as `x.flac` once stored.
 """
 from __future__ import annotations
 
+import atexit
 import functools
 import hashlib
 import io
@@ -42,6 +43,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -122,7 +124,7 @@ def store(path: str | Path, *, ownership=None) -> dict:
         if ownership is not None:
             part, reserved = ownership.container.temporary()
             reserved.close()
-        _flac("-8", "--keep-foreign-metadata", "-o", part, path)
+        _flac("-5", "--keep-foreign-metadata", "-o", part, path)
         with tempfile.TemporaryDirectory() as tmp:
             back = Path(tmp) / path.name
             _flac("-d", "--keep-foreign-metadata", "-o", back, part)
@@ -143,6 +145,31 @@ def store(path: str | Path, *, ownership=None) -> dict:
         if ownership is None:
             part.unlink(missing_ok=True)
     return facts | {"wav": flac.name}
+
+
+def store_later(path: str | Path, log: str | Path) -> None:
+    """`store` the closed WAV at `path` once this process exits, from a child that outlives it.
+
+    A six-hour session's store held its exit for most of a minute (10-23), so the
+    exit unkeys, reports and hands back the station first, and the store runs on
+    in its own session with `log` its only output. The WAV goes only once the
+    FLAC decodes back to it, as in `store`.
+    """
+    atexit.register(_store_detached, Path(path), Path(log))
+
+
+_STORE = ("import json, sys, time; from hfmodem.core.wav import store; "
+          "print(time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), sys.argv[1], flush=True); "
+          "facts = store(sys.argv[1]); print(json.dumps(facts), flush=True); "
+          "sys.exit('kept' in facts)")
+
+
+def _store_detached(path: Path, log: Path) -> None:
+    package = str(Path(__file__).resolve().parents[2])
+    env = os.environ | {"PYTHONPATH": os.pathsep.join(filter(None, (package, os.environ.get("PYTHONPATH"))))}
+    with log.open("ab") as out:
+        subprocess.Popen([sys.executable, "-c", _STORE, str(path)], stdin=subprocess.DEVNULL,
+                         stdout=out, stderr=subprocess.STDOUT, start_new_session=True, env=env)
 
 
 @functools.cache

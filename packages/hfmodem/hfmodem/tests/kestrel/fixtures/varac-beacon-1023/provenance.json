@@ -1,0 +1,115 @@
+{
+ "kg9b-en54fl": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   1677180000,
+   1677660000
+  ],
+  "rate": 48000,
+  "sha256": "c94d5a7ef5c4e18e40c9eec4ca46d13bfb0f7ab9bfd5e38e76da68cee73fa7ae",
+  "flac_sha256": "19f0d99ab946acbac81622920fedcc8148e430384abcbf6ae0eef48c9b53a9ca",
+  "dial_hz": 7105000,
+  "text": "20OEN54FLKG9B",
+  "sn_live": 12.3,
+  "description": "40 m calling frequency, 2026-10-23: advanced beacon header at 2.0 s, KG9B EN54FL, 139 mi, the strongest beacon on tape"
+ },
+ "kc0taf-en25ov": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   1478232480,
+   1478712480
+  ],
+  "rate": 48000,
+  "sha256": "8129c5814b845d4418a8742e9120b4c6fae03f219b53df5e25f410b333aa5322",
+  "flac_sha256": "cecc70b98fb4847a5b815831485cced1d610dc7b7206cc46e9c1ad5cbb8ff432",
+  "dial_hz": 7105000,
+  "text": "21CEN25OVKC0TAF",
+  "sn_live": 11.5,
+  "description": "40 m calling frequency, 2026-10-23: advanced beacon header at 2.0 s, KC0TAF EN25OV, status 21C"
+ },
+ "n9pmi-em78eg": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   1422883200,
+   1423363200
+  ],
+  "rate": 48000,
+  "sha256": "b8fd163e5ee5da442d541d56e9bcaf964cb3a616b949446464ba38b2886a71c0",
+  "flac_sha256": "b0ad02c944a66211180523c56f7e1df35078d48dec05e8d749b840715eaf41d1",
+  "dial_hz": 7105000,
+  "text": "21OEM78EGN9PMI",
+  "sn_live": 11.5,
+  "description": "40 m calling frequency, 2026-10-23: advanced beacon header at 2.0 s, N9PMI EM78EG, status 21O; byte 20 carries another station's callsign CRC"
+ },
+ "wk9i-en61eq": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   1720938720,
+   1721418720
+  ],
+  "rate": 48000,
+  "sha256": "8fedf27615069b782f60992d939903be8a4d8dbb15f59855f38f904160c873c8",
+  "flac_sha256": "403a13bbbe542f9c6d9443fa20d3d6169324390a9e22e6a8112d30227923f5c4",
+  "dial_hz": 7105000,
+  "text": "20AEN61EQWK9I",
+  "sn_live": 7.7,
+  "description": "40 m calling frequency, 2026-10-23: advanced beacon header at 2.0 s, WK9I EN61EQ, status 20A"
+ },
+ "n9mec-en34jq": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   1564625280,
+   1565105280
+  ],
+  "rate": 48000,
+  "sha256": "7730d19d6bee19e8c5613a4bc7ec4c96d96ce6820df41d154e3efdab4b2bd396",
+  "flac_sha256": "ac626285e657a179c701d19e29ed032960c51f6407e3e43c9cd99978d59b8f5f",
+  "dial_hz": 7105000,
+  "text": "20CEN34JQN9MEC",
+  "sn_live": 6.8,
+  "description": "40 m calling frequency, 2026-10-23: advanced beacon header at 2.0 s, N9MEC EN34JQ; other stations connected to N9MEC on the CF at 14:00:38"
+ },
+ "wr9r-en60va": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   1641078240,
+   1641558240
+  ],
+  "rate": 48000,
+  "sha256": "9ffef784c5db7589f054a3011301c5f0bca248fd79b669fe4afd17414591d920",
+  "flac_sha256": "9b109ad60e1c0c569ff6f148e445046474841873d3295d91105273bcc1503d01",
+  "dial_hz": 7105000,
+  "text": "20OEN60VAWR9R",
+  "sn_live": 5.6,
+  "description": "40 m calling frequency, 2026-10-23: advanced beacon header at 2.0 s, WR9R EN60VA"
+ },
+ "stock-kiss2-w9ssj": {
+  "source": "working/varac-on-air/bench3/kiss-1023/run6__b2a.wav",
+  "samples": [
+   312000,
+   792000
+  ],
+  "rate": 48000,
+  "sha256": "b2f451ab4af3544be9273ccd7b93cad7f1a8100cb2b62344806f9f51d96dfed7",
+  "flac_sha256": "eff7a9a50520699eba49b3a0970dd5d5bab829c7a8d49bf4ae1310a195b5fcd4",
+  "dial_hz": null,
+  "text": "20OEN63BCW9SSJ",
+  "sn_live": null,
+  "description": "bench 3, 2026-10-23 run6: stock VARA HF 4.9.0 (WI9YZA, host attached, CHAT ON) keys the KISS command-2 frame \"20OEN63BCW9SSJ      \" on the HFModem Bench 1020 B cable; stock A hands the same frame back"
+ },
+ "kc3qlx-fn20aq-200hz-low": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T222533471470Z/receive.wav",
+  "samples": [
+   8242560,
+   8722560
+  ],
+  "rate": 48000,
+  "sha256": "3ac2c8cb4ea013031f302729345414cc03e047c939a6fa009a0289c6c9bd9439",
+  "flac_sha256": "8e688d6efcfe108b59f52eeb1da363822868b2da082c9d4658e8a98527517fc0",
+  "dial_hz": 7105000,
+  "text": "20OFN20AQKC3QLX",
+  "sn_live": null,
+  "description": "40 m calling frequency, 2026-10-23 22:28:42Z: advanced beacon header at 2.0 s, KC3QLX FN20AQ, keyed about 200 Hz low. Missed live; stock B on bench 3 reads it only once shifted +75 to +300 Hz, not as heard or shifted +50 (working/varac-on-air/bench3/offset-1023/tol-kc3qlx.out)",
+  "offset_hz": -200
+ }
+}

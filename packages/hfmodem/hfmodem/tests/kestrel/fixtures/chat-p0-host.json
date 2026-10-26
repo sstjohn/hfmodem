@@ -1,0 +1,238 @@
+{
+  "source": "working/vara/oracle/chat-p0",
+  "listen": [
+    {
+      "source": "item1/20261018-135104-chat.jsonl",
+      "sha256": "8eb10263e887479d1b4735511e66beae5625dd552aebb810798c62084a557943",
+      "commands": [
+        "PUBLIC ON",
+        "CWID ON",
+        "COMPRESSION TEXT",
+        "MYCALL WI9YZA",
+        "LISTEN OFF",
+        "BW500",
+        "CHAT ON"
+      ],
+      "replies": [
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK"
+      ]
+    },
+    {
+      "source": "item1/20261018-135131-chat.jsonl",
+      "sha256": "47d0cbb200fb0d689970c8b54acad5e52ee0922ae02e8d069130971beb3b2cde",
+      "commands": [
+        "PUBLIC ON",
+        "CWID ON",
+        "COMPRESSION TEXT",
+        "MYCALL WI9YZA",
+        "LISTEN OFF",
+        "BW500",
+        "CHAT ON",
+        "LISTEN OFF"
+      ],
+      "replies": [
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK"
+      ]
+    },
+    {
+      "source": "item1/20261018-135220-chat.jsonl",
+      "sha256": "6df78db631860129a4c7a1f1bf50f684e86aa0ef8f8c202eb2b0485bb0ab2202",
+      "commands": [
+        "PUBLIC ON",
+        "CWID ON",
+        "COMPRESSION TEXT",
+        "MYCALL WI9YZA",
+        "LISTEN OFF",
+        "BW500",
+        "LISTEN CQ"
+      ],
+      "replies": [
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK"
+      ]
+    },
+    {
+      "source": "item1/20261018-135336-chat.jsonl",
+      "sha256": "0df0473f5c894f8d2fba1f976023485fc5011036b7e0a28d121b685bc64c970d",
+      "commands": [
+        "PUBLIC ON",
+        "CWID ON",
+        "COMPRESSION TEXT",
+        "MYCALL WI9YZA",
+        "LISTEN OFF",
+        "BW500",
+        "CHAT ON",
+        "CHAT OFF"
+      ],
+      "replies": [
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK"
+      ]
+    },
+    {
+      "source": "item1/20261018-135407-chat.jsonl",
+      "sha256": "56ab79bc67a88dd57780e8d5c2044aabb4990b290ff96e6f2831014edf55881e",
+      "commands": [
+        "PUBLIC ON",
+        "CWID ON",
+        "COMPRESSION TEXT",
+        "MYCALL WI9YZA",
+        "LISTEN OFF",
+        "BW500",
+        "CHAT OFF"
+      ],
+      "replies": [
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK",
+        "OK"
+      ]
+    }
+  ],
+  "clean": [
+    {
+      "source": "item5/20261018-140347-chat.jsonl",
+      "who": "B",
+      "t": 0.156857,
+      "reply": "CLEANTXBUFFER BUFFEREMPTY"
+    },
+    {
+      "source": "item5/20261018-140347-chat.jsonl",
+      "who": "A",
+      "t": 29.826957,
+      "reply": "CLEANTXBUFFER FAILED "
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "who": "A",
+      "t": 32.809255,
+      "reply": "CLEANTXBUFFER FAILED "
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "who": "A",
+      "t": 97.816826,
+      "reply": "CLEANTXBUFFER BUFFEREMPTY"
+    },
+    {
+      "source": "item5/20261018-140750-chat.jsonl",
+      "who": "A",
+      "t": 22.140293,
+      "reply": "CLEANTXBUFFER FAILED "
+    },
+    {
+      "source": "item5/20261018-140856-chat.jsonl",
+      "who": "B",
+      "t": 27.837745,
+      "reply": "CLEANTXBUFFER OK"
+    }
+  ],
+  "idle": {
+    "source": "item2/20261018-142208-chat.jsonl",
+    "wait_start": 32.855475,
+    "poll_starts": [
+      55.238656,
+      67.314469,
+      79.380938,
+      91.453871,
+      103.512009,
+      115.571282,
+      127.621776,
+      139.703985,
+      151.761786,
+      163.831438,
+      175.900927,
+      187.953254,
+      200.022516,
+      212.092438,
+      224.172926,
+      236.230676,
+      248.28154,
+      260.377021,
+      272.430461,
+      284.492721,
+      296.570116,
+      308.640922,
+      320.690867,
+      332.74992,
+      344.854042,
+      356.90156,
+      368.974615,
+      381.048536,
+      393.124714,
+      405.190059,
+      417.252216,
+      429.336849,
+      441.393872,
+      453.462081,
+      465.524988,
+      477.604378,
+      489.661651,
+      501.709638,
+      513.817527,
+      525.871048,
+      537.94116,
+      550.011034,
+      562.089411,
+      574.152919,
+      586.211212,
+      598.264208,
+      610.321965,
+      622.38143,
+      634.459111,
+      646.501006,
+      658.572907,
+      670.651417,
+      682.712714,
+      694.772302,
+      706.824379,
+      718.882006,
+      730.952949,
+      743.003077
+    ]
+  },
+  "chat_off_baseline": {
+    "source": "packages/hfmodem/hfmodem/kestrel/host/server.py",
+    "commit": "32f05b9dd58fabc74ccb9587959333e05eedd8c7",
+    "commands": [
+      "MYCALL W9SSJ",
+      "BW500",
+      "COMPRESSION TEXT",
+      "LISTEN ON",
+      "CHAT OFF",
+      "PUBLIC ON",
+      "CWID OFF",
+      "P2P SESSION",
+      "BOGUS"
+    ],
+    "command_bytes_hex": "4f4b0d4f4b0d4f4b0d4f4b0d4f4b0d4f4b0d4f4b0d4f4b0d57524f4e470d50454e44494e470d434f4e4e454354454420573953534a20574939595a41203530300d424954524154452028342920353132206270732052580d42554646455220380d505454204f4e0d505454204f46460d42554646455220300d444953434f4e4e45435445440d",
+    "data_bytes_hex": "68656c6c6f00ff"
+  }
+}

@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # PACTOR-2 — waveform, frame geometry, coding and acquisition
 
 This document specifies the PACTOR-2 physical and link layer: the two-carrier

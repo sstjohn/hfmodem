@@ -204,8 +204,7 @@ def test_the_station_records_kestrels_live_results_rest_on_are_reachable():
         if manifest.name != "external.json" or path.exists():
             evidence.checked_samples(path, manifest)
     _reachable(corpora.STATION_RECORDS,
-               repairable=any(d.is_dir() for d in
-                              (evidence.WORKING, evidence.LOGS, evidence.CAPTURES)),
+               repairable=evidence.private_source_tree(evidence.TREE, evidence.RECORD),
                at=evidence.RECORD,
                what="this station's own session records",
                how="The surviving originals and checked substitutes are declared "
@@ -225,22 +224,45 @@ def test_every_lost_original_is_present_or_has_a_restoring_flight():
     assert all(flight.strip() for flight in corpora.STATION_LOST.values())
 
 
-@pytest.mark.parametrize("repairable", [False, True], ids=["published", "station"])
-def test_missing_external_station_evidence_obeys_repairability(tmp_path, monkeypatch, repairable):
+@pytest.mark.parametrize("kind", ["published", "incidental", "source", "origin"])
+def test_missing_external_station_evidence_obeys_repairability(tmp_path, monkeypatch, kind):
     missing = tmp_path / "external.flac"
+    origin = tmp_path / "origin"
+    monkeypatch.setattr(evidence, "TREE", tmp_path)
+    monkeypatch.setattr(evidence, "RECORD", origin)
     monkeypatch.setattr(corpora, "STATION_MANIFESTS", ())
     monkeypatch.setattr(corpora, "STATION_CHECKED", ())
     monkeypatch.setattr(corpora, "STATION_LOST", {})
     monkeypatch.setattr(corpora, "STATION_RECORDS", (missing,))
     for name in ("WORKING", "LOGS", "CAPTURES"):
         monkeypatch.setattr(evidence, name, tmp_path / name)
-    if repairable:
-        evidence.CAPTURES.mkdir()
+        if kind == "incidental":
+            getattr(evidence, name).mkdir()
+    if kind in {"source", "origin"}:
+        marker = (tmp_path if kind == "source" else origin) / "publish" / "manifest.toml"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("# development source")
         with pytest.raises(pytest.fail.Exception, match="external.flac"):
             test_the_station_records_kestrels_live_results_rest_on_are_reachable()
     else:
         with pytest.warns(UserWarning, match="external.flac"), pytest.raises(pytest.skip.Exception):
             test_the_station_records_kestrels_live_results_rest_on_are_reachable()
+
+
+def test_missing_tracked_station_clip_fails_before_external_absence(tmp_path, monkeypatch):
+    import json
+
+    tracked = tmp_path / "tracked.wav"
+    manifest = tmp_path / "clips.json"
+    manifest.write_text(json.dumps({"files": [{"file": tracked.name}]}))
+    monkeypatch.setattr(evidence, "TREE", tmp_path)
+    monkeypatch.setattr(evidence, "RECORD", tmp_path)
+    monkeypatch.setattr(corpora, "STATION_MANIFESTS", ())
+    monkeypatch.setattr(corpora, "STATION_CHECKED", ((tracked, manifest),))
+    monkeypatch.setattr(corpora, "STATION_LOST", {})
+    monkeypatch.setattr(corpora, "STATION_RECORDS", (tmp_path / "external.flac",))
+    with pytest.raises(AssertionError, match="Missing tracked evidence"):
+        test_the_station_records_kestrels_live_results_rest_on_are_reachable()
 
 
 @pytest.mark.parametrize("kind", ["source", "origin", "partial", "published"])

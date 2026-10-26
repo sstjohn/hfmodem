@@ -269,7 +269,8 @@ def l3_column_bins(frame_bytes: bytes, level: int = ROBUST_LEVEL) -> np.ndarray:
 
 
 def synth_l3_burst(frame_bytes: bytes | Sequence[bytes], onset: int = 0,
-                   length: int | None = None, level: int = ROBUST_LEVEL) -> np.ndarray:
+                   length: int | None = None, level: int = ROBUST_LEVEL,
+                   training: Sequence[int] | None = None) -> np.ndarray:
     """Render an index-record burst — one frame, or several back to back — to
     real 48 kHz audio.
 
@@ -277,11 +278,12 @@ def synth_l3_burst(frame_bytes: bytes | Sequence[bytes], onset: int = 0,
     against each other with no pulse shaping, so it is a boundary here where the
     base level's ``onset`` is a symbol centre. Later frames follow the first on
     the same grid with no training of their own, as the stock sender keys them
-    [rx.varahf500._l3_frames]."""
+    [rx.varahf500._l3_frames]. ``training`` replaces the stand-in training columns
+    where the recording fixes them, as the KISS broadcast frame's are."""
     dw = _rx.INDEX_RECORDS[level].dw
     frames = [frame_bytes] if isinstance(frame_bytes, bytes) else list(frame_bytes)
-    bins = _l3_training_bins(level) + [b for f in frames
-                                       for b in l3_column_bins(f, level)]
+    bins = list(training or _l3_training_bins(level)) + [b for f in frames
+                                                         for b in l3_column_bins(f, level)]
     if length is None:
         length = onset + len(bins) * dw
     air = np.zeros(length)

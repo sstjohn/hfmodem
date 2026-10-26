@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The VARA profile: the bounded level experiment, and every flag an arm may vary.
 
 `FLOWN` is the line that flew every arm of the original bounded on-air runner,
@@ -32,7 +34,7 @@ quietly missing:
 Three things this console does that the runner did not. `--witness` is on, so a
 third-party KiwiSDR records the arm; no VARA arm has ever flown with one.
 High speed capable is on by default, so the link-setup carries the high speed
-marker and the gear-shift climbs the full ladder; `--speed-limited --no-witness`
+marker and the gear-shift climbs the full ladder; `--winlink-cartel-mode --no-witness`
 makes the launcher line byte-identical to what flew. And a
 credential the operator does not name as a file is read into this arm's
 environment rather than passed as a path, so it is in no transcript that quotes
@@ -41,9 +43,7 @@ the line.
 from __future__ import annotations
 
 import argparse
-from hfmodem.core.config import client_sid
 from datetime import datetime, timezone
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -51,7 +51,8 @@ import subprocess
 from .modes import (ANSWERED, CLEARED, NOT_ATTEMPTED, NO_REPLY, Assessment, Mode, Readout,
                     highest, spoken)
 from .roster import read_json
-from .station import CAT_PORT, ONAIR, ROOT, winlink_password
+from . import claim, station
+from .station import ONAIR, ROOT, winlink_password
 
 from .operator import mode_root
 HERE = mode_root('vara')
@@ -238,7 +239,7 @@ def varied(air, link):
     link.add_argument('--direction', choices=('tx', 'rx'), default='tx')
     link.add_argument('--mail-timeout', type=int, default=240, choices=range(60, 601),
                       metavar='60..600')
-    link.add_argument('--speed-limited', action='store_true',
+    link.add_argument('--winlink-cartel-mode', action='store_true',
                       help='key the stock link-setup and hold the L1-L4 ladder; the default is the high speed '
                            'capable form every user of this modem gets')
     link.add_argument('--cr-retry-form', choices=RETRY_FORMS, default=None,
@@ -287,7 +288,6 @@ def flags(peer, level, args, directory, send):
         raise ValueError('`--direction rx` sends nothing, so there is no arm for a delivery '
                          'test to ride. Fly it at `--direction tx`.')
     if args.amplitude is None:
-        from . import station
         from hfmodem.core import config
         audio = getattr(args, 'selected_audio', None)
         if getattr(args, 'selected_rig', station.RIG_NAME) == 'ft891' and not audio:
@@ -300,7 +300,7 @@ def flags(peer, level, args, directory, send):
     words = list(FLOWN)
     words += ['--cr-retry-form', form, '--amplitude', str(args.amplitude),
               '--mail-timeout', str(args.mail_timeout), '--mail-fetch',
-              '--mail-sid', client_sid(), '--mail-out', str(mode_root('vara') / 'mail'),
+              '--mail-sid', args.client_sid, '--mail-out', str(mode_root('vara') / 'mail'),
               '--trace-timing']
     if not args.data_retries:
         words += ['--no-data-retries']
@@ -313,8 +313,8 @@ def flags(peer, level, args, directory, send):
     probe = args.bw == 2750 and not args.data_retries
     if probe:
         words += ['--probe-intermediate-query']
-    if args.speed_limited:
-        words += ['--speed-limited']
+    if args.winlink_cartel_mode:
+        words += ['--winlink-cartel-mode']
     password = (str(Path(args.mail_password_file).expanduser().resolve())
                 if args.mail_password_file else None)
     if password:
@@ -329,7 +329,7 @@ def flags(peer, level, args, directory, send):
     adjustments = dict(row=f'{args.bw}-{args.direction}',
                        bw_hz=args.bw, direction=args.direction,
                        cr_retry_form=form, amplitude=args.amplitude,
-                       high_speed=not args.speed_limited, mail_timeout_s=args.mail_timeout,
+                       high_speed=not args.winlink_cartel_mode, mail_timeout_s=args.mail_timeout,
                        data_retries=args.data_retries, probe_intermediate_query=probe,
                        advertised_hours_utc=peer.get('hours'),
                        roster_retrieved_utc=read_json(mode_root('vara') / 'peers.json').get('retrieved_utc'),
@@ -384,10 +384,8 @@ def sense(emission, peer, dwell_s):
     short = f' (a {dwell_s:g}s dwell was asked for; this instrument reads {WINDOW_S:g}s)' \
         if dwell_s < WINDOW_S else ''
     try:
-        heard = subprocess.run(['bash', '-c', script], cwd=ROOT, text=True,
-                               capture_output=True, timeout=WINDOW_S + 180,
-                               env=dict(os.environ, CAT_PORT=CAT_PORT,
-                                        DXCALL=peer['call']))
+        heard = claim.assess('assessment', script, timeout=WINDOW_S + 180,
+                             env=dict(CAT_PORT=station.CAT_PORT, DXCALL=peer['call']))
     except (subprocess.SubprocessError, OSError) as trouble:
         return Assessment(occupied=None, instrument=instrument,
                           detail=f'the sense did not run ({type(trouble).__name__}); '

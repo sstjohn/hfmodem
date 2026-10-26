@@ -6,7 +6,7 @@ from hfmodem.shrike import arq, pactor1, rxfront, spec
 from hfmodem.tests.shrike.test_no_p3_fallback import entered, grant, cs, acknowledge
 from hfmodem.tests.shrike.test_p3_entry_window_1003 import (
     ARMS, recording, grid, collected_end)
-from hfmodem.shrike import onair
+from hfmodem.shrike import onair, p1rx
 
 
 def current():
@@ -163,15 +163,23 @@ def test_retained_history_survives_but_current_close_evidence_resets_next_link()
 @pytest.mark.parametrize('arm,positive', [('1003-0004', True), ('1003-0007', True),
                                          ('1003-0008', False), ('1003-0010', False),
                                          ('1003-0012', False)])
-def test_recorded_grants_confirmed_and_ambiguous_windows(arm, positive):
+@pytest.mark.parametrize('known_grant', [False, True])
+def test_recorded_grants_confirmed_and_ambiguous_windows(arm, positive, known_grant):
     audio = recording(arm)
     host, tx, _ = entered(payload=b'unconfirmed application bytes')
+    if not known_grant:
+        host._entry_grant = None
     rx = onair._SessionRx(host, tag='P1-CLOSE')
     for row in ARMS[arm]['rows']:
         rx.new_cycle()
         g = grid(arm, row)
+        tx.raster, tx.slot = g, g.next_slot(g.keyed_slot)
         end = collected_end(rx, g, row)
         rx.control_signal_in(audio[row['origin']:end], row['origin'], g)
+        if known_grant and host.arq._entry_window_truncated:
+            assert not host.prepare_p1_entry_goodbye()
+            end = row['nominal'] + g.p1_cs_n + round(p1rx.CS_SEARCH_HALF_S * onair.FS)
+            rx.control_signal_in(audio[row['origin']:end], row['origin'], g)
         host.tick()
     assert host.prepare_p1_entry_goodbye() is positive
     if positive:
@@ -181,7 +189,7 @@ def test_recorded_grants_confirmed_and_ambiguous_windows(arm, positive):
         assert tx.emissions[-1][2] == pactor1.qrt_field('WS8EOC', host.p1_baud)
     else:
         assert host.protocol is spec.Protocol.PACTOR3
-        assert host.arq._p3_entry_confirmed is (arm != '1003-0012')
+        assert host.arq._p3_entry_confirmed is (arm != '1003-0012' or known_grant)
 
 
 def test_host_write_during_p1_terminal_close_is_retained_not_transmitted():

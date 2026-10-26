@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hfmodem"
-version = "0.2.1"
+version = "0.3.0"
 maintainers = [{ email = "hfmodem@ssj.lol" }]
 description = "Experimental HF modems, receive monitors and shared radio station tools."
 # Inline, not a file path: this package directory carries no README.md, and
@@ -42,7 +44,7 @@ classifiers = [
 # hfhost supplies the config primitives and the client the station probes itself
 # through. The dependency runs one way only and tests/gates/test_import_direction.py
 # enforces it: hfhost must stay able to drive a modem it knows nothing about.
-dependencies = ["hfhost>=0.2.1", "creance>=0.2.1", "numpy>=1.24", "scipy>=1.10", "sounddevice>=0.4", "pyserial>=3.5"]
+dependencies = ["hfhost>=0.3.0", "creance>=0.3.0", "numpy>=1.24", "scipy>=1.10", "sounddevice>=0.4", "pyserial>=3.5"]
 
 [project.urls]
 Homepage = "https://hfmodem.ssj.lol"
@@ -54,7 +56,7 @@ Issues = "https://github.com/sstjohn/hfmodem/issues"
 radio = []
 # Optional logbook certificate signing.
 operator = ["cryptography>=42"]
-dev = ["pytest>=7", "ruff>=0.5"]
+dev = ["pytest>=7", "pytest-xdist", "ruff>=0.5"]
 
 [project.scripts]
 hfmodem = "hfmodem.cli:main"
@@ -67,10 +69,12 @@ namespaces = false
 
 [tool.setuptools.package-data]
 "hfmodem.shrike" = ["assets/c2-*.swaps.z"]
-"hfmodem.shrike.c2proof" = ["cml_generate.c", "upstream/srandom.h", "NOTICE.md", "COPYING.LESSER"]
+"hfmodem.shrike.c2proof" = ["cml/cml_generate.c", "cml/upstream/srandom.h", "NOTICE.md", "COPYING.LESSER"]
 # The pulse is a separately cleared measurement. P4 uses the approved exact
 # replay swaps above; its original constructor is an offline proof tool.
 "hfmodem.kestrel.tx" = ["assets/*.npz"]
+# Not a package: the tripwire the tests put on every child's PYTHONPATH.
+"hfmodem.tests" = ["hermetic_py/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["hfmodem/tests"]
@@ -80,6 +84,7 @@ testpaths = ["hfmodem/tests"]
 # collects or refuses to collect depending on how it was invoked.
 norecursedirs = [".venv", "*.egg-info", "build"]
 markers = [
+    "wall_clock: real wall-budget admission test; run at nice 0 in the serial priority slice",
     "realtime: depends on the machine keeping up -- a rendezvous between spawned processes, a wall-clock deadline, an elapsed time asserted on; deselect with -m 'not realtime' on a busy machine",
     "slow: end-to-end tests that run the threaded modem in real time",
     "corpus: needs the off-air recording corpus (HFMODEM_CORPUS)",

@@ -29,6 +29,8 @@ import socket
 import struct
 import threading
 from typing import Callable
+from hfmodem.core.socketpair import SocketPairAcceptor
+from hfmodem.core.hostio import Connection
 
 from .. import __version__
 from . import protocol as P
@@ -104,8 +106,16 @@ class HostServer(ModemObserver):
 
     def __init__(self, modem: ModemCore | None = None, *,
                  host: str = "127.0.0.1", control_port: int = P.DEFAULT_CONTROL_PORT,
-                 data_port: int | None = None, quiet: bool = False) -> None:
+                 data_port: int | None = None, quiet: bool = False,
+                 half_open_timeout: float = 5.0, output_block_limit: int = 1024) -> None:
+        if not 1 <= output_block_limit <= 65532:
+            raise ValueError("output payload blocks must be 1..65532 bytes")
         self.modem = modem or LoopbackModem()
+        self.output_block_limit = output_block_limit
+        self.half_open_timeout = half_open_timeout
+        self.pairing_guarantee = "requires exclusive supervised endpoint isolation"
+        self._pairs = None
+        self._attachment_lock = threading.RLock()
         self.host = host                       # loopback by default; ardopcf binds 0.0.0.0
         self.control_port = control_port
         # Port 0 means "any free port", so the +1 derivation would ask for
@@ -130,6 +140,7 @@ class HostServer(ModemObserver):
             "TUNINGRANGE": "100", "FASTSTART": "TRUE", "CMDTRACE": "FALSE",
             "DEBUGLOG": "FALSE", "INPUTNOISE": "0", "RXLEVEL": "100",
             "TXLEVEL": "100", "MYAUX": "",
+            "CODEC": "TRUE", "RADIOCTRL": "FALSE",
         }
         self._mycall = ""
         self._initializing = False
@@ -139,6 +150,7 @@ class HostServer(ModemObserver):
         self._data_lock = threading.Lock()
         self._data_sock: socket.socket | None = None
         self._running = False
+        self._managed_endpoints = False
         self._listeners: list[socket.socket] = []
         self._accepting: list[threading.Thread] = []
         self._table = self._build_table()
@@ -154,26 +166,44 @@ class HostServer(ModemObserver):
         except OSError:
             cmd_l.close()
             raise
-        self._running = True
-        self.modem.start(self)
+        try:
+            self.start_attached(managed=False)
+        except BaseException:
+            cmd_l.close()
+            data_l.close()
+            raise
         self.control_port = cmd_l.getsockname()[1]
         self.data_port = data_l.getsockname()[1]
         self._log(f"besra host: control :{self.control_port}  data :{self.data_port}")
         self._listeners = [cmd_l, data_l]
-        self._accepting = [
-            threading.Thread(target=self._accept_loop, args=(cmd_l, self._serve_command),
-                             name="accept-cmd", daemon=True),
-            threading.Thread(target=self._accept_loop, args=(data_l, self._serve_data),
-                             name="accept-data", daemon=True),
-        ]
-        for t in self._accepting:
-            t.start()
+        self._pairs = SocketPairAcceptor((cmd_l, data_l), self._serve_pair,
+                                         half_open_timeout=self.half_open_timeout)
+        self._pairs.start()
         return self.control_port, self.data_port
 
-    def stop(self) -> None:
+    def start_attached(self, *, managed=True) -> None:
+        """Start the owner with endpoints supplied by an exclusive supervisor.
+
+        No legacy listeners are bound here. The supervisor supplies each pair
+        only after its private attachment/lease checks succeed.
+        """
+        if self._running:
+            raise RuntimeError('ARDOP host already started')
+        self.modem.start(self)
+        self._managed_endpoints = managed
+        self._running = True
+
+    def serve_attached(self, command, data) -> None:
+        if not self._running:
+            raise RuntimeError('ARDOP host owner is not running')
+        self._serve_pair(command, data)
+
+    def stop(self, timeout=5.0) -> bool:
         """Undoes `start`: the listeners close, the accept loops unwind on them,
         and any attached host loses both sockets."""
         self._running = False
+        if self._pairs is not None:
+            self._pairs.stop(timeout=timeout)
         with self._cmd_lock:
             cmd, self._cmd_sock = self._cmd_sock, None
         with self._data_lock:
@@ -185,6 +215,7 @@ class HostServer(ModemObserver):
             t.join(timeout=1.0)
         self._listeners, self._accepting = [], []
         self.modem.stop()
+        return True
 
     def serve_forever(self) -> None:
         self.start()
@@ -203,23 +234,25 @@ class HostServer(ModemObserver):
         s.listen(1)
         return s
 
-    def _accept_loop(self, listener: socket.socket, handler: Callable) -> None:
-        while self._running:
-            try:
-                conn, _ = listener.accept()
-            except OSError:
-                return
-            # One host per socket: the handler installs itself, displacing any
-            # incumbent (spec §1 socket lifecycle).
-            threading.Thread(target=handler, args=(conn,), daemon=True).start()
+    def _serve_pair(self, cmd, data):
+        cmd = Connection(cmd, line=True)
+        data = Connection(data)
+        with self._cmd_lock:
+            self._cmd_sock = cmd
+        with self._data_lock:
+            self._data_sock = data
+        workers = [threading.Thread(target=self._serve_command, args=(cmd,), daemon=True),
+                   threading.Thread(target=self._serve_data, args=(data,), daemon=True)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        for conn in (cmd, data):
+            conn.join_workers()
 
     # -- command socket ----------------------------------------------------
 
     def _serve_command(self, conn: socket.socket) -> None:
-        with self._cmd_lock:
-            displaced, self._cmd_sock = self._cmd_sock, conn
-        if displaced is not None:
-            _hang_up(displaced)
         buf = bytearray()
         try:
             while self._running:
@@ -227,22 +260,23 @@ class HostServer(ModemObserver):
                 if not chunk:
                     break
                 buf.extend(chunk)
+                if len(buf) > 65536:
+                    self._send_cmd("FAULT command buffer overflow")
+                    break
                 # Reassemble CR-terminated lines across segments; any number per
                 # segment (spec §7 "Server tolerance").
                 while b"\r" in buf:
                     line, _, rest = buf.partition(b"\r")
                     del buf[:]
                     buf.extend(rest)
-                    self._dispatch(line.decode("latin-1", "replace"))
+                    with self._attachment_lock:
+                        if conn is not self._cmd_sock:
+                            return
+                        self._dispatch(line.decode("latin-1", "replace"))
         except OSError:
             pass
         finally:
-            with self._cmd_lock:
-                live = self._cmd_sock is conn
-                if live:
-                    self._cmd_sock = None
-            conn.close()
-            self._host_link_lost(live)
+            self._host_link_lost(conn)
 
     def _dispatch(self, raw: str) -> None:
         line = raw.strip("\n").rstrip()
@@ -270,24 +304,30 @@ class HostServer(ModemObserver):
         with self._cmd_lock:
             if self._cmd_sock is not None:
                 try:
-                    self._cmd_sock.sendall(text.encode("latin-1") + P.CR)
+                    self._cmd_sock.send_bounded(text.encode("latin-1") + P.CR)
                 except OSError:
                     self._cmd_sock = None
 
     # -- data socket -------------------------------------------------------
 
-    def _host_link_lost(self, live: bool) -> None:
-        """Either socket dropping mid-session ends the session and reverts to
-        receive (spec §1). Only the *current* host counts: a connection that has
-        already been displaced must not tear down its successor's link."""
-        if live and self.modem.connected:
-            self.modem.disconnect()
+    def _host_link_lost(self, conn) -> None:
+        """Lose the entire attachment, including an unfinished acquisition."""
+        with self._attachment_lock:
+            if conn is not self._cmd_sock and conn is not self._data_sock:
+                return
+            with self._cmd_lock:
+                cmd, self._cmd_sock = self._cmd_sock, None
+            with self._data_lock:
+                data, self._data_sock = self._data_sock, None
+            for sock in (cmd, data):
+                if sock is not None:
+                    _hang_up(sock)
+            self.modem.set_listen(False)
+            self._cfg["LISTEN"] = "FALSE"
+            self.modem.abort()
+            self.modem.purge_buffer()
 
     def _serve_data(self, conn: socket.socket) -> None:
-        with self._data_lock:
-            displaced, self._data_sock = self._data_sock, conn
-        if displaced is not None:
-            _hang_up(displaced)
         try:
             while self._running:
                 hdr = self._recv_exactly(conn, 2)
@@ -297,16 +337,14 @@ class HostServer(ModemObserver):
                 payload = self._recv_exactly(conn, length)
                 if payload is None:
                     break
-                self.modem.transmit(bytes(payload))
+                with self._attachment_lock:
+                    if conn is not self._data_sock:
+                        return
+                    self.modem.transmit(bytes(payload))
         except OSError:
             pass
         finally:
-            with self._data_lock:
-                live = self._data_sock is conn
-                if live:
-                    self._data_sock = None
-            conn.close()
-            self._host_link_lost(live)
+            self._host_link_lost(conn)
 
     @staticmethod
     def _recv_exactly(conn: socket.socket, n: int) -> bytearray | None:
@@ -321,11 +359,14 @@ class HostServer(ModemObserver):
     def _send_data(self, tag: str, blob: bytes) -> None:
         # modem→host block: <2-byte BE length><3-char tag><payload>; length
         # counts the tag + payload (spec §5 "Data path", §6).
-        body = tag.encode("ascii") + blob
+        if tag not in DATA_TAGS:
+            raise ValueError("unknown ARDOP data tag")
         with self._data_lock:
             if self._data_sock is not None and not self._initializing:
                 try:
-                    self._data_sock.sendall(struct.pack(">H", len(body)) + body)
+                    for offset in range(0, max(1, len(blob)), self.output_block_limit):
+                        body = tag.encode("ascii") + blob[offset:offset + self.output_block_limit]
+                        self._data_sock.send_bounded(struct.pack(">H", len(body)) + body)
                 except OSError:
                     self._data_sock = None
 
@@ -376,8 +417,8 @@ class HostServer(ModemObserver):
                 v = args[0].upper()
                 if v not in ("TRUE", "FALSE") + extra:
                     raise Fault(f"Syntax Err: {name} {args[0]}")
-                self._cfg[name] = v
                 self._on_set(name, v)
+                self._cfg[name] = v
                 return f"{name} now {v}"
             return h
 
@@ -393,6 +434,7 @@ class HostServer(ModemObserver):
                     raise Fault(f"Syntax Err: {name} {args[0]}")
                 if round_to > 1:
                     n = ((n + round_to - 1) // round_to) * round_to   # round up, as ardopcf does
+                self._on_set(name, str(n))
                 self._cfg[name] = str(n)
                 return f"{name} now {n}"
             return h
@@ -404,17 +446,17 @@ class HostServer(ModemObserver):
                 v = args[0].upper()
                 if v not in values:
                     raise Fault(f"Syntax Err: {name} {args[0]}")
-                if in_session_fault and self.modem.connected:
+                if in_session_fault and self.modem.state not in (P.ArdopState.DISC, P.ArdopState.OFFLINE):
                     raise Fault(f"Not from state {self.modem.state}")
-                self._cfg[name] = v
                 self._on_set(name, v)
+                self._cfg[name] = v
                 return f"{name} now {v}"
             return h
 
         # Boolean knobs.
         for name in ("AUTOBREAK", "BUSYBLOCK", "ENABLEPINGACK", "FECID",
                      "FSKONLY", "MONITOR", "USE600MODES", "LISTEN",
-                     "FASTSTART", "CMDTRACE", "DEBUGLOG"):
+                     "FASTSTART", "CMDTRACE", "DEBUGLOG", "CODEC", "RADIOCTRL"):
             t[name] = bool_knob(name)
         t["CWID"] = bool_knob("CWID", extra=("ONOFF",))
 
@@ -472,8 +514,11 @@ class HostServer(ModemObserver):
             call = args[0].upper()
             if not _valid_call(call):
                 raise Fault(f"Syntax Err: MYCALL {args[0]}")
-            self._mycall = call
+            if (self.modem.state not in (P.ArdopState.DISC, P.ArdopState.OFFLINE)
+                    and call != self._mycall):
+                raise Fault(f"Not from state {self.modem.state}")
             self.modem.set_mycall(call)
+            self._mycall = call
             return f"MYCALL now {call}"
         t["MYCALL"] = mycall
 
@@ -519,6 +564,7 @@ class HostServer(ModemObserver):
         # Actions / session verbs.
         t["INITIALIZE"] = self._cmd_initialize
         t["ARQCALL"] = self._cmd_arqcall
+        t["CONNECT"] = self._cmd_connect
         t["PING"] = self._cmd_ping
         t["DISCONNECT"] = self._cmd_disconnect
         t["ABORT"] = self._cmd_abort
@@ -530,7 +576,7 @@ class HostServer(ModemObserver):
         t["DATATOSEND"] = self._cmd_datatosend
         t["TWOTONETEST"] = self._cmd_twotonetest
         t["CLOSE"] = self._cmd_close
-        t["BREAK"] = lambda a, l: None                   # manual turnover, no reply
+        t["BREAK"] = self._cmd_break
 
         # Radio-control stubs (no CAT layer on a desktop besra).
         t["RADIOFREQ"] = lambda a, l: (None if a else self._raise("RADIOFREQ command string missing"))
@@ -552,20 +598,45 @@ class HostServer(ModemObserver):
         elif name == "ARQBW":
             forced = value.endswith("FORCED")
             self.modem.set_bandwidth(int(value[:-6] if forced else value[:-3]), forced)
+        elif name == "CODEC":
+            self.modem.set_codec(value == "TRUE")
+        elif name == "RADIOCTRL":
+            self.modem.set_radioctrl(value == "TRUE")
+        elif name == "DRIVELEVEL":
+            self.modem.set_drivelevel(int(value))
+        elif name == "AUTOBREAK":
+            self.modem.set_autobreak(value == "TRUE")
+        elif name == "ARQTIMEOUT":
+            self.modem.set_arqtimeout(int(value))
+        elif name == 'LEADER':
+            self.modem.set_leader(int(value))
+        elif name == 'TRAILER':
+            self.modem.set_trailer(int(value))
+        elif name == 'CWID':
+            self.modem.set_cwid(value)
+
+    def _cmd_break(self, args, line):
+        if args:
+            raise Fault(f"Syntax Err: {line}")
+        self.modem.break_link()
 
     # -- session-verb handlers --------------------------------------------
 
     def _cmd_initialize(self, args, line):
         self._initializing = True
-        if self.modem.connected:
+        try:
             self.modem.abort()
-        self._initializing = False
+            self.modem.purge_buffer()
+        finally:
+            self._initializing = False
         return "INITIALIZE"
 
     def _cmd_arqcall(self, args, line):
         if len(args) != 2:
             raise Fault(f"Syntax Err: {line}")
         target, rep = args[0], args[1]
+        if not _valid_call(target.upper()):
+            raise Fault(f"Syntax Err: {line}")
         if not self._mycall:
             raise Fault("MYCALL not set")
         if self._cfg["PROTOCOLMODE"] != "ARQ":
@@ -577,6 +648,26 @@ class HostServer(ModemObserver):
             raise Fault(f"Syntax Err: {line}")
         self.modem.connect(target.upper(), repeats)
         return line                                       # echo original, case-preserved
+
+    def _cmd_connect(self, args, line):
+        """Trimode's call-only legacy verb, with the published 2015 reply.
+
+        The current shipped Windows dispatcher has no CONNECT verb. This
+        compatibility form uses the selected ARQBW and the modem's source-backed
+        five-repeat default; ARQCALL retains its explicit per-call budget and
+        original-line echo. Neither reply is a claim that RF connected.
+        """
+        if len(args) != 1 or not _valid_call(args[0].upper()):
+            raise Fault('Connect Failure')
+        if not self._mycall or self._cfg['PROTOCOLMODE'] != 'ARQ':
+            raise Fault('Connect Failure')
+        try:
+            if self.modem.state != P.ArdopState.DISC:
+                raise ValueError('contact already active or codec offline')
+            self.modem.connect(args[0].upper())
+        except Exception:
+            raise Fault('Connect Failure') from None
+        return 'CONNECT IN PROCESS'
 
     def _cmd_ping(self, args, line):
         if len(args) != 2 or not self._mycall:
@@ -632,10 +723,17 @@ class HostServer(ModemObserver):
     def _cmd_twotonetest(self, args, line):
         if self.modem.state != P.ArdopState.DISC:
             raise Fault(f"Not from state {self.modem.state}")
+        self.modem.two_tone_test()
         return "TWOTONETEST"
 
     def _cmd_close(self, args, line):
-        self._running = False
+        if self._managed_endpoints:
+            # The compatibility child owns this attachment's lifetime. Losing
+            # its sockets ends that child without stopping the station owner.
+            # A later child gets a fresh lease and cannot inherit this close.
+            self._host_link_lost(self._cmd_sock)
+        else:
+            self._running = False
         return None
 
     def _log(self, msg: str) -> None:

@@ -240,14 +240,15 @@ class _TxIO(VA.VaraIO):
 
 def _delivery(payload: bytes) -> list:
     """The overs a connected BW500 initiator keys for ``payload``, each read back
-    by this station's own narrow receiver, with the peer's control burst granting
-    the turn and answering every over."""
+    by this station's own narrow receiver, with the peer's frame 13 granting the
+    turn and its control burst answering every over."""
     io = _TxIO()
     hs = VA.VaraStationHandshake([_MYCALL], io, bw="500")
     hs.role, hs.called, hs.caller = "initiator", _CALLED, _MYCALL
     hs.state, hs.step = VA.VaraState.CONNECTED, VA._I_CONNECTED
     hs.send(payload)
-    for _ in range(3):
+    hs.on_rx_audio(MK.synth_tone_pairs(VF.turn_grant(_CALLED, "500")))
+    for _ in range(2):
         hs.on_rx_audio(MK.synth_tone_pairs(VF.control_bursts(_MYCALL, "500")[1]))
     overs = [s for s in io.sent if len(s) > 2 * rx.FS]
     return [rx.decode_burst_frames(s, OF.ONSET_500, len(s))[0] for s in overs]

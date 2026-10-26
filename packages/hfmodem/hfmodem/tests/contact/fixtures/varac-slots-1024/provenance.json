@@ -1,0 +1,26 @@
+{
+ "slot1-ai7eq-link": {
+  "source": "operator-data/working/vara-chat/sessions/20261024T011618981238Z/receive.wav",
+  "samples": [
+   2400000,
+   15840000
+  ],
+  "rate": 48000,
+  "sha256": "ea32022d8010e7755a408b9ec1d2c9c57448c666793516cf453907076559304f",
+  "flac_sha256": "0df80c489b1904433cdcf80f3cb341c1689c9fb782bf225cb5dd4a1038cfe330",
+  "dial_hz": 7105000,
+  "description": "40 m calling frequency, 2026-10-24 01:17Z, dial on the CF: the slot 1 QSO from before it begins: KD5LEE beaconing on the CF at 7.9 s (the host heard it; the cut does not decode it), AI7EQ calling CQ for slot 1 at 17 and 27 s, the link first read at 61-71 s (level 4, `My information: <NAME:Sean> <QTH:Crooked River`), the setup unread; its short frames end in the caller trailer 14 d2, KD5LEE's CRC byte; one side heard"
+ },
+ "slot1-ai7eq-gap": {
+  "source": "operator-data/working/vara-chat/sessions/20261024T011618981238Z/receive.wav",
+  "samples": [
+   33120000,
+   50400000
+  ],
+  "rate": 48000,
+  "sha256": "ee60d5896933d7ed8195ef114b6020f6699d0c44c1667ea0324e0865d3ee761b",
+  "flac_sha256": "7d138419311767c35bfca3cd586382e69e736a8d76452d65d0fcedd3a4219a58",
+  "dial_hz": 7105000,
+  "description": "40 m calling frequency, 2026-10-24 01:17Z, dial on the CF: the same QSO later: `15 de AI7EQ <R-10>` at 25 s, frames to 133 s, then none read until 322 s while the far side sent"
+ }
+}

@@ -1,0 +1,134 @@
+{
+  "basis": "Separate approved active-NAK pins; original no-NAK event digests remain in the test.",
+  "onair-1002-1013": {
+    "neutral": [
+      {
+        "at": 2312834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2372834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2432834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2492834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2552834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2612834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2672834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2732834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2792834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2852834,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      }
+    ],
+    "decision_digest": "c3f55bbc7b1b9ada7183c1d1541963656d600f431eaf0729586c51d781063834",
+    "ordinary_emission_digest": "f07138df1c3b257e64e7e7eb21b9c166eb119c131ed0be09859f9216ff7b7f02",
+    "ordinary_emission_count": 18,
+    "ordinary_waveform_digest": "71f5d7579c6345ee417089a11497967eeeeee01e2c079be93c3a20d60489f70a",
+    "heard_digest": "14e75d948678151ee9c4241d36754ad3e8ef485b51c594ed900f1454533c3124",
+    "without_requests_heard_digest": "8babb824da3c6b595b4d6a2cbdc0f447fb571155fba745ee4031d5819670cdad",
+    "without_requests_decision_digest": "59e22aa1f5b5b431872e3494f95436fde6dedff1d575f5ba4efbc60a1c8ffd6d",
+    "ordinary_waveform_count": 17
+  },
+  "onair-1001-1045": {
+    "neutral": [
+      {
+        "at": 1951883,
+        "word": "X27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 2071877,
+        "word": "V27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      }
+    ],
+    "decision_digest": "b4876b47a61079f3304ac1fa9c7e3b5e63463ecfbba263ec711725a030078da1",
+    "ordinary_emission_digest": "c2b43ca5d3d039cd686d33ab28477f208e8df42cd13a778754f4f05d78300e71",
+    "ordinary_emission_count": 38,
+    "ordinary_waveform_digest": "73d5d0f2acd3c0c2bac22ca18cf90ba4f7aa0ae46b63078905a1f09878df4ba4",
+    "heard_digest": "bc2d0b66396380ba4fb37f9cb22a1ed5300af22284edff40d54afa852f7d1933",
+    "without_requests_heard_digest": "fe59e4b76c040b7e3a0edad7a90c97a936598fac006ec9782312e65f32fec5ad",
+    "without_requests_decision_digest": "ea7eac9ed69647c980eb2a45c300018f9ad2166bd8eb291faa370fb52afb83bc",
+    "ordinary_waveform_count": 37
+  },
+  "onair-1003-1110": {
+    "neutral": [
+      {
+        "at": 1111087,
+        "word": "X27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      },
+      {
+        "at": 1591992,
+        "word": "X27",
+        "purpose": null,
+        "kind": "word",
+        "state": "IRS_ANSWER"
+      }
+    ],
+    "word_waveform": {
+      "samples": 11709,
+      "dtype": "<f8",
+      "sha256": "65ec8dcda8ce7f28eb29896977ad16ea1381d91d0ed85e65230affa7c6bff469"
+    }
+  }
+}

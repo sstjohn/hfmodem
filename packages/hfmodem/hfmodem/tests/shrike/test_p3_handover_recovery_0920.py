@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """VE3KPG cycle authorization and WS8EOC's established-SL3 handover stall."""
 import pytest
 from hfmodem.shrike import arq, spec

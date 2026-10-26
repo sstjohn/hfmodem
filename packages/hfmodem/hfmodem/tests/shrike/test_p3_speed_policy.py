@@ -19,10 +19,11 @@ CS = {name: index for index, name in arq._CS_NAMES.items()}
 
 
 def stock(queue=b'', inflight=None, policy='stock'):
-    host, seam = sender(enabled=False)
+    prefix = inflight.payload if inflight is not None else b'\x01/W'
+    host, seam = sender(enabled=False, payload=prefix + queue)
     host.arq.cfg.p3_speed_policy = policy
     host.arq._outbuf = bytearray(queue)
-    host.arq._buffer_raw = len(queue)
+    host.arq._buffer_raw = len(prefix) + len(queue)
     if inflight is not None:
         host.arq._inflight = inflight
     return host, seam

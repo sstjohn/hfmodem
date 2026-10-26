@@ -247,6 +247,10 @@ def wait(*a, **kw):
     return None
 
 
+def stop(*a, **kw):
+    return None
+
+
 def _emitted(mono, device, start: float, handed_s: float) -> None:
     """Log what the transmitter actually carried, and let the far end answer it.
 

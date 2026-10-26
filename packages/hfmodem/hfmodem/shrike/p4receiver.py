@@ -3,6 +3,7 @@
 """P4 session receiver: one physical-emission registry and a role-aware raster."""
 
 from dataclasses import InitVar, dataclass, replace
+from contextlib import contextmanager
 from enum import StrEnum
 from time import monotonic
 import numpy as np
@@ -56,6 +57,29 @@ class Clock:
     slack_s: float = 0.035
 
 
+@dataclass(frozen=True)
+class GrantEmissionContext:
+    """Physical pre-key facts, never receive/source/credit permission."""
+    emission: Emission
+    registry: list
+    generation: int
+    predecessor: Emission | None
+    predecessor_generation: int
+    packet_due: int | None
+    short_packet: bool
+    peer_onset: int | None
+    heads: tuple[int, ...]
+
+
+@dataclass
+class PeerPacketWatch:
+    generation: int
+    onset: int
+    clock: Clock
+    attempts: int
+    last_attempt: int | None
+
+
 @dataclass
 class CloseLease:
     emission: int
@@ -95,10 +119,14 @@ class P4Receiver:
         self.new_call()
 
     def new_call(self):
+        self.grant_emission_context = None
         self._body_carrier_known = False
         self._word_cfo_hz = None
         self.expected = False
         self.clock = None
+        self.peer_watch = None
+        self._watch_read_generation = None
+        self._peer_watch_evidence = {}
         self.last_emission = None
         self._close_grant_word = False
         self.observations = []
@@ -432,6 +460,10 @@ class P4Receiver:
                 and not obs.unexpected and obs.word is not None
                 and (self.expected_words is None or obs.word in self.expected_words))
         live = False
+        if (self.peer_watch is not None and reg.peer_watch_generation == self.peer_watch.generation
+                and obs.kind in (Kind.LONG, Kind.CHIRP) and obs.frame is not None
+                and not obs.provisional and not obs.weak and not obs.unexpected):
+            live |= abs(at-self.peer_watch.clock.next_due) <= round(.035*self.fs)
         if reg.responds_to is not None:
             em = next(e for e in self.emissions if e.stream_sample == reg.responds_to)
             key = 'word' if em.role == Role.IRS else 'long' if em.kind in (Kind.LONG, Kind.CHIRP) else 'short'
@@ -510,6 +542,16 @@ class P4Receiver:
                    for em in self.emissions)
 
     def note_emission(self, em, *, close_grant=False):
+        potential_grant = (em.kind == Kind.BODY and em.role == Role.ISS
+                           and em.packet_reply and not em.train and not em._close_grant)
+        if potential_grant:
+            clock = self.clock
+            predecessor, generation = self.last_emission, self._train_generation
+            short_packet = (self.admitted and self.expected and clock is not None
+                            and clock.expects == Expect.PACKET and clock.cycle_s == 1.25
+                            and self._watch_read_generation is None)
+            due = clock.next_due if clock is not None else None
+            onset, heads = self.peer_onset, tuple(self._peer_heads)
         close_grant = close_grant or em._close_grant
         if em.role == Role.ISS or close_grant:
             self.invalidate_long_phase()
@@ -542,6 +584,10 @@ class P4Receiver:
             self.hold.reset('our key')
             self._body_heads.clear()
         self.last_emission = em
+        self.grant_emission_context = (GrantEmissionContext(
+            em, self.observations, self._train_generation, predecessor,
+            generation, due, bool(short_packet), onset, heads)
+            if potential_grant else None)
         self.expected = True
         if em.current_slot_accepted:
             for obs in self.observations:
@@ -556,8 +602,8 @@ class P4Receiver:
         long = em.kind in (Kind.LONG, Kind.CHIRP)
         peer_long = (
             em.role == Role.IRS
-            and self.clock is not None
-            and self.clock.cycle_s == 3.75
+            and (self.peer_watch is not None
+                 or self.clock is not None and self.clock.cycle_s == 3.75)
         )
         after = (.330 if close_grant else
                  float(np.median((self.turnarounds.get("word") or [.330])))
@@ -580,6 +626,47 @@ class P4Receiver:
             self.cfo_hz or 0.0,
             slack_s=.035 if em.role == Role.IRS else WORD_SLACK_S,
         )
+
+    def sync_peer_watch(self, watch, *, receiving=False):
+        """Turn admission owns authority; unread slots never create authority."""
+        old = self.peer_watch
+        if watch is None:
+            self.peer_watch = None
+            if receiving and self._watch_read_generation is not None and self.clock is not None:
+                self.clock = replace(self.clock)
+            return
+        if old is None or old.generation != watch.generation:
+            clock = Clock(Expect.PACKET, watch.onset+watch.cycle, .330,
+                          watch.cycle/self.fs, watch.cfo_hz)
+            self.peer_watch = PeerPacketWatch(watch.generation, watch.onset, clock,
+                                             watch.attempts, watch.last_attempt)
+            if receiving and self.clock is not None and (
+                    self.clock.expects == Expect.WORD or self._watch_read_generation is not None):
+                self.clock = replace(clock, next_due=watch.onset)
+        else:
+            old.attempts, old.last_attempt = watch.attempts, watch.last_attempt
+
+    @contextmanager
+    def scoped_clock(self, clock, *, watch_generation=None):
+        """A feed may replace/revoke the owner. Such a transition wins restoration."""
+        primary = self.clock
+        old_generation = self._watch_read_generation
+        self.clock = clock
+        self._watch_read_generation = watch_generation
+        try:
+            yield
+        finally:
+            if self.clock is clock:
+                self.clock = primary
+            self._watch_read_generation = old_generation
+
+    def finish_peer_watch(self, watch, onset):
+        # Account the nominal consumed slot, even when admission replaced phase.
+        silent = self.finish_cycle(onset)
+        current = self.peer_watch
+        if current is not None and abs(current.clock.next_due-onset) <= round(.035*self.fs):
+            current.clock.next_due += round(current.clock.cycle_s*self.fs)
+        return silent
 
     def note_gap(self, begin, end):
         self.capture_gaps = [(a, b) for a, b in self.capture_gaps if b > end-6*self.fs]
@@ -702,6 +789,13 @@ class P4Receiver:
 
     def register(self, obs):
         reg = self._register(obs)
+        generation = self._watch_read_generation
+        independent = generation is not None
+        watched = generation is not None and obs.kind in (Kind.LONG, Kind.CHIRP)
+        previous_watch = reg.replaced.stream_sample if reg.replaced is not None else obs.stream_sample
+        if not watched and obs.kind in (Kind.LONG, Kind.CHIRP):
+            generation = self._peer_watch_evidence.get(previous_watch)
+            watched = generation is not None
         if (obs.kind == Kind.SHORT and obs.value is not None and not obs.provisional
                 and not obs.weak and not obs.unexpected and reg.outcome != Registered.EXPIRED):
             self.invalidate_long_phase()
@@ -740,6 +834,18 @@ class P4Receiver:
                       response_generation=evidence[0] if evidence else None,
                       response_slot=evidence[1] if evidence else None,
                       response_owner=self if evidence else None)
+        if watched:
+            self._peer_watch_evidence[reg.observation.stream_sample] = generation
+            reg = replace(reg, peer_watch_generation=generation,
+                          primary_packet_due=(self.clock.next_due if not independent
+                              and self.clock is not None and self.clock.expects == Expect.PACKET
+                              and abs(obs.stream_sample-self.clock.next_due) <= round(.035*self.fs)
+                              else None))
+            if independent:
+                reg = replace(reg, responds_to=None, response_generation=None,
+                              response_slot=None, response_owner=None)
+                self._responds_to[reg.observation.stream_sample] = None
+                self._response_evidence[reg.observation.stream_sample] = None
         if (self.train_lease is not None and reg.response_generation == self.train_lease.generation
                 and reg.response_slot == 0 and reg.outcome in (Registered.NEW, Registered.CONFIRMED)
                 and obs.kind == Kind.WORD and not obs.provisional and not obs.weak
@@ -787,7 +893,19 @@ class P4Receiver:
                 self.expected = True
             return RegisteredObservation(obs, Registered.NEW)
         outcome = Registered.DUPLICATE
-        if (old.kind == obs.kind == Kind.LONG and old.provisional
+        watch = self.peer_watch
+        if (watch is not None and self._watch_read_generation == watch.generation
+                and watch.clock.expects == Expect.PACKET
+                and abs(obs.stream_sample-watch.clock.next_due) <= round(.035*self.fs)
+                and obs.kind in (Kind.LONG, Kind.CHIRP) and obs.frame is not None
+                and not obs.provisional and not obs.weak and not obs.unexpected
+                and old.kind == Kind.SHORT and old.provisional and not old.placed
+                and old.frame is None and old.header is None
+                and old.value is None and old.word is None):
+            # A current watched CRC packet resolves an empty short hypothesis.
+            # Keep its measured coordinates and the ordinary replacement journal.
+            outcome = Registered.CONFIRMED
+        elif (old.kind == obs.kind == Kind.LONG and old.provisional
                 and obs.provisional and not old.placed and obs.placed):
             outcome = Registered.ENRICHED
         elif (old.kind == obs.kind and (obs.kind == Kind.NORMAL or
@@ -1474,15 +1592,18 @@ class P4Receiver:
         if entry is not None and (entry.get('obs') is None
                                   or entry.get('complete') or end <= entry['end']):
             return entry.get('obs'), entry['coherence']
-        if entry is not None and alias:
-            entry['alias'] = True
         if self._normal_baseband is not None:
             z, base_origin, nominal = self._normal_baseband
         else:
             lo = max(0, predicted-origin-round(.050*fs))
-            z = p4rx.audio_to_baseband(np.asarray(audio)[lo:], fs)
+            available = np.asarray(audio)[lo:]
+            if len(available) == 0:
+                return None, 0.
+            z = p4rx.audio_to_baseband(available, fs)
             base_origin = origin+lo
             nominal = round((predicted-base_origin)*28800/fs)+p4short.GEOM
+        if entry is not None and alias:
+            entry['alias'] = True
         if entry is None:
             offsets = p4short.WIDE
             bases = (self.clock.cfo_hz,)
@@ -1873,7 +1994,7 @@ class P4Receiver:
 
     def read_chirp(self, audio, origin, *, onset):
         """Register an acquired chirp; None means unread, [] an already registered frame."""
-        if not self.has_chirp_header(onset):
+        if onset < origin or not self.has_chirp_header(onset):
             return None
         started = monotonic()
         obs = self._chirp(audio, origin, onset)
@@ -1896,6 +2017,7 @@ class P4Receiver:
         context, context_origin = audio, origin
         long_coherence = None
         sf8_candidate, sf8_tried = None, False
+        chirp_prefix_available = True
         if self.clock and self.clock.expects == Expect.PACKET:
             begin = max(0, self.clock.next_due-round(.5*fs)-origin)
             end = max(0, self.clock.next_due+round(3.355*fs)-origin)
@@ -1948,7 +2070,7 @@ class P4Receiver:
                 and self.clock.expects == Expect.PACKET):
             nominal = self.clock.next_due-origin
             header_key = (self.clock.next_due, self.clock.cfo_hz)
-            if len(audio)-nominal >= round(.235*fs):
+            if nominal >= 0 and len(audio)-nominal >= round(.235*fs):
                 self._chirp_headers = {k: v for k, v in self._chirp_headers.items() if k[0] >= header_key[0]-6*fs}
                 self._chirp_prior_cycles = {k: v for k, v in self._chirp_prior_cycles.items()
                                             if k in self._chirp_headers}
@@ -1961,6 +2083,12 @@ class P4Receiver:
                             self.clock, self._train_generation, self.clock.cycle_s)
             header = self._chirp_headers.get(header_key)
             first = None if header is None else header[0]-origin
+            # Prediction and acquired onset have different retention bounds.
+            # A cached later onset can survive even when nominal is negative.
+            chirp_prefix_available = (nominal >= 0 if first is None else
+                                      first >= 0 and len(audio)-first >= round(.200*fs))
+            if not chirp_prefix_available:
+                first = None
             if first is not None:
                 self.clock.cycle_s = 3.75
             if partial and first is not None and len(audio)-first > round(.80*fs):
@@ -2070,6 +2198,8 @@ class P4Receiver:
                     kind = (Kind.CHIRP if self.chirp and self.expected and self.clock
                             and self.clock.expects == Expect.PACKET and self.clock.cycle_s == 3.75
                             and duration > .80 else Kind.NORMAL)
+                    if kind == Kind.CHIRP and not chirp_prefix_available:
+                        continue
                 elif closed:
                     if kind is None and duration <= 0.9:
                         lattice, training, cfo = p4oracle.training_origin(piece, fs)
@@ -2170,7 +2300,8 @@ class P4Receiver:
         if self.clock and (packet is not None or pending_packet):
             self.clock.misses = 0
         elif self.clock and not hits:
-            horizon = WORD_HORIZON_S if self.clock.expects == Expect.WORD else .85
+            horizon = (WORD_HORIZON_S if self.clock.expects == Expect.WORD else
+                       3.355 if self.peer_watch is not None and self.clock.cycle_s == 3.75 else .85)
             if (whole or self.clock.expects == Expect.WORD) and origin+len(audio) >= self.clock.next_due+round(horizon*self.fs):
                 if self._missed_due != self.clock.next_due:
                     self.clock.misses += 1
@@ -2263,6 +2394,12 @@ class P4Receiver:
                     self.pending_body = None
         for old in list(self.observations):
             if not old.provisional:
+                continue
+            if (old.kind == Kind.CHIRP and old.stream_sample < origin
+                    and self.clock is not None and self.clock.expects == Expect.PACKET
+                    and abs(self.clock.next_due-old.stream_sample) <= round(.035*self.fs)
+                    and self.has_chirp_header(old.stream_sample)):
+                # Missing prefix bytes are not a failed CRC or cadence evidence.
                 continue
             if old.kind == Kind.WORD:
                 horizon = old.stream_sample + round(self._word_horizon(old) * self.fs)

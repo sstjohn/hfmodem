@@ -160,13 +160,22 @@ def _split_tail(Lt):
 
 def _iterate(Lsys, Lp1, Lp2, tail, perm, iters, check):
     """Shared turbo iteration. `check(bits)->bool` stops early (CRC); None runs all `iters`."""
+    work = _iterate_steps(Lsys, Lp1, Lp2, tail, perm, iters, check)
+    while True:
+        try:
+            next(work)
+        except StopIteration as done:
+            return done.value
+
+
+def _iterate_steps(Lsys, Lp1, Lp2, tail, perm, iters, check):
     N=len(Lsys)
     iperm=np.empty(N,int); iperm[perm]=np.arange(N)
     ts1,tp1,ts2,tp2=tail
     La=np.zeros(N)
     bits=(Lsys<0).astype(int)
     passed=None
-    for _ in range(iters):
+    for iteration in range(iters):
         Le1=_bcjr(Lsys, Lp1, La, ts1, tp1)
         La=_bcjr(Lsys[perm], Lp2, Le1[perm], ts2, tp2)[iperm]
         bits=(Lsys+Le1+La<0).astype(int)
@@ -182,6 +191,8 @@ def _iterate(Lsys, Lp1, Lp2, tail, perm, iters, check):
             passed=bits
         else:
             passed=None
+        if (iteration + 1) % 4 == 0 and iteration + 1 < iters:
+            yield
     return bits
 
 def decode_from_coded_llr(Lc, N, iters=12, perm=None, check=None):
@@ -196,6 +207,16 @@ def decode_from_coded_llr(Lc, N, iters=12, perm=None, check=None):
     Lp1=np.full(N,np.nan); Lp1[ei]=Lpar[ei]     # parity1 known at even i
     Lp2=np.full(N,np.nan); Lp2[oi]=Lpar[oi]     # parity2 known at odd i
     return _iterate(Lc[0:2*N:2].copy(), Lp1, Lp2, _split_tail(Lc[2*N:]), perm, iters, check)
+
+
+def decode_from_coded_llr_steps(Lc, N, iters=12, check=None):
+    perm = interleaver(N)
+    Lpar = Lc[1:2*N:2]
+    Lp1 = np.full(N, np.nan)
+    Lp2 = np.full(N, np.nan)
+    Lp1[::2], Lp2[1::2] = Lpar[::2], Lpar[1::2]
+    return (yield from _iterate_steps(Lc[0:2*N:2].copy(), Lp1, Lp2,
+                                      _split_tail(Lc[2*N:]), perm, iters, check))
 
 
 # ------------------------- RATE-1/3 variant (control levels 0/1) -------------------------

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """AI4Y's recorded P2 controls pin the global CS alphabet."""
 import pytest
 from hfmodem.shrike import p2rx

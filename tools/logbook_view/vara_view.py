@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Build an offline VARA inspection artifact for one existing logbook QSO.
 
 No radio, network, multidecode service or transmitter is used. The decoder is
@@ -21,6 +23,7 @@ from datetime import datetime, timezone
 HERE = Path(__file__).resolve().parent
 TREE = HERE.parents[1]
 sys.path.insert(0, str(TREE / 'packages/hfmodem'))
+sys.path.insert(0, str(TREE / 'tools'))
 
 import vara_timing
 from vara_signal import signal_view, align_audio, align_packets, align_handshakes
@@ -350,6 +353,7 @@ def build(book, entry, out_root, recording=None, bw=None):
             other_paths.append((item, candidate, sha(candidate)))
     options = {'sources': [(r['url'],h) for r,p,h in other_paths], 'bw': bandwidth, 'calls': [book.station['call'], entry['call']],
                'transcript_sha256': transcript_hash, 'session': {k: entry.get(k) for k in ('dial_hz', 'centre_hz', 'band_m', 'tx_w', 'tx_w_max', 'reached', 'mail', 'speed')},
+                'local_role': entry.get('local_role', 'caller'), 'recording_window': entry.get('recording'),
                 'p4_record_sha256':p4_hash, 'schema': SCHEMA}
     key = hashlib.sha256(json.dumps([source_hash, digest, options], sort_keys=True).encode()).hexdigest()[:20]
     arm = entry['id']
@@ -369,7 +373,9 @@ def build(book, entry, out_root, recording=None, bw=None):
     tx, timing_note = timing_fn(transcript_text, path, selected['kind'], len(x)/FS)
     participating = 'connect' in (entry.get('reached') or [])
     events = replay_fn(x, bandwidth, options['calls'], out, tx=tx, decode_tx=True)
-    vara_timing.attribute(events, tx, qso=participating)
+    attribution = dict(qso=participating, local_role=entry.get('local_role', 'caller'),
+                       bounded=(entry.get('recording') or {}).get('state') == 'complete')
+    vara_timing.attribute(events, tx, **attribution)
     events = sorted(events + tx, key=lambda e: (e['t0'], e['id']))
     sources = [{'id': 'rx', 'kind': selected['kind'], 'url': selected['url'],
                 'sha256': source_hash, 'offset_s': 0, 'alignment': 'Primary recording clock',
@@ -404,7 +410,7 @@ def build(book, entry, out_root, recording=None, bw=None):
         import tempfile
         with tempfile.TemporaryDirectory(dir=out, prefix='.source-') as scratch:
             local = replay_fn(other, bandwidth, options['calls'], Path(scratch), tx=keyed, decode_tx=True)
-            vara_timing.attribute(local, keyed, qso=participating)
+            vara_timing.attribute(local, keyed, **attribution)
             for event in local:
                 event['id'] = source_id+'-'+event['id']
                 event['t0'] -= shift; event['t1'] -= shift
@@ -463,21 +469,25 @@ def build(book, entry, out_root, recording=None, bw=None):
             event['preferred_source'] = event['source_id']
     events.sort(key=lambda e:(e['t0'],e['id']))
     if protocol == 'vara':
-        vara_payloads(events, book.station['call'])
+        vara_payloads(events, entry['call'] if entry.get('local_role') == 'called' else book.station['call'])
     write_json(out / 'events.json', events)
     loaded = {name: {'file': str(Path(m.__file__).resolve()), 'sha256': sha(m.__file__)}
               for name, m in list(sys.modules.items()) if name.startswith('hfmodem.')
               and getattr(m, '__file__', None) and Path(m.__file__).suffix == '.py'}
     if any(not Path(m['file']).is_relative_to(TREE) for m in loaded.values()):
         raise ValueError('A decoder module loaded outside the viewer worktree.')
-    commit = subprocess.check_output(['git', '-C', str(TREE), 'rev-parse', 'HEAD'], text=True).strip()
+    head = subprocess.run(['git', '-C', str(TREE), 'rev-parse', 'HEAD'], capture_output=True, text=True)
+    commit = head.stdout.strip() if head.returncode == 0 else None
     manifest = {'schema': SCHEMA, 'arm': arm, 'call': entry['call'], 'protocol': protocol.upper(),
                 'started_utc': entry['started_utc'], 'created_utc': datetime.now(timezone.utc).isoformat(),
                 'recording': {'url': selected['url'], 'kind': selected['kind'], 'sha256': source_hash,
-                              'source_rate': source_rate, 'channel': 0},
+                              'source_rate': source_rate, 'channel': 0,
+                              'source_window': entry.get('recording')},
                 'sample_rate': FS, 'duration_s': len(x) / FS, 'bw_hz': bandwidth,
                 'clock': 'Seconds from the first sample of this recording; not the arm start.',
-                'caller': book.station['call'], 'called': entry['call'], 'timing': timing_note,
+                'caller': entry['call'] if entry.get('local_role') == 'called' else book.station['call'],
+                'called': book.station['call'] if entry.get('local_role') == 'called' else entry['call'],
+                'local_role': entry.get('local_role', 'caller'), 'timing': timing_note,
                 'session': {k: entry.get(k) for k in ('dial_hz', 'centre_hz', 'band_m', 'tx_w', 'tx_w_max', 'reached', 'mail', 'speed')},
                 'p4_record_sha256':p4_hash,
                 'transcript_sha256': transcript_hash,
@@ -510,11 +520,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--root', type=Path, required=True, help='existing logbook data checkout')
     ap.add_argument('--arm', required=True, help='QSO ID in the logbook')
-    ap.add_argument('--out', type=Path, help='artifact root, also passed to serve.py --viewer-root')
+    ap.add_argument('--out', type=Path, help='artifact root, also passed to desk/face.py --viewer-root')
     ap.add_argument('--bw', type=int, choices=[500, 2300, 2750])
     ap.add_argument('--recording', help='exact /file/ URL of a recording listed for this QSO')
     args = ap.parse_args(argv)
-    from serve import Logbook
+    from desk.face import Logbook
     book = Logbook(args.root)
     entry = next((e for e in book.entries()['entries'] if e['id'] == args.arm), None)
     if entry is None:

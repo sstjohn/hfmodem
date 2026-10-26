@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Taper and window, settled by rendering tape overs from their bytes
 
 `render_vs_tape.py` prints every number below (about 4 min, nothing written). Each over is rendered

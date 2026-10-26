@@ -3,18 +3,26 @@ Copyright (C) 2026 Saul St John (W9SSJ)
 
 The code is free software: you can redistribute it and/or modify it under the
 terms of the GNU Affero General Public License as published by the Free Software
-Foundation, version 3. See LICENSE for the full text.
+Foundation, version 3. See LICENSE for the full text. The documentation of the
+software -- installing, configuring and operating it, its architecture, and the
+implementation notes in docs/implementation/ -- is under the same licence.
 
-The documentation, the images and the project site are under the Creative
-Commons Attribution 4.0 International licence instead -- everything under docs/
-and site/, the protocol descriptions in docs/protocols/ included. See
-LICENSE-CC-BY-4.0 for the full text and
-https://creativecommons.org/licenses/by/4.0/ for the deed. Attribution is the
-whole of what it asks.
+The protocol descriptions and the project site are under the Creative Commons
+Attribution 4.0 International licence instead: the waveforms, wire formats and
+link behaviour set out in docs/protocols/, the illustrated guides in docs/viz/,
+the notes in evidence/, and the pages under site/ (its build code stays AGPL).
+Each file names its licence in its first lines, or in REUSE.toml when it cannot
+carry one. See LICENSE-CC-BY-4.0 for the full
+text and https://creativecommons.org/licenses/by/4.0/ for the deed. Attribution
+is the whole of what it asks.
 
 That licence reaches this project's expression of the protocols it describes and
 not the facts of them, which are nobody's to license: an implementation written
 from these descriptions owes it nothing. See docs/protocols/LICENSE.md.
+
+Recordings of on-air transmissions, this station's and other stations', and
+data decoded from them, are listed in REUSE.toml as NOASSERTION. The project
+claims no copyright in and assigns no licence to these files.
 
 
 ATTRIBUTION

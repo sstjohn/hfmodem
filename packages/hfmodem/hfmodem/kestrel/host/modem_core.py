@@ -4,7 +4,7 @@
 """The 'modem core' seam for the kestrel host-side VARA-protocol server.
 
 The server in ``server.py`` speaks VARA's *documented TCP host interface* to an
-application (VarAC, Pat, Winlink Express, or any conforming host-API client).
+application (Pat, Winlink Express, or any conforming host-API client).
 Everything below that -- the actual link establishment, the over-the-air
 transfer, the flow-control cadence -- is delegated to a :class:`ModemCore`.
 
@@ -86,12 +86,15 @@ class ModemObserver(abc.ABC):
 
     def modem_bitrate(self, level: int, bps: int, tx: bool) -> None:
         """Speed level of my next over (``tx``) or the frame I just decoded
-        (``not tx``) -> ``BITRATE (N) x bps TX`` / ``... RX``. One per over."""
+        (``not tx``) -> ``BITRATE (N)  x bps TX`` / ``... RX``. One per over."""
 
-    def modem_snr(self, sn: int) -> None:
-        """Decoded signal report. The session renders it as ``SN xx`` ONLY
-        while chat mode is on (see :class:`HostSession`), so the modem may call
-        it unconditionally on every decode and let the session gate it."""
+    def modem_snr(self, sn: float | None) -> None: ...
+
+    def modem_cqframe(self, call: str, bw: str, sn: float | None) -> None: ...
+
+    def modem_beacon(self, result) -> None: ...
+
+    def modem_clean_tx_buffer(self, result: str) -> None: ...
 
 
 class ModemCore(abc.ABC):
@@ -112,6 +115,8 @@ class ModemCore(abc.ABC):
     the server's command handlers non-blocking.
     """
 
+    default_compression = 'TEXT'
+
     @abc.abstractmethod
     def start(self, observer: ModemObserver) -> None: ...
 
@@ -131,6 +136,37 @@ class ModemCore(abc.ABC):
 
     def set_listen(self, on: bool) -> None:
         self._listen = on
+
+    def set_session_mode(self, mode: str) -> None:
+        if mode not in ('WINLINK', 'P2P'):
+            raise ValueError('unknown VARA session mode')
+        self._session_mode = mode
+
+    def request_heartbeat(self, reply) -> None:
+        """Reply immediately for a backend without an external audio owner.
+
+        Live bindings defer this callback until their modem owner makes
+        progress; a TCP heartbeat thread alone cannot prove that liveness.
+        """
+        reply()
+
+    def set_chat(self, on: bool) -> None:
+        """The initial HF profile implements CHAT OFF timing only."""
+        if on:
+            raise NotImplementedError('CHAT ON timing is unavailable')
+
+    def clean_tx_buffer(self) -> None:
+        if self._observer is not None:
+            self._observer.modem_warning("WRONG")
+
+    def send_cq(self, call: str, bw: int) -> None:
+        raise NotImplementedError
+
+    def defer_cq_rejection(self, reply) -> bool:
+        return False
+
+    def send_beacon(self, text: str) -> None:
+        raise NotImplementedError
 
     # -- session verbs -----------------------------------------------------
 
@@ -174,6 +210,14 @@ class LoopbackModem(ModemCore):
     OTA_DELAY = 0.02
     #: simulated connect-handshake airtime (seconds)
     HANDSHAKE_DELAY = 0.05
+
+    def set_chat(self, on: bool) -> None:
+        """Accept the simulated host dialect's CHAT selection.
+
+        HostSession owns the CHAT/LISTEN flags. This modem has no waveform
+        timing to select, so the real HF profile's timing refusal does not apply.
+        """
+        pass
 
     def __init__(self, bandwidth: str = "500") -> None:
         self._observer: ModemObserver | None = None
@@ -256,8 +300,8 @@ class LoopbackModem(ModemCore):
                 # Pre-session write: buffer it against the queue (spec §7.4) and
                 # flush it once CONNECTED, rather than dropping it on the floor.
                 self._preconnect.append(blob)
-        # Report the enqueue immediately (VARA emits BUFFER on enqueue), whether
-        # or not the session is up yet -- the bytes are really queued.
+        # Report the enqueue immediately; the host session drops it while no
+        # link is up, as stock does.
         assert self._observer is not None
         self._observer.modem_buffer(depth)
         if not preconnect:
@@ -296,6 +340,21 @@ class LoopbackModem(ModemCore):
                     depth = self._buffer
                 obs.modem_buffer(depth)
             obs.modem_ptt(False)
+
+    def clean_tx_buffer(self) -> None:
+        with self._lock:
+            if not self._buffer:
+                result = "BUFFEREMPTY"
+            elif self._connected:
+                result = "FAILED "
+            else:
+                self._preconnect.clear()
+                self._buffer = 0
+                result = "OK"
+        if self._observer:
+            self._observer.modem_clean_tx_buffer(result)
+            if result == "OK":
+                self._observer.modem_buffer(0)
 
     def disconnect(self) -> None:
         threading.Thread(target=self._do_disconnect, daemon=True).start()

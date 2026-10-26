@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Foreground ALE station and held-channel selcall operator console.
 
 All keying goes through Station's existing rig, identity and transmit arbiter.
@@ -6,7 +8,7 @@ The UI uses the native host dialects in-process; no mail client is needed.
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import math
@@ -20,8 +22,8 @@ import uuid
 
 from hfmodem.core import band, config
 from hfmodem.core.rig import RigError
-from hfmodem.station.process import Station
-from . import claim, modes, station
+from hfmodem.station.process import Station as ServiceStation
+from . import claim, station
 
 HELP = """Commands (text after the address needs no quotation marks):
   status | heard | channels       station state / recent ALE stations / dial list
@@ -220,6 +222,20 @@ def command(line, available):
     return protocol, f'{native} {rest}'.rstrip()
 
 
+class Station(ServiceStation):
+    def _start(self):
+        from hfmodem.station import hosts
+        self.open_audio()
+        self.open_rig()
+        self.build_arbiter()
+        self.build_lanes()
+        self.hosts = hosts.build(self.cfg, station=self)
+        self._state('owning')
+        self.is_ready = True
+        self._poll_thread = threading.Thread(target=self._poll, name='station-lanes', daemon=True)
+        self._poll_thread.start()
+
+
 class OperatorStation(Station):
     def __init__(self, cfg, *, output, args, dials):
         super().__init__(cfg)
@@ -323,13 +339,9 @@ class OperatorStation(Station):
 
 
 @contextmanager
-def claimed():
-    with ExitStack() as stack:
-        for name in modes.KNOWN:
-            mode = modes.resolve(name)
-            mode.lock.parent.mkdir(parents=True, exist_ok=True)
-            stack.enter_context(claim.lease(mode))
-        yield
+def claimed(*, env=None):
+    with claim.lease('hflink', env=env) as held:
+        yield held
 
 
 def run(argv, *, family='hflink'):
@@ -353,7 +365,7 @@ def run(argv, *, family='hflink'):
             raise ValueError('set [audio] capture_dir or supply --log-dir')
         directory = Path(cfg.audio.capture_dir).expanduser() / f'hflink-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}'
     directory = directory.expanduser()
-    with claimed():
+    with claimed(env={config.STATION_ENV: str(args.config)}):
         directory.mkdir(parents=True, exist_ok=False)
         (directory / 'plan.json').write_text(json.dumps(description, indent=2) + '\n')
         with (directory / 'events.jsonl').open('w') as journal:

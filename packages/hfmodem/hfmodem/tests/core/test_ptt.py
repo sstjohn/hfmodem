@@ -218,3 +218,22 @@ def test_a_trailing_digit_is_not_enough_to_derive_from():
     for name in ("/dev/ttyUSB0", "/dev/ttyACM0", "/dev/cu.usbserial0"):
         with pytest.raises(ValueError):
             derive_ptt_port(name)
+
+
+def test_line_keyer_reads_low_after_open_before_assert(port, recorder):
+    from hfmodem.core.ptt import LineKeyer
+
+    calls, state = recorder
+    keyer = LineKeyer(port, lambda line: None)
+    try:
+        keyer.arm()
+        assert calls[-1][0] == "GET"
+        assert not any(op == "BIS" for op, bits in calls)
+        assert state["lines"] == 0
+        assert keyer.key(True)
+        assert keyer.last_key.state is True
+        assert keyer.key(False)
+        assert keyer.last_drive.state is False
+    finally:
+        keyer.hand_back()
+    assert keyer.transport._ptt.released_low is True

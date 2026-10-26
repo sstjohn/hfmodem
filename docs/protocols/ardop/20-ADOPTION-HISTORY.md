@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # How ARDOP Became a First-Class Winlink Mode
 
 *Method: this account is built from public Winlink/ARSFI pages, the ARDOP specification and

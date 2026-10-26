@@ -106,7 +106,7 @@ def test_refused_retry_preserves_geometry_budgets_and_later_host_delivery():
     assert unconfirmed(hs) == data + b'next host write'
 
 
-def test_retry_and_close_preserve_separate_host_delivery():
+def test_retry_and_close_preserve_separate_host_delivery(monkeypatch):
     hs, io, data = pending(ROWS[0])
     hs.send(b'later')
     assert hs._peer_data_nak(native(ROWS[0])[:48000])
@@ -121,7 +121,24 @@ def test_retry_and_close_preserve_separate_host_delivery():
         hs._took_over_continue()
     assert bytes(decoded) == data
     assert hs._txq == [b'later']
+    now = [100.0]
+    monkeypatch.setattr(VA.time, "monotonic", lambda: now[0])
+    kinds = []
+    io.tx_metadata = lambda **metadata: kinds.append(metadata["packet_kind"])
     hs._took_control_burst()
+    assert kinds == ["session-turn-release"]
+    assert hs._tx_pending is None and hs.turn == VA._TURN_PEER
+    assert hs._txq == [b'later'] and hs._ask_owed
+    now[0] += .294
+    hs.idle_keepalive()
+    assert kinds == ["session-turn-release"]
+    now[0] += .002
+    hs.idle_keepalive()
+    assert kinds == ["session-turn-release", "session-turn-request"]
+    assert hs._tx_pending is None and hs.turn == VA._TURN_ASKED
+    assert not hs._ask_owed
+    hs._turn_granted((), said="session-drained-responder")
+    assert kinds[-1] == "data"
     assert hs._tx_pending[2] == 3 and unconfirmed(hs) == b'later'
 
 

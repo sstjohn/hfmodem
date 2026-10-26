@@ -2,14 +2,19 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
 """CW identification obeys TX guards and never runs during shutdown unwinding."""
+import inspect
+import signal
+import sys
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from hfmodem.core import cwid, levels
-from hfmodem.shrike import onair, pactor1, ptc
-from hfmodem.tests.shrike.test_armdefaults import _parsed
+from hfmodem.shrike import onair, ota, pactor1, ptc
+from hfmodem.tests.shrike.test_armdefaults import BASE, _parsed
+from hfmodem.tests.shrike.test_beacon import LADDER, every_opcode, ladder_rig
+from hfmodem.tests.shrike.test_beacon import stop_handler  # noqa: F401 -- a fixture
 from hfmodem.tests.shrike.test_connected_hush import grid
 from hfmodem.tests.shrike.test_grid import _Bench, _Rig
 
@@ -212,6 +217,147 @@ def test_session_shutdown_closes_devices_and_writes_mail_without_keying_id(
     assert "PTT off." in log and "transmit cadence:" in log
     if ending is not None:
         assert log.count(f"send {args.mycall} by hand") == 1
+
+
+def _ctrl_c(_host):
+    raise KeyboardInterrupt
+
+
+def _interrupted(tmp_path, monkeypatch, *, stop, summary, tick=_ctrl_c):
+    """A flown session stopped by Ctrl-C, run through the shipped entry point."""
+    rig = _Rig()
+    events = []
+    monkeypatch.setattr(rig, "stop", lambda: stop(events))
+    monkeypatch.setattr(rig, "ptt", lambda on: events.append(on) or True)
+    monkeypatch.setattr(onair.ota, "Rig", lambda *a, **kw: rig)
+    monkeypatch.setattr(onair.ota, 'ptt_device', lambda *a, **kw: None)
+    monkeypatch.setattr(onair, "find_device", lambda *a, **kw: 0)
+    monkeypatch.setattr(onair, "_LiveInput", lambda *a, **kw: Clock())
+    monkeypatch.setattr(onair, "_save_capture_async", lambda *a, **kw: None)
+
+    monkeypatch.setattr(onair.PtcHost, "tick", tick)
+    monkeypatch.setattr(onair, "_summary", lambda *a, **kw: summary(events))
+    monkeypatch.setattr(sys, "argv", BASE + [
+        "--transmit", "--serial", "/dev/null", "--dial", "7100000",
+        "--outdir", str(tmp_path / 'capture'), "--max-key", "1", "--max-cycles", "1"])
+    return onair.main_refusing(), events
+
+
+def test_a_second_ctrl_c_during_the_verdict_leaves_the_rig_down(
+        tmp_path, monkeypatch, capsys):
+    def again(events):
+        events.append("verdict")
+        raise KeyboardInterrupt
+
+    code, events = _interrupted(tmp_path, monkeypatch, stop=lambda e: e.append("stop"),
+                                summary=again)
+    assert code == 130
+    assert events[-1] == "verdict" and True in events[:events.index("stop")]
+    assert True not in events[events.index("stop"):]
+    assert "Traceback" not in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("stop_handler")
+def test_a_second_ctrl_c_inside_the_unkey_waits_for_the_power_restore(
+        tmp_path, monkeypatch, capsys):
+    ladder = []
+    rig, deadmen = ladder_rig(monkeypatch, ladder)
+    monkeypatch.setattr(onair, "_phase_power", lambda *_a: SimpleNamespace(
+        restore=lambda: ladder.append("restore")))
+    code, _ = _interrupted(tmp_path, monkeypatch, stop=lambda _e: rig.stop(),
+                           summary=lambda _e: None)
+    assert code == 130
+    assert ladder == LADDER + ["restore"]
+    assert deadmen[0] == ota.DEADMAN_BUDGET_S
+    assert ota._depth == 0 and ota._pending is None
+    assert "PTT off." in capsys.readouterr().out
+
+
+def test_the_rest_of_a_stopped_unwind_gets_what_closing_and_draining_wait(
+        tmp_path, monkeypatch):
+    """What the teardown's hold hands the deadman must cover the waits that
+    follow it: the card's close joining the recording thread, and the drain
+    waiting on queued WAV writes for as long as `run` lets it."""
+    handed = []
+    held = onair.signals_held
+
+    def recorded(after_s=None):
+        handed.append(after_s)
+        return held(after_s)
+
+    monkeypatch.setattr(onair, "signals_held", recorded)
+    code, _ = _interrupted(tmp_path, monkeypatch, stop=lambda _e: None,
+                           summary=lambda _e: None)
+    drain = inspect.signature(onair._drain_captures).parameters["timeout"].default
+    assert code == 130 and handed, handed
+    assert handed[0] >= onair.REC_JOIN_S + drain, (
+        f"{handed[0]} s handed over for a {onair.REC_JOIN_S} s join and a {drain} s drain")
+
+
+@pytest.mark.usefixtures("stop_handler")
+def test_a_second_signal_between_finally_and_the_hold_still_stops_the_rig(
+        tmp_path, monkeypatch):
+    """The first signal starts the unwind; a second one, at any opcode between
+    `_drive_session`'s `finally:` and the hold it opens, must not cost `Rig.stop`."""
+    run = inspect.unwrap(onair._drive_session)
+    source, first = inspect.getsourcelines(run)
+    begin = next(i for i, line in enumerate(source)
+                 if line.strip() == "unwinding = sys.exc_info()[1]") - 1
+    end = next(i for i in range(begin, len(source)) if "with signals_held(" in source[i])
+    regions = {run.__code__: set(range(first + begin, first + end + 1))}
+
+    def first_signal(_host):
+        signal.raise_signal(signal.SIGINT)
+
+    class Trial:
+        trials = 0
+
+        def run(self):
+            self.trials += 1
+            where = tmp_path / str(self.trials)
+            where.mkdir()
+            self.code, self.events = _interrupted(
+                where, monkeypatch, stop=lambda e: e.append("stop"),
+                summary=lambda _e: None, tick=first_signal)
+
+        def check(self, _outcome, n, _real):
+            assert "stop" in self.events, f"opcode {n} skipped Rig.stop"
+            assert self.code == 130, f"opcode {n}: {self.code}"
+            monkeypatch.setattr(ota, "_pending", None)
+
+    assert every_opcode(regions, signal.SIGINT, Trial()) > 5
+
+
+@pytest.mark.parametrize("ending,status", [
+    (KeyboardInterrupt, 130),
+    (lambda: onair.Signalled(signal.SIGTERM), 143),
+    (lambda: onair.Signalled(signal.SIGHUP), 129)])
+def test_a_teardown_failure_under_a_stop_signal_is_still_said(
+        tmp_path, monkeypatch, capsys, ending, status):
+    def stopped(_host):
+        raise ending()
+
+    def fails(_events):
+        raise RuntimeError("rigctl did not answer the unkey")
+
+    code, _ = _interrupted(tmp_path, monkeypatch, stop=fails, summary=lambda e: None,
+                           tick=stopped)
+    assert code == status
+    assert "RuntimeError: rigctl did not answer the unkey" in capsys.readouterr().err
+
+
+def test_an_exception_the_session_handled_is_not_printed_as_a_teardown_failure(
+        tmp_path, monkeypatch, capsys):
+    def ctrl_c_while_handling(_host):
+        try:
+            raise ValueError("the session handled this")
+        except ValueError:
+            raise KeyboardInterrupt
+
+    code, _ = _interrupted(tmp_path, monkeypatch, stop=lambda _e: None,
+                           summary=lambda _e: None, tick=ctrl_c_while_handling)
+    assert code == 130
+    assert "the session handled this" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("linked,optional,ids", [

@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # hfmodem
 
 [![Release workflow status](https://img.shields.io/github/actions/workflow/status/sstjohn/hfmodem/release.yml?event=push&style=flat&label=release)](https://github.com/sstjohn/hfmodem/actions/workflows/release.yml?query=event%3Apush)
@@ -22,7 +24,7 @@ that keys unbidden or holds PTT the way `SECURITY.md` asks.
 - **besra** — ARDOP
 - **sabir** — a clean-sheet protocol
 - **lanner** — RTTY, SITOR-B and NAVTEX
-- **brubru** — [Robust Packet](docs/protocols/robust-packet/station.md)
+- **brubru** — [Robust Packet](docs/implementation/robust-packet/station.md)
 
 with **hfhost** (host-protocol clients) and **creance** (the conformance bench).
 
@@ -31,7 +33,7 @@ with **hfhost** (host-protocol clients) and **creance** (the conformance bench).
 selcall and 2G ALE. The operator can enable ALE scanning to retune the rig
 through a channel list. ALE directory lookup, DTM/DBM reception and linking
 protection support monitoring as well as operation. These components have
-station host ports; [their documentation](docs/protocols/bateleur/README.md)
+station host ports; [their documentation](docs/implementation/bateleur/README.md)
 records the tests and external recordings used. On-air operation is untested.
 
 The original four — shrike, kestrel, besra and sabir — were developed in separate repositories. They are unified here because they
@@ -49,6 +51,7 @@ For a first PACTOR-3 or VARA Winlink call, follow the
     packages/creance     the conformance bench
     docs/                running a station, the station file, the on-air record
     docs/protocols/      normative descriptions of each protocol
+    docs/implementation/ how the modems here implement them, and their limits
     docs/viz/            the four protocols compared, drawn from the tree
     examples/            two station files: one for a radio, one for a recording
 
@@ -83,7 +86,7 @@ attempt — is its own operating log and is not published.
 
 `docs/viz/flock-compared.html` puts the four side by side — carrier geometry, symbol,
 coding, ARQ timing, rate ladder — and opens in a browser with nothing installed. Its
-figures are not drawings: `docs/viz/build.py` regenerates each one from two of the off-air
+figures are not drawings: `docs/viz/tools/build.py` regenerates each one from two of the off-air
 recordings the distribution carries and from the constants the modems import, and
 `--check` fails if the page has drifted from either.
 
@@ -186,8 +189,8 @@ confirmations, with their evidence limits:
 | shrike / PACTOR-1 | Sep 11 | Live KB5LZK | Four messages pulled in one exchange, over a link that never upgraded | One station, one evening |
 | shrike / PACTOR-3 | Oct 2 | Live WS8EOC | Winlink mail sent and received over hfmodem’s PACTOR-3 | Mail transfer established; confirmed link shutdown remains separate |
 | shrike / PACTOR-3 | Sep 20 | Live WS8EOC | **Mail delivered.** Message `9WQNVWBDLVOY` sent over PACTOR-3 through WS8EOC, with receipt confirmed by the operator | One named delivery; cross-gateway reliability remains open |
-| brubru / Robust Packet | Sep 30 | Public recordings and generated audio | Four frames decoded from three stations; three regeneration comparisons; all length classes at both levels in loopback | Station and KISS attachment tested in software loopback; independent station bench and connected mode remain |
-| sabir | Aug 29 | Two public RF receivers, our decoder | Presence beacon decoded | No exchange with a second transmitting station — a WebSDR cannot transmit (`docs/protocols/sabir/ONAIR.md`) |
+| brubru / Robust Packet | Sep 30 | Public recordings and generated audio | Four frames decoded from three stations; three regeneration comparisons; all length classes at both levels in loopback | Station and KISS attachment tested in software loopback; newer Tracker/AGWPE connected hosts have software coverage ([status](docs/STATUS.md#robust-packet-brubru)); independent station bench remains |
+| sabir | Aug 29 | Two public RF receivers, our decoder | Presence beacon decoded | No exchange with a second transmitting station — a WebSDR cannot transmit (`docs/implementation/sabir/ONAIR.md`) |
 
 [Development status](docs/STATUS.md) gives the dates, evidence and limits behind
 these milestones. [The documentation index](docs/README.md) maps the guides,
@@ -195,9 +198,9 @@ protocol descriptions and historical notes. The project remains an experimental 
 
 ## Licensing
 
-The code is AGPL-3.0-only; see `LICENSE`. The documentation, the images and the
-site are CC BY 4.0; see `LICENSE-CC-BY-4.0`, and `docs/protocols/LICENSE.md` for
-what that does and does not reach in a protocol description.
+The code and its documentation are AGPL-3.0-only; see `LICENSE`. The protocol
+descriptions and the site are CC BY 4.0; see `LICENSE-CC-BY-4.0`, and
+`docs/protocols/LICENSE.md` for what that does and does not reach.
 
 besra is derived from ardopcf in the places `NOTICE` names, and `NOTICE` carries the
 MIT notice and the Reed-Solomon notice that come with it.

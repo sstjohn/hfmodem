@@ -132,13 +132,14 @@ def test_a_held_arrow_key_cannot_walk_off_either_end(alc):
 
 
 def test_the_waveform_ring_returns_to_where_it_started(alc):
+    waves = alc.waveforms(tone_hz=1500, call="K1ABC", gap=False)
     name = "tone"
     seen = [name]
-    for _ in range(len(alc.WAVEFORMS) - 1):
-        name = alc.cycle_waveform(name)
+    for _ in range(len(waves) - 1):
+        name = alc.cycle_waveform(name, waves)
         seen.append(name)
     assert sorted(seen) == sorted(alc.WAVEFORMS)
-    assert alc.cycle_waveform(name) == "tone"
+    assert alc.cycle_waveform(name, waves) == "tone"
 
 
 # -- the search ---------------------------------------------------------------

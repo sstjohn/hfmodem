@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # Root configuration for the monorepo. Not a distribution — the three wheels are
 # built from packages/{hfmodem,hfhost,creance}.
 #
@@ -11,6 +13,7 @@ testpaths = ["packages", "tools/consolelib/test_operator.py", "tools/consolelib/
              "tools/logbook_view/test_vara_timing.py"]
 norecursedirs = ["working", "perf", ".venv", "*.egg-info", "build"]
 markers = [
+    "wall_clock: real wall-budget admission test; run at nice 0 in the serial priority slice",
     "realtime: depends on the machine keeping up -- a rendezvous between spawned processes, a wall-clock deadline, an elapsed time asserted on; deselect with -m 'not realtime' on a busy machine",
     "slow: end-to-end tests that run the threaded modem in real time, and the\n     publication gate that runs the whole suite again inside the distribution;\n     exclude with -m 'not slow', which works where --deselect silently does not",
     "corpus: needs the off-air recording corpus (HFMODEM_CORPUS)",

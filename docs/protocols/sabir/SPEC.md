@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # SPEC.md — the sabir protocol
 
 **Status: experimental, unpublished.** This specification defines the waveform,

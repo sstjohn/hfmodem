@@ -1,0 +1,23 @@
+{
+  "raw_offer": "<SF:01 Welcome To KQ4QWHs BBS Gateway.txt.VarAC_gzip|1232|52809BA0CBC6068F3E8977F8D47D7DCC>",
+  "offer_capture": "/Users/saul/src/radio/hfmodem/operator-data/working/vara-chat/vmail/file-captures/bbs-capture-dmvj5oqh",
+  "link_generation": 3,
+  "peer": "KQ4QWH",
+  "dial_hz": 14105750,
+  "chunks": [
+    "1649 <SFB>H4sIAAAAAAAEAK1WTVPbSBC9U8V/6M1hCVXC2AYC2VPMV+EKziaY4N29ja22NUGacWZGuMSv39czMhiSPWxVXGWDpO6e16+7X2vC5cxWTLeWPn45/DK52vF0p9z",
+    "gjM7K2gd221vbW+PAD0wFO87k8m9bU6FwZ2aN4VngnIKlqnnp2CG6LcTGlhQKbRakprYOpF6akfZ4rALpQL5Qjj3ha2s3w39TDitmAwPG1zGTNj4oI8/sPN72DaJUNEyIXG0MjsLZY0t6T",
+    "g2geja5nFopXQpQj3ytYbKG+lUWgzie6aVmE2imDC317F7g1EscMpfEri7bc1JgiSqGMXJpZ6rMSMVDci3wAl2p6odQBmHgPwySMkhfWg/m7PwP4XSPWlrueu863c7JOhNxUzTRJreP1OvR57Noe",
+    "3m7d9zr0tthSwf1dpPl8RFuX1xeTWhV6FkhR/ngrFmA6Qn7kAmapbMPOgeHF8JJlqjJaDBMaZyejjvbW/T0uXT8ncazgvO6ZNqjfndE/cP9458j6bdIrqzTj9YEVdJJt6JzLoOia2uXP0F2oX",
+    "yg3+nT3XD8KwDe2KCCkJfzEiVqaUS35jpoazz1uqOMekfyc4yfA7k87I7WCb1/3xtsZHTQZnSuVYUY9NdBt/tpQB/gN/8lfI5oPD6lcW0yuq0ZP0Wd0ViFTafXHzhdjmhk4TPhPENQHeG",
+    "/PaudQyeXjTRvqQ3v0uD26OTk5OsdDYfDjbwOd9so/5nd/2iXvXbcn6dalSvV4M8DrNUUmUrPpKlDrftdGaZDdIaai0Mfx/6DOwNEzGsnNZPJzFWD2XZSUH6Sg15XqifFk9oh2GGXKkYUn8XpD",
+    "roC2nd4gM7ryHi18oABABLtC5GsQjowqQdUAUlWNnA8tPYs8pIGUhu6USXrRQGSVcMBYqjLklPyUYLAuK1Tn0HAlI9JjuJzKMdKhwL8Lp2ulGtobmd1tLgYnf05GokiJJ2CqxwGuZEg0XslWgJ",
+    "wCw3wEpGCazLIlcIAiZiK7nI0HeKcslzXCrcaCHa5TNo6FDHaJAI8ONFtRRDz23qKwhUKYl4mtBLCQpdROetgNrcuZmp41bJil+xUsO4ZfsQKMIA0sw+oKMBa6F9GucPQC8zUOeKyU5GxIbJi",
+    "CQDbAyUR5L/GggKJFdoSJX3kHJ6ntWQj++Q+RlmgHsL7VOriKO6R3yTRzyUKwTRnxJnL5gCuOugScWIqEco+x6WwQHOhV1+WwrfKARXn9eqISnwtZ6dbKs+xrHzKX+g3nJahNhgE",
+    "lOHN/v7kuv+RbvbfSG1Tt0y/YWmSjCa1vPol9gWoCHgAgYp8r0+KcR1HH7GNJ8daft1IB0NIc40h+yGXdQ/FZYUqiJWPN2TbpnpbhJDhecFWLqsyo28Y6NclTF0l0XONJlq/MuSWvdkJ",
+    "UjQ9b8R+VbBoS0SGatbL0qo8FnKArBKUmOBUlvCD5lXbbRDrIPt4yriSyY+leJISa56yfk44lv38sg0ryT07AC5Ut4YAxPC+bRvsZbXWrCxRm+b6aTghanEgUR74NDTVC9DyxOaakEgj",
+    "CHGvOmNjNKMLUEe5gWlno01LjrNzb+xKXlukHJwywBxr72tJKLSvaB8aVVjbwSuERDg+8O0b2vZWev4velMHeNQJAAA="
+  ],
+  "expected_size": 2516,
+  "expected_sha256": "44c36a9969d42021d608be4eee4b61db5ef7c9c8762e07405728d41ce45497b1"
+}

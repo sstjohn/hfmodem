@@ -14,7 +14,7 @@ import pytest
 
 from hfmodem.shrike import onair, p4chirp, p4chirprx
 from hfmodem.shrike.p4receiver import Clock, Expect, P4Receiver
-from hfmodem.shrike.p4turn import P4Turn
+from hfmodem.shrike.p4turn import P4Turn, Proposal, State
 from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.tests.shrike import p4_chirp_deadline_support as support
 from hfmodem.tests.shrike.test_p4turn import ack_frame
@@ -37,11 +37,28 @@ def recorded(monkeypatch):
     original_tx = support.Tx
     streams = []
     refusal_clock = []
+    machines = []
+    transmitters = []
+    observations = []
+
+    def snapshot(stage, proposal, due=None):
+        # The seed is preloaded, not a decision/physical key in this replay.
+        events = transmitters[0].p4_probe.link_events
+        decision = next(i for i in range(len(events)-1, -1, -1)
+                        if events[i]['event'] == 'Decision')
+        stream = streams[0]
+        row = dict(stage=stage, decision=decision, proposal=proposal,
+                   facts=vars(proposal).copy(),
+                   due=proposal.stream_sample if due is None else due,
+                   now=stream.sample_now(), notice=stream.key_notice)
+        observations.append(row)
+        return row
 
     class ChargedTx(original_tx):
         def __init__(self, stream):
             super().__init__(stream)
             streams.append(stream)
+            transmitters.append(self)
             self.p4_link_host.deliver = deliver.append
             rx = self.sessrx.p4
             receivers.append(rx)
@@ -62,17 +79,46 @@ def recorded(monkeypatch):
 
             rx.read_chirp = timed
 
+        def _tx(self, audio, what):
+            row = snapshot('physical', machines[0]._next,
+                           self.raster.boundary(self.slot))
+            result = super()._tx(audio, what)
+            row['start'] = self.tx_audio_start
+            return result
+
     seed = P4Turn.seed_opening
 
     def waiting(machine, *args, **kwargs):
         result = seed(machine, *args, **kwargs)
         machine.allow_breakin = False
+        machines.append(machine)
         return result
 
     acquire = p4chirprx.acquire_header
     refuse = P4Turn.refused
+    can_key = P4Turn.can_key
+    keyable_slot = onair._keyable_slot
+
+    def eligible(machine, proposal):
+        row = snapshot('eligible', proposal)
+        held = machine._held_answer
+        row['held'] = None if held is None else dict(
+            answer=vars(held.answer).copy(), generation=held.generation)
+        row['epoch'] = machine._receive_epoch
+        row['generation'] = machine._peer_generation
+        row['allowed'] = can_key(machine, proposal)
+        return row['allowed']
+
+    def admission(live, raster, slot, lead_n, *, listen=True, shift=None):
+        row = snapshot('admission', machines[0]._next, raster.boundary(slot))
+        row.update(slot=slot, lead=lead_n, listen=listen, shift=shift)
+        row['returned'] = keyable_slot(live, raster, slot, lead_n,
+                                       listen=listen, shift=shift)
+        return row['returned']
+
     def timed_refusal(machine,reason):
         proposal=machine._next
+        snapshot('refusal', proposal)['reason'] = reason
         if proposal is not None and not proposal.current_slot_accepted:
             stream=streams[0]
             now=stream.sample_now()
@@ -95,10 +141,13 @@ def recorded(monkeypatch):
         patch.setattr(support, 'Tx', ChargedTx)
         patch.setattr(P4Turn, 'seed_opening', waiting)
         patch.setattr(P4Turn, 'refused', timed_refusal)
+        patch.setattr(P4Turn, 'can_key', eligible)
+        patch.setattr(onair, '_keyable_slot', admission)
         patch.setattr(p4chirprx, 'acquire_header', tracked_header)
         result = support.replay('onair-1003-1110', measured_work=True)
     result['headers'] = headers
     result['neutral_refusal_clock'] = refusal_clock
+    result['arming_observations'] = observations
     return result, calls, deliver
 
 
@@ -145,25 +194,240 @@ def assert_charged_chirp_receive(result, calls, delivered, neutral):
                and abs(row['onset_sample']-2148862) < 100 for row in result['heard'])
 
 
+def assert_proposal_admission(result, neutral, refused):
+    """Join ordered decisions to real eligibility, admission and physical seams."""
+    decisions = []
+    for index, event in enumerate(result['events']):
+        if event['event'] == 'Decision':
+            decisions.append((index, event, []))
+        elif event['event'] in ('Keyed', 'Refused'):
+            assert decisions, event
+            decisions[-1][2].append(event)
+    observations = iter(result['arming_observations'])
+    pending = next(observations, None)
+    neutral_outcomes, neutral_refusals, clocks, physical_starts = [], [], [], []
+    for index, decision, outcomes in decisions:
+        rows = []
+        while pending is not None and pending['decision'] == index:
+            rows.append(pending)
+            pending = next(observations, None)
+        if decision['proposed_at'] is None:
+            assert not rows and not outcomes, (decision, rows, outcomes)
+            continue
+        assert rows and len(outcomes) == 1, (decision, rows, outcomes)
+        first = rows[0]
+        proposal, facts = first['proposal'], first['facts']
+        due = decision['proposed_at']
+        assert facts['stream_sample'] == due
+        assert first['stage'] == 'eligible', rows
+        assert all(row['proposal'] is proposal and row['facts'] == facts
+                   and row['due'] == due for row in rows), rows
+        gates = [row for row in rows if row['stage'] == 'eligible']
+        assert all(row['allowed'] is True for row in gates), gates
+        admissions = [row for row in rows if row['stage'] == 'admission']
+        assert len(admissions) == 1, rows
+        admission = admissions[0]
+        assert (admission['slot'], admission['lead'], admission['listen'],
+                admission['shift']) == (0, 0, False, False)
+        margin = due-admission['notice']-admission['now']
+        assert (admission['returned'] == 0) == (margin >= 0), admission
+        outcome, = outcomes
+        assert outcome['at'] == due and outcome['kind'] == facts['kind'], outcome
+        is_neutral = not facts['current_slot_accepted']
+        if is_neutral:
+            assert (facts['kind'], facts['state'], facts['payload'],
+                    facts['purpose']) == ('word', 'IRS_ANSWER', b'', None)
+            held = first['held']
+            valid = (held is not None
+                     and held['answer']['receive_epoch'] == first['epoch']
+                     and held['generation'] == first['generation'])
+            expected = held['answer'] if valid else vars(Proposal(
+                facts['kind'], due, word='V27', state=State.IRS_ANSWER))
+            # Only placement and acceptance change when copying the held answer.
+            assert {k: v for k, v in facts.items() if k not in (
+                'stream_sample', 'current_slot', 'current_slot_accepted')} == {
+                k: v for k, v in expected.items() if k not in (
+                    'stream_sample', 'current_slot', 'current_slot_accepted')}
+        record = dict(at=due, **{k: facts[k] for k in (
+            'word', 'purpose', 'kind', 'state')})
+        if margin >= 0:
+            assert [row['stage'] for row in rows] == [
+                'eligible', 'admission', 'eligible', 'physical'], rows
+            assert len(gates) == 2 and outcome['event'] == 'Keyed', outcome
+            physical = rows[-1]
+            assert due-physical['notice']-physical['now'] >= 0, physical
+            assert physical['start'] == due
+            physical_starts.append(due)
+            for name in ('word', 'purpose', 'accepted_target', 'current_slot',
+                         'current_slot_accepted'):
+                assert outcome[name] == facts[name], outcome
+            identity = facts['ack_identity']
+            assert outcome['ack_identity'] == (
+                (identity[0], identity[1].hex()) if identity is not None else None)
+            if is_neutral:
+                assert outcome['state'] == facts['state']
+                neutral_outcomes.append(record)
+        else:
+            assert [row['stage'] for row in rows] == [
+                'eligible', 'admission', 'refusal'], rows
+            assert len(gates) == 1 and is_neutral, rows
+            assert outcome['event'] == 'Refused' and outcome['reason'] == 'deadline'
+            assert outcome['state'] == facts['state']
+            refusal = rows[-1]
+            assert refusal['reason'] == 'deadline'
+            refusal_margin = due-refusal['notice']-refusal['now']
+            assert refusal_margin < 0, refusal
+            record = dict(record, reason='deadline')
+            neutral_refusals.append(record)
+            clocks.append(dict(record, now_sample=refusal['now'],
+                               key_notice=refusal['notice'],
+                               margin_samples=refusal_margin))
+    assert pending is None, pending
+    assert neutral_outcomes == neutral
+    assert neutral_refusals == refused
+    assert clocks == result['neutral_refusal_clock']
+    # The first emission is the explicitly preloaded opening seed.
+    assert [row['audio_start'] for row in result['emissions'][1:]] == physical_starts
+    assert all(row['proposed_at'] == row['keyed_at'] == row['audio_start']
+               for row in result['emissions'][1:])
+
+
+def assert_word_waveforms(result, waves, pin):
+    words = {row['at'] for row in result['events']
+             if row['event'] == 'Keyed' and row.get('word') == 'X27'}
+    assert words == {row['at'] for row in waves}
+    assert [row['at'] for row in waves] == [
+        row['start'] for row in result['arming_observations']
+        if row['stage'] == 'physical']
+    assert all({k: row[k] for k in ('samples', 'dtype', 'sha256')} == pin
+               for row in waves)
+
+
 def test_none_body_driver_receives_chirps_with_charged_work(monkeypatch):
     refused=[]
     with neutral_keys(refused=refused) as neutral, waveform_keys() as waves:
         result, calls, delivered = recorded(monkeypatch)
     pins = json.loads((Path(__file__).with_name('fixtures')/
                        'nak-stack1003e-controls.json').read_text())['onair-1003-1110']
-    assert neutral == pins['neutral']
-    assert refused == [dict(at=751084,word='X27',purpose=None,
-                            kind='word',state='IRS_ANSWER',reason='deadline')]
-    assert result['neutral_refusal_clock'] == [{**refused[0],'now_sample':749980,
-                                              'key_notice':1796,'margin_samples':-692}]
+    assert_proposal_admission(result, neutral, refused)
     assert_charged_chirp_receive(result, calls, delivered, neutral)
     # Both real ACKs and neutral requests key the frozen X27 waveform; only
     # whether the keyed slot was accepted distinguishes the two, never the word's name.
-    words = {row['at'] for row in result['events']
-             if row['event'] == 'Keyed' and row.get('word') == 'X27'}
-    assert words == {row['at'] for row in waves}
-    assert all({k:row[k] for k in ('samples', 'dtype', 'sha256')}
-               == pins['word_waveform'] for row in waves)
+    assert_word_waveforms(result, waves, pins['word_waveform'])
+
+
+def arming_example():
+    """One equality-boundary held key and one late default-word refusal."""
+    keyed = Proposal('word', 100, word='X27', state=State.IRS_ANSWER,
+                     receive_epoch=3, source_root=('body', 40),
+                     accepted_target=40, current_slot=90,
+                     ack_identity=(0, b'field'), current_slot_accepted=False)
+    late = Proposal('word', 200, word='V27', state=State.IRS_ANSWER,
+                    current_slot=190, current_slot_accepted=False)
+    held = replace(keyed, stream_sample=50, current_slot=40,
+                   current_slot_accepted=True)
+    first = dict(decision=0, proposal=keyed, facts=vars(keyed).copy(),
+                 due=100, now=90, notice=10)
+    second = dict(decision=2, proposal=late, facts=vars(late).copy(),
+                  due=200, now=191, notice=10)
+    source = dict(held=dict(answer=vars(held).copy(), generation=4),
+                  epoch=3, generation=4)
+    neutral = [dict(at=100, word='X27', purpose=None, kind='word', state='IRS_ANSWER')]
+    refused = [dict(at=200, word='V27', purpose=None, kind='word',
+                    state='IRS_ANSWER', reason='deadline')]
+    result = dict(
+        events=[dict(event='Decision', proposed_at=100),
+                dict(event='Keyed', **neutral[0], accepted_target=40,
+                     current_slot=90, current_slot_accepted=False,
+                     ack_identity=(0, b'field'.hex())),
+                dict(event='Decision', proposed_at=200),
+                dict(event='Refused', at=200, kind='word', state='IRS_ANSWER',
+                     reason='deadline')],
+        arming_observations=[
+            dict(first, stage='eligible', allowed=True, **source),
+            dict(first, stage='admission', slot=0, lead=0, listen=False,
+                 shift=False, returned=0),
+            dict(first, stage='eligible', allowed=True, **source),
+            dict(first, stage='physical', start=100),
+            dict(second, stage='eligible', allowed=True, held=None,
+                 epoch=3, generation=4),
+            dict(second, stage='admission', slot=0, lead=0, listen=False,
+                 shift=False, returned=1),
+            dict(second, stage='refusal', reason='deadline')],
+        neutral_refusal_clock=[dict(refused[0], now_sample=191, key_notice=10,
+                                    margin_samples=-1)],
+        emissions=[dict(audio_start=0),
+                   dict(audio_start=100, proposed_at=100, keyed_at=100)])
+    return result, neutral, refused
+
+
+def test_proposal_admission_accepts_on_time_and_late_examples():
+    assert_proposal_admission(*arming_example())
+
+
+@pytest.mark.parametrize('fault', [
+    'late key', 'lost on-time key', 'unexplained refusal', 'duplicate outcome',
+    'missing outcome', 'ineligible', 'wrong held source', 'ordinary refusal',
+])
+def test_proposal_admission_rejects_broken_contract(fault):
+    result, neutral, refused = arming_example()
+    rows = result['arming_observations']
+    if fault == 'late key':
+        rows[3]['now'] = 91
+    elif fault == 'lost on-time key':
+        rows.pop(3)
+        rows.pop(2)
+        rows.insert(2, dict(rows[0], stage='refusal', reason='deadline'))
+        result['events'][1] = dict(event='Refused', at=100, kind='word',
+                                   state='IRS_ANSWER', reason='deadline')
+        result['emissions'].pop()
+    elif fault == 'unexplained refusal':
+        result['events'][-1]['reason'] = 'admission'
+        rows[-1]['reason'] = 'admission'
+    elif fault == 'duplicate outcome':
+        result['events'].append(dict(result['events'][-1]))
+    elif fault == 'missing outcome':
+        result['events'].pop()
+    elif fault == 'ineligible':
+        rows[2]['allowed'] = False
+    elif fault == 'wrong held source':
+        rows[0]['held']['answer']['source_root'] = ('body', 41)
+    else:
+        for row in rows[4:]:
+            row['facts']['current_slot_accepted'] = True
+    with pytest.raises(AssertionError):
+        assert_proposal_admission(result, neutral, refused)
+
+
+def test_neutral_history_mutation_is_rejected(monkeypatch):
+    from hfmodem.tests.shrike.test_p4turn import machine
+
+    turn, _ = machine()
+    turn.state = State.IRS_ANSWER
+    turn._next = Proposal('word', 100, word='V27', state=State.IRS_ANSWER,
+                          current_slot_accepted=False)
+    keyed = P4Turn.keyed
+
+    def mutate_history(self, *args, **kwargs):
+        sent = keyed(self, *args, **kwargs)
+        self.ack_word = 'mutated history'
+        return sent
+
+    monkeypatch.setattr(P4Turn, 'keyed', mutate_history)
+    with neutral_keys(), pytest.raises(AssertionError):
+        turn.keyed(100)
+
+
+def test_word_waveform_digest_mutation_is_rejected():
+    result, _, _ = arming_example()
+    pin = json.loads((Path(__file__).with_name('fixtures')/
+                      'nak-stack1003e-controls.json').read_text())[
+                          'onair-1003-1110']['word_waveform']
+    waves = [dict(at=100, **pin)]
+    assert_word_waveforms(result, waves, pin)
+    waves[0]['sha256'] = '0'*64
+    with pytest.raises(AssertionError):
+        assert_word_waveforms(result, waves, pin)
 
 
 def test_charged_chirp_without_neutral_requests_keeps_original_receive(monkeypatch):

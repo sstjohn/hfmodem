@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """One bounded offline replay worker for the local logbook."""
 from collections import deque
 from pathlib import Path

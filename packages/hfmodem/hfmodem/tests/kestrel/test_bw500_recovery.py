@@ -164,11 +164,13 @@ def test_the_responder_idle_draws_session_over_nak_at_the_stock_lead():
     _stream(hs, io, np.concatenate([quiet, idle, np.zeros(MK.FS)]))
     assert len(io.sent) == 1
     assert _is(io.sent[0], NAK, "K5FIT")
-    # The idle's last sample is known to the recogniser's alignment plateau,
-    # ~1400 samples, and the keying to the poll: 0.234 s here against the stock
-    # caller's 0.242, and the stock's two arms agree to 0.05 s.
+    # The stock caller's 0.242 s is on the air. Keyed at that lead on the
+    # stream, ours reached stock 0.40-0.45 s behind its idle and drew nothing
+    # (bench 1, Pat at 0.6, 2026-10-21); the stream lead now leaves the rest to
+    # our transmit path  [see VA._ANSWER_HELD_S]. The idle's last sample
+    # is known to the recogniser's alignment plateau, ~1400 samples.
     lead = (io.keyed_at[0] - (len(quiet) + len(idle))) / MK.FS
-    assert -0.03 <= lead - VA._OVER_NAK_LEAD_S <= 0.03 + POLL / MK.FS, lead
+    assert -0.03 <= lead - VA._ANSWER_HELD_S <= 0.03 + POLL / MK.FS, lead
     assert hs._owed_recovery and hs._owed_block
     assert hs._answer_owed == VA._OWED_OVER
     assert hs._reacks == 1
@@ -267,8 +269,10 @@ def test_no_rung_goes_out_behind_an_over_that_will_not_decode():
     for n in range(1, VA._REACK_MAX + 1):
         hs.on_rx_audio(cue)
         assert len(io.sent) == n + 1 and hs._reacks == n
+    # Behind an over already read stock's caller keys the 16-symbol 61/541
+    # (stock pairs tk, tb-tf); 60/1117 there drew only idles on bench 1.
     for burst in io.sent[1:]:
-        assert _is(burst, NAK, "KC9GHZ")
+        assert _is(burst, VF.for_bw(VF.SESSION_OVER_NAK_SHORT, "500"), "KC9GHZ")
         assert not any(_is(burst, VF.for_bw(k, "500"), "KC9GHZ") for k in
                        (VF.SESSION_OVER_RESPONSE, VF.SESSION_OVER_RESPONSE_SHORT))
         assert len(burst) != len(acked) or not (burst == acked).all()

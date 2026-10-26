@@ -64,7 +64,7 @@ from hfmodem.core.audio import WARM_S, play_drained
 from hfmodem.core.occupied import FILTER_HZ
 from hfmodem.core.ptt import LineKeyer
 from hfmodem.core.regulatory import Control, Emission, NotPermitted, Profile
-from hfmodem.core.rigs import RIGS
+from hfmodem.core.rigs import RIGS, mode_passband
 from hfmodem.sabir.phy.rate import FS
 
 #: hamlib's "NET rigctl": a rigctld client. On a shared station the serial port
@@ -143,15 +143,35 @@ class Rig:
         if self.rigctld:
             return [exe, "-m", str(NET_MODEL), "-r", self.rigctld]
         return [exe, "-m", str(self.model), "-r", self.serial,
-                "-s", str(self.baud)]
+                "-s", str(self.baud), "-P", "NONE"]
 
     def _run(self, *args: str) -> tuple[int, str]:
+        """One rigctl invocation. Direct CAT goes under the launch admission, and
+        a refused admission answers as a command that failed; the daemon's
+        netrigctl opens no device."""
+        from hfmodem.core.claim import ClaimError
+        from hfmodem.core.native import spawn_native
+
+        argv = self._base() + list(args)
+        if self.rigctld:
+            try:
+                p = subprocess.run(argv, capture_output=True, text=True,
+                                   timeout=_CAT_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                return 124, ""
+            return p.returncode, (p.stdout or "").strip()
         try:
-            p = subprocess.run(self._base() + list(args), capture_output=True,
-                               text=True, timeout=_CAT_TIMEOUT_S)
+            child = spawn_native(argv, claim_fd=9)
+        except ClaimError as exc:
+            self._log(f"  CAT refused: {exc}")
+            return 1, ""
+        try:
+            out, _ = child._process.communicate(timeout=_CAT_TIMEOUT_S)
         except subprocess.TimeoutExpired:
+            child._process.kill()
+            child._process.communicate()
             return 124, ""
-        return p.returncode, (p.stdout or "").strip()
+        return child._process.returncode, out.decode(errors="replace").strip()
 
     def identify(self) -> str:
         """The model name hamlib reports, or ``"?"``.
@@ -199,6 +219,7 @@ class Rig:
         return self.dial_hz
 
     def set_mode(self, passband: int = FILTER_HZ) -> None:
+        passband = mode_passband(RIGS[self.radio], passband)
         self._run("M", self.mode, str(int(passband)))
 
     # -- the key -----------------------------------------------------------

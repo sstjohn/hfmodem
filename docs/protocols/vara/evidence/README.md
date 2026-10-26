@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # VARA HF speed levels: bench evidence
 
 This is a measurement record of the source and recordings examined for that

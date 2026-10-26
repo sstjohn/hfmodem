@@ -3,7 +3,7 @@
 
 """CLI: run the kestrel host-side VARA-protocol server.
 
-Point a real client at it (VarAC / Pat / Winlink Express) or this project's own
+Point a real client at it (Pat / Winlink Express) or this project's own
 VARA host-API client. With the default loopback modem, a client can connect, transfer
 data (echoed back), and disconnect -- no radio required.
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """FTDX10 tune readback and raw receive-filter CAT."""
 from __future__ import annotations
 
@@ -12,39 +14,92 @@ ROOF_SET = {12000: '1', 3000: '2', 500: '4', 300: '5'}
 
 
 def filter_commands(profile=None):
+    """The roofing, width and (where the profile names one) IF shift setters. Roofing
+    goes first: the rig puts the width back to 3000 when the roofing filter changes.
+    IS is written in the form the rig answers `IS0;` with, `IS00+0500;`."""
     profile = RIGS['ftdx10'] if profile is None else profile
     width, roof = profile['rx_width_hz'], profile['roofing_hz']
     index = next(i for i, hz in DATA_WIDTHS.items() if hz == width)
-    return f'SH00{index:02d};', f'RF0{ROOF_SET[roof]};'
+    commands = f'RF0{ROOF_SET[roof]};', f'SH00{index:02d};'
+    if 'if_shift_hz' in profile:
+        commands += f'IS00{profile["if_shift_hz"]:+05d};',
+    return commands
+
+
+def rigctld(*commands):
+    """Commands as one rigctld connection in its extended framing, closed by `q`."""
+    return ''.join(f'+\\{command}\n' for command in commands) + 'q\n'
+
+
+def session_batch(dial):
+    """`tune`'s setters on one connection: VFO-A, the dial and its readback, DATA-U, AGC
+    off, IPO, then the filters. The dial goes first, since on another band the band stack
+    brings back that band's own mode and filters; the filters belong to the mode."""
+    return rigctld('set_vfo VFOA', f'send_cmd FA{dial:09d};', 'send_cmd FA;', 'send_cmd MD0C;',
+                   'set_level AGC 0', 'get_level AGC', 'set_level PREAMP 0', 'get_level PREAMP',
+                   *(f'send_cmd {command}' for command in filter_commands()), 'get_vfo')
+
+
+#: Asked on a connection of its own once the setters have settled.
+READBACK = rigctld(*(f'send_cmd {query}' for query in ('MD0;', 'SH0;', 'RF0;', 'IS0;')))
+#: `AC P1 P2 P3;`, P3 0 off, 1 on, 2 tuning: the ATU's match memory is not on the CAT.
+TUNER = rigctld('send_cmd AC;')
+
+
+def tuner(reply):
+    """True on, False off, None unread."""
+    state = answer(r'\bAC00([0-2]);', reply)
+    return None if state is None else state != '0'
+
+
+def answer(pattern, reply):
+    """The one answer to a query, never the setter's own echo on its header line."""
+    found = re.findall(pattern, '\n'.join(line for line in reply.splitlines()
+                                         if not line.startswith('send_cmd:')))
+    return found[0] if len(found) == 1 else None
 
 
 def read_filters(reply):
-    reply = '\n'.join(line for line in reply.splitlines()
-                      if not line.startswith('send_cmd:'))
-    width = re.findall(r'\bSH00(\d{2});', reply)
-    roof = re.findall(r'\bRF0([0-9A]);', reply)
-    return (DATA_WIDTHS.get(int(width[0])) if len(width) == 1 else None,
-            ROOFS.get(roof[0]) if len(roof) == 1 else None)
+    width, roof = answer(r'\bSH00(\d{2});', reply), answer(r'\bRF0([0-9A]);', reply)
+    return (None if width is None else DATA_WIDTHS.get(int(width)),
+            None if roof is None else ROOFS.get(roof))
 
 
-def tune_report(reply, rc=0, daemon=False):
-    error = re.search(r'error =[^\n]*|RPRT -\d+', reply)
-    failed = error.group() if error else (f'exit {rc}' if rc else None)
-    if daemon and reply.splitlines().count('RPRT 0') != 4:
-        failed = failed or 'incomplete rigctld reply'
-    for label, reading, expected in zip(('width', 'roofing filter'), read_filters(reply),
-            (RIGS['ftdx10']['rx_width_hz'], RIGS['ftdx10']['roofing_hz'])):
+def read_shift(reply):
+    shift = answer(r'\bIS00([+-]\d{4});', reply)
+    return None if shift is None else int(shift)
+
+
+def readback_report(reply, rc=0, daemon=False, say=print):
+    """The rig's own answers to `MD0; SH0; RF0; IS0;`, asked once the setters have settled."""
+    profile = RIGS['ftdx10']
+    verified = True
+    for label, query, read, expected in (
+            ('mode', 'MD0;', lambda part: answer(r'\bMD0([0-9A-F]);', part), 'C'),
+            ('width', 'SH0;', lambda part: read_filters(part)[0], profile['rx_width_hz']),
+            ('roofing filter', 'RF0;', lambda part: read_filters(part)[1], profile['roofing_hz']),
+            ('IF shift', 'IS0;', read_shift, profile['if_shift_hz'])):
+        part = daemon_part(reply, f'send_cmd: {query}') if daemon else reply
+        failed, reading = reply_failure(part, rc, daemon, count=1), read(part)
+        verified = verified and not failed and reading == expected
+        shown = f'{reading:+d} Hz' if label == 'IF shift' and reading is not None else reading
         if failed or reading is None:
-            print(f'  !! {label} unverified ({failed or "missing or unknown CAT reply"})')
+            say(f'  !! {label} unverified ({failed or "missing or unknown CAT reply"})')
         elif reading == expected:
-            print(f'  {label} {expected} verified')
+            say('  DATA-U verified' if label == 'mode' else f'  {label} {shown} verified')
+        elif label == 'mode':
+            say(f'  !! mode reads {reading} (not DATA-U)')
         else:
-            print(f'  !! {label} reads {reading}')
+            say(f'  !! {label} reads {shown}')
+
+    return bool(verified)
 
 
 def daemon_part(reply, *headers):
+    """The answers under these headers, each ending at its own RPRT line: the `RPRT 0`
+    that answers the closing `q` has no header, and would otherwise join the last block."""
     blocks = re.split(r'(?m)^(?=(?:set_vfo|get_vfo|send_cmd|set_level|get_level):)', reply)
-    return '\n'.join(block for block in blocks
+    return '\n'.join(re.sub(r'(?ms)^(RPRT -?\d+)$.*', r'\1', block) for block in blocks
                      if block.splitlines() and block.splitlines()[0] in headers)
 
 
@@ -54,10 +109,9 @@ def session_parts(reply, daemon=False):
             return daemon_part(reply, *headers)
         return dict(
             dial=part(*(f'send_cmd: {line}' for line in re.findall(r'(?m)^send_cmd: (FA[^\n]*)', reply))),
-            selection=part('set_vfo: VFOA', 'get_vfo:', 'send_cmd: MD0C;', 'send_cmd: MD0;'),
+            vfo=part('set_vfo: VFOA', 'get_vfo:'),
             AGC=part('set_level: AGC 0', 'get_level: AGC'),
-            PREAMP=part('set_level: PREAMP 0', 'get_level: PREAMP'),
-            filters=part(*(f'send_cmd: {line}' for line in re.findall(r'(?m)^send_cmd: ((?:SH|RF)[^\n]*)', reply))))
+            PREAMP=part('set_level: PREAMP 0', 'get_level: PREAMP'))
     lines = reply.splitlines()
     dial_at = next((i for i, line in enumerate(lines) if re.fullmatch(r'\d{5,}', line)), len(lines))
     rest = lines[dial_at + 1:]
@@ -67,13 +121,12 @@ def session_parts(reply, daemon=False):
     level_at = level_end[1] + 1 if len(level_end) >= 2 else raw_at
     levels = rest[:level_at]
     first = next((i + 1 for i, line in enumerate(levels) if re.fullmatch(r'-?\d+', line)), len(levels))
-    selection_at = next((i for i in range(level_at, len(rest))
-                         if re.search(r'\bMD\d|^(?:VFO|Main|Sub|MEM)', rest[i])), len(rest))
+    vfo_at = next((i for i in range(level_at, len(rest))
+                   if re.search(r'^(?:VFO|Main|Sub|MEM)', rest[i])), len(rest))
     return dict(dial='\n'.join(lines[dial_at:dial_at + 1]),
-                selection='\n'.join([line for line in lines[:dial_at] if 'error =' in line]
-                                     + rest[selection_at:]),
-                AGC='\n'.join(levels[:first]), PREAMP='\n'.join(levels[first:]),
-                filters='\n'.join(rest[level_at:selection_at]))
+                vfo='\n'.join([line for line in lines[:dial_at] if 'error =' in line]
+                              + rest[vfo_at:]),
+                AGC='\n'.join(levels[:first]), PREAMP='\n'.join(levels[first:]))
 
 
 def reply_failure(reply, rc=0, daemon=False, count=2):
@@ -97,51 +150,40 @@ def session_frequency(reply, rc=0, daemon=False):
     return part
 
 
-def selection_report(reply, rc=0, daemon=False):
-    data = '\n'.join(line for line in reply.splitlines()
-                     if not line.startswith(('send_cmd:', 'set_vfo:')))
-    vfos = re.findall(r'(?m)^(?:VFO: )?(VFO[A-Z]+|Main|Sub|MEM)$', data)
-    modes = re.findall(r'\bMD0([0-9A-F]);', data)
-    if daemon:
-        vfos = re.findall(r'(?m)^VFO: (VFO[A-Z]+|Main|Sub|MEM)$', daemon_part(reply, 'get_vfo:'))
-        modes = re.findall(r'\bMD0([0-9A-F]);', '\n'.join(
-            line for line in daemon_part(reply, 'send_cmd: MD0;').splitlines()
-            if not line.startswith('send_cmd:')))
-    for label, readings, expected, accepted in (
-            ('VFO', vfos, 'A', ('VFOA', 'Main')),
-            ('mode', modes, 'DATA-U', ('C',))):
-        part = reply
-        if daemon:
-            headers = (('set_vfo: VFOA', 'get_vfo:') if label == 'VFO'
-                       else ('send_cmd: MD0C;', 'send_cmd: MD0;'))
-            part = daemon_part(reply, *headers)
-        failed = reply_failure(part, rc, daemon)
-        verified = 'VFO-A' if label == 'VFO' else 'DATA-U'
-        if failed or len(readings) != 1:
-            print(f'  !! {label} unverified ({failed or "missing or unknown CAT reply"})')
-        elif readings[0] in accepted:
-            print(f'  {verified} verified')
-        else:
-            print(f'  !! {label} reads {readings[0]} (not {expected})')
+def vfo_report(reply, rc=0, daemon=False, say=print):
+    pattern = r'(?m)^VFO: (VFO[A-Z]+|Main|Sub|MEM)$' if daemon else (
+        r'(?m)^(?:VFO: )?(VFO[A-Z]+|Main|Sub|MEM)$')
+    vfos = re.findall(pattern, daemon_part(reply, 'get_vfo:') if daemon else reply)
+    failed = reply_failure(reply, rc, daemon)
+    if failed or len(vfos) != 1:
+        say(f'  !! VFO unverified ({failed or "missing or unknown CAT reply"})')
+    elif vfos[0] in ('VFOA', 'Main'):
+        say('  VFO-A verified')
+    else:
+        say(f'  !! VFO reads {vfos[0]} (not A)')
+
+    return not failed and len(vfos) == 1 and vfos[0] in ('VFOA', 'Main')
 
 
-def session_report(reply, rc=0, daemon=False):
+def session_report(reply, rc=0, daemon=False, say=print):
     parts = session_parts(reply, daemon)
-    selection_report(parts['selection'], rc, daemon)
-    for level, verified in (('AGC', 'AGC off'), ('PREAMP', 'IPO')):
+    verified = vfo_report(parts['vfo'], rc, daemon, say)
+    for level, description in (('AGC', 'AGC off'), ('PREAMP', 'IPO')):
         part = parts[level]
         failed = reply_failure(part, rc, daemon)
         values = re.findall(r'(?m)^(-?\d+)$', part)
+        verified = verified and not failed and values == ['0']
         if failed or len(values) != 1:
             failed = failed or f'no {level} reading (exit {rc})'
             label = 'AGC' if level == 'AGC' else 'IPO'
-            print(f'  !! {label} unverified (rigctl: {failed})')
+            say(f'  !! {label} unverified (rigctl: {failed})')
         elif values[0] == '0':
-            print(f'  {verified} verified')
+            say(f'  {description} verified')
         else:
             expected = 'off' if level == 'AGC' else 'IPO'
-            print(f'  !! {level} reads {values[0]} (not {expected})')
-    tune_report(parts['filters'], rc, daemon)
+            say(f'  !! {level} reads {values[0]} (not {expected})')
+
+    return bool(verified)
 
 
 def normal(reply):
@@ -153,9 +195,13 @@ def normal(reply):
 if __name__ == '__main__':
     if sys.argv[1] == 'commands':
         print(' '.join(filter_commands()))
+    elif sys.argv[1] == 'batch':
+        sys.stdout.write(session_batch(int(sys.argv[2])))
+    elif sys.argv[1] == 'readback-batch':
+        sys.stdout.write(READBACK)
     elif sys.argv[1] == 'dial':
         print(session_frequency(normal(sys.stdin.read()), int(sys.argv[2]), bool(int(sys.argv[3]))))
     elif sys.argv[1] == 'session-report':
         session_report(normal(sys.stdin.read()), int(sys.argv[2]), bool(int(sys.argv[3])))
-    else:
-        tune_report(normal(sys.stdin.read()), int(sys.argv[2]), bool(int(sys.argv[3])))
+    elif sys.argv[1] == 'readback':
+        readback_report(normal(sys.stdin.read()), int(sys.argv[2]), bool(int(sys.argv[3])))

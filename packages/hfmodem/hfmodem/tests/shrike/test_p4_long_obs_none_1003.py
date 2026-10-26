@@ -3,6 +3,7 @@
 
 import json
 from contextlib import redirect_stdout
+from itertools import count
 from os import devnull
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -10,7 +11,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from hfmodem.shrike import p4host, p4long, p4oracle, p4robustrx, p4rx, p4short, session
+from hfmodem.shrike import p4host, p4long, p4oracle, p4robustrx, p4rx, p4short, p4turn, session
 from hfmodem.shrike.p4receiver import Clock, Expect, P4Receiver
 from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.tests.shrike.p4_chirp_deadline_support import FS, replay
@@ -123,6 +124,8 @@ def test_refinement_skips_a_missing_observation(monkeypatch, kind, missing_key):
 
 
 def test_1112_replay_deduplicates_c2_and_requests_queued_turn(monkeypatch):
+    # A different reader may already have allocated many ownership nonces.
+    monkeypatch.setattr(p4turn, '_peer_watch_generations', count(1000))
     arm = 'onair-1003-1112'
     require_input(CAPTURES/arm/'stream.flac')
     probe = json.loads((CAPTURES/arm/'p4-probe.json').read_text())
@@ -135,6 +138,21 @@ def test_1112_replay_deduplicates_c2_and_requests_queued_turn(monkeypatch):
         return work
 
     accepted = []
+    recovery = []
+    observe = p4turn.P4Turn.observe
+
+    def observed(self, reg, **kwargs):
+        watch = self.peer_watch
+        result = observe(self, reg, **kwargs)
+        obs = reg.observation
+        if obs.stream_sample == 1608445 and obs.frame is not None and not obs.provisional:
+            held = self._held_answer
+            recovery.append(dict(reg=reg, watch=watch, now=kwargs['now'], state=self.state,
+                last=self.last, held=held, deferred=self._deferred, next=self._next,
+                inflight=self.outbox.inflight, credit=self.outbox.arq.tx_acked_bytes))
+        return result
+
+    monkeypatch.setattr(p4turn.P4Turn, 'observe', observed)
     accept = p4host.P4Host.accept
 
     def tracked(self, frame, **kwargs):
@@ -150,13 +168,13 @@ def test_1112_replay_deduplicates_c2_and_requests_queued_turn(monkeypatch):
 
     assert max(e.get('cycle_end_sample', 0) for e in result['events']) > round(36.8*FS)
     c2 = [e for e in result['heard'] if e.get('status') == 2 and not e['provisional']]
-    assert len(c2) >= 2
-    assert [e['onset_sample'] for e in c2] == [1068446, 1248445]
+    assert len(c2) == 3
+    assert [e['onset_sample'] for e in c2] == [1068446, 1248445, 1608445]
     assert len({e['data'] for e in c2}) == 1
+    assert len(accepted) == 3
     assert accepted[0] == (True, False)
     assert all(row == (False, True) for row in accepted[1:])
-    # The approved link-layer repeat rule now requests at c2's answer slot.
-    # It avoids the later live crash boundary; that boundary is pinned below.
+    # Recovery is received after the third real request has already keyed.
     keys = [e for e in result['events'] if e['event'] == 'Keyed']
     first_answer, = [e for e in keys if e['at'] == 1231646]
     assert first_answer['word'] == 'X27' and first_answer['state'] == 'IRS_ANSWER'
@@ -165,8 +183,36 @@ def test_1112_replay_deduplicates_c2_and_requests_queued_turn(monkeypatch):
     assert first_decision['now_sample'] <= first_decision['decision_at']
     assert first_decision['proposed_at'] == 1231646
     requests = [e for e in keys if e.get('state') == 'IRS_BREAKIN']
-    assert requests and abs(requests[0]['at']-1411645) < 10
-    assert all(e.get('kind') == 'body' and not e.get('payload') for e in requests)
+    assert [e['at'] for e in requests] == [1411645, 1591645, 1771645]
+    assert all(e.get('kind') == 'word' and e.get('word') == 'Y27'
+               and not e.get('payload') for e in requests)
+    for emission, protected in zip(
+            [e for e in result['emissions'] if e.get('word') == 'Y27'],
+            [1428445, 1608445, 1788445]):
+        assert emission['audio_end'] < protected
+    snapshot, = recovery
+    reg = snapshot['reg']
+    assert reg.outcome == p4turn.Registered.CONFIRMED
+    # Generation numbers are process-wide nonces, not this replay's ordinal.
+    # The recovering observation must belong to the watch live when it arrived.
+    assert snapshot['watch'] is not None
+    assert reg.peer_watch_generation == snapshot['watch'].generation
+    assert reg.responds_to is None
+    assert reg.replaced.kind == p4turn.Kind.SHORT and reg.replaced.provisional
+    assert reg.replaced.stream_sample == 1609723
+    assert snapshot['now'] == 1786044 and snapshot['last'].stream_sample == 1771645
+    assert snapshot['last'].word == 'Y27' and snapshot['state'] == p4turn.State.IRS_ANSWER
+    held = snapshot['held']
+    assert held.onset == 1608445 and held.context['accepted']
+    assert held.context['body'] is reg.observation
+    assert held.answer.ack_identity == (2, reg.observation.frame.data)
+    assert snapshot['deferred'][0] == 1608445
+    assert snapshot['deferred'][1]['due'] == 1951645
+    assert snapshot['deferred'][1]['body'] is reg.observation
+    assert not snapshot['inflight'] and snapshot['credit'] == 0
+    assert not [e for e in keys if e['at'] == 1951645]
+    assert c2[-1]['received_at_sample'] == 1786044
+    assert c2[-1]['capture_end_sample'] == 1783354
     assert all(not e.get('payload') for e in keys)
     assert result['buffered'] == len(bytes.fromhex(result['source']))
     assert not [e for e in result['events'] if e['event'] == 'Refused']

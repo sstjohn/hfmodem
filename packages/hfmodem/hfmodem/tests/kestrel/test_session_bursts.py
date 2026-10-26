@@ -8,10 +8,12 @@ not OFDM data frames. Tone sequences below were demodulated from live Wine VARA
 BW2300 sessions at 2048-sample symbol resolution, five independent called callsigns;
 each predictor reproduces its capture exactly from the callsign alone.
 """
+import numpy as np
 import pytest
 
 from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_frames as VF
+from hfmodem.kestrel.vara import vara_mfsk as MK
 
 # call -> {burst kind name: observed tone sequence}  [live VARA capture, 2026-07-24]
 _CAPTURED = {
@@ -63,10 +65,13 @@ class _IO(VA.VaraIO):
     def __init__(self, peer_inbox):
         self.peer_inbox = peer_inbox
         self.sent = []
+        self.tx_bursts = []
 
     def key(self, on): pass
 
-    def tx(self, samples): self.peer_inbox.append(samples)
+    def tx(self, samples):
+        self.tx_bursts.append(samples)
+        self.peer_inbox.append(samples)
 
     def pending(self): pass
 
@@ -109,7 +114,8 @@ def test_initiator_keys_the_session_confirm_after_connected():
 def test_responder_answers_the_session_confirm():
     init, resp, io_i, io_r = _handshake()
     assert any("rx session-confirm" in m for m in io_r.sent), io_r.sent
-    assert any("tx connect-response" in m for m in io_r.sent)
+    want = MK.synth_tone_pairs(VF.control_bursts(resp.caller, resp.bw, 0)[1])
+    np.testing.assert_allclose(io_r.tx_bursts[-1], want)
 
 
 def test_the_keepalive_is_answered_never_originated_and_always_b():

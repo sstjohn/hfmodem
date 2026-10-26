@@ -4,7 +4,7 @@
 """Launch two kestrel host-API servers sharing one AudioChannel.
 
 Each server runs a real :class:`KestrelModem` (ARQ FSM + proven VARA HF 500 burst
-codec). Point any VARA host-API client (Pat, VarAC, or the test client) at
+codec). Point any VARA host-API client (Pat, or the test client) at
 each port pair; a CONNECT on side A establishes an over-the-air ARQ session to
 side B, and data written to A's data port arrives on B's — every frame a real
 synthesised burst decoded by the frozen receiver.

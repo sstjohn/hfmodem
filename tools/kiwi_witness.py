@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Record one whole on-air exchange from a third-party receiver, unwindowed.
 
 Everything this project has measured about its own transmissions has come from
@@ -457,7 +459,8 @@ from hfmodem.core import config
 def main(argv: list[str] | None = None, client=None) -> int:
     global PLACE_S
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dial", type=float, required=True, help="dial kHz (centre - 1.5)")
+    ap.add_argument("--dial", type=float, required=True, help="receiver dial in kHz")
+    ap.add_argument("--mode", choices=('usb', 'lsb'), default='usb', help='receiver sideband (default USB)')
     ap.add_argument("--seconds", type=float, default=180.0)
     ap.add_argument("--out", required=True)
     from hfmodem.core import capture_producer
@@ -474,7 +477,7 @@ def main(argv: list[str] | None = None, client=None) -> int:
                                      "geometry: hostname, host:port, or the "
                                      "number in front of a proxy name.")
     ap.add_argument("--passband", nargs=2, type=int, metavar=("LOW", "HIGH"),
-                    help="explicit USB audio passband in Hz; omitted uses client defaults")
+                    help="positive audio passband in Hz for either sideband; omitted uses client defaults")
     ap.add_argument("--agc-gain", type=int,
                     help="explicit fixed receiver gain with AGC off; omitted uses client defaults")
     ap.add_argument("--place-seconds", type=float, default=PLACE_S,
@@ -569,6 +572,8 @@ def main(argv: list[str] | None = None, client=None) -> int:
 
         walked = time.time()
         receiver_options = {}
+        if args.mode != 'usb':
+            receiver_options['mode'] = args.mode
         if args.passband is not None:
             receiver_options["passband"] = tuple(args.passband)
         if args.agc_gain is not None:
@@ -616,7 +621,7 @@ def main(argv: list[str] | None = None, client=None) -> int:
                 """
             peak = float(np.abs(x).max()) or 1.0
             placed_blind = math.isnan(got.mi_us)
-            facts = {'utc_start': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t0)), 'dial_khz': args.dial, 'centre_khz': args.dial + 1.5, 'receiver': url, 'requested_settings': receiver_options, 'client_source': client_source, 'seconds': len(x) / fs, 'sample_rate': fs, 'peak': peak, 'peak_dbfs': 20 * math.log10(max(peak, 1e-12)), 'rms': float(x.std()), 'normalised_to': 0.9, 'complete': complete, 'peer': label, 'peer_miles': got.mi_peer, 'station_miles': None if placed_blind else got.mi_us, 'midpoint_miles': got.mi_mid, 'path_miles': apart or None, 'off_path_miles': None if got.mi_peer is None or placed_blind else off_path(got, apart), 'hears_us': None if placed_blind else args.near <= got.mi_us <= args.far, 'resolves_peer': None if got.mi_peer is None or placed_blind else got.mi_peer <= got.mi_us}
+            facts = {'utc_start': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t0)), 'dial_khz': args.dial, 'mode': args.mode, 'centre_khz': args.dial + (1.5 if args.mode == 'usb' else -1.5), 'receiver': url, 'requested_settings': receiver_options, 'client_source': client_source, 'seconds': len(x) / fs, 'sample_rate': fs, 'peak': peak, 'peak_dbfs': 20 * math.log10(max(peak, 1e-12)), 'rms': float(x.std()), 'normalised_to': 0.9, 'complete': complete, 'peer': label, 'peer_miles': got.mi_peer, 'station_miles': None if placed_blind else got.mi_us, 'midpoint_miles': got.mi_mid, 'path_miles': apart or None, 'off_path_miles': None if got.mi_peer is None or placed_blind else off_path(got, apart), 'hears_us': None if placed_blind else args.near <= got.mi_us <= args.far, 'resolves_peer': None if got.mi_peer is None or placed_blind else got.mi_peer <= got.mi_us}
             if ownership is None:
                 side.write_text(json.dumps(facts, indent=2) + '\n')
             else:

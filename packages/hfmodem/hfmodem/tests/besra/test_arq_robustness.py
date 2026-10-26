@@ -722,14 +722,16 @@ class _Obs(ModemObserver):
 def test_verbs_safe_before_start_and_after_stop():
     m = BesraModem(bandwidth=500)
     m.set_mycall("W9SSJ")
-    m.connect("K7ABC")           # pre-start: _session is None
+    with pytest.raises(ValueError, match="session is not running"):
+        m.connect("K7ABC")       # pre-start: no silent connect acceptance
     m.transmit(b"x")
     m.disconnect()
     m.abort()
 
     m.start(_Obs())
     m.stop()                     # nulls _session
-    m.connect("K7ABC")           # post-stop
+    with pytest.raises(ValueError, match="session is not running"):
+        m.connect("K7ABC")       # post-stop
     m.transmit(b"x")
     m.disconnect()
     m.abort()

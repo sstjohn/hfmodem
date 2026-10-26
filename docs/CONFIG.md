@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # The station file
 
 For initial FTDX10 or FT-891 setup, run `hfmodem winlink`; it starts the guided
@@ -73,8 +75,44 @@ to every enabled protocol.
 **Host ports.** Listeners bind to loopback by default and accept each
 protocol's normal opening directly. An HTTP request line closes the
 connection before its body can reach the modem. See
-[host connections](protocols/bateleur/HOST-API.md#host-connections).
+[host connections](implementation/bateleur/HOST-API.md#host-connections).
 `tx_drive` must be between zero and one, inclusive.
+
+The station's VARA and ARDOP hosts use their real modem owners and the same
+receive stream and transmit arbiter as the other enabled protocols. A
+receive-only station refuses their transmission requests. Their standalone
+host-server defaults still provide loopback for protocol development.
+
+PACTOR with `host = "ptc"` mounts the native session driver on a POSIX PTY.
+`pty` optionally names an exclusively created symlink; an existing path is
+preserved and startup fails. Each sequential attachment gets a fresh PTY under
+that name. Without `pty`, the endpoint is reported under a private temporary
+directory. This initial station profile requires the transmit arbiter, CW
+identification, Normal calls, MYLevel 1 or 3 and PTT settle plus 10 ms fitting
+the native 90 ms call-answer turnaround. Longer TXDelay and Robust/longpath
+outgoing selections refuse. MODE defaults to 2 and MAXError to 70, from the SCS
+manual. Full stock SCS compatibility remains unqualified.
+`options.drive_reference_mv` optionally sets the positive calibration reference
+(default 3000 mVpp). Unconfirmed wire bytes and exact original host bytes are
+retained separately under the reported runtime recovery root; sixteen retained
+contact directories stop further calls rather than discard recovery evidence.
+PTC CW identification, scanner holds, terminal controls and delivery recovery
+are implemented. This is not a qualified unattended station profile.
+See [host compatibility](HOST-COMPATIBILITY.md) for client checks and limits.
+
+Robust Packet also accepts `host = "tracker"` on a POSIX PTY and
+`host = "agwpe"` on a TCP `port`. These hosts provide connected AX.25 sessions.
+The KISS host leaves link control to its client.
+
+Managed hosts are `vara-managed`, `ardop-managed`, `ptc-managed` and
+`tracker-managed`. Each uses a `port` and an `auth_token_file` containing a
+32-byte hex secret. Supervised Windows adapters attach to these hosts.
+Legacy command/data pairs require an exclusively supervised endpoint; shared
+localhost ports cannot identify racing applications.
+
+VARA's optional `kiss_port` enables its KISS beacon and UI broadcast interface.
+The live VARA host defaults to TEXT compression; legacy `COMPRESSION ON`
+selects TEXT. OFF and FILES remain available.
 
 **`[protocols.selcall]`** takes one four-digit address and/or one six-digit
 address, with `dots_s` between 0.2 and 20 seconds. `acknowledge` and
@@ -96,7 +134,7 @@ protected lane warns at startup for configured amateur band-plan frequencies
 and at each transmit attempt on one of those frequencies. These are limits
 of the operator's chosen profile.
 Directory lookup, DTM/DBM reception and protected reception support
-monitoring as well as operation; see [ALE.md](protocols/bateleur/ALE.md).
+monitoring as well as operation; see [ALE.md](implementation/bateleur/ALE.md).
 `sound_s` must be zero or at least 60 seconds; `activity_s` must be finite
 and nonnegative. The `hflink` preset supplies those intervals and rejects
 explicit `sound_s` or `activity_s` entries, including entries equal to defaults. `base` and `pilot_channels` require `hflink`.
@@ -129,15 +167,9 @@ measure antenna gain.
 
 ## What the loader cannot check
 
-`rig.ptt.port` equal to the CAT port is **not** refused. There is nothing to compare
-it against: rigctld holds the CAT device and does not say which one, so the guard
-that used to sit here was testing every port against an empty string. It read as
-protection and was not.
-
-Two owners of one serial port is still a mistake, and it is caught by being said out
-loud instead. `hfmodem rig --preflight` prints the line it is about to key and by
-what method — `RTS on /dev/cu.usbserial-XXXXB1` — and the arm gate refuses a daemon
-that owns PTT itself. Read that line; it is the check.
+Use separate CAT and PTT endpoints. Configuration alone does not prove the
+wiring. `hfmodem rig station.toml --arm` checks the selected keying line;
+this briefly transmits. A rigctld backend must leave PTT disabled.
 
 ## A station on a recording
 

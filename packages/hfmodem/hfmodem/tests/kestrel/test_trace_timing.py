@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from hfmodem.tests import fakeclaim
+
 from . import corpora
 
 
@@ -224,6 +226,7 @@ def test_ready_occupancy_decision_shares_first_key_clock(transport, monkeypatch,
 @pytest.mark.parametrize("trace", [False, True])
 def test_cli_routes_timing_flag_without_opening_devices(monkeypatch, trace):
     kc = corpora.harness("kestrel_connect")
+    fakeclaim.install(monkeypatch)
     options = []
     stopped = []
 

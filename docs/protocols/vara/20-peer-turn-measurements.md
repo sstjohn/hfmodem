@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # What the caller keys during the peer's turn — measurements, 2026-09-16
 
 The figures the peer's-turn code is written against. Cited from `vara_arq` by path

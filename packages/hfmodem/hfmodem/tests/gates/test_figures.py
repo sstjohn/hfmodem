@@ -7,7 +7,7 @@ Five generated pages in `docs/viz/` — the cross-protocol comparison and one de
 each of PACTOR-III, VARA HF, ARDOP and sabir — state measurements.
 An off-air constellation, two received spectra, four rate ladders, a transmit
 kernel, a carrier raster, a speed-level table: a figure that states a measurement
-is a claim. `docs/viz/build.py --check` regenerates each page's generated block
+is a claim. `docs/viz/tools/build.py --check` regenerates each page's generated block
 from the shipped recordings and the constants the modems import, and reports drift
 rather than repairing it. Running it here is what stops a page ageing quietly while
 the code moves underneath it.
@@ -43,7 +43,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[5]
-BUILD = REPO / "docs/viz/build.py"
+BUILD = REPO / "docs/viz/tools/build.py"
 PAGES = sorted((REPO / "docs/viz").glob("*.html"))
 # These original guides promise repository-only navigation. The three newer
 # experimental guides also cite external primary standards; their figures still
@@ -74,7 +74,7 @@ def test_the_figures_match_the_tree_they_were_drawn_from():
     assert done.returncode == 0, (
         f"{done.stdout}{done.stderr}"
         "\na page no longer matches what the tree produces; "
-        "run `python docs/viz/build.py` and read the diff before committing it")
+        "run `python docs/viz/tools/build.py` and read the diff before committing it")
 
 
 def test_comparison_constellations_preserve_recorded_decisions():

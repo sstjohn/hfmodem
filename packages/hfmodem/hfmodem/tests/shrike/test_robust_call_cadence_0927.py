@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """A robust caller keys every cycle while the P4 reader is armed for the link.
 
 onair-0927-1749 (WS8EOC) and -1755 (VE3KPG) called with `--connect robust` and

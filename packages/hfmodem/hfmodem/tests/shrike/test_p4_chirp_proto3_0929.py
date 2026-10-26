@@ -46,7 +46,7 @@ def test_stock_n9vc_protocol3_chirp_draws_x27():
 
 
 @pytest.mark.parametrize('status,kind,word', [(0x00, Kind.WORD, 'V27'), (0x21, Kind.WORD, 'V27'),
-                                              (0x41, Kind.BODY, None)])
+                                              (0x41, Kind.WORD, 'X27')])
 def test_other_chirp_protocols_keep_their_answers(status, kind, word):
     data = b'[BPQ-6.0.25.1-B2FWIHJM'
     frame = p4frame.decode_field(p4frame.encode_field(data, p4frame.Status.from_byte(status)),

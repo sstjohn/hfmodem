@@ -668,7 +668,9 @@ def binary_mail():
     keeps for itself, so the escape has to survive a five-byte field."""
     body = np.random.default_rng(7).integers(0, 256, 1200,
                                              dtype=np.uint8).tobytes()
-    return compose("WS8EOC", "W9SSJ", "binary body", body, mid="BINARYBODY1")
+    # The timestamp is part of the compressed specimen, just like its seed.
+    return compose("WS8EOC", "W9SSJ", "binary body", body, mid="BINARYBODY1",
+                   date=datetime(2026, 9, 10, 18, 32, tzinfo=timezone.utc))
 
 
 def test_a_compressed_body_crosses_the_link_byte_exact_in_five_byte_fields():

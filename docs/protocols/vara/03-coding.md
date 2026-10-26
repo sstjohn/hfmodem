@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # 03 — Coding layer (scrambler / interleaver / FEC / CRC)
 
 Two coding regimes exist and must not be conflated:

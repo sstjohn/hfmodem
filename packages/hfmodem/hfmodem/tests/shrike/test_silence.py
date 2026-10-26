@@ -233,8 +233,9 @@ def the_held_link_keeps_talking() -> None:
     # stop dead at the callsign announcement: `--message` was queued only on the
     # connect-send-disconnect path, and a `--hold` session runs a different loop.
     check("--message reaches a --hold session and is acknowledged",
-          host.sent_total >= ANNOUNCE + len(MESSAGE),
-          f"{host.sent_total}B confirmed, of {ANNOUNCE + len(MESSAGE)}B owed")
+          host.sent_total == len(MESSAGE)
+          and host.wire_sent_total >= ANNOUNCE + len(MESSAGE),
+          f"{host.sent_total}B host payload and {host.wire_sent_total}B wire confirmed")
     # ONE PACKET PER HELD CYCLE. The message is three packets' worth at 100 Bd, so
     # most of the hold is spent with an empty buffer -- which is exactly the state
     # that used to key nothing at all.

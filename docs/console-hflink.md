@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # ALE and selcall with the console
 
 For installation and guided radio setup, start with the [operator guide](CONSOLE.md).
@@ -112,7 +114,7 @@ For a peer supporting ALE data messages, `dtm ADDRESS text` and
 split text into protocol blocks and acknowledge/retry them. Incoming text
 prints as `DTM` or `DBM`; `DTM SENT`/`DBM SENT` report completed ARQ. These
 paths remain self-tested, with external-radio interoperability limits described
-in [ALE](protocols/bateleur/ALE.md). Both ends need matching support; AMD is
+in [ALE](implementation/bateleur/ALE.md). Both ends need matching support; AMD is
 the first practical HFLINK messaging test.
 
 `OK` means the modem accepted the command. `TX complete` means the burst

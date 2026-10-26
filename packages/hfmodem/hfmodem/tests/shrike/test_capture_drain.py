@@ -172,7 +172,7 @@ def test_the_drain_never_precedes_the_unkey() -> None:
     hundred milliseconds of writing is fine after the transmitter is dropped and
     is not fine before it."""
     import inspect
-    src = inspect.getsource(onair.run)
+    src = inspect.getsource(onair._drive_session)
     assert src.index("rig.stop()") < src.index("_drain_captures("), (
         "the capture drain sits between the session ending and the rig being "
         "unkeyed -- nothing may delay dropping the transmitter")

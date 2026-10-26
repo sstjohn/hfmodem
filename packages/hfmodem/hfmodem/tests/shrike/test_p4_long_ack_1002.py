@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Opt-in robust LONG ACK selection on accepted, keyed source packets."""
 
 from dataclasses import replace

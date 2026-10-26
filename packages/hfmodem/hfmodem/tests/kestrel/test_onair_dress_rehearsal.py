@@ -18,6 +18,10 @@ it — against two stand-ins:
     ``PYTHONPATH``, which gives the session a channel whose contents the test picks —
     band noise, a steady carrier, a real off-air recording, or a listening kestrel
     standing in for the gateway.
+  * :class:`~hfmodem.tests.kestrel.fake_line_keyer.FakeLine` in place of
+    ``core.ptt.RtsPtt`` in every child, installed by a ``sitecustomize`` on the
+    same path: the keying line both processes open, as one file of timestamped
+    edges, so the real ``LineKeyer`` ladder runs and only the ioctl is faked.
 
 The far end is a real :class:`~hfmodem.kestrel.vara.vara_arq.VaraStationHandshake`, so a
 connect completes here only when the tool synthesises a real connect-request, the
@@ -40,9 +44,8 @@ What the exit codes mean, and where each is pinned:
     6  the rig has been retired           an unkey never confirmed — not a
                                           per-target condition, so the run stops
 
-Every case asserts where PTT ended up, read off the fake daemon rather than off the
-session's own printout — except the one where the daemon stops answering, which
-cannot be read and where what is asserted instead is that the session says so loudly.
+Every case asserts where PTT ended up, read off the fake line rather than off the
+session's own printout.
 """
 from __future__ import annotations
 
@@ -60,6 +63,8 @@ import pytest
 
 from hfmodem.tests.kestrel import corpora, fake_rigctld
 from hfmodem.tests.kestrel.fake_rigctld import FakeRigctld
+from hfmodem.tests.kestrel.fake_line_keyer import (LINE_ENV, FakeLineKeyer, LineRecord,
+                                                   line_shim, pty_line)
 from hfmodem.tests.kestrel.test_station_id import _decode
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
@@ -77,22 +82,9 @@ pytestmark = pytest.mark.skipif(not (_FAKE_AUDIO / "sounddevice.py").exists(),
                                 reason="test harness not present (installed-wheel run)")
 
 MYCALL = "W9SSJ"
-#: The keying line every run here names, because an armed session refuses to start
-#: without one: the unkey of last resort — RTS cleared on the line itself, no daemon
-#: in the loop — has nothing to pull down otherwise. The gate stats the path and
-#: never opens it, so /dev/null stands in for the adapter without a port being held.
-#: It is not a line that keys: the ioctl comes back ENOTTY, which is why the deaf
-#: daemon below still ends in TRANSMITTER MAY BE STUCK.
-PTT_LINE = "/dev/null"
-#: A line that moves no pin is also why every run here asks for the daemon. The
-#: session's own default is the opposite — each attempt drives the keying line
-#: and rigctld only tunes, the shape the 2026-08-13 wire records argue for — but
-#: that shape wants a line with a pin on the end of it, and `LineKeyer.arm`
-#: refuses /dev/null before the first burst. What is rehearsed below is the
-#: session; the shape the operator gets is pinned as text by
-#: :func:`test_the_attempt_is_armed_on_the_keying_line`, which is what keeps this
-#: opt-out from quietly becoming the default again.
-DAEMON_PTT = "--no-line-ptt"
+#: An armed session refuses to start without a keying line.
+ptt_line = pytest.fixture(scope="module")(pty_line)
+
 # Two 40 m channels whose emission stays inside the data segment once the 1500 Hz
 # dial offset is applied: 7101.0 -> dial 7099.5, 7103.5 -> dial 7102.0.
 TARGETS = (("W1AAA", 7101.0), ("W1BBB", 7103.5))
@@ -108,9 +100,9 @@ def _csv(tmp_path: Path, *rows) -> Path:
 class Session:
     """One run of ``onair_session.py``, and everything it did on the way."""
 
-    def __init__(self, proc: subprocess.Popen, server: FakeRigctld, events: Path,
-                 record: Path):
-        self.proc, self.server, self._events = proc, server, events
+    def __init__(self, proc: subprocess.Popen, server: FakeRigctld, line: LineRecord,
+                 events: Path, record: Path):
+        self.proc, self.server, self.line, self._events = proc, server, line, events
         self.record = record
         self.out = ""
         self.rc: int | None = None
@@ -152,19 +144,26 @@ def rigctld():
 
 
 @pytest.fixture
-def session(tmp_path):
+def session(tmp_path, ptt_line):
     """Launch the tool. Anything still running when the test ends is stopped, and
-    stopped with the attempt it spawned rather than around it."""
+    stopped with the attempt it spawned rather than around it. Its station claim
+    lives under ``tmp_path``, never the operator's."""
     started: list[Session] = []
 
     def start(server: FakeRigctld, *, audio: dict | None = None, gateways=(),
-              wait: float | None = 240.0, ptt_device: str | None = PTT_LINE,
-              **flags) -> Session:
+              wait: float | None = 240.0, ptt_device: str | None = ...,
+              line: dict | None = None, **flags) -> Session:
+        if ptt_device is ...:
+            ptt_device = ptt_line
         events = tmp_path / "audio-events.jsonl"
         cfg = {"log": str(events), **(audio or {})}
+        rec = LineRecord(tmp_path / "line.jsonl")
+        rec.configure(**(line or {}))
         env = {**os.environ,
-               "PYTHONPATH": os.pathsep.join([str(_FAKE_AUDIO), str(corpora.PKG_ROOT)]),
-               "KESTREL_FAKE_AUDIO": json.dumps(cfg)}
+               "PYTHONPATH": os.pathsep.join(
+                   [str(line_shim(tmp_path)), str(_FAKE_AUDIO), str(corpora.PKG_ROOT)]),
+               "KESTREL_FAKE_AUDIO": json.dumps(cfg), LINE_ENV: str(rec.path),
+               "HFMODEM_COEXIST_HARNESS": "1", "HFMODEM_STATE_DIR": str(tmp_path / "state")}
         # Recording is on by default and writes under `logs/` — which is the point
         # of it, and is not somewhere a test may write, so every run here is pointed
         # at its own tmp_path.
@@ -174,7 +173,6 @@ def session(tmp_path):
                 "--gateways", str(_csv(tmp_path, *gateways)),
                 "--rigctld", f"127.0.0.1:{server.port}",
                 "--device", "fake", "--listen", "5", "--record", str(record),
-                DAEMON_PTT,
                 *(("--ptt-device", ptt_device) if ptt_device else ())]
         for k, v in flags.items():
             argv.append("--" + k.replace("_", "-"))
@@ -182,7 +180,7 @@ def session(tmp_path):
                 argv.append(str(v))
         s = Session(corpora.launch(argv, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, env=env,
-                                   cwd=str(corpora.REPO)), server, events, record)
+                                   cwd=str(corpora.REPO)), server, rec, events, record)
         started.append(s)
         return s.wait(wait) if wait else s
 
@@ -192,8 +190,8 @@ def session(tmp_path):
             corpora.stop_tool(s.proc)
 
 
-def _keyed(server: FakeRigctld) -> int:
-    return server.seen("T 1")
+def _keyed(s: Session) -> int:
+    return len(s.line.raised())
 
 
 def _qsy_targets(cat: list[str]) -> list[int]:
@@ -230,6 +228,7 @@ time.sleep(3600)
 _STANDIN_ATTEMPT = """\
 import signal, sys, time
 signal.signal(signal.SIGTERM, {on_term})
+open({ready!r}, "w").close()
 print("ATTEMPT UP", flush=True)
 time.sleep(3600)
 """
@@ -272,10 +271,16 @@ def test_stopping_a_session_is_bounded_and_reaches_the_attempt(tmp_path, on_term
     """
     tool = tmp_path / "session.py"
     tool.write_text(_STANDIN_SESSION)
+    ready = tmp_path / "attempt.ready"
     proc = corpora.launch([sys.executable, str(tool),
-                           _STANDIN_ATTEMPT.format(on_term=on_term)],
+                           _STANDIN_ATTEMPT.format(on_term=on_term, ready=str(ready))],
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     attempt = _spawned_by(proc.pid)
+    # A child pid exists before its interpreter has installed the handler under test.
+    end = time.monotonic() + 30.0
+    while not ready.exists():
+        assert time.monotonic() < end, "the attempt never installed its SIGTERM handler"
+        time.sleep(0.05)
 
     t0 = time.monotonic()
     out = corpora.stop_tool(proc, grace=2.0)
@@ -297,17 +302,16 @@ def test_the_attempt_is_armed_on_the_keying_line():
     comes back — while the keying line, tried afterwards, read LOW instantly,
     eight of eight. An attempt is the transmission that must work while the
     antenna is radiating, so it drives the line itself and rigctld is left to
-    tune. The default carries that, rather than a flag an operator can forget:
-    a daemon-keyed armed session here is 0-for-N by construction.
+    tune. No flag carries that, so none can be forgotten or turned off: a
+    daemon-keyed armed session here is 0-for-N by construction.
     """
     src = (_TOOLS / "onair_session.py").read_text()
     cmd = src.split('"kestrel_connect.py"')[1].split("]")[0]
     for flag in ("--arm", "--expect-model", "--ptt-device", "--line-ptt"):
         assert flag in cmd, f"the attempt is no longer launched with {flag}"
-    decl = [ln for ln in src.splitlines() if 'add_argument("--line-ptt"' in ln]
-    assert decl and "default=True" in decl[0], (
-        "--line-ptt no longer defaults on, so an armed session keys through the "
-        "daemon whenever a flag is forgotten")
+    assert 'add_argument("--line-ptt"' not in src and "--no-line-ptt" not in src, (
+        "the session offers a switch between the line and the daemon again")
+    assert "line_ptt=True" in src, "the session's own unkey no longer drives the line"
     assert "ptt_type=RTS" not in src and "ptt_pathname" not in src, (
         "the session hands rigctld the keying line as well — two owners of one "
         "transmitter is how it keys unasked")
@@ -323,17 +327,19 @@ def test_the_rehearsal_walks_every_target_without_keying(rigctld, session):
     back, assert the data mode *after every QSY* (a Yaesu restores the mode last used
     on the band it is tuned to, so a mode confirmed on one channel says nothing about
     the next), check PTT is down, and listen before deciding anything.
+
+    PTT is read off the keying line, never asked of rigctld: its Hamlib holds no
+    PTT (``-P NONE``), so ``t`` has nothing to answer with. A dry run holds no
+    line and says so rather than calling the transmitter down.
     """
     server = rigctld()
     s = session(server, dry_run=True)
     assert s.rc == 1, s
 
     assert s.cat == ["\\dump_caps", "M PKTUSB 2400", "m",
-                     "F 7099500", "f", "M PKTUSB 2400", "m", "t",
-                     "F 7102000", "f", "M PKTUSB 2400", "m", "t",
-                     # ... and the transmitter is read back twice on the way out:
-                     # once by the shutdown, once for the line the operator reads.
-                     "t", "t"], s
+                     "F 7099500", "f", "M PKTUSB 2400", "m",
+                     "F 7102000", "f", "M PKTUSB 2400", "m"], s
+    assert s.out.count("PTT UNKNOWN (no line held)") == 2, s
 
     # The dial, not the published channel. Getting this wrong is silent and kills
     # both directions: our bursts above where the gateway listens, its answer under
@@ -349,9 +355,9 @@ def test_the_rehearsal_walks_every_target_without_keying(rigctld, session):
     # transmission out of turn.
     assert s.out.count("would identify: W9SSJ in Morse") == 1
 
-    assert _keyed(server) == 0, "a dry run reached the key line"
+    assert _keyed(s) == 0, "a dry run reached the key line"
     assert not s.events("play"), "a dry run put audio into the transmitter"
-    assert server.ptt == 0
+    assert not s.line.high
 
 
 def test_a_channel_it_cannot_call_over_is_skipped(rigctld, session):
@@ -367,8 +373,8 @@ def test_a_channel_it_cannot_call_over_is_skipped(rigctld, session):
     assert s.rc == 1, s
     assert s.out.count("BUSY, skipping") == 2, s
     assert "RECEIVER" not in s.out, "called a live occupied channel a broken receiver"
-    assert _keyed(server) == 0, "keyed on a channel it had just refused to call"
-    assert server.ptt == 0
+    assert _keyed(s) == 0, "keyed on a channel it had just refused to call"
+    assert not s.line.high
 
 
 def test_a_deaf_receiver_stops_the_session_instead_of_reading_as_a_busy_band(rigctld,
@@ -396,7 +402,7 @@ def test_a_deaf_receiver_stops_the_session_instead_of_reading_as_a_busy_band(rig
     assert "RECEIVER DEAF" in s.out, s
     assert "BUSY, skipping" not in s.out, "still reporting a dead codec as a busy band"
     assert len(_qsy_targets(s.cat)) == 1, "carried on to a target that could not work"
-    assert _keyed(server) == 0 and server.ptt == 0
+    assert _keyed(s) == 0 and not s.line.high
 
 
 def test_a_deaf_receiver_is_not_something_force_can_overrule(rigctld, session):
@@ -409,7 +415,7 @@ def test_a_deaf_receiver_is_not_something_force_can_overrule(rigctld, session):
                 per_target=20, force=True)
     assert s.rc == 5, s
     assert "RECEIVER DEAF" in s.out and "--force does not make a deaf receiver hear" in s.out
-    assert _keyed(server) == 0 and server.ptt == 0
+    assert _keyed(s) == 0 and not s.line.high
 
 
 # -- a gateway that answers, and one that does not ---------------------------------
@@ -464,8 +470,8 @@ def test_a_gateway_that_answers_produces_a_connect(rigctld, session):
     assert s.events("play", pid=s.proc.pid), (
         "no identification was keyed after a cleanly closed session")
 
-    assert _keyed(server) > 0, "a connect that never keyed anything"
-    assert server.ptt == 0, "left the transmitter keyed after a successful connect"
+    assert _keyed(s) > 0, "a connect that never keyed anything"
+    assert not s.line.high, "left the transmitter keyed after a successful connect"
 
 
 def test_a_session_records_everything_it_heard(rigctld, session):
@@ -489,7 +495,7 @@ def test_a_session_records_everything_it_heard(rigctld, session):
     audio = [p for p in kept.values() if p.suffix in (".wav", ".flac")]
     listens = [p for p in audio if p.stem.endswith("-listen")]
     attempts = [p for p in audio if p not in listens]
-    logs = [p for n, p in kept.items() if n.endswith(".log")]
+    logs = [p for n, p in kept.items() if n.endswith(".log") and not n.endswith(".store.log")]
     assert len(listens) == 1, f"the listen window was not kept: {sorted(kept)}"
     assert len(attempts) == 1, f"the attempt's receive audio was not kept: {sorted(kept)}"
     assert len(logs) == 1, f"the attempt's output was not kept: {sorted(kept)}"
@@ -603,7 +609,7 @@ def _transmissions(s: Session) -> list[dict]:
         f"{len(silent)} silent writes reached the transmit device — the warm-up is "
         f"one block, and anything else silent on the card is a burst that lost its "
         f"modulation on the way out")
-    keyed = s.server.stamped("T 1")
+    keyed = s.line.raised()
     for e in silent:
         assert not keyed or e["t"] < keyed[0], (
             f"silence was written {e['t'] - keyed[0]:.3f} s after the transmitter "
@@ -637,8 +643,8 @@ def test_the_key_brackets_the_audio_closely_at_both_edges(rigctld, session):
     identification is where it was — 2.21 s of carrier before the first dit, on every
     call this station sent.
 
-    Read off the transport and the daemon rather than off the tool: every burst
-    either process played, against when the daemon's PTT line actually moved. And the
+    Read off the transport and the line rather than off the tool: every burst
+    either process played, against when the keying line actually moved. And the
     burst itself is untouched — the tail is held, not padded, so nothing at either
     end has to recognise a burst longer than the one it was taught.
     """
@@ -658,7 +664,7 @@ def test_the_key_brackets_the_audio_closely_at_both_edges(rigctld, session):
     assert bursts, "the attempt never played anything"
     assert ident, "the session never identified, so the lead is unproven where it was"
     for e in played:
-        up = server.raised_before(e["t"])
+        up = s.line.raised_before(e["t"])
         assert up is not None, f"audio at {e['t']} went out over an unkeyed transmitter"
         assert e["t"] - up <= _CARRIER_LEAD_S, (
             f"{e['t'] - up:.3f} s of unmodulated carrier before {e['secs']:.2f} s of "
@@ -667,7 +673,7 @@ def test_the_key_brackets_the_audio_closely_at_both_edges(rigctld, session):
 
     for e in played:
         end = e["t"] + e["secs"]
-        down = server.dropped_after(end)
+        down = s.line.dropped_after(end)
         assert down is not None, f"audio ending at {end} left the transmitter keyed"
         assert down - end >= _TAIL_HOLD_MIN_S, (
             f"PTT dropped {down - end:.4f} s past the last sample, less than the "
@@ -709,7 +715,7 @@ def test_the_callsign_the_transmitter_carried_is_the_whole_callsign(rigctld, ses
     ident = [e for e in s.events("play") if e["pid"] == s.proc.pid]
     assert len(ident) == 1, f"the session did not identify exactly once: {ident}"
     e = ident[0]
-    assert server.dropped_after(e["t"] + e["secs"]) is not None, (
+    assert s.line.dropped_after(e["t"] + e["secs"]) is not None, (
         "the identification left the transmitter keyed")
     assert e["secs"] == pytest.approx(e["handed_s"], abs=0.001), (
         f"{e['handed_s'] - e['secs']:.3f} s of the identification never left the "
@@ -721,38 +727,20 @@ def test_the_callsign_the_transmitter_carried_is_the_whole_callsign(rigctld, ses
         f"a part-sent callsign identifies somebody else")
 
 
-def test_an_unkey_the_daemon_swallows_is_retried_and_ends_the_attempt(rigctld,
-                                                                      session):
+def test_an_unkey_the_line_will_not_confirm_ends_the_attempt(session, rigctld):
     """2026-07-28, and the reason the operator stopped the session at the radio.
 
-    rigctld took the third connect-request's ``T 0`` and never answered it. The unkey
-    then spent its whole six-second budget on that one command — three seconds
-    waiting for a reply that never came, three more on the readback — and gave up
-    having asked exactly once. Measured off that session's own receive recording, the
-    FT-891 stayed keyed 7.84 s past the last sample of a 1.75 s burst, against the
-    0.42 s the two bursts before it showed.
-
-    Two things have to be true afterwards. The budget has to buy repeated ``T 0``s
-    rather than one long wait — the write is what drops the transmitter and the read
-    is only evidence — and nothing may go back on the air over a transmitter nobody
-    has confirmed is down. The session then transmitted a fourth connect-request into
-    exactly that.
-
-    ``deaf_after`` is set so the child's key-up is answered and its unkey is not:
-    eight commands carry the parent through its QSY, mode and PTT checks, and three
-    more carry the child through ``\\dump_caps``, ``f`` and ``T 1``.
+    An unkey went unconfirmed and the session transmitted a fourth connect-request
+    over a transmitter nobody had confirmed was down. The daemon that swallowed that
+    ``T 0`` keys nothing now; the line is what keys, and a line that will not read
+    low after its first burst is the same transmitter in the same unknown state.
+    Nothing may go back on the air over it.
     """
-    server = rigctld(deaf_after=11)
+    server = rigctld()
     s = session(server, gateways=(TARGETS[0],), arm=True, expect_model="FT-891",
-                per_target=40, wait=300)
-
-    keyed = server.stamped("T 1")
-    assert keyed, "the attempt never reached the air"
-    tries = [t for t in server.stamped("T 0") if t < keyed[0] + 8.0]
-    assert len(tries) >= 3, (              # four by design; three leaves scheduling slack
-        f"the six-second unkey budget bought {len(tries)} attempt(s) at T 0 — a "
-        f"budget spent waiting on one blocked read is a single try in a retry loop's "
-        f"clothes")
+                per_target=40, wait=300, line={"stick_after": 0})
+    assert s.line.raised(), "the attempt never reached the air"
+    assert s.line.high
 
     assert "MAY BE STUCK" in s.out, (
         "the stuck transmitter was not reported to the operator while it was stuck")
@@ -777,15 +765,14 @@ def test_a_retired_transmitter_stops_the_whole_run_not_just_the_target(rigctld,
                                                                        session):
     """A rig that cannot key does not get better at the next channel.
 
-    Same defect as the test above — rigctld swallows the third connect-request's
-    unkey — but with a second target waiting behind the first. The old behaviour
-    moved on to it, over a transmitter it had already lost, and would have logged
-    it silent too; every target after the first would have compounded the same
-    false verdict.
+    Same defect as the test above — the first unkey never reads low — but with a
+    second target waiting behind the first. The old behaviour moved on to it, over a
+    transmitter it had already lost, and would have logged it silent too; every
+    target after the first would have compounded the same false verdict.
     """
-    server = rigctld(deaf_after=11)
+    server = rigctld()
     s = session(server, gateways=TARGETS, arm=True, expect_model="FT-891",
-                per_target=40, wait=300)
+                per_target=40, wait=300, line={"stick_after": 0})
     assert s.rc == 6, s
     assert "the transmitter has been taken down" in s.out, s
     assert "did not answer" not in s.out, s
@@ -814,8 +801,8 @@ def test_a_channel_that_never_answers_is_an_honest_no_connect(rigctld, session,
     assert "W1AAA did not answer" in s.out, s
     assert "*** CONNECTED" not in s.out, f"claimed a connect ({why}):\n{s}"
     assert "no connect." in s.out
-    assert _keyed(server) > 0, "the attempt never reached the air, so this proves nothing"
-    assert server.ptt == 0
+    assert _keyed(s) > 0, "the attempt never reached the air, so this proves nothing"
+    assert not s.line.high
 
     # The identification schedule: the session transmitted and no link was left open, so the callsign is
     # keyed — once, at the end of the communication, after everything else has stopped.
@@ -872,9 +859,9 @@ def test_the_channel_sense_decides_on_real_receiver_audio(rigctld, session,
                 arm=True, expect_model="FT-891", per_target=12, wait=300)
     assert s.rc == 1, s
     assert ("BUSY, skipping" in s.out) == occupied, s
-    assert (_keyed(server) > 0) == (not occupied), "keyed against its own verdict"
+    assert (_keyed(s) > 0) == (not occupied), "keyed against its own verdict"
     assert "*** CONNECTED" not in s.out, "manufactured a connect out of band noise"
-    assert server.ptt == 0
+    assert not s.line.high
 
 
 def test_force_calls_a_channel_the_sense_reports_busy(rigctld, session):
@@ -895,8 +882,8 @@ def test_force_calls_a_channel_the_sense_reports_busy(rigctld, session):
     assert "--force IS IN EFFECT" in s.out, s
     assert "BUSY, but --force is set — calling anyway" in s.out, s
     assert "BUSY, skipping" not in s.out
-    assert _keyed(server) > 0, "--force is set and it still did not call"
-    assert server.ptt == 0
+    assert _keyed(s) > 0, "--force is set and it still did not call"
+    assert not s.line.high
 
 
 def test_named_targets_are_called_in_the_order_they_are_named(rigctld, session):
@@ -945,7 +932,7 @@ def test_arm_is_refused_when_there_is_no_keying_line_to_unkey_with(rigctld, sess
     assert s.rc == 2, s
     assert "--ptt-device" in s.out, s
     assert server.commands == [], f"talked to the rig anyway: {server.commands}"
-    assert _keyed(server) == 0 and server.ptt == 0
+    assert _keyed(s) == 0 and not s.line.high
 
 
 def test_arm_is_refused_when_the_rig_is_not_the_expected_model(rigctld, session):
@@ -955,7 +942,7 @@ def test_arm_is_refused_when_the_rig_is_not_the_expected_model(rigctld, session)
     s = session(server, arm=True, expect_model="FT-891", wait=60)
     assert s.rc == 2, s
     assert "REFUSING TO ARM" in s.out and "IC-7300" in s.out
-    assert _keyed(server) == 0 and server.ptt == 0
+    assert _keyed(s) == 0 and not s.line.high
 
 
 @pytest.mark.parametrize("kw", [
@@ -971,7 +958,7 @@ def test_arm_is_refused_when_the_mode_is_not_confirmed(rigctld, session, kw):
     s = session(server, arm=True, expect_model="FT-891", wait=60)
     assert s.rc == 2, s
     assert "REFUSING TO ARM" in s.out and "mode not confirmed" in s.out
-    assert _keyed(server) == 0 and server.ptt == 0
+    assert _keyed(s) == 0 and not s.line.high
 
 
 def test_without_arm_the_key_line_is_never_reached(rigctld, session):
@@ -989,20 +976,24 @@ def test_without_arm_the_key_line_is_never_reached(rigctld, session):
     assert "NOT ARMED" in s.out
     assert s.out.count("(would call here)") == 2
     assert "M PKTUSB 3000" in s.cat and "mode: PKTUSB / 2400 Hz" in s.out, s
-    assert _keyed(server) == 0 and server.ptt == 0
+    assert _keyed(s) == 0 and not s.line.high
 
 
 # -- the ways a session ends -------------------------------------------------------
 
 def test_a_transmitter_already_keyed_stops_the_session(rigctld, session):
-    """PTT up before we have called anything is not a thing to transmit through."""
+    """PTT up before we have called anything is not a thing to transmit through.
+
+    The session's claim proves the line low before anything opens; a line that will
+    not come down refuses the claim, so nothing is tuned and nothing is keyed.
+    """
     server = rigctld()
-    server.ptt = 1
-    s = session(server, arm=True, expect_model="FT-891", per_target=20, wait=120)
-    assert s.rc == 3, s
-    assert "PTT IS UP" in s.out
-    assert server.ptt == 0, "found a keyed transmitter and left it keyed"
-    assert len(_qsy_targets(s.cat)) == 1, "carried on to the next target"
+    s = session(server, arm=True, expect_model="FT-891", per_target=20, wait=120,
+                line={"high": True, "stick_after": 0})
+    assert s.rc == 2, s
+    assert "NOT CONFIRMED: PTT LINE high" in s.out, s
+    assert not s.line.raised(s.proc.pid), "keyed a transmitter it found up"
+    assert server.commands == [], "tuned a rig whose transmitter it found up"
 
 
 def test_an_attempt_that_never_reaches_the_air_stops_with_the_slot_intact(rigctld,
@@ -1020,7 +1011,7 @@ def test_an_attempt_that_never_reaches_the_air_stops_with_the_slot_intact(rigctl
     assert "never reached the air" in s.out, s
     assert len(_qsy_targets(s.cat)) == 1, "burnt a second target on the same defect"
     assert "identifying" not in s.out, "identified for a transmission that never happened"
-    assert server.ptt == 0
+    assert not s.line.high
 
 
 def test_losing_the_input_device_costs_a_target_and_not_the_slot(rigctld, session):
@@ -1035,36 +1026,39 @@ def test_losing_the_input_device_costs_a_target_and_not_the_slot(rigctld, sessio
                 arm=True, expect_model="FT-891", per_target=20, wait=180)
     assert s.rc == 1, s
     assert s.out.count("cannot listen on 'fake'") == 2, s
-    assert _keyed(server) == 0, "called a channel it never listened to"
-    assert server.ptt == 0
+    assert _keyed(s) == 0, "called a channel it never listened to"
+    assert not s.line.high
 
 
 def test_ctrl_c_during_an_attempt_drops_the_transmitter(rigctld, session):
     """An interrupt is an emergency stop, and it stops at the transmitter.
 
     The signal is sent once the attempt is demonstrably on the air — the child's
-    first ``T 1`` — which is the moment a ``finally:`` would not save us.
+    first key-up — which is the moment a ``finally:`` would not save us.
     """
     server = rigctld()
     s = session(server, gateways=(TARGETS[0],),
                 audio={"station": {"call": "W1AAA", "bw": "2300"}},
                 arm=True, expect_model="FT-891", per_target=60, wait=None)
-    assert server.wait_for("T 1", timeout=180), "the attempt never reached the air"
+    assert s.line.wait_for_key(180), "the attempt never reached the air"
     s.proc.send_signal(signal.SIGINT)
     s.wait(60)
 
     assert s.rc == 1, s
     assert "*** interrupted" in s.out, s
     assert "*** CONNECTED" not in s.out
-    assert server.ptt == 0, "interrupted with the transmitter keyed"
+    assert not s.line.high, "interrupted with the transmitter keyed"
 
-    # And nothing of ours is left holding it: no further traffic reaches the daemon.
-    settled = len(server.commands)
+    # And nothing of ours is left holding it: nothing further moves the line or
+    # reaches the daemon.
+    settled, edges = len(server.commands), len(s.line.edges())
     time.sleep(2.0)
     assert len(server.commands) == settled, (
         f"something outlived the session and is still talking to rigctld: "
         f"{server.commands[settled:]}")
-    assert server.ptt == 0
+    assert len(s.line.edges()) == edges, (
+        f"something outlived the session and is still keying: {s.line.edges()[edges:]}")
+    assert not s.line.high
 
 
 def test_a_rigctld_that_stops_answering_is_shouted_about_not_assumed_away(rigctld,
@@ -1073,17 +1067,18 @@ def test_a_rigctld_that_stops_answering_is_shouted_about_not_assumed_away(rigctl
 
     Six commands are answered, which carries the session into the first target's
     mode check, and then nothing is. The session must finish rather than hang, must
-    not talk itself into a verdict it has no evidence for, and must tell the operator
-    in plain words that it can no longer see the transmitter — in the same words the
-    attempt uses, now that both processes drop PTT through the same code.
+    not talk itself into a verdict it has no evidence for, and must say it can no
+    longer read the rig. The daemon keys nothing, so what it can no longer see is
+    dropped on the line that does key, and the line is what reads low.
     """
     server = rigctld(deaf_after=6)
     s = session(server, arm=True, expect_model="FT-891", per_target=20, wait=180)
     assert s.rc == 1, s
-    assert "MAY BE STUCK" in s.out, s
-    assert "PTT down: False" in s.out, "reported a transmitter it cannot see as down"
+    assert "mode reads ''" in s.out and "refused: ''" in s.out, s
+    assert "PTT down: True" in s.out, "the line reads low, and the session must say so"
+    assert not s.line.high
     assert "*** CONNECTED" not in s.out
-    assert _keyed(server) == 0
+    assert _keyed(s) == 0
 
 
 def test_no_targets_is_refused_before_the_rig_is_touched(rigctld, session):
@@ -1099,18 +1094,27 @@ def test_no_targets_is_refused_before_the_rig_is_touched(rigctld, session):
 # -- the child, and the parent that owns the transmitter after it ------------------
 
 @pytest.fixture
-def cat(rigctld):
-    """An armed :class:`onair_session.Cat` against a fake daemon, stood down after."""
+def cat(monkeypatch):
+    """The parent's PTT facade needs no tuning socket to exercise escalation."""
+    monkeypatch.setattr(RIG, "LineKeyer", FakeLineKeyer)
+
+    def no_cat(*args, **kwargs):
+        raise AssertionError("parent escalation reached CAT")
+
+    monkeypatch.setattr(RIG.Rig, "_cmd", no_cat)
     made = []
 
-    def make(server, wait: float = 0.05):
-        c = S.Cat(f"127.0.0.1:{server.port}", wait=wait, armed=True)
+    def make():
+        # Only the real Cat key/unkey methods run here; tuning is tested by the CLI.
+        c = S.Cat.__new__(S.Cat)
+        c.rig = RIG.Rig(None, armed=True, log=print,
+                        line_ptt=True, ptt_device="/dev/fake")
         made.append(c)
         return c
 
     yield make
     for c in made:
-        c.rig.retire()
+        c.rig.shutdown()
 
 
 @pytest.mark.parametrize("body,expect_kill", [
@@ -1121,7 +1125,7 @@ def cat(rigctld):
 ], ids=["hangs", "ignores-sigterm"])
 @pytest.mark.realtime
 def test_an_attempt_that_overruns_is_terminated_and_the_transmitter_dropped(
-        monkeypatch, tmp_path, rigctld, cat, body, expect_kill):
+        monkeypatch, tmp_path, cat, body, expect_kill):
     """``subprocess.run(timeout=)`` would send SIGKILL, the one signal a child cannot
     unkey through: its handlers and its watchdog die with it, and if it was keyed at
     that instant the radio stays keyed. So the child gets SIGTERM and time to unkey
@@ -1133,79 +1137,20 @@ def test_an_attempt_that_overruns_is_terminated_and_the_transmitter_dropped(
     is about the escalation, not about the clock.
     """
     monkeypatch.setattr(S, "_CHILD_GRACE_S", 1.0)
-    server = rigctld()
-    c = cat(server)
+    monkeypatch.setenv("HFMODEM_COEXIST_HARNESS", "1")
+    monkeypatch.setenv("HFMODEM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("RIG_CLAIMED", raising=False)
+    c = cat()
     c.key(True, "standing in for a child mid-over")
-    assert server.ptt == 1
+    line = c.rig._keyer
+    assert line.high
 
     src = tmp_path / "child.py"
-    src.write_text(body)
+    src.write_text('print("CLAIM ADMITTED", flush=True)\n' + body)
     t0 = time.monotonic()
     rc, _out = S.run_attempt([sys.executable, str(src)], 1.0, c)
     assert time.monotonic() - t0 < 15.0, "the parent waited on a child that never ends"
     assert rc == -(signal.SIGKILL if expect_kill else signal.SIGTERM), (
         f"the child ended with {rc}, not the escalation this path promises")
     assert S._child is None
-    assert server.ptt == 0, "the parent left the transmitter up after killing the child"
-
-
-# What a key-up may cost when rigctld will not confirm it — a number the operator can
-# be given, because he is standing in front of a transmitter in an unknown state while
-# it runs. At most `_KEY_BUDGET_S` deciding the key-up has failed, then at most
-# `_UNKEY_BUDGET_S` putting the rig back down in case rigctld keyed the radio and
-# failed only to say so. It used to be bounded by neither: three attempts at a
-# three-second socket timeout, twice over, measured at 15.07 s before anything was
-# said.
-_KEY_GIVE_UP_S = RIG._KEY_BUDGET_S + RIG._UNKEY_BUDGET_S
-
-
-@pytest.mark.parametrize("server_kw", [
-    pytest.param({"refuse": ("T",)}, id="refuses"),
-    pytest.param({"answer": False}, id="says-nothing"),
-])
-def test_a_key_up_that_cannot_be_confirmed_gives_up_fast_and_loudly(rigctld, cat,
-                                                                    capsys, server_kw):
-    """A rig that will not confirm a key-up is not a rig to keep asking.
-
-    Whatever it is doing, nothing is going out — and the answer to that is to say so
-    while the operator is still in front of the radio, not to spend a quarter of a
-    minute finding out. The two ways rigctld declines are both here: an in-band
-    ``RPRT -1``, which is an answer, and silence, which is not. Either way the key-up
-    ends inside a stated bound, reports itself, and puts PTT down on the way past —
-    rigctld may have keyed the radio and failed only to say so.
-    """
-    server = rigctld(**server_kw)
-    c = cat(server)
-    t0 = time.monotonic()
-    assert c.key(True, "station ID") is False, "keyed against a daemon that refused"
-    held = time.monotonic() - t0
-    assert held <= _KEY_GIVE_UP_S + 1.0, (
-        f"a key-up nobody could confirm took {held:.1f} s to give up, past the "
-        f"{_KEY_GIVE_UP_S:.1f} s this path promises")
-    said = capsys.readouterr().out
-    assert "PTT ON NOT CONFIRMED" in said and "NOT TRANSMITTING" in said, said
-    assert server.seen("T 0"), "gave up on a key-up without dropping PTT to be sure"
-    assert server.ptt == 0
-
-
-@pytest.mark.realtime
-def test_a_daemon_that_goes_quiet_while_keyed_is_never_read_as_unkeyed(rigctld, cat,
-                                                                       capsys):
-    """The worst state this program has, in isolation: keyed, and no way to see the rig.
-
-    An empty reply is not a confirmation. The shutdown must finish — an operator is
-    waiting on it — and it must say what it could not do. This is the shape the CLI
-    case above ends in, without the session around it.
-    """
-    server = rigctld()
-    c = cat(server)
-    assert c.key(True, "test") and server.ptt == 1
-    server.answer = False
-
-    t0 = time.monotonic()
-    c.shutdown()
-    assert time.monotonic() - t0 < 20.0, "shutdown never returned"
-    said = capsys.readouterr().out
-    assert "MAY BE STUCK" in said, said
-    assert server.seen("T 0") >= 3, "gave up after one unanswered write"
-    assert c.ptt_state() is None, "an unanswered rig must read unknown, never down"
+    assert not line.high, "the parent left the transmitter up after killing the child"

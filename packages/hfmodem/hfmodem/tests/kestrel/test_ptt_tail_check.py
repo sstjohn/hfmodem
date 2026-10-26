@@ -17,8 +17,8 @@ Three claims, tested three ways:
     numbers, so that a pass on the bench and a pass on the radio are one claim.
   * the safety. The arm gate, a rig that reads back keyed, a rig that is not the one
     named, a receiver too deaf to measure anything, and a Ctrl-C mid-transmission —
-    each against a fake daemon on an ephemeral port. **Nothing here may touch 4533**:
-    there is a real transmitter on the end of it.
+    each against a fake daemon on an ephemeral port that tunes, and a `FakeLine` that
+    keys. **Nothing here may touch 4533**: there is a real transmitter on the end of it.
 """
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ import pytest
 
 from hfmodem.core.ptt import arming_refusal
 from hfmodem.tests.kestrel import corpora, fake_rigctld
+from hfmodem.tests.kestrel.fake_line_keyer import LINE_ENV, LineRecord, line_shim, pty_line
 from hfmodem.tests.kestrel.fake_rigctld import FakeRigctld
 
 T = corpora.harness("ptt_tail_check")
@@ -51,7 +52,6 @@ _TOOL = _TOOLS / "ptt_tail_check.py"
 _INCIDENT = _ROOT / "logs" / "onair" / "20260728T234742Z" / "20260728T234805Z-W9SSJ-K9WRA.wav"
 
 MYCALL = "W9SSJ"
-PTT_LINE = "/dev/null"            # a character device the arm gate accepts, nothing opens
 FS = 48000
 
 
@@ -247,9 +247,20 @@ def rigctld():
     yield from fake_rigctld.serving()
 
 
+ptt_line = pytest.fixture(scope="module")(pty_line)
+
+
 @pytest.fixture
-def run(tmp_path):
-    """The tool as a subprocess, with a fake daemon and a fake codec under it.
+def line(tmp_path):
+    rec = LineRecord(tmp_path / "line.jsonl")
+    rec.configure()
+    return rec
+
+
+@pytest.fixture
+def run(tmp_path, ptt_line, line):
+    """The tool as a subprocess, with a fake daemon, a fake line and a fake codec
+    under it.
 
     The codec substitution is the assumption everything below rests on: without it
     this module would open the station's own sound card, which another modem may be
@@ -262,8 +273,10 @@ def run(tmp_path):
     def go(server: FakeRigctld | None = None, *, audio: dict | None = None,
            wait: float | None = 180.0, **flags):
         env = {**os.environ,
-               "PYTHONPATH": os.pathsep.join([str(_FAKE_AUDIO), str(corpora.PKG_ROOT)]),
-               "KESTREL_FAKE_AUDIO": json.dumps({**(audio or {})})}
+               "PYTHONPATH": os.pathsep.join(
+                   [str(line_shim(tmp_path)), str(_FAKE_AUDIO), str(corpora.PKG_ROOT)]),
+               "KESTREL_FAKE_AUDIO": json.dumps({**(audio or {})}),
+               LINE_ENV: str(line.path)}
         argv = [sys.executable, str(_TOOL), "--record", str(tmp_path / "rec")]
         if server is not None:
             argv += ["--rigctld", f"127.0.0.1:{server.port}"]
@@ -272,20 +285,10 @@ def run(tmp_path):
         # 20 WPM, not the 30 this used to pass to run faster: the encoder caps a
         # CW identification there and core.cwid refuses above it. A test that asks
         # the tool to send above that ceiling is testing the wrong range.
-        # --no-line-ptt: the bench keys through the fake daemon, because no
-        # test machine has a line whose pin moves (TIOCMBIC on /dev/null or a
-        # pty is ENOTTY) and a run asking for one refuses before the first
-        # burst. The operator's line-keyed default is pinned as text by
-        # test_the_operators_check_keys_the_line_not_the_daemon.
         live = {} if "analyze" in flags else {"mycall": MYCALL, "device": "fake",
-                                              "listen": 5, "wpm": 20,
-                                              "no_line_ptt": True}
-        # Arming names the keying line, because the tool refuses without one: the
-        # last-resort unkey has to have something to pull when rigctld stops
-        # answering. The gate stats and never opens, so /dev/null satisfies it
-        # without a serial port anywhere near this suite.
+                                              "listen": 5, "wpm": 20}
         if flags.get("arm") and "ptt_device" not in flags:
-            live["ptt_device"] = PTT_LINE
+            live["ptt_device"] = ptt_line
         for k, v in {**live, **flags}.items():
             if v is None:                 # the way a test asks for a flag to be absent
                 continue
@@ -310,17 +313,18 @@ def _sessions(tmp_path: Path) -> list[Path]:
     return sorted(p for p in (tmp_path / "rec").glob("*") if p.is_dir())
 
 
-def test_the_dry_run_cannot_reach_the_transmitter(rigctld, run):
+def test_the_dry_run_cannot_reach_the_transmitter(rigctld, run, line):
     """The default is a rehearsal, and a rehearsal that keys is not one."""
     server = rigctld()
     r = run(server, dial=7101.0)
     assert r.returncode == 2, r.stdout
-    assert not server.seen("T 1"), server.commands
+    assert not line.raised() and not server.seen("T 1"), server.commands
     assert "DISARMED" in r.stdout
     assert "nothing is established" in r.stdout
 
 
-def test_an_armed_run_keys_once_and_leaves_the_transmitter_down(rigctld, run, tmp_path):
+def test_an_armed_run_keys_once_and_leaves_the_transmitter_down(rigctld, run, line,
+                                                                 tmp_path):
     """The whole sequence, armed: one key-up, one transmission, PTT confirmed down.
 
     The fake codec does not mute itself while it plays, which is the point of running
@@ -330,10 +334,10 @@ def test_an_armed_run_keys_once_and_leaves_the_transmitter_down(rigctld, run, tm
     server = rigctld()
     r = run(server, arm=True, expect_model="FT-891", dial=7101.0)
     assert r.returncode == 4, r.stdout
-    assert server.seen("T 1") == 1, server.commands
-    assert server.ptt == 0
-    keys = [c for c in server.commands if c.startswith("T ")]
-    assert keys[0] == "T 1" and keys[-1] == "T 0", keys
+    edges = [on for _, _, on in line.edges()]
+    assert edges.count(True) == 1, edges
+    assert edges[-1] is False and not line.high, edges
+    assert not server.seen("T 1"), "rigctld was asked to key"
     assert "INCONCLUSIVE" in r.stdout
     assert "off the air" in r.stdout and "software" in r.stdout
 
@@ -377,23 +381,25 @@ def test_the_preparation_asks_the_rig_only_what_it_uses(rigctld, run):
                                ";f", ";m"], server.commands
 
 
-def test_a_rig_that_reads_back_keyed_stops_the_check(rigctld, run):
+def test_a_rig_that_reads_back_keyed_stops_the_check(rigctld, run, line):
     """This instrument measures the PTT line. One that is already up is somebody
     else's transmission, and calling over it is exactly the fault being hunted."""
     server = rigctld()
     server.ptt = 1
     r = run(server, arm=True, expect_model="FT-891")
     assert r.returncode == 3, r.stdout
-    assert not server.seen("T 1"), server.commands
-    assert server.ptt == 0, "found a keyed transmitter and walked away from it"
+    assert "unkey (PTT was already up when the check started)" in r.stdout, \
+        "found a keyed transmitter and walked away from it"
+    assert not line.raised(), line.edges()
 
 
-def test_the_wrong_radio_is_refused_before_anything_transmits(rigctld, run):
+def test_the_wrong_radio_is_named_before_anything_transmits(rigctld, run):
+    """A model mismatch warns and the operator decides."""
     server = rigctld(model="IC-7300")
     r = run(server, arm=True, expect_model="FT-891")
-    assert r.returncode == 2, r.stdout
-    assert not server.seen("T 1"), server.commands
-    assert "REFUSING TO ARM" in r.stdout
+    warning = r.stdout.find("WARNING: rigctld reports 'IC-7300', expected 'FT-891'")
+    assert -1 < warning < r.stdout.index("PTT ON"), r.stdout
+    assert "REFUSING TO ARM" not in r.stdout
 
 
 def test_arming_without_naming_the_radio_is_refused(run):
@@ -430,10 +436,8 @@ def test_arming_on_a_keying_line_with_no_device_behind_it_is_refused(rigctld, ru
 
 
 def test_the_operators_check_keys_the_line_not_the_daemon():
-    """The shape the operator gets, pinned as text — the runs in this file
-    cannot show it, because they opt out of it: no bench has a line whose pin
-    moves (`TIOCMBIC` on /dev/null or a pty is ENOTTY), so the bench keys
-    through the fake daemon the way the dress rehearsal does.
+    """The shape the operator gets, pinned as text: the line is the only keying
+    path, with no option left to ask for the daemon instead.
 
     On air the daemon path is 0-for-N: rigctld answered every command until it
     keyed the rig and then answered nothing, twelve failed unkeys out of twelve
@@ -444,13 +448,11 @@ def test_the_operators_check_keys_the_line_not_the_daemon():
     daemon, with no way to ask for the line at all.
     """
     src = _TOOL.read_text()
-    assert "line_ptt=args.line_ptt" in src, (
+    assert "line_ptt=True" in src, (
         "the Rig is built without the keying line, so every armed run keys "
         "through the daemon")
-    decl = [ln for ln in src.splitlines() if 'add_argument("--line-ptt"' in ln]
-    assert decl and "default=True" in decl[0], (
-        "--line-ptt is not the default, so the operator's first act on a new "
-        "station keys through the daemon whenever a flag is forgotten")
+    assert '"--line-ptt"' not in src and '"--no-line-ptt"' not in src, (
+        "the tool offers a choice of keying path again")
 
 
 def _printed_commands(text: str) -> list[str]:
@@ -482,27 +484,27 @@ def test_every_printed_example_is_a_command_the_tool_accepts(doc):
                 f"the {doc} prints {flag}, which the tool does not take: {c}")
 
 
-def test_a_deaf_receiver_is_not_transmitted_over(rigctld, run):
+def test_a_deaf_receiver_is_not_transmitted_over(rigctld, run, line):
     """A receiver below the codec floor has no mute to show, so keying into it would
     spend the RF and answer nothing."""
     server = rigctld()
     r = run(server, audio={"bed": "quiet"}, arm=True, expect_model="FT-891")
     assert r.returncode == 5, r.stdout
-    assert not server.seen("T 1"), server.commands
+    assert not line.raised(), line.edges()
 
 
-def test_ctrl_c_mid_transmission_puts_the_transmitter_down(rigctld, run):
+def test_ctrl_c_mid_transmission_puts_the_transmitter_down(rigctld, run, line):
     """The first thing that keys after privileges return is the first thing that has
     to survive an operator reaching for Ctrl-C."""
     server = rigctld()
     proc = run(server, arm=True, expect_model="FT-891", wait=None)
-    assert server.wait_for("T 1", timeout=60), "the tool never keyed"
+    assert line.wait_for_key(timeout=60), "the tool never keyed"
     time.sleep(0.3)
     proc.send_signal(signal.SIGINT)
     out = proc.communicate(timeout=30)[0]
     assert proc.returncode != 0, out
-    assert server.ptt == 0, out
-    assert server.seen("T 0"), server.commands
+    assert not line.high, out
+    assert line.dropped_after(line.raised()[0]), line.edges()
 
 
 # -- the verdict off a recording ---------------------------------------------------

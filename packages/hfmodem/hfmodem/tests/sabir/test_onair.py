@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hfmodem.core import band, busy, cwid, regulatory
+from hfmodem.core import audio, band, busy, claim, cwid, regulatory
 from hfmodem.core.ptt import PttError, arming_refusal
 from hfmodem.sabir import onair, radio
 
@@ -120,7 +120,35 @@ def radio_answers(monkeypatch):
         return k
     monkeypatch.setattr(radio, "LineKeyer", keyer)
     monkeypatch.setattr(radio, "play_drained", lambda audio, fs, device: None)
+    monkeypatch.setattr(audio, "warm_output", lambda device: None)
     return keyers
+
+
+@pytest.fixture(autouse=True)
+def launch_admissions(monkeypatch):
+    """These device fakes run as a launched modem with an inherited claim."""
+    events = []
+
+    class Admission:
+        held = True
+
+        def opened(self):
+            assert self.held
+            self.held = False
+            events.append("opened")
+
+        def failed(self):
+            self.held = False
+            events.append("failed")
+
+    def inherited(fd, *, launch):
+        assert (fd, launch) == (9, True)
+        events.append("inherited")
+        return Admission()
+
+    monkeypatch.setattr(claim, "inherited", inherited)
+    yield events
+    assert events.count("inherited") == events.count("failed")
 
 
 #: Which dispositions `onair._install_signals` takes over, and this fixture gives
@@ -199,13 +227,24 @@ def test_arming_without_a_callsign_is_refused(capsys):
     assert "--mycall" in capsys.readouterr().out
 
 
-def test_arming_with_everything_named_gets_past_the_gates(radio_answers, capsys):
+def test_arming_with_everything_named_gets_past_the_gates(radio_answers, capsys,
+                                                        launch_admissions):
     """A gate that also refuses the armed-correctly case is just the
     transmitter switched off."""
     assert onair.main(cli()) == 0
     out = capsys.readouterr().out
     assert "dial 7.102000 MHz verified" in out
     assert radio_answers[0].events == ["arm", "key", "unkey", "hand_back"]
+    assert launch_admissions == ["inherited", "opened", "failed"]
+
+
+def test_a_listen_longer_than_the_admission_window_is_refused(radio_answers, capsys,
+                                                             launch_admissions):
+    """The sense runs before `CLAIM ADMITTED`, and a launcher that waits out its
+    window ends the modem mid-listen."""
+    assert onair.main(cli("--listen", str(onair.MAX_LISTEN_S + 1))) == 2
+    assert "--listen" in capsys.readouterr().out
+    assert not launch_admissions and not radio_answers
 
 
 # -- the dial ----------------------------------------------------------------
@@ -502,11 +541,12 @@ def _silent_receiver(monkeypatch):
 
 # -- the transmission itself -------------------------------------------------
 
-def test_a_dry_run_describes_the_burst_and_keys_nothing(capsys):
+def test_a_dry_run_describes_the_burst_and_keys_nothing(capsys, launch_admissions):
     assert onair.main(["--mycall", "W9SSJ", "--channel", str(CHANNEL)]) == 0
     out = capsys.readouterr().out
     assert "NOT ARMED" in out
     assert "7.103" in out and "s keyed" in out
+    assert not launch_admissions
 
 
 def test_the_burst_carries_the_callsign_in_morse():

@@ -53,7 +53,7 @@ from hfmodem.core.rates import CARD_RATE_HZ
 from hfmodem.core.regulatory import Emission
 from hfmodem.core.rig import RigError
 from hfmodem.core.tx_events import TxEvents
-from hfmodem.station.arbiter import LIVE, ERRAND, Refused, RequestState, TxRequest
+from hfmodem.station.arbiter import LIVE, ERRAND, Refused, RequestState, TxRequest, longest_burst_s
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +134,8 @@ class ProtocolLink:
     # -- transmit ----------------------------------------------------------
 
     def transmit(self, audio: np.ndarray, *, why: str = "", at: int | None = None,
-                 responding: bool = False, power_w: float | None = None) -> int | None:
+                 responding: bool = False, power_w: float | None = None,
+                 on_ptt=None, gain: float = 1.0) -> int | None:
         """Ask the station to put `audio` on the air. Returns the card index it
         ended at, or None if it was refused.
 
@@ -152,7 +153,7 @@ class ProtocolLink:
                     self.station.rig.dial(),
                     power_w=power_w if power_w is not None else self.station.cfg.rig.power_w),
                 at=at, responding=responding,
-                settle_s=self.station.cfg.rig.ptt.settle_s)
+                settle_s=self.station.cfg.rig.ptt.settle_s, on_ptt=on_ptt, gain=gain)
             end = arb.submit(req)
         except (Refused, RigError) as exc:
             self.refusals.append(str(exc))
@@ -162,38 +163,120 @@ class ProtocolLink:
 
 
 class BesraLink(ProtocolLink):
-    """ARDOP.
+    """One ARDOP core shared by the station decoder and external host ports.
 
-    Its core already separates decoding from the session: `receive_frames` takes
-    frames a rolling decoder found, precisely because overlapping windows would
-    otherwise deliver the same frame twice — and a replayed DATAACK clears a data
-    frame the peer never acknowledged. So the lane decodes and the frames go
-    straight in.
+    The existing rolling decoder preserves frame-position deduplication and
+    performs 48-to-12 kHz resampling over overlapping windows. Only the bounded
+    owner applies decoded frames, host commands and protocol timers.
     """
 
     #: The 12 kHz core rate is normative to the protocol and is what the ardopcf
     #: cross-decode holds at.
     waveform = Waveform("ardop", 12000)
 
-    def __init__(self, station, modem, **kw) -> None:
-        self.modem = modem
+    def __init__(self, station, modem=None, **kw) -> None:
+        from hfmodem.besra.station_runtime import StationArdopModem
+        from hfmodem.station.contact import ContactOwner
+        self._decoder_lock = threading.Lock()
+        self._transmitting = False
+        self._muted_spans = deque(maxlen=16)
+        self._capture_next = None
+        self._keyed_at = -1
+        self.modem = modem or StationArdopModem(
+            self._output, capture_position=lambda: int(station.audio.samples),
+            ptt_from_station=True, contact=ContactOwner(station.arbiter, 'ardop'))
         super().__init__(station, **kw)
+        self._reset_decoder(0)
+
+    @property
+    def active(self):
+        return self._transmitting or self.modem.active
+
+    def make_lane(self, depth):
+        return StreamLane(CARD_RATE_HZ, depth=depth)
+
+    def _reset_decoder(self, at):
+        from hfmodem.besra.radio import RollingDecoder
+        from hfmodem.besra.arq.session import peer_quality
+        generation, boundary = self.modem.receive_boundary
+        channel_epoch = self.modem.channel_epoch
+        at = max(at, boundary)
+        def heard(pos, frame):
+            if pos < decoder.keyed_at and peer_quality(frame.type) is not None:
+                return
+            self.modem.deliver_frames([frame], generation=generation, channel_epoch=channel_epoch)
+        decoder = RollingDecoder(self.modem.core._demod, heard)
+        decoder.keyed_at = self._keyed_at
+        self._decoder = decoder
+        self._decoder._n = self._decoder._pushed = self._decoder._decoded_to = at
+        self._decoder_generation = generation
+        self._next = at
+
+    def poll(self):
+        for chunk in self.lane.poll():
+            with self._decoder_lock:
+                generation, boundary = self.modem.receive_boundary
+                flushed = any(f.cause == 'flush' for f in chunk.faults)
+                if (any(f.cause != 'flush' for f in chunk.faults)
+                        or self._capture_next is not None
+                        and chunk.at != self._capture_next and not flushed):
+                    self._reset_decoder(chunk.at)
+                    self.modem.receive_fault()
+                elif flushed:
+                    self._reset_decoder(chunk.at)
+                if generation != self._decoder_generation:
+                    self._reset_decoder(max(chunk.at, boundary))
+                skip = max(0, self._next - chunk.at)
+                samples = chunk.samples[skip:]
+                if len(samples):
+                    samples = np.array(samples, dtype=np.float32, copy=True)
+                    at = chunk.at + skip
+                    for start, end in self._muted_spans:
+                        lo, hi = max(0, start-at), min(len(samples),
+                            (end if end is not None else at+len(samples))-at)
+                        if hi > lo:
+                            samples[lo:hi] = 0
+                    self._decoder.push(samples)
+                    self._decoder.pump()
+                    self._next += len(samples)
+                self._capture_next = chunk.at + len(chunk.samples)
+        return []
+
+    def _output(self, samples):
+        with self._decoder_lock:
+            start = int(self.station.audio.samples)
+            span = [start, None]
+            self._muted_spans.append(span)
+            self._keyed_at = self._decoder.keyed_at = self._decoder._span(start)
+        self._transmitting = True
+        try:
+            # The session negotiates its bandwidth; the emission must follow it.
+            self.waveform = Waveform('ardop', 12000, str(self.modem.emission_bandwidth))
+            end = self.transmit(samples, why='ARDOP frame', responding=self.modem.connected,
+                                on_ptt=self.modem.notify_ptt, gain=self.modem.drive_scale)
+            if end is None:
+                raise OSError(self.refusals[-1])
+        finally:
+            with self._decoder_lock:
+                span[1] = int(self.station.audio.samples)
+            self._transmitting = False
+
+    def stop(self):
+        self.modem.stop()
 
     def decode(self, samples: np.ndarray):
-        return self.modem._demod.decode(np.asarray(samples, "<i2"))
+        raise AssertionError('ARDOP receives through its rolling decoder')
 
     def on_frame(self, frame) -> None:
-        self.modem.receive_frames([frame])
+        self.modem.deliver_frames([frame])
 
 
 class ShrikeLink(ProtocolLink):
     """PACTOR-1/2/3.
 
-    The one protocol here with a raster: its cycle is 1.25 s of *sample indices*,
-    which is why the station keeps a `CycleLane` at all. This adapter uses the
-    rolling lane for monitoring; a cycle-locked session wants `CycleLane` and the
-    arbiter's `at` parameter, so that the burst lands on the grid rather than
-    wherever the scheduler got to.
+    Without a host this uses a rolling lane for monitoring. With host='ptc', a
+    StreamLane hands each indexed sample once to the native onair driver. That
+    driver keeps its own raster and submits exact indices to the station arbiter.
 
     `rxfront.decode_events` reports each event once and derives the protocol from
     the decoder rather than from the event kind — a shared kind lies, and one did:
@@ -202,9 +285,49 @@ class ShrikeLink(ProtocolLink):
 
     waveform = Waveform("pactor", 48000)
 
+    @classmethod
+    def validate_options(cls, options):
+        import math
+        value = options.get('drive_reference_mv', 3000) if isinstance(options, dict) else None
+        if (not isinstance(options, dict) or set(options) - {'drive_reference_mv'}
+                or isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0):
+            raise ConfigError('PACTOR supports only a finite positive drive_reference_mv')
+
     def __init__(self, station, *, on_event=None, **kw) -> None:
         self._on_event = on_event
+        cfg = getattr(getattr(station, 'cfg', None), 'protocols', {}).get('pactor')
+        self._native = (cfg is not None and cfg.host in ('ptc', 'ptc-managed')
+                        and station.arbiter is not None and station.rig is not None)
         super().__init__(station, **kw)
+        self.runtime = None
+        if self._native:
+            from hfmodem.shrike.station_runtime import StationPtcRuntime
+            self.validate_options(cfg.options)
+            self.runtime = StationPtcRuntime(self,
+                drive_reference_mv=cfg.options.get('drive_reference_mv', 3000))
+
+    @property
+    def active(self):
+        return self.runtime is not None and self.runtime.active
+
+    def make_lane(self, depth):
+        if self._native:
+            return StreamLane(self.waveform.rate, depth=depth)
+        return super().make_lane(depth)
+
+    def start(self):
+        if self.runtime is not None:
+            self.runtime.start()
+
+    def stop(self):
+        if self.runtime is not None:
+            self.runtime.stop()
+
+    def poll(self):
+        if self.runtime is not None:
+            return self.runtime.pump()
+        return super().poll()
 
     def decode(self, samples: np.ndarray):
         from hfmodem.shrike import rxfront
@@ -216,11 +339,9 @@ class ShrikeLink(ProtocolLink):
 
 
 class SabirLink(ProtocolLink):
-    """The clean-sheet protocol, and the only one whose ARQ stack this station
-    also *runs* rather than merely feeds.
+    """The clean-sheet protocol's station-owned ARQ stack.
 
-    The other three adapters decode into a session that some other code drives.
-    sabir's session was written against a simulated air — two endpoints, one
+    Its session was written against a simulated air — two endpoints, one
     thread, virtual time — so binding it here means supplying that same port over
     a real radio, which is `station.air.StationAir` and is the whole of M5.
 
@@ -268,26 +389,52 @@ class SabirLink(ProtocolLink):
 
 
 class KestrelLink(ProtocolLink):
-    """VARA.
+    """VARA host and receiver share one owner and the station's arbiter.
 
-    BW500 is what has been demodulated byte-exact from real audio; the wideband
-    records are validated against our own encoder. Nothing holds this adapter to
-    either bandwidth, so it declares both: the union in `core.occupied` is
-    BW2300's, the wider of the two.
+    Every burst supplies its actual bandwidth, which selects the corresponding
+    measured occupied-band row. No audio device or physical key lives here.
     """
 
     waveform = Waveform("vara", 48000)
 
+    def __init__(self, station, **kw):
+        from hfmodem.kestrel.host.station_runtime import StationVaraRuntime
+        self._transmitting = False
+        super().__init__(station, **kw)
+        self.runtime = StationVaraRuntime(self)
+
+    @property
+    def active(self):
+        return self._transmitting or self.runtime.active
+
+    def make_lane(self, depth):
+        return StreamLane(CARD_RATE_HZ, depth=depth)
+
+    def start(self):
+        self.runtime.start()
+
+    def stop(self):
+        self.runtime.stop()
+
+    def poll(self):
+        for chunk in self.lane.poll():
+            if any(f.cause != 'flush' for f in chunk.faults):
+                self.runtime.transport.fault.set()
+            if any(f.cause == 'flush' for f in chunk.faults):
+                self.runtime.transport.flushed(chunk.at)
+            self.runtime.transport.feed(chunk.at, chunk.samples)
+        return []
+
+    def emit(self, samples, bandwidth, *, responding=False, on_ptt=None):
+        self.waveform = Waveform('vara', 48000, bandwidth)
+        return self.transmit(np.asarray(samples), why='VARA frame', responding=responding,
+                             on_ptt=on_ptt) is not None
+
     def decode(self, samples: np.ndarray):
-        from hfmodem.kestrel.rx import varahf500 as v5
-        try:
-            res = v5.decode_stream(np.asarray(samples, float))
-        except Exception:                       # noqa: BLE001
-            return []
-        return [res] if res else []
+        raise AssertionError('VARA receives through its stream owner')
 
     def on_frame(self, frame) -> None:
-        return None
+        raise AssertionError('VARA receives through its stream owner')
 
 
 class _ThreadedModemLink(ProtocolLink):
@@ -329,11 +476,18 @@ class _ThreadedModemLink(ProtocolLink):
         self.modem.start()
 
     def stop(self) -> None:
-        self.modem.stop()
+        arbiter = self.station.arbiter
+        if arbiter is not None:
+            arbiter.disable(self.waveform.name, "lane stopped")
+        rig = self.station.cfg.rig
+        # Let the current burst finish, then allow one maximum-sized receive item.
+        limit = rig.max_key_s + rig.ptt.settle_s + self.modem._audio_limit / self.modem.card_rate
+        if not self.modem.stop(timeout=limit):
+            raise LeaseTimeout(self.waveform.name)
 
 
 class BateleurLink(_ThreadedModemLink):
-    """The bateleur modem (docs/protocols/bateleur).
+    """The bateleur modem (docs/implementation/bateleur).
 
     A transmission can run for minutes — a long-interleave message has a
     4.8 s preamble before its first byte — which no rolling window holds, and
@@ -356,8 +510,9 @@ class BateleurLink(_ThreadedModemLink):
         proto = station.cfg.protocols.get("bateleur")
         bw = (proto.bandwidth if proto else "") or "3000"
         self.waveform = Waveform("bateleur", BATELEUR_RATE, bw)
+        rig = station.cfg.rig
         self.modem = BateleurModem(
-            self._send, card_rate=CARD_RATE_HZ, max_key_s=station.cfg.rig.max_key_s,
+            self._send, card_rate=CARD_RATE_HZ, max_key_s=longest_burst_s(rig.max_key_s, rig.ptt.settle_s),
             log=lambda m: print(m, file=sys.stderr), trim=(bw == "3000"))
         super().__init__(station, **kw)
 
@@ -400,7 +555,7 @@ class AleLink(_ThreadedModemLink):
         common = dict(scan_rate=p.scan_rate, scanning=len(self.dials) > 1,
                       listen_s=POUNCE_WINDOW_S, lp_level=p.lp_level, lp_key=p.lp_key,
                       channel_hz=[float(d) for d in self.dials],
-                      max_key_s=station.cfg.rig.max_key_s)
+                      max_key_s=longest_burst_s(station.cfg.rig.max_key_s, station.cfg.rig.ptt.settle_s))
         if p.conventions == "hflink":
             from hfmodem.bateleur.ale import hflink
             pilots = [self.dials.index(int(round(f))) for f in p.pilot_channels] or None
@@ -484,13 +639,31 @@ class AleLink(_ThreadedModemLink):
     def _load_directory(self, sources) -> None:
         from hfmodem.bateleur.ale import directory as D
         srcs = [None if s == "default" else s for s in sources]
-        try:
-            d = D.load(srcs)
-        except (OSError, ValueError) as exc:
-            print(f"ale: directory: {exc}", file=sys.stderr)
-            return
-        self.modem.directory = d
-        print(f"ale: directory: {d.summary()}", file=sys.stderr)
+        result = []
+        done = threading.Event()
+
+        def load():
+            # This worker owns only inputs and a private result. DNS and a slow
+            # body can outlive us, but cannot retain or mutate the radio/link.
+            try:
+                result.append(D.load(srcs, timeout=30.0))
+            except (OSError, ValueError) as exc:
+                result.append(exc)
+            finally:
+                done.set()
+
+        deadline = time.monotonic() + self._directory_budget
+        threading.Thread(target=load, name="ale-directory-io", daemon=True).start()
+        while not self._directory_stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            if done.is_set():
+                if result and not isinstance(result[0], Exception):
+                    self.modem.directory = result[0]
+                    print(f"ale: directory: {result[0].summary()}", file=sys.stderr)
+                return
+            self._directory_stop.wait(min(.02, remaining))
 
     def poll(self):
         super().poll()
@@ -506,11 +679,23 @@ class AleLink(_ThreadedModemLink):
         self.modem.start()
         sources = self.station.cfg.protocols["ale"].directory
         if sources:
-            threading.Thread(target=self._load_directory, args=(list(sources),),
-                             name="ale-directory", daemon=True).start()
+            self._directory_budget = 30.0
+            self._directory_stop = threading.Event()
+            self._directory_thread = threading.Thread(
+                target=self._load_directory, args=(list(sources),),
+                name="ale-directory", daemon=True)
+            self._directory_thread.start()
 
     def stop(self) -> None:
-        self.modem.stop()
+        stop = getattr(self, "_directory_stop", None)
+        if stop is not None:
+            stop.set()
+        super().stop()
+        directory = getattr(self, "_directory_thread", None)
+        if directory is not None:
+            directory.join(.25)
+            if directory.is_alive():
+                raise LeaseTimeout("ale-directory")
         rig = self.station.rig
         if rig is not None:
             try:
@@ -548,6 +733,8 @@ class RprRequest:
     queued: float
     attempts: int = 0
     deferrals: int = 0
+    completion: tuple[str, str] | None = None
+    channel_epoch: int = 0
 
 
 class RprLink(ProtocolLink):
@@ -561,13 +748,15 @@ class RprLink(ProtocolLink):
 
         if not isinstance(options, dict):
             raise ConfigError("rpr options must be a table")
-        allowed = {"limiter", "level", "txdelay", "persistence", "slot_ms", "tx_events"}
+        allowed = {"limiter", "level", "txdelay", "persistence", "slot_ms", "tx_events",
+                   "drive_reference_mv"}
         if options.keys() - allowed:
             raise ConfigError(f"unknown rpr options: {sorted(options.keys() - allowed)}")
         if "limiter" in options and type(options["limiter"]) is not bool:
             raise ConfigError("rpr limiter must be boolean")
         for key, lo, hi in (("level", 0, 1), ("txdelay", 0, 2550),
-                            ("persistence", 0, 255), ("slot_ms", 1, 2550)):
+                            ("persistence", 0, 255), ("slot_ms", 1, 2550),
+                            ("drive_reference_mv", 30, 10000)):
             if key in options and (type(options[key]) is not int or
                                    not lo <= options[key] <= hi):
                 raise ConfigError(f"rpr {key} must be an integer in {lo}..{hi}")
@@ -590,6 +779,8 @@ class RprLink(ProtocolLink):
         self._discard_fault = None
         self._on_frame = on_frame
         self.host = None
+        self.packet_engine = None
+        self.drive_scale = 1.0
         self.received = deque(maxlen=64)
         self.rx_events = deque(maxlen=64)
         self.events = TxEvents("rpr")
@@ -603,6 +794,10 @@ class RprLink(ProtocolLink):
         self._worker = None
         self._identifier = 0
         self._history = None
+        self._channel_boundary = (station.arbiter.receive_boundary
+                                  if station.arbiter is not None else (0, 0))
+        self._assessment_boundary = self._channel_boundary
+        self._assessment_lock = threading.Lock()
         super().__init__(station, **kw)
         # Measure after card conversion before accepting any client parameters.
         tx.onset_s(False)
@@ -620,6 +815,15 @@ class RprLink(ProtocolLink):
         result = []
         for chunk in self.lane.poll():
             at, samples = chunk
+            boundary = (self.station.arbiter.receive_boundary
+                        if self.station.arbiter is not None else (0, 0))
+            if boundary != self._channel_boundary:
+                self._channel_boundary = boundary
+                self.receiver.reset()
+                self._expected = None
+                self._sync_assessment()
+            skip = max(0, boundary[1]-at)
+            samples, at = samples[skip:], at+skip
             if chunk.faults:
                 fault = max(chunk.faults, key=lambda f: (f.index, f.serial))
                 self._discard_fault = fault.index
@@ -661,7 +865,7 @@ class RprLink(ProtocolLink):
                     position = 5 * burst.ref + self.decimator.DELAY
                     self.received.append((position, burst))
                     for raw in burst.frames:
-                        self.on_frame(raw)
+                        self.on_frame(raw, channel_epoch=boundary[0])
                     result.append((position, burst))
             while self.receiver.events:
                 index, reason = self.receiver.events.popleft()
@@ -670,9 +874,17 @@ class RprLink(ProtocolLink):
             self._condition.notify_all()
         return result
 
-    def on_frame(self, raw):
+    def on_frame(self, raw, *, channel_epoch=None):
+        if (self.station.arbiter is not None and channel_epoch is not None
+                and channel_epoch != self.station.arbiter.receive_boundary[0]):
+            return
         if self.host is not None:
-            self.host.send_frame(raw)
+            if channel_epoch is None:
+                self.host.send_frame(raw)
+            elif self.host is self.packet_engine:
+                self.host.send_frame(raw, channel_epoch=channel_epoch)
+            else:
+                self.host.send_frame(raw)
         if self._on_frame is not None:
             self._on_frame(raw)
 
@@ -690,8 +902,12 @@ class RprLink(ProtocolLink):
         with self._condition:
             self._identifier += 1
             request = RprRequest(self._identifier, bytes(raw), RequestState(), time.monotonic())
+            arbiter = self.station.arbiter
+            request.channel_epoch = arbiter.receive_boundary[0] if arbiter is not None else 0
             if self._stopping or len(self._queue) + (self._active is not None) >= 16:
                 reason = "stopped" if self._stopping else "inbound queue full"
+            elif arbiter is not None and arbiter.scan_held:
+                reason = "station scanner lease held"
             else:
                 self._queue.append(request)
                 self._condition.notify_all()
@@ -699,7 +915,12 @@ class RprLink(ProtocolLink):
         self._record(request, "refused", reason)
         return request
 
-    def _record(self, request, outcome, reason="", **fields):
+    @property
+    def active(self):
+        return ((self.packet_engine is not None and self.packet_engine.active)
+                or self._active is not None or bool(self._queue))
+
+    def _record(self, request, outcome, reason="", *, final=True, **fields):
         if not self._journal_lock.acquire(timeout=2):
             self._fatal("rpr journal producer did not drain")
         try:
@@ -709,6 +930,8 @@ class RprLink(ProtocolLink):
                                        **fields)
             self.outcomes.append(event)
             self._drain_events()
+            if final:
+                request.completion = (outcome, reason)
         finally:
             self._journal_lock.release()
 
@@ -775,17 +998,28 @@ class RprLink(ProtocolLink):
             history = arbiter.transmit_history()
             if history != self._history:
                 self._history = history
-                return history.end
+                return history.capture_floor
         return None
 
     def _fresh(self):
+        self._sync_assessment()
         after = self._fresh_after()
         if after is not None:
             self.access.require_fresh(after)
 
     def _eligible(self):
+        self._sync_assessment()
         return self.access.eligible(self.lane.fault_serial, fresh_after=self._fresh_after(),
                                     transmitting=True)
+
+    def _sync_assessment(self):
+        arbiter = self.station.arbiter
+        if arbiter is not None:
+            boundary = arbiter.receive_boundary
+            with self._assessment_lock:
+                if boundary != self._assessment_boundary:
+                    self.access.retune(boundary[1], self.lane.fault_serial)
+                    self._assessment_boundary = boundary
 
     def _run(self):
         while True:
@@ -806,16 +1040,23 @@ class RprLink(ProtocolLink):
                     self._active = None
 
     def _serve(self, request):
-        from hfmodem.brubru.tx import transmit
+        from hfmodem.brubru.tx import lead_s, transmit
 
         arbiter, rig = self.station.arbiter, self.station.rig
         if arbiter is None or rig is None:
             self._record(request, "refused", "station has no transmitter")
             return
         settle = self.station.cfg.rig.ptt.settle_s
+        lead = lead_s(self.txdelay, settle, self.limiter)
+        budget = longest_burst_s(rig.max_key_s, lead)
+        if budget <= 0:
+            self._record(request, "refused", "burst cannot fit the rig's keyed interval: "
+                         f"complete keyed interval exceeds max_key_s {rig.max_key_s:g}")
+            return
         try:
             bursts = transmit([request.frame], self.level, limiter=self.limiter,
-                              max_key_s=rig.max_key_s, txdelay=self.txdelay, settle_s=settle)
+                              max_key_s=lead + budget,
+                              txdelay=self.txdelay, settle_s=settle)
             if len(bursts) != 1:
                 raise ValueError("frame fits no permitted class")
             burst, = bursts
@@ -825,6 +1066,9 @@ class RprLink(ProtocolLink):
         while True:
             if request.state.value == "cancelled":
                 self._record(request, "error", "cancelled")
+                return
+            if request.channel_epoch != arbiter.receive_boundary[0]:
+                self._record(request, "refused", "channel changed before packet transmission")
                 return
             if time.monotonic() - request.queued >= 60:
                 self._record(request, "refused", "request expired")
@@ -836,8 +1080,11 @@ class RprLink(ProtocolLink):
                 continue
             req = TxRequest(LIVE, request.identifier, "rpr", burst.audio, 9600,
                             self.waveform.emission(rig.dial(), power_w=self.station.cfg.rig.power_w),
-                            settle_s=settle, state=request.state, eligible=self._eligible,
-                            lead_s=burst.lead_s(self.txdelay, settle), expires=request.queued + 60)
+                            settle_s=settle, state=request.state,
+                            eligible=lambda: request.channel_epoch == arbiter.receive_boundary[0]
+                                             and self._eligible(),
+                            lead_s=burst.lead_s(self.txdelay, settle), expires=request.queued + 60,
+                            gain=self.drive_scale)
             try:
                 result = arbiter.submit_result(req)
             except Exception as exc:
@@ -850,17 +1097,18 @@ class RprLink(ProtocolLink):
                     self.access.tx(False, int(self.station.audio.sample_now()))
             if result.outcome == "deferred":
                 request.deferrals += 1
-                self.access.require_fresh(max(arbiter.transmit_history().end, self.access.evaluated))
+                self.access.require_fresh(max(arbiter.transmit_history().capture_floor, self.access.evaluated))
                 continue
             request.attempts += 1
             outcome = "error" if result.outcome == "invalidated" else result.outcome
-            self._record(request, outcome, result.reason, end=result.end,
+            retry_invalidated = (result.outcome == "invalidated" and result.state == "waiting"
+                                 and request.attempts == 1)
+            self._record(request, outcome, result.reason, final=not retry_invalidated, end=result.end,
                          displacement=result.displacement)
             if result.outcome == "sent":
                 self.sent += 1
-            if (result.outcome == "invalidated" and result.state == "waiting"
-                    and request.attempts == 1):
-                self.access.require_fresh(max(arbiter.transmit_history().end, self.access.evaluated))
+            if retry_invalidated:
+                self.access.require_fresh(max(arbiter.transmit_history().capture_floor, self.access.evaluated))
                 continue
             return
 

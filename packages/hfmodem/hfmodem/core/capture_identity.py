@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Exclusive PACTOR evidence ownership, with no device or modem imports.
 
 Identity describes filesystem provenance; it grants no radio admission. All

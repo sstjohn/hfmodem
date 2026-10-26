@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # W9SSJ / FT-891 on-air launcher. One command per modem, so a rig window is spent
 # transmitting rather than rediscovering how to start things.
 #
@@ -100,6 +102,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/ports.sh"
 # shared with the unattended launchers, which need the verified dial and the
 # same instrument held to a stricter rule.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/rig.sh"
+if [ "${1:-}" = down ]; then
+  station_down
+  exit $?
+fi
 MYGRID="${MYGRID:-}"
 identity_verb="${1:-}"
 [ "$identity_verb" != "--capture-prepared" ] || identity_verb="${2:-}"
@@ -111,14 +117,14 @@ case "$identity_verb" in
   rtty) MYCALL="$(station_mycall)" ;;
 esac
 case "$identity_verb" in
-  pactor|pactor-answer|vara|vara-mail|ardop-mail)
+  pactor|pactor-answer|vara|vara-mail|vara-chat|ardop-mail)
     # Resolve final identity flags before CAT/audio setup. Freeze the fallback
     # so edits to the station file during a pounce cannot change this attempt.
     # Module launchers must validate in their actual snapshot environment.
     # VARA's script inserts its own package tree; mirror only that launcher.
     identity_pythonpath="${PYTHONPATH:-}"
     case "$identity_verb" in
-      vara|vara-mail) identity_pythonpath="$REPO/packages/hfmodem${PYTHONPATH:+:$PYTHONPATH}" ;;
+      vara|vara-mail|vara-chat) identity_pythonpath="$REPO/packages/hfmodem${PYTHONPATH:+:$PYTHONPATH}" ;;
     esac
     call_identity=$(PYTHONPATH="$identity_pythonpath" \
       "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.identification \
@@ -239,15 +245,15 @@ if [ "$CAPTURE_PREPARED" = 1 ] || [ -n "$LOG_NAME" ]; then
   fi
   if [ "$CAPTURE_PREPARED" = 1 ]; then
   if [ -t 1 ] && [ -x "${HFMODEM_PYTHON:-$VENV/python}" ]; then
-    exec > >(capture_tee_rc=0; tee -a "$transcript_target" | "${HFMODEM_PYTHON:-$VENV/python}" -u "$REPO/tools/consolelib/view.py" || capture_tee_rc=$?; capture_transcript_finish "$capture_tee_rc") 2>&1
+    exec > >(exec 7>&- 8>&- 9>&-; capture_tee_rc=0; tee -a "$transcript_target" | "${HFMODEM_PYTHON:-$VENV/python}" -u "$REPO/tools/consolelib/view.py" || capture_tee_rc=$?; capture_transcript_finish "$capture_tee_rc") 2>&1
   else
-    exec > >(capture_tee_rc=0; tee -a "$transcript_target" || capture_tee_rc=$?; capture_transcript_finish "$capture_tee_rc") 2>&1
+    exec > >(exec 7>&- 8>&- 9>&-; capture_tee_rc=0; tee -a "$transcript_target" || capture_tee_rc=$?; capture_transcript_finish "$capture_tee_rc") 2>&1
   fi
   else
   if [ -t 1 ] && [ -x "${HFMODEM_PYTHON:-$VENV/python}" ]; then
-    exec > >(tee -a "$transcript_target" | "${HFMODEM_PYTHON:-$VENV/python}" -u "$REPO/tools/consolelib/view.py") 2>&1
+    exec > >(exec 7>&- 8>&- 9>&-; tee -a "$transcript_target" | "${HFMODEM_PYTHON:-$VENV/python}" -u "$REPO/tools/consolelib/view.py") 2>&1
   else
-    exec > >(tee -a "$transcript_target") 2>&1
+    exec > >(exec 7>&- 8>&- 9>&-; tee -a "$transcript_target") 2>&1
   fi
   fi
   printf '  transcript: %s\n' "$ARM_LOG"
@@ -397,342 +403,20 @@ otherwise it is read as $1 and every flag after it lands one place to the left."
 STOPPED=
 stopped_a() { STOPPED="$STOPPED $1,"; }
 
-# `down` MAY ONLY REACH WHAT EXISTED WHEN IT WAS ISSUED. Arm 11 of 2026-09-03 was
-# keyed over by the previous arm's trailing `down`, pasted after it and still
-# running when the next arm began: it found that arm's modem on the keying line
-# and sent it the same SIGTERM it sends a stale one. The instant of issue is a
-# pid snapshot taken as the verb starts; a pid absent from it started later and
-# belongs to whoever started it. Outside `down` there is no snapshot and every
-# pid passes, so a launch clearing a stale daemon is unchanged.
-DOWN_PIDS=
-FENCED=
-KEPT=
-issued_before() {       # <pids…> -> KEPT holds the ones this verb may signal
-  local pid
-  KEPT=
-  for pid in "$@"; do
-    if [ -z "$DOWN_PIDS" ] || [[ "$DOWN_PIDS" == *" $pid "* ]]; then
-      KEPT="$KEPT$pid "
-    elif [[ "$FENCED" != *" $pid "* ]]; then
-      FENCED="$FENCED $pid "
-      printf "  pid %s started after this down was issued -- not this down's to stop:\n     %s\n" \
-          "$pid" "$(ps -o command= -p "$pid" 2>/dev/null | redact_secrets)"
-    fi
-  done
-  return 0
-}
-# Between stages: once a later arm is on the station, the line, the CAT port and
-# the receiver reading are its, and nothing below may reach for them.
-fenced_exit() {
-  [ -n "$FENCED" ] || return 0
-  say "an arm started after this down was issued (pid$(printf '%s' "$FENCED" | tr -s ' ' | sed 's/ $//')) — the station is its, and nothing of it was stopped"
-  exit 0
-}
+settle_port() { claim_twin inherited 9 7>&- 8>&- >/dev/null; }
 
-# THE PORT COMES FREE AFTER `down` RETURNS, NOT BEFORE. Arm 04 of 2026-09-03 was
-# launched on the same line as the `down` before it, met a CAT port the previous
-# daemon still held, and died at the dial readback; every arm after it waited on
-# lsof and pgrep by hand and settled inside a second. Bounded, so it can hold a
-# transmission the operator asked for by at most this long, and then goes on --
-# a holder still there is named by the refusal that meets it.
-SETTLE_MAX_S=5
-port_unsettled() {
-  lsof -t "$CAT_PORT" >/dev/null 2>&1 || pgrep -f "rigctld -m $MODEL" >/dev/null 2>&1
-}
-settle_port() {
-  local waited=0
-  while [ "$waited" -lt "$SETTLE_MAX_S" ] && port_unsettled; do
-    sleep 1; waited=$((waited + 1))
-  done
-  if port_unsettled; then
-    printf '  !! %s not settled after %ss -- going on\n' "$CAT_PORT" "$SETTLE_MAX_S"
-  else
-    printf '  port settled after %ss\n' "$waited"
-  fi
-  return 0
-}
+rigctld_stop() { claim_processes daemon; }
 
-# SIGTERM is not enough and waiting a second for it is not either. A rigctld that
-# has stopped answering is usually blocked in a read on the CAT port, where it
-# ignores TERM and keeps the port — so the next daemon cannot open the radio, and
-# the launcher blames the rig. Ask nicely, then insist, then wait for the port
-# itself to come free rather than for a guess at how long that takes.
-rigctld_stop() {
-  took hardware
-  local had= rc=0 pids
-  issued_before $(pgrep -f "rigctld -m $MODEL" 2>/dev/null || true); pids="$KEPT"
-  [ -z "$pids" ] || { had=1; kill -TERM $pids 2>/dev/null || true; }
-  for _ in $(seq 10); do
-    [ -n "$(alive_of $pids)" ] || break
-    sleep 0.5
-  done
-  if [ -n "$(alive_of $pids)" ]; then
-    echo "  a rigctld ignored SIGTERM — it is wedged on the CAT port; killing it"
-    kill -9 $pids 2>/dev/null || true
-    sleep 1
-  fi
-  # AND THEN THE RESOURCE, BECAUSE THE NAME IS NOT THE RESOURCE. Everything above
-  # matches one spelling of one command line. A daemon started by hand, one left
-  # by a build under another model number, one written `-m1036`: none of them is
-  # found there, and every one of them goes on listening on 4532 after this says
-  # the station is stopped. `free_port` learned the same lesson about the serial
-  # devices on 2026-08-02 -- ask the resource who holds it -- and this is the
-  # port that was still being cleared by hand before arms 4, 5 and 6.
-  if lsof -t -nP -iTCP:4532 -sTCP:LISTEN >/dev/null 2>&1; then
-    had=1
-    rigctld_4532_free || rc=1
-  fi
-  # THE TWO ARE NOT THE SAME SENTENCE. `down` is read mid-slot against a clock,
-  # and "already stopped" was reaching the operator as silence -- indistinguishable
-  # from a verb that had done nothing because it had gone wrong.
-  if [ -n "$had" ]; then
-    echo "  rigctld stopped"; stopped_a rigctld
-  else
-    echo "  no rigctld was running, and 4532 is free"
-  fi
-  for _ in $(seq 10); do
-    issued_before $(lsof -t "$CAT_PORT" 2>/dev/null || true)
-    [ -n "$KEPT" ] || return "$rc"
-    sleep 0.5
-  done
-  # A port still held after all of that is a real inability to stop something,
-  # and those are the only conditions here worth a non-zero status.
-  echo "  !! something still holds $CAT_PORT"
-  return 1
-}
-
-# The daemon's socket, asked directly, and only when the caller has already found
-# something on it.
-rigctld_4532_free() {
-  local sig pid pids who
-  for sig in TERM KILL; do
-    issued_before $(lsof -t -nP -iTCP:4532 -sTCP:LISTEN 2>/dev/null || true); pids="$KEPT"
-    [ -n "$pids" ] || return 0
-    RIGCTLD_4532_HELD=1
-    for pid in $pids; do
-      who="$(ps -o command= -p "$pid" 2>/dev/null | redact_secrets)"
-      case "$who" in
-        # A rigctld here runs ptt_type=None and holds no key, so there is nothing
-        # for it to put down and the escalation costs a transmitter nothing --
-        # which is exactly why `reap_orphans` and `free_port`, which do reach
-        # things that key, may not escalate the same way.
-        *rigctld*) printf '  4532 listened on by pid %s -- SIG%s\n' "$pid" "$sig"
-                   kill "-$sig" "$pid" 2>/dev/null || true ;;
-        # Not ours, and this is a shared machine: named, and left alone. The next
-        # launcher still cannot have the port, and it will now be told why by
-        # something other than a daemon that mysteriously will not start.
-        *) printf '  !! 4532 IS HELD AND NOT BY A RIGCTLD -- not ours to signal:\n     %s\n' \
-               "${who:-pid $pid, already gone}"
-           return 1 ;;
-      esac
-    done
-    sleep 1
-  done
-  issued_before $(lsof -t -nP -iTCP:4532 -sTCP:LISTEN 2>/dev/null || true)
-  [ -n "$KEPT" ] || return 0
-  printf '  !! 4532 IS STILL LISTENED ON -- the next daemon would not bind it\n'
-  return 1
-}
-
-# RELEASE THE HARDWARE BY ASKING THE DEVICES, NOT BY GUESSING PROCESS NAMES.
-#
-# `down` used to pkill three command patterns. Three separate holders survived
-# that on 2026-08-02, each of them silently spoiling every session that followed:
-# a kestrel that ignored SIGTERM and sat on the codec for 82 minutes; a rigctld
-# that answered nothing while still owning the CAT port, so `rigctl f` timed out
-# and every launcher read it as a dead radio; and an orphaned analysis script
-# whose multiprocessing children crash-looped for two hours because a heredoc
-# parent cannot be re-imported by a spawned worker.
-#
-# None of them matched the patterns. All three were visible in `lsof` on the
-# port, or as our own code reparented to init. So this asks the serial devices
-# who holds them and escalates, rather than trusting a list of names to be
-# complete -- a list is only ever as good as the last failure someone remembered.
-free_port() {
-  local dev="$1" sig pid held asked=
-  for sig in TERM KILL; do
-    issued_before $(lsof -t "$dev" 2>/dev/null || true); held="$KEPT"
-    if [ -z "$held" ]; then
-      if [ -n "$asked" ]; then printf '  %s is free\n' "$dev"; stopped_a "$(basename "$dev")"
-      elif [ -n "$FENCED" ]; then printf '  %s is left to the arm above\n' "$dev"
-      else printf '  %s was already free\n' "$dev"; fi
-      return 0
-    fi
-    asked=1
-    for pid in $held; do
-      printf '  %s held by pid %s -- SIG%s\n' "$dev" "$pid" "$sig"
-      kill "-$sig" "$pid" 2>/dev/null || true
-    done
-    sleep 2
-  done
-  issued_before $(lsof -t "$dev" 2>/dev/null || true)
-  if [ -n "$KEPT" ]; then
-    printf '  !! %s STILL HELD\n' "$dev"
-    return 1
-  fi
-  printf '  %s is free\n' "$dev"
-  stopped_a "$(basename "$dev")"
-  return 0
-}
-
-# How long an orphan gets to put its own key down before it is insisted on. Every
-# modem here unkeys on the way out of a SIGTERM -- the handler raises, the
-# `finally` chain drops the line, the codec drains -- and onair_session.py budgets
-# 12 s for a child doing exactly that work. Spent by polling, so a modem that goes
-# quietly costs nothing at all.
-REAP_GRACE_S=12
-
-# Which of these pids are still standing. A function rather than an inline loop
-# because a `kill -0` that finds nothing exits 1, and `left=$(...)` inheriting
-# that status ends the run under `set -e` -- in the case where every orphan died
-# on the first ask, which is the good one.
-alive_of() {
-  local pid
-  for pid in "$@"; do kill -0 "$pid" 2>/dev/null && printf '%s ' "$pid"; done
-  return 0
-}
-
-# Our own processes that outlived the shell that started them. Matched on this
-# repository's path so a reparented worker of ours is caught and the operator's
-# unrelated work is not: this runs on a shared machine and must never reach for
-# anything it did not start.
-#
-# ASK, WAIT, THEN INSIST. This opened with SIGKILL, which is the one signal a
-# modem cannot unkey through: the handler, the `finally` chain and the keying
-# watchdog all die with it, and whatever the line was doing it goes on doing --
-# process death is not known to lower it on this hardware (docs/STATION.md). An
-# orphan is exactly the process most likely to be holding a transmitter up, so it
-# gets the same escalation `hfhost.supervisor._terminate` gives a modem it
-# recycles, and for the same reason. The `down` verb reads the line back once the
-# ports are free, because a signal is not evidence.
-reap_orphans() {
-  local pid pids left
-  issued_before $(ps -Ao pid,ppid,command | awk -v r="$REPO" \
-           '$2==1 && index($0,r) && !/onair\.sh/ {print $1}'); pids="$KEPT"
-  # `cond && printf` as the last statement makes the CONDITION this function's
-  # exit status, so reaping anything returned 1 -- and under `set -e` that ended
-  # `down` before it freed PTT_PORT or reached prove_unkeyed. The cleanup verb
-  # aborted in exactly the case that needed it.
-  if [ -z "$pids" ]; then printf '  no orphaned workers\n'; return 0; fi
-  stopped_a "orphaned worker(s)"
-  for pid in $pids; do
-    printf '  orphan pid %s (parent gone) -- SIGTERM\n' "$pid"
-    # The children too, and by name: an orphan's own workers key nothing, but a
-    # reparented modem under it does, and it is not reachable through a dead
-    # parent's handler.
-    pkill -TERM -P "$pid" 2>/dev/null || true
-    kill -TERM "$pid" 2>/dev/null || true
-  done
-  for _ in $(seq $((REAP_GRACE_S * 2))); do
-    left=$(alive_of $pids)
-    [ -n "$left" ] || break
-    sleep 0.5
-  done
-  left=$(alive_of $pids)
-  for pid in $left; do
-    printf '  orphan pid %s ignored SIGTERM for %ss -- SIGKILL, so it never unkeyed\n' \
-        "$pid" "$REAP_GRACE_S"
-    pkill -9 -P "$pid" 2>/dev/null || true
-    kill -9 "$pid" 2>/dev/null || true
-  done
-  [ -z "$left" ] || sleep 1
-  return 0
-}
-
-# The daemon never holds the key. Every armed verb drives RTS on $PTT_PORT
-# itself and REFUSES to arm if the daemon also owns PTT — two owners of one
-# transmitter is how it keys unasked — so rigctld runs ptt_type=None and tunes,
-# which it does before there is any RF about. The last verb keying through the
-# daemon was `vara`, and on 2026-08-13 its wire records ended the argument:
-# rigctld answered every command until the first key-down, then answered
-# nothing — connect in 1 ms, `T 0` swallowed, 751 ms of silence, four times
-# over, ~4.7 s of carrier past the end of audio on every attempt — while the
-# line itself read LOW in microseconds, eight of eight. The socket was healthy
-# the whole time; it is the daemon's rig side that dies with PTT asserted. A
-# path that must work while the antenna radiates does not travel that.
-# shrike is the one exception to the daemon itself: it opens the CAT port
-# directly and cannot share it, so it runs with no daemon at all.
-RIGCTLD_PID=
 rigctld_cleanup() {
-  # Only this shell's child: an EXIT trap must never sweep up another arm.
-  # The daemon inherits the rig claim, so even a pre-key refusal must reap it.
-  local pid="${RIGCTLD_PID:-}" i
-  [ -n "$pid" ] || return 0
-  if jobs -pr | grep -qx "$pid"; then
-    kill -TERM "$pid" 2>/dev/null || true
-    for i in $(seq 10); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.5
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -KILL "$pid" 2>/dev/null || true
-    fi
-    echo "  rigctld pid $pid stopped (launcher cleanup)"
-  fi
-  wait "$pid" 2>/dev/null || true
+  [ -z "${RIGCTLD_PID:-}" ] || claim_processes end "$RIGCTLD_PID" || return
+  [ -z "${RIGCTLD_PID:-}" ] || wait "$RIGCTLD_PID" 2>/dev/null || true
   RIGCTLD_PID=
-  return 0
 }
 
 rigctld_start() {
-  took hardware
-  local ptt="$1"
-  [ "$ptt" = none ] || die "rigctld never holds the key (asked for ptt=$ptt)"
-  rigctld_stop || die "CAT cleanup failed -- cannot start another rigctld while the previous owner remains"
-  # A DAEMON THAT ANSWERS FOR A RADIO IT CANNOT REACH is the failure the sweep
-  # above exists to prevent, and it is silent from here: the daemon started below
-  # would fail to bind, exit, and every `nc` after it would be answered by the
-  # stale one. That reads as a healthy start on a rig nothing is holding.
-  if lsof -t -nP -iTCP:4532 -sTCP:LISTEN >/dev/null 2>&1; then
-    die "4532 is still listened on by something the stop above could not clear --
-   see the line naming it. A daemon started now would bind nothing and be
-   ANSWERED BY THE STALE ONE, on a CAT port it may no longer reach."
-  fi
-  if [ "$CAPTURE_PREPARED" = 1 ]; then
-    trap 'capture_trap_rc=$?; rigctld_cleanup; witness_stop; capture_exit "$capture_trap_rc"' EXIT
-  else
-    trap 'rigctld_cleanup; witness_stop' EXIT
-  fi
-  # Bash does not run EXIT for an unhandled termination signal on every platform.
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  trap 'exit 129' HUP
-  rigctld -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" --set-conf=ptt_type=None \
-      >"${TMPDIR:-/tmp}/rigctld.log" 2>&1 &
-  local spawned=$!
-  RIGCTLD_PID=$spawned
-  # Wait for the daemon to ANSWER rather than sleeping a guess at how long it takes.
-  # Three seconds is usually enough and sometimes is not: the adapter this rig is on
-  # can take longer to open when the previous holder has only just let go, and the
-  # launcher then aborted on an empty pipeline before printing a word about why —
-  # `set -o pipefail` turning a slow start into a session that never began.
-  local reply=""
-  for _ in $(seq 12); do
-    kill -0 "$spawned" 2>/dev/null || break
-    reply="$(printf '+\\get_conf ptt_type\nq\n' | nc -w 2 127.0.0.1 4532 2>/dev/null || true)"
-    if ! kill -0 "$spawned" 2>/dev/null; then reply=""; break; fi
-    case "$reply" in *ptt_type=*) break ;; esac
-    reply=""
-    sleep 1
-  done
-  # THE DAEMON GOES WITH THE REFUSAL. This died with the process it had just
-  # spawned still running, and on 2026-08-28 that happened inside `down` twice:
-  # the cleanup verb exited before its own final stop and left a rigctld holding
-  # the CAT port -- the verb whose whole job is clearing that trap creating it,
-  # and returning 1 while it did, which the operator read as the launch having
-  # short-circuited.
-  if [ -z "$reply" ]; then
-    rigctld_cleanup
-    die "rigctld did not answer on 4532 within 12 s — see ${TMPDIR:-/tmp}/rigctld.log"
-  fi
-  # None is hamlib's name for a value of the ptt_type enum, not English for
-  # missing. Printed bare, four lines under the `PTT … present` line, the two read
-  # as a contradiction, and this line is the only one that shows the operator the
-  # daemon is not a second owner of the key. So it says which of the two it is.
-  case "$reply" in
-    *ptt_type=None*) echo "  daemon keys nothing (ptt_type=None) — the line is ours alone" ;;
-    *) printf '%s\n' "$reply" | sed -n 's/^ptt_type=/  !! THE DAEMON WOULD KEY THE RIG: ptt_type=/p' ;;
-  esac
+  [ "$1" = none ] || die "rigctld never holds the key"
+  rigctld_stop || die "CAT cleanup failed"
+  claim_daemon_start "${TMPDIR:-/tmp}/rigctld.log" || die "rigctld startup failed"
 }
 
 # Everything that has to be present before a modem is started. Named here rather
@@ -741,14 +425,13 @@ rigctld_start() {
 # goes looking for the wrong thing.
 require_hardware() {
   took launch
-  # THE CLAIM COMES FIRST, before a port is opened or a device is even looked
-  # for: a second launcher has to be turned away while it is still incapable of
-  # keying, not after it has taken the codec and the CAT line off the first.
-  claim_rig
+  # Configuration and pathname checks open no device. Claim before resolving
+  # the codecs or starting anything that can open CAT, audio or the keying line.
   require_ports
   [ -e "$CAT_PORT" ] || die "CAT port $CAT_PORT missing — is the rig on and cabled?"
   [ -e "$PTT_PORT" ] || die "PTT port $PTT_PORT missing — set PTT_PORT if the key \
 is not on the second interface of the CAT adapter"
+  claim_rig || exit $?
   echo "  CAT $CAT_PORT / PTT $PTT_PORT present"
   settle_port
   require_hamlib
@@ -853,14 +536,13 @@ witness_start() {       # <dial Hz> [gateway callsign]
       --seconds "$WITNESS_MAX_S" --out "$WITNESS_WAV" \
       --candidates "${HFMODEM_WITNESS_CANDIDATES:-$OPERATOR_DATA/kiwi-candidates.csv}" ${capture_witness_args[@]+"${capture_witness_args[@]}"} \
       ${2:+--peer "$2"} \
-      >"$witness_log_target" 2>&1 &
+      7>&- 8>&- >"$witness_log_target" 2>&1 &
   WITNESS_PID=$!
+  # An optional recorder may fail before metadata discovery reaches it. A gone
+  # child needs no teardown; a live child without an identity must fail closed.
+  claim_record "$WITNESS_PID" || { kill -0 "$WITNESS_PID" 2>/dev/null && exit 1; true; }
   # Every path out of this shell, including the gate's own refusal and `die`.
-  if [ "$CAPTURE_PREPARED" = 1 ]; then
-    trap 'capture_trap_rc=$?; rigctld_cleanup; witness_stop; capture_exit "$capture_trap_rc"' EXIT
-  else
-    trap 'rigctld_cleanup; witness_stop' EXIT
-  fi
+  trap 'claim_exit $?' EXIT
   printf '  witness: kiwi_witness pid %s -> %s (log %s/witness.log)\n' \
       "$WITNESS_PID" "$WITNESS_WAV" "$SESSION"
   return 0
@@ -875,15 +557,7 @@ witness_stop() {
   [ -n "$WITNESS_PID" ] || return 0
   local pid="$WITNESS_PID"
   WITNESS_PID=
-  kill -TERM "$pid" 2>/dev/null || true
-  for _ in $(seq 20); do
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.5
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    printf '  the witness ignored SIGTERM for 10s -- killing it, so it wrote nothing\n'
-    kill -9 "$pid" 2>/dev/null || true
-  fi
+  claim_processes end "$pid" || return
   # WHAT THE RECEIVER COULD AND COULD NOT DO, BESIDE THE ARM IT WITNESSED. The
   # recorder marks those lines; they carry which receiver it got, how far that
   # one is from the PEER, and the true level, which the .wav cannot show because
@@ -922,6 +596,10 @@ witness_stop() {
 # 2 on its own refusals ahead of the key, and those must reach the verdict.
 unkey_and_exit() {          # <the modem's status> <dial> [<tool argparsed>]
   local rc="$1" cat_ready=1
+  if [ "$CLAIM_ADMITTED" = 0 ]; then
+    [ "$rc" -ne 0 ] || rc=1
+    exit "$rc"
+  fi
   [ -z "${3:-}" ] || refuse_usage_error "$rc" "$3"
   if [ "${3:-}" = kestrel_connect.py ]; then
     # VARA has exited and released PTT. Release its CAT daemon before the
@@ -1082,7 +760,7 @@ rig_power() {
   local dial="$1" level watts
   level="$(printf '\\get_level RFPOWER\nq\n' | nc -w 3 127.0.0.1 4532 2>/dev/null | sed -n 1p || true)"
   case "$level" in ''|*[!0-9.]*)
-    level="$(rigctl -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" l RFPOWER 2>/dev/null | sed -n 1p || true)" ;;
+    level="$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" l RFPOWER 2>/dev/null | sed -n 1p || true)" ;;
   esac
   case "$level" in ''|*[!0-9.]*)
     echo "  TX power: CAT did not answer; power setting unavailable"
@@ -1091,7 +769,7 @@ rig_power() {
   watts="$(printf '\\power2mW %s %s PKTUSB\nq\n' "$level" "$dial" \
              | nc -w 3 127.0.0.1 4532 2>/dev/null | sed -n 1p || true)"
   case "$watts" in ''|*[!0-9]*)
-    watts="$(rigctl -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" 2 "$level" "$dial" PKTUSB \
+    watts="$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" 2 "$level" "$dial" PKTUSB \
                2>/dev/null | sed -n 1p || true)" ;;
   esac
   case "$watts" in
@@ -1136,7 +814,15 @@ cat_free_or_die() {
 # A receiver that hears the band is the only proof PTT is actually down. A dead
 # input and a keyed transmitter look identical from every other angle.
 prove_unkeyed() {
-  "${HFMODEM_PYTHON:-$VENV/python}" - <<PY
+  claim_worker "${HFMODEM_PYTHON:-$VENV/python}" - <<PY
+from hfmodem.core import claim
+import atexit
+admission = claim.inherited(9, launch=True)
+def admission_failed():
+    if admission.fd is not None:
+        admission.failed()
+        print("CLAIM NOT ADMITTED capture open failed", flush=True)
+atexit.register(admission_failed)
 import numpy as np, sounddevice as sd
 from hfmodem.core.levels import NO_AUDIO_CAUSE, RX_SILENT_RMS
 ins = [i for i, x in enumerate(sd.query_devices())
@@ -1146,7 +832,9 @@ if not ins:
     # way to tell a quiet band from a transmitter that never let go of the line.
     print("  no '$AUDIO' input — CANNOT PROVE PTT IS DOWN")
     raise SystemExit(1)
-a = sd.rec(int(0.7 * 48000), samplerate=48000, channels=1, device=ins[0], blocking=True)
+with sd.InputStream(samplerate=48000, channels=1, device=ins[0]) as stream:
+    admission.opened()
+    a, overflow = stream.read(int(0.7 * 48000))
 r = float(np.sqrt(np.mean(a.astype(float) ** 2)))
 # THREE OUTCOMES, NOT TWO. This named one cause -- a stuck transmitter -- for
 # every reading under 0.01, and on 2026-08-14 printed it beside the exit trap's
@@ -1185,6 +873,7 @@ check)   # Everything that can be wrong before key-down, and nothing that keys.
   "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem devices | sed -n 's/^/  /p'
   say "receiver"
   prove_unkeyed
+  claim_admit
   say "ready — nothing above has transmitted"
   ;;
 
@@ -1198,8 +887,11 @@ preflight)  # Keys UNMODULATED, so a sideband transmitter emits nothing.
   # operator for a licence class to measure a sound card, which is the wrong
   # question at the wrong moment. The device name is what has to agree between
   # the two files, and that is checked below.
-  "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem rig "${HFMODEM_STATION:-$REPO/station.toml}" --preflight || true
-  prove_unkeyed
+  rc=0
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem rig "${HFMODEM_STATION:-$REPO/station.toml}" --preflight || rc=$?
+  [ "$CLAIM_ADMITTED" = 1 ] || exit "$rc"
+  prove_unkeyed || rc=$((rc ? rc : $?))
+  exit "$rc"
   ;;
 
 pactor)  # shrike opens the CAT port ITSELF, so the daemon must let go of it, and
@@ -1239,7 +931,7 @@ pactor)  # shrike opens the CAT port ITSELF, so the daemon must let go of it, an
   # --serial/--ptt-port are the arm gate's demand: without them shrike refuses
   # at "NOT KEYING" before the rig object exists.
   rc=0
-  "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.shrike.onair --transmit \
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.shrike.onair --transmit \
       --serial "$CAT_PORT" --ptt-port "$PTT_PORT" \
       --audio-out "$AUDIO_OUT" --audio-in "$AUDIO_IN" \
       --mycall "$MYCALL" --dxcall "$gw" --dial "$((centre - 1500))" \
@@ -1258,7 +950,7 @@ pactor-answer)  # Keys only when a station calls $MYCALL, so no channel gate.
   rig_power "$((centre - 1500))"
   cat_free_or_die
   rc=0
-  "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.shrike.onair --transmit \
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.shrike.onair --transmit \
       --serial "$CAT_PORT" --ptt-port "$PTT_PORT" \
       --audio-out "$AUDIO_OUT" --audio-in "$AUDIO_IN" \
       --mycall "$MYCALL" --dial "$((centre - 1500))" \
@@ -1298,7 +990,7 @@ vara)    # kestrel drives the keying line itself, the shape vara-mail proved.
   # answered, and the transmitter stayed keyed with no modulation until the
   # operator unkeyed it by hand. kestrel refuses --arm without it.
   rc=0
-  "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_connect.py" \
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_connect.py" \
       --gateway "$gw" --mycall "$MYCALL" --bw "$bw" \
       --tx-device "$AUDIO" --rx-device "$AUDIO" \
       --rigctld 127.0.0.1:4532 --freq "$(printf '%d.%03d' "$(((centre - 1500) / 1000))" "$(((centre - 1500) % 1000))")" \
@@ -1324,17 +1016,13 @@ ardop)   # besra keys the line itself (see vara-mail), and records by default no
   [ ${#KEY_ARGS[@]} -eq 0 ] || die "ardop takes <gw> [centre] [bw] [--force] and \
 nothing after -- '${KEY_ARGS[0]}' would go nowhere"
   witness_start "$((centre - 1500))" "$gw"
-  "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.besra.host.run_server \
+  claim_start "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.besra.host.run_server \
       --radio "$RIG_NAME" --rigctld 127.0.0.1:4532 \
       --audio-in "$AUDIO" --audio-out "$AUDIO" \
       --channel "$centre" --bandwidth "$bw" \
-      --ptt-device "$PTT_PORT" --line-ptt &
-  modem=$!
-  if [ "$CAPTURE_PREPARED" = 1 ]; then
-    trap 'capture_trap_rc=$?; kill $modem 2>/dev/null || true; rigctld_cleanup; witness_stop; capture_exit "$capture_trap_rc"' EXIT
-  else
-    trap 'kill $modem 2>/dev/null || true; rigctld_cleanup; witness_stop' EXIT
-  fi
+      --ptt-device "$PTT_PORT" --line-ptt
+  modem=$CLAIM_PID
+  trap 'claim_exit $?' EXIT
   # besra is ready when it answers, and a fixed sleep here was ten seconds of a
   # pounce's gap. `run_server` binds the host port only after the radio link is
   # up -- audio and rig both open -- so the port is a stricter precondition than
@@ -1350,12 +1038,9 @@ nothing after -- '${KEY_ARGS[0]}' would go nowhere"
   # default went out at 2000: the line above announced BW200 and the session came
   # up `ARQBW now 2000MAX`, four times the occupancy nobody asked for.
   rc=0; "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/ardop_call.py" "$gw" 90 --bandwidth "$bw" || rc=$?
-  kill $modem 2>/dev/null || true
-  if [ "$CAPTURE_PREPARED" = 1 ]; then
-    trap 'capture_trap_rc=$?; rigctld_cleanup; witness_stop; capture_exit "$capture_trap_rc"' EXIT
-  else
-    trap 'rigctld_cleanup; witness_stop' EXIT
-  fi
+  claim_processes end "$modem" || exit 1
+  claim_wait || true
+  trap 'claim_exit $?' EXIT
   sleep 2
   unkey_and_exit "$rc" "$((centre - 1500))" ardop_call.py
   ;;
@@ -1377,7 +1062,7 @@ ardop-mail)  # A whole Winlink exchange over one held ARDOP link: run_server own
   gate_channel "$((centre - 1500))" ardop "$bw" "${@:5}"
   witness_start "$((centre - 1500))" "$gw"
   rc=0
-  "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.besra.host.run_server \
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.besra.host.run_server \
       --radio "$RIG_NAME" --rigctld 127.0.0.1:4532 \
       --audio-in "$AUDIO" --audio-out "$AUDIO" \
       --channel "$centre" --bandwidth "$bw" \
@@ -1412,7 +1097,7 @@ vara-mail)   # The same exchange over a held VARA link. PTT does NOT go through 
   gate_channel "$((centre - 1500))" vara "$bw" "${@:$rest}"
   witness_start "$((centre - 1500))" "$gw"
   rc=0
-  "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_connect.py" \
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_connect.py" \
       --gateway "$gw" --mycall "$MYCALL" --bw "$bw" \
       --tx-device "$AUDIO" --rx-device "$AUDIO" \
       --rigctld 127.0.0.1:4532 --freq "$(printf '%d.%03d' "$(((centre - 1500) / 1000))" "$(((centre - 1500) % 1000))")" \
@@ -1454,7 +1139,7 @@ sabir)   # One-way beacon or prepared DATAGRAM proof; no peer reply is expected.
   # arrives days later, and a one-way test is that recording against this file.
   beacon_grid ${KEY_ARGS[@]+"${KEY_ARGS[@]}"}
   rc=0
-  "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.sabir.onair --transmit \
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.sabir.onair --transmit \
       --radio "$RIG_NAME" --rigctld 127.0.0.1:4532 \
       --ptt-device "$PTT_PORT" --line-ptt \
       --channel "$centre" \
@@ -1471,6 +1156,50 @@ sabir)   # One-way beacon or prepared DATAGRAM proof; no peer reply is expected.
   unkey_and_exit "$rc" "$((centre - 1500))"
   ;;
 
+vara-chat)   # The attended VarAC session: the calling frequency in Hz, then the terminal's
+             # own arguments. Nothing keys until the operator answers, calls or calls CQ,
+             # or a station calls us and auto-answer is on.
+  dial="${2:?the calling frequency in Hz}"
+  chat_args=("${@:3}")
+  require_hardware
+  rigctld_start none
+  positional dial "$dial"
+  tune "$dial"
+  rig_power "$dial"
+  vara_chat_readout() { rig_power "$dial"; prove_unkeyed || true; }
+  CLAIM_AFTER_DOWN=vara_chat_readout
+  rc=0
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_host.py" --chat \
+      --mycall "$MYCALL" --expect-model "$RIG_EXPECT_MODEL" \
+      --ptt-device "$PTT_PORT" --tx-device "$AUDIO_OUT" --rx-device "$AUDIO_IN" \
+      "${chat_args[@]}" || rc=$?
+  CLAIM_AFTER_DOWN=
+  unkey_and_exit "$rc" "$dial" "kestrel_host.py --chat"
+  ;;
+
+vara-txcal)  # Stepped VARA drives with the meters read while keyed, on the dial the rig
+             # sits on (`-`) or the one named. The console runs it only with --execute.
+  dial="${2:?a dial in Hz, or - to leave the rig where it is}"
+  require_hardware
+  rigctld_start none
+  if [ "$dial" = - ]; then
+    dial="$(printf '+\\get_freq\nq\n' | nc -w 5 127.0.0.1 4532 2>/dev/null \
+            | sed -n 's/^Frequency: //p' | head -1)"
+  fi
+  positional dial "$dial"
+  tune "$dial"
+  rig_power "$dial"
+  vara_txcal_readout() { rig_power "$dial"; prove_unkeyed || true; }
+  CLAIM_AFTER_DOWN=vara_txcal_readout
+  rc=0
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/vara_txcal.py" \
+      --mycall "$MYCALL" --expect-model "$RIG_EXPECT_MODEL" \
+      --ptt-device "$PTT_PORT" --tx-device "$AUDIO_OUT" --rx-device "$AUDIO_IN" \
+      "${@:3}" || rc=$?
+  CLAIM_AFTER_DOWN=
+  unkey_and_exit "$rc" "$dial" "vara_txcal.py"
+  ;;
+
 rtty)    # Keyboard-to-keyboard RTTY, and the operator keys every over by hand. No
          # gate_channel: they listen before they key, and a sense per over would
          # delay every turnover. The rig goes to its data USB mode on either
@@ -1480,7 +1209,7 @@ rtty)    # Keyboard-to-keyboard RTTY, and the operator keys every over by hand. 
   require_hardware
   say "RTTY terminal as $MYCALL -- nothing transmits until you key"
   rigctld_start none
-  printf '+\\set_mode %s 3000\nq\n' "$RIG_MODE" | nc -w 5 127.0.0.1 4532 >/dev/null || true
+  printf '+\\set_mode %s %s\nq\n' "$RIG_MODE" "$(mode_passband 3000)" | nc -w 5 127.0.0.1 4532 >/dev/null || true
   mode="$(printf '+\\get_mode\nq\n' | nc -w 5 127.0.0.1 4532 2>/dev/null \
           | sed -n 's/^Mode: //p' | head -1)"
   # The terminal owns the screen and this stderr goes only to arm.log, so the
@@ -1505,17 +1234,16 @@ rtty)    # Keyboard-to-keyboard RTTY, and the operator keys every over by hand. 
   rig_power "$dial"
   # In the background and waited for, so a signal to this shell runs its trap at
   # once rather than after the terminal exits: TERM or HUP halts the terminal (its
-  # TERM unkeys), and the verdict below still runs once it has gone. INT forwards
-  # the operator's stop to the terminal too, including a signal to this shell only.
-  "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.lanner.qso --dial "$dial" --rig "$RIG_NAME" \
+  # TERM unkeys), and the verdict still runs once it has gone, after `down` has
+  # read the line low. INT forwards the operator's stop to the terminal too,
+  # including a signal to this shell only.
+  rtty_readout() { rig_power "$dial"; prove_unkeyed || true; }
+  CLAIM_AFTER_DOWN=rtty_readout
+  rc=0
+  claim_run "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.lanner.qso --dial "$dial" --rig "$RIG_NAME" \
       --ptt-device "$PTT_PORT" --audio-in "$AUDIO_IN" --audio-out "$AUDIO_OUT" \
-      --mycall "$MYCALL" --launcher "$$" ${warn[@]+"${warn[@]}"} "${@:3}" &
-  modem=$!
-  trap 'kill -TERM "$modem" 2>/dev/null || true' TERM HUP
-  trap 'kill -INT "$modem" 2>/dev/null || true' INT
-  while kill -0 "$modem" 2>/dev/null; do wait "$modem" || true; done
-  rc=0; wait "$modem" || rc=$?
-  trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
+      --mycall "$MYCALL" --launcher "$$" ${warn[@]+"${warn[@]}"} "${@:3}" || rc=$?
+  CLAIM_AFTER_DOWN=
   unkey_and_exit "$rc" "$dial" "lanner qso"
   ;;
 
@@ -1532,7 +1260,7 @@ pounce)  # ./tools/onair.sh pounce <verb> <gw> <centre> [more…]
   # would otherwise both wait it out and both go when it cleared, which is the
   # collision this file exists to prevent arriving on a timer. The verb below
   # inherits this one.
-  claim_rig
+  claim_rig pounce || exit $?
   say "waiting for $((centre / 1000)).$((centre % 1000 / 100)) kHz to clear, then $verb -> $gw"
   for _ in 1 2 3 4 5; do
     rc=0
@@ -1540,7 +1268,7 @@ pounce)  # ./tools/onair.sh pounce <verb> <gw> <centre> [more…]
     if [ "${CAPTURE_KIND:-}" = launch-group ]; then
       parent_capture_args=(--capture-parent-id "$CAPTURE_ID" --capture-parent-kind launch-group)
     fi
-    POUNCE_WAIT="${POUNCE_WAIT:-900}" "$0" ${WITNESS:+--witness} "${@:2}" \
+    POUNCE_WAIT="${POUNCE_WAIT:-900}" claim_run "$0" ${WITNESS:+--witness} "${@:2}" \
       ${parent_capture_args[@]+"${parent_capture_args[@]}"} || rc=$?
     [ "$rc" -eq 3 ] && die "channel never cleared"
     [ "$rc" -eq "$CHANNEL_BUSY" ] || exit "$rc"
@@ -1555,14 +1283,16 @@ listen)  # Receive only. Nothing here can key: the daemon is told ptt_type=None
   require_hardware
   rigctld_start none
   say "listening on centre $centre (dial $((centre - 1500))) for ${secs}s — NO TX"
-  printf '+\\set_mode PKTUSB 3000\nq\n' | nc -w 5 127.0.0.1 4532 >/dev/null
+  printf '+\\set_mode PKTUSB %s\nq\n' "$(mode_passband 3000)" | nc -w 5 127.0.0.1 4532 >/dev/null
   # Through the shared tune, which reads the dial back and refuses a mismatch.
   # This verb had its own copy of that, printing the frequency without checking
   # it -- and it was the only verb doing the readback at all, while the four that
   # can key were not. One path now, and the receive side gets the tolerance too:
   # a frequency that did not take is silent, and looks exactly like a dead band.
   tune "$((centre - 1500))"
-  timeout "$secs" "${HFMODEM_PYTHON:-$VENV/python}" -m creance.cli monitor --device "$AUDIO" || true
+  rc=0
+  claim_run timeout -k 5 "$secs" "${HFMODEM_PYTHON:-$VENV/python}" -m creance.cli monitor --device "$AUDIO" || rc=$?
+  [ "$CLAIM_ADMITTED" = 1 ] || exit "$rc"
   prove_unkeyed
   ;;
 
@@ -1570,86 +1300,14 @@ power)   # No TX, and no key: one CAT question, asked of a daemon if one is up.
          # The centre only picks the frequency the watts are converted at, so it
          # defaults to where the station usually calls rather than demanding one.
   centre="${2:-7101500}"
+  claim_rig power || exit $?
   require_cat
   require_hamlib
   settle_port
   rig_power "$((centre - 1500))"
+  claim_admit
   ;;
 
-down)
-  # The one verb that frees the ports without first proving them present: it runs
-  # when things are already wrong. It still has to know which ports those are.
-  #
-  # ALREADY STOPPED IS SUCCESS, AND IT SAYS SO OUT LOUD. This came back 1 when
-  # there was nothing left to stop, and on 2026-08-28 the operator read that as
-  # the launch having short-circuited and started arm 2 a second time on top of
-  # itself. Nothing below reports failure for a thing that was not running; the
-  # status is non-zero only for a port this could not free, which is the one
-  # condition that will actually spoil the next arm.
-  DOWN_PIDS=" $(ps -Ao pid= | tr -s '[:space:]' ' ') "
-  require_ports
-  say "stopping everything"
-  stuck=0
-  # Ask nicely first: a modem that shuts down on its own unkeys deliberately,
-  # where a kill leaves the last PTT state to the watchdog.
-  issued_before $(pgrep -f "run_server|kestrel_connect|shrike.onair|lanner.qso|kiwi_witness|creance.cli" 2>/dev/null || true)
-  modems="$KEPT"
-  if [ -z "$modems" ]; then
-    echo "  no modem was running"
-  else
-    printf '  asking %s modem(s) to stop: %s\n' "$(echo $modems | wc -w | tr -d ' ')" "$(echo $modems)"
-    kill -TERM $modems 2>/dev/null || true
-    stopped_a "modem(s)"
-    # Only when there was something to wait for. A cleanup that costs two seconds
-    # of a slot for nothing is two seconds of the gap the next arm launches into.
-    sleep 2
-  fi
-  fenced_exit
-  reap_orphans
-  fenced_exit
-  rigctld_stop      || stuck=$((stuck + 1))
-  fenced_exit
-  free_port "$CAT_PORT" || stuck=$((stuck + 1))
-  fenced_exit
-  free_port "$PTT_PORT" || stuck=$((stuck + 1))
-  fenced_exit
-  # THE LINE ITSELF, once nothing holds the port. Everything above this is a
-  # signal, and a signal is not evidence: `free_port` and `reap_orphans` both end
-  # in SIGKILL, which is the one way out a modem cannot unkey through, and this
-  # station has never measured whether the line falls on its own when a process
-  # dies. `drop_rts` takes both output lines down on the hardware and reads them
-  # back, so it answers whether the key is down as well as putting it there.
-  # Before the receiver check rather than after: that one exits 1 on a quiet
-  # band, and under `set -e` would take the line verdict with it.
-  prove_down
-  # ONE SHOT, NOT A DAEMON. This asked the question by starting a rigctld and
-  # stopping it again, and it left one orphaned twice on 2026-08-28: the start's
-  # own `die` -- the daemon spawned, then not answering inside 12 s -- ended
-  # `down` before its own stop, so the cleanup verb walked away holding the CAT
-  # port it exists to free, and rigctld was killed by hand before three arms.
-  # `rigctl` opens the port, answers, and is gone; there is nothing left to
-  # orphan and nothing left holding the port when this verb returns.
-  dial="$(rigctl -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" f 2>/dev/null | sed -n 1p || true)"
-  case "$dial" in
-    ''|*[!0-9]*) printf '  !! CAT DID NOT ANSWER -- check the radio, not the software\n' ;;
-    *)           printf '  CAT answers, dial %s\n' "$dial" ;;
-  esac
-  # Both readings below are the station's condition, not this verb's result. A
-  # radio that is off and a band that is quiet are things `down` reports; they
-  # are not things it failed to stop, and reporting them as failure is what cost
-  # arm 2.
-  prove_unkeyed || true
-  if [ "$stuck" -gt 0 ]; then
-    die "$stuck port(s) above are STILL HELD. The next arm would open the wrong
-   thing or nothing at all -- clear the holder named above before calling again."
-  fi
-  if [ -z "$STOPPED" ]; then
-    say "nothing was running — the station was already down, and that is success"
-  else
-    say "stopped:${STOPPED%,} — the station is down"
-  fi
-  exit 0
-  ;;
 
 # The header, however long it grows. This was `sed -n '2,36p'`, and adding a
 # paragraph to the usage above silently cut the last one off the bottom of it.

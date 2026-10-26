@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""Loopback host ports for the station's protocol lanes.
+"""External host endpoints for the station's protocol lanes.
 
 Binding completes before a host is reported as served. A failed host is
 reported while its lane continues receiving. ``Served.keys`` distinguishes
@@ -11,6 +11,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import sys
+import threading
+import time
+
+from hfmodem.core.operations import LeaseTimeout
 
 
 @dataclass
@@ -26,11 +30,17 @@ class Served:
     the moment a real modem is wired in it has to move with it — a lane that
     says it keys and does not is the failure this field exists to prevent.
     """
+    endpoint_attrs: tuple[str, ...] = ()
 
     @property
     def ports(self) -> tuple[int, ...]:
         """Read off the server, so a config that asked for 0 reports what it got."""
         return tuple(getattr(self.server, a) for a in self.port_attrs)
+
+    @property
+    def endpoints(self) -> tuple[str, ...]:
+        return tuple(str(port) for port in self.ports) + tuple(
+            str(getattr(self.server, attr)) for attr in self.endpoint_attrs)
 
 
 def _start(server) -> None:
@@ -50,7 +60,7 @@ def _start(server) -> None:
     raise TypeError(f"{type(server).__name__} offers no way to start it")
 
 
-def build(cfg, *, station=None, log=print) -> dict[str, Served]:
+def build(cfg, *, station=None, log=print, failed=None, retain=None) -> dict[str, Served]:
     """Start a host server for every enabled protocol that has one.
 
     Returns what actually came up, which is not necessarily what was asked for.
@@ -59,54 +69,110 @@ def build(cfg, *, station=None, log=print) -> dict[str, Served]:
     dialect that can be served without one says so by not needing it. sabir needs
     one: its session runs here rather than elsewhere.
     """
-    out: dict[str, Served] = {}
+    out: dict[str, Served] = {} if retain is None else retain
     for name, p in cfg.protocols.items():
         if not p.enabled:
+            continue
+        if station is not None and name not in station.enabled:
             continue
         try:
             served = _build_one(name, p, station)
         except Exception as exc:            # noqa: BLE001
             log(f"{name}: host dialect not served ({exc})")
+            if failed is not None:
+                failed.append({"name": name, "why": str(exc)})
             continue
+        out[name] = served
         try:
             _start(served.server)
         except Exception as exc:            # noqa: BLE001
             log(f"{name}: host dialect would not start ({exc})")
+            stop_all({name: served})
+            del out[name]
+            if failed is not None:
+                failed.append({"name": name, "why": str(exc)})
             continue
         out[name] = served
         radio = "" if served.keys else \
             "  -- NO RADIO: an application attaching here does not reach the air"
         log(f"{name}: {p.host} on "
-            f"{', '.join(str(x) for x in served.ports)}{radio}")
+            f"{', '.join(served.endpoints)}{radio}")
     return out
 
 
 def _build_one(name: str, p, station=None) -> Served:
     if name == "rpr":
-        if p.host != "kiss":
+        if p.host not in ("kiss", "tracker", "tracker-managed", "agwpe"):
             raise NotImplementedError("rpr mail host is not implemented")
         from hfmodem.brubru.host.server import KissServer
         link = station.lanes.get("rpr") if station is not None else None
         if link is None:
             raise ValueError("rpr KISS needs a station receive lane")
-        server = KissServer(link, port=p.port)
+        if p.host in ("tracker", "tracker-managed", "agwpe"):
+            from hfmodem.brubru.host.runtime import PacketRuntime
+            from hfmodem.brubru.host.connected_server import TrackerServer, AgwServer
+            from hfmodem.station.contact import ContactOwner
+            arbiter = getattr(getattr(link, 'station', None), 'arbiter', None)
+            runtime = PacketRuntime(
+                link, mycall=station.cfg.station.mycall or 'NOCALL',
+                full_scale_mv=p.options.get('drive_reference_mv', 3000),
+                contact=ContactOwner(arbiter, 'rpr') if arbiter is not None else None)
+            if p.host == 'tracker-managed':
+                from hfmodem.brubru.host.managed_tracker import tracker_broker
+                server = tracker_broker(runtime, secret=_managed_secret(p), port=p.port)
+                return Served(name, server, ('port',),
+                              keys=station.rig is not None and station.arbiter is not None)
+            if p.host == 'tracker':
+                server = TrackerServer(runtime, endpoint=p.pty)
+                return Served(name, server, (),
+                              keys=station.rig is not None and station.arbiter is not None,
+                              endpoint_attrs=('endpoint',))
+            server = AgwServer(runtime, port=p.port)
+        else:
+            server = KissServer(link, port=p.port)
         return Served(name, server, ("port",),
                       keys=station.rig is not None and station.arbiter is not None)
     if name == "vara":
-        # LOOPBACK. `VaraServer` takes a `modem_factory` and there is nothing to
-        # hand it: kestrel's real core has no constructor that binds it to this
-        # station's air and arbiter, and `run_server.py` has no --modem either.
-        from hfmodem.kestrel.host.server import VaraServer
-        s = VaraServer(cmd_port=p.cmd_port, data_port=p.data_port)
-        return Served(name, s, ("cmd_port", "data_port"), keys=False)
+        from hfmodem.kestrel.host.server import HostSession, VaraServer
+        from hfmodem.kestrel.host.modem_core import LoopbackModem
+        link = station.lanes.get('vara') if station is not None else None
+        kwargs = {'modem_factory': link.runtime.modem_factory} if link is not None else {}
+        if p.host == 'vara-managed':
+            from hfmodem.core.managed_host import ManagedHost
+            factory = kwargs.get('modem_factory', LoopbackModem)
+            def serve_pair(command, data):
+                session = HostSession(command, data, factory())
+                try:
+                    session.run()
+                finally:
+                    session.close()
+                    session.ensure_retired()
+            s = ManagedHost(serve_pair, secret=_managed_secret(p), port=p.port)
+            return Served(name, s, ('port',), keys=link is not None
+                          and station.rig is not None and station.arbiter is not None)
+        s = VaraServer(cmd_port=p.cmd_port, data_port=p.data_port,
+                       kiss_port=getattr(p, 'kiss_port', 0) or None, **kwargs)
+        return Served(name, s, ("cmd_port", "data_port"),
+                      keys=link is not None and station.rig is not None
+                      and station.arbiter is not None)
     if name == "ardop":
-        # LOOPBACK, and this is the one with a real modem already written:
-        # `besra.host.run_server --radio` builds a `BesraModem` on its own rig.
-        # It owns that rig, which is the rig this station owns, so the wiring is
-        # a shared-radio question rather than a missing argument.
         from hfmodem.besra.host.server import HostServer
-        s = HostServer(control_port=p.cmd_port, data_port=p.data_port, quiet=True)
-        return Served(name, s, ("control_port", "data_port"), keys=False)
+        link = station.lanes.get('ardop') if station is not None else None
+        s = HostServer(control_port=p.cmd_port, data_port=p.data_port, quiet=True,
+                       modem=link.modem if link is not None else None)
+        if link is not None:
+            # The production core begins with listening disabled. Report that
+            # effective value rather than the standalone loopback's default.
+            s._cfg['LISTEN'] = 'FALSE'
+        if p.host == 'ardop-managed':
+            from hfmodem.core.managed_host import ManagedHost
+            broker = ManagedHost(s.serve_attached, secret=_managed_secret(p), port=p.port,
+                                 start_owner=s.start_attached, stop_owner=s.stop)
+            return Served(name, broker, ('port',), keys=link is not None
+                          and station.rig is not None and station.arbiter is not None)
+        return Served(name, s, ("control_port", "data_port"),
+                      keys=link is not None and station.rig is not None
+                      and station.arbiter is not None)
     if name == "sabir":
         # A fresh session core attaches to the station's one Sabir audio lane.
         air = getattr(station.lanes.get("sabir"), "air", None) if station else None
@@ -146,18 +212,59 @@ def _build_one(name: str, p, station=None) -> Served:
             server = SelcallHost(link.modem, port=p.port, emergency=p.emergency)
         return Served(name, server, ports, keys=keys)
     if name == "pactor":
-        # An SCS controller is a serial device, so this one is a pty rather than a
-        # socket: the application opens it exactly as it would open a PTC-IIIusb.
-        # `PtcHost` is the command surface; putting it behind a pty is what
-        # `shrike.ptc.main` does, and the station does not own that yet.
-        raise NotImplementedError(
-            "the SCS dialect is a pty and the station does not own one yet: "
-            "shrike.ptc.main joins PtcHost to a pty with a simulated peer, "
-            "shrike.onair joins PtcHost to the radio with no pty, and nothing "
-            "joins the pty to the radio")
+        if p.host not in ('ptc', 'ptc-managed'):
+            raise ValueError('PACTOR station host must be ptc')
+        from hfmodem.shrike.station_runtime import PtcServer
+        link = station.lanes.get('pactor') if station is not None else None
+        runtime = getattr(link, 'runtime', None)
+        if runtime is None:
+            raise ValueError('PTC requires the station native PACTOR owner')
+        if p.host == 'ptc-managed':
+            from hfmodem.core.managed_host import ManagedHost
+            broker = ManagedHost(runtime.serve_stream, secret=_managed_secret(p), port=p.port,
+                                 stream_roles=(3,),
+                                 start_owner=lambda: runtime.start_host(managed=True),
+                                 stop_owner=runtime.stop)
+            return Served(name, broker, ('port',),
+                          keys=station.rig is not None and station.arbiter is not None)
+        return Served(name, PtcServer(runtime, endpoint=p.pty), (),
+                      keys=station.rig is not None and station.arbiter is not None,
+                      endpoint_attrs=('endpoint',))
     raise LookupError(f"no host dialect is implemented for {name}")
 
 
-def stop_all(served: dict[str, Served]) -> None:
-    for s in served.values():
-        s.server.stop()
+def _managed_secret(p):
+    from pathlib import Path
+    try:
+        encoded = Path(p.auth_token_file).read_text(encoding='ascii').strip()
+        secret = bytes.fromhex(encoded)
+    except (OSError, ValueError, UnicodeError):
+        raise ValueError('managed host token file must contain a 32-byte hex secret') from None
+    if len(encoded) != 64 or len(secret) != 32:
+        raise ValueError('managed host token file must contain a 32-byte hex secret')
+    return secret
+
+
+def stop_all(served: dict[str, Served], timeout=5.0) -> None:
+    pending = []
+
+    def stop(server, result):
+        try:
+            result.append(server.stop(timeout=timeout))
+        except BaseException as exc:
+            result.append(exc)
+
+    for name, item in served.items():
+        result = []
+        thread = threading.Thread(target=stop, args=(item.server, result),
+                                  name=f"stop-{name}", daemon=True)
+        deadline = time.monotonic() + timeout + 0.25
+        thread.start()
+        pending.append((name, thread, deadline, result))
+    failures = []
+    for name, thread, deadline, result in pending:
+        thread.join(max(0, deadline - time.monotonic()))
+        if thread.is_alive() or not result or result[0] is not True:
+            failures.append(name)
+    if failures:
+        raise LeaseTimeout(", ".join(failures))

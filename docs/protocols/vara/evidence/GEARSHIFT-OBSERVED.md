@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # High speed capable VARA gear-shift, as observed
 
 What a high speed capable VARA HF 4.9.0 pair does with its speed level, read from transcripts only: the 5 clean

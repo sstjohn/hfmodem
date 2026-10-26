@@ -86,9 +86,23 @@ import os
 
 from enum import StrEnum
 from dataclasses import dataclass, replace
+from functools import wraps
 from typing import Optional
 
 from . import compress, pactor1, pactor2, spec
+from .ledger import PayloadLedger
+
+
+def _owner_operation(method):
+    """Optional PTC owner boundary; ordinary drivers retain direct event calls."""
+    @wraps(method)
+    def event(self, *args, **kwargs):
+        scope = getattr(self.io, 'rf_scope', None)
+        if scope is None:
+            return method(self, *args, **kwargs)
+        with scope(method.__name__):
+            return method(self, *args, **kwargs)
+    return event
 
 # ---- control-signal semantics (spec.py) -------------------------------------
 # CS index (0..5) -> logical ARQ event. The 20-bit codewords themselves are in
@@ -734,8 +748,21 @@ class ArqConfig:
     15 bit errors to 6 (`p1rx.search_calls`).
     """
 
+    host_error_limit: int | None = None
+    """SCS MAXError threshold, when explicitly selected by a host.
+
+    None preserves the existing driver/bench air-error budgets. Host selection
+    controls unanswered calls and consecutive air errors; it does not enlarge
+    independent transmit-refusal, entry-campaign or capture-lifetime bounds.
+    Stock value 255 disables this air-error timeout, not those local bounds.
+    """
+
     def __post_init__(self) -> None:
         check_entry_ladder(self.entry_ladder)
+        if (self.host_error_limit is not None and
+                (not isinstance(self.host_error_limit, int)
+                 or not 30 <= self.host_error_limit <= 255)):
+            raise ValueError('host_error_limit must be 30..255 or None')
         if (not isinstance(self.p3_mail_cs4_wait_ticks, int)
                 or isinstance(self.p3_mail_cs4_wait_ticks, bool)
                 or self.p3_mail_cs4_wait_ticks < 1):
@@ -820,6 +847,17 @@ class ArqIO:
         """The link's `n`th packet of ours was acknowledged, before the next
         one is cut: what the host queues here rides it."""
     def buffer(self, nbytes: int) -> None: ...
+    def payload_confirmed(self, blob: bytes) -> None:
+        """Original host bytes settled by a peer, excluding protocol traffic."""
+    def wire_confirmed(self, n: int) -> None:
+        """RF telemetry includes protocol traffic, in character-stream units."""
+    def contact_ready(self) -> bool:
+        return True
+    def begin_scan_hold(self) -> bool:
+        """Acquire the producer's scan hold on this same session owner."""
+        return True
+    def end_scan_hold(self) -> None:
+        """Release a previously acquired producer hold."""
     def log(self, msg: str) -> None: ...
 
 
@@ -858,6 +896,7 @@ class _ReceiveOpportunity:
     occupied: bool = False
     carrier: bool = False
     gear_error_counted: bool = False
+    host_error_counted: bool = False
 
 
 class PactorArq:
@@ -875,6 +914,7 @@ class PactorArq:
         self.answering = False
         self.mycall = self.dxcall = ""
         self._listen = False
+        self._scan_hold = False
 
         # Sending side
         self.p4_admitted = False
@@ -883,6 +923,7 @@ class PactorArq:
         self.p4_sf8_eligible = None
         self._p4_lent = b""
         self._outbuf = bytearray()                 # host byte stream awaiting TX
+        self.payload_ledger = PayloadLedger()
         self._link_generation = 0
         self.tx_queued_bytes = self.tx_acked_bytes = self.tx_retired_setup_bytes = 0
         self._p3_receive_only = False
@@ -915,6 +956,8 @@ class PactorArq:
         self._subtick = 0                          # driver ticks into a long cycle
         self._buffer_raw = 0
         self._connect_retries = 0
+        self._host_sync_packets = 0
+        self._host_air_errors = 0
         self.robust_answer: Optional[int] = None   # see on_rx_robust_answer
         self._refused_burst = False                # see REFUSED and `_sent`
         self._peer_heard = False
@@ -992,6 +1035,9 @@ class PactorArq:
         self._upgrade_reply_owed = False
         self._upgrade_owned_grant = False
         self._upgrade_requests = 0
+        self._entry_partial_requests = 0
+        self._entry_partial_owned = False
+        self._entry_reply_credits = {}
         self._upgrade_refusals = 0
         self._entry_window_truncated = False
         self._entry_truncated_windows = 0
@@ -1269,6 +1315,22 @@ class PactorArq:
     def p3_max_try(self) -> int:
         return 1 if self._stock else self.cfg.p3_max_try
 
+    @property
+    def air_error_limit(self) -> int:
+        return (self.cfg.max_retries if self.cfg.host_error_limit is None
+                else self.cfg.host_error_limit)
+
+    def _charge_host_air_error(self) -> bool:
+        """Count one failed opportunity, across silence, CRC and role changes."""
+        if self.cfg.host_error_limit in (None, 255):
+            return False
+        opportunity = self._receive_opportunity
+        if opportunity is None or not opportunity.host_error_counted:
+            self._host_air_errors += 1
+            if opportunity is not None:
+                opportunity.host_error_counted = True
+        return self._host_air_errors >= self.cfg.host_error_limit
+
     def _payload_bytes(self, breakin: bool = False) -> int:
         if breakin and self.breakin_bytes_override:
             return self.breakin_bytes_override
@@ -1280,12 +1342,45 @@ class PactorArq:
     # ==================================================================== #
     # Host-driven events
     # ==================================================================== #
+    @_owner_operation
     def on_host_listen(self, on: bool) -> None:
         self._listen = on
+        if self._scan_hold:
+            return
         if on and self.state == State.DISCONNECTED:
             self._to(State.LISTENING)
         elif not on and self.state == State.LISTENING:
             self._to(State.DISCONNECTED)
+
+    @property
+    def scan_held(self) -> bool:
+        return self._scan_hold
+
+    def acquire_scan_hold(self) -> bool:
+        """One owner operation: test admission, hold the producer, inhibit calls.
+
+        A driver must serialize this with receive acquisition and transmission.
+        The logical engine cannot acquire a physical station lease by itself.
+        """
+        if self.state not in (State.DISCONNECTED, State.LISTENING):
+            return False
+        if self._scan_hold:
+            return True
+        if (self._outbuf or self._inflight is not None or not self.io.contact_ready()
+                or not self.io.begin_scan_hold()):
+            return False
+        self._scan_hold = True
+        if self.state is State.LISTENING:
+            self._to(State.DISCONNECTED)
+        return True
+
+    def release_scan_hold(self) -> None:
+        if not self._scan_hold:
+            return
+        self.io.end_scan_hold()
+        self._scan_hold = False
+        if self._listen and self.state is State.DISCONNECTED:
+            self._to(State.LISTENING)
 
     connect_variant: str = "normal"
     """Which call `io.connect_burst` keys: a value of `CONNECT_PREFIXES`.
@@ -1312,31 +1407,43 @@ class PactorArq:
     persists the same way [PTC-IIIusb 4.1 §6.22.2]. Kept apart from `dxcall`,
     which a station calling US overwrites."""
 
+    @_owner_operation
     def on_host_connect(self, mycall: str, dxcall: str) -> None:
         """Call a station, `dxcall` carrying any SCS connect operator.
 
         An empty `dxcall` is the PTC's bare `C`: re-dial the last remote, with
         the operator it was called with.
         """
+        if self._scan_hold:
+            raise ValueError("SCANNER HOLD ACTIVE")
+        if self.state not in (State.DISCONNECTED, State.LISTENING):
+            raise ValueError("CHANNEL CONTACT ACTIVE")
         if dxcall.strip():
             dxcall, variant = parse_connect_arg(dxcall)
         elif self.last_connect is not None:
             dxcall, variant = self.last_connect
         else:
             raise ValueError("no station has been called yet")
+        if self.transfer_unconfirmed is not None:
+            # History owns the finalized prior record. A new unanswered call
+            # must not update it from the old ledger's now-retired spans.
+            self.transfer_unconfirmed = None
+            self.payload_ledger = PayloadLedger()
         self.mycall, self.dxcall = mycall.upper(), dxcall
         self.connect_variant = variant
         self.last_connect = (dxcall, variant)
         self.role, self.answering = ISS, False
         self._to(State.CONNECTING)
         self._connect_retries = 0
+        self._host_sync_packets = 1
         self._peer_heard = False
         self.robust_answer = None
         self.io.connect_burst(self.mycall, self.dxcall)     # P1 FSK connect [spec]
         self.io.log(f"connect burst -> {self.dxcall}"
                     + ("" if variant == "normal" else f" ({variant} call)"))
 
-    def on_host_data(self, blob: bytes) -> None:
+    @_owner_operation
+    def on_host_data(self, blob: bytes) -> bool:
         """Queue host data. Accepted in either role: an IRS holds it until it
         becomes the ISS, which is how a host can write ahead of a changeover.
 
@@ -1371,15 +1478,24 @@ class PactorArq:
         field it sent, which is these bytes and not the host's.
         """
         if self._entry_p1_close:
+            # Preserve rejected in-process application writes as modem history,
+            # as before. They are not admitted host payload and earn no credit.
+            # PtcHost rejects external writes before calling this branch.
             self._queue(compress.transparent(blob))
-            return
+            return False
         if self.state != State.CONNECTED or self._qrt_pending:
             self.io.log(f"{len(blob)} bytes from the host discarded -- "
                         + ("the goodbye is owed" if self._qrt_pending
                            else f"the link is {self.state}"))
-            return
+            return False
+        self._queue(compress.transparent(blob), original=blob)
+        return True
+
+    def queue_protocol_data(self, blob: bytes) -> None:
+        """Callsign announcements are not writes from the external host."""
         self._queue(compress.transparent(blob))
 
+    @_owner_operation
     def on_host_supervisor(self, block: bytes) -> None:
         """Queue a supervisor block as written: `compress.supervisor_block`
         has made it a character stream already, and `transparent` would make it
@@ -1393,6 +1509,7 @@ class PactorArq:
             return
         self._queue(block)
 
+    @_owner_operation
     def on_rx_p4(self, reg):
         """Record P4 evidence and keep the link alive; no legacy ARQ action."""
         from .p4observation import Registered, Kind
@@ -1445,6 +1562,8 @@ class PactorArq:
         self._p4_lent = b""
         self._buffer_raw -= len(wire)
         self.tx_acked_bytes += len(wire)
+        self.io.wire_confirmed(len(wire))
+        self.io.payload_confirmed(self.payload_ledger.settle(len(wire)))
         self.io.buffer(self._buffer_raw)
 
     def return_bytes(self, wire: bytes) -> None:
@@ -1455,7 +1574,7 @@ class PactorArq:
         self._p4_lent = b""
         self.io.buffer(self._buffer_raw)
 
-    def _queue(self, wire: bytes) -> None:
+    def _queue(self, wire: bytes, *, original: bytes | None = None) -> None:
         log = getattr(self.io, "_p3_traffic_log", None)
         if log is not None:
             log.queued(len(wire))
@@ -1469,24 +1588,45 @@ class PactorArq:
         else:
             self._outbuf += wire
         self._buffer_raw += len(wire)
+        self.payload_ledger.queue(wire, original)
         self.io.buffer(self._buffer_raw)
 
+    def clear_unsent(self) -> None:
+        """CLr: preserve fields already offered, including a split escape.
+
+        Inflight semantics beyond this unsent-only policy require stock traces.
+        Retirement never calls the peer-confirmation callback.
+        """
+        offered = len(self._inflight.payload) if self._inflight else 0
+        offered += len(self._p4_lent)
+        start = self.payload_ledger.boundary_after(offered)
+        preserve = start - offered
+        removed = len(self._outbuf) - preserve
+        self.payload_ledger.discard(start, self.payload_ledger.wire_pending)
+        del self._outbuf[preserve:]
+        self._buffer_raw -= removed
+        self.io.buffer(self._buffer_raw)
+
+    @_owner_operation
     def on_host_over(self) -> None:
         """Hand the link to the peer once the transmit buffer is sent and
         confirmed. Latent while we are the IRS. [PTC hostmode %Q, and %O as ISS]"""
         if self.state == State.CONNECTED:
             self._over_pending = True
 
+    @_owner_operation
     def on_host_breakin(self) -> None:
         """Take the link now, by force. [PTC hostmode %I, and %O as IRS]"""
         if self.state == State.CONNECTED and self.role == IRS:
             self._breakin_pending = True
             self._breakin_invited = False
 
+    @_owner_operation
     def on_host_changeover(self) -> None:
         """Reverse the link: break in if receiving, hand over if sending. [%O]"""
         (self.on_host_breakin if self.role == IRS else self.on_host_over)()
 
+    @_owner_operation
     def on_host_disconnect(self, *, local: bool = True) -> None:
         self._p3_local_close |= local
         if self._p3_receive_only and local:
@@ -1524,11 +1664,13 @@ class PactorArq:
             # the QRT is built over it, under the counter the peer is expecting.
             self.requeue_inflight()
 
+    @_owner_operation
     def on_rx_ack_emitted(self) -> None:
         """The driver emitted the ACK owed to a received QRT."""
         if self._rx_close_pending:
             self._finish_disconnected()
 
+    @_owner_operation
     def on_cs_emitted(self, cs_index: int) -> None:
         """A control actually reached the transmit seam, rather than its queue."""
         self._refused_cycles = 0            # the seam keyed: it is not stuck
@@ -1564,12 +1706,14 @@ class PactorArq:
         # final ACK; do not reinterpret that physical index as a logical NAK.
         self.on_rx_ack_emitted()
 
+    @_owner_operation
     def on_host_abort(self) -> None:
         self._finish_disconnected()
 
     # ==================================================================== #
     # RX events — a decoded control signal or a decoded data packet
     # ==================================================================== #
+    @_owner_operation
     def on_rx_connect(self, mycall: str, dxcall: str,
                       variant: str = "normal") -> None:
         """Peer's connect burst decoded (we are being called).
@@ -1577,7 +1721,10 @@ class PactorArq:
         `variant` is the kind of call it was, as `CONNECT_PREFIXES` names them;
         a robust call reaches here once the branch-B reader labels one.
         """
-        if self.state not in (State.LISTENING, State.CONNECTING):
+        if self._scan_hold or self.state not in (State.LISTENING, State.CONNECTING):
+            return
+        if not self.io.contact_ready():
+            self.io.log("previous contact still has host output -- call ignored")
             return
         if variant.lower() not in CONTYPE_ACCEPTS[self.cfg.contype]:
             self.io.log(f"CONType {self.cfg.contype} does not answer a "
@@ -1608,7 +1755,7 @@ class PactorArq:
         self._enter_connected()
         self._send_cs(CS_ACK)                             # confirm the link
 
-    def _peer_answered(self) -> None:
+    def _peer_answered(self, *, valid: bool = True) -> None:
         """A decoded frame from the peer: whatever we last changed, it followed.
 
         The bar is a DECODE, which is why this sits in the two RX handlers rather
@@ -1621,6 +1768,12 @@ class PactorArq:
         ISS is handed the other ISS's packets and drops them below, and that
         discard is the deafness `_on_nak`'s yield exists to break.
         """
+        if valid and self.cfg.host_error_limit is not None:
+            self._host_sync_packets = 0
+            self._host_air_errors = 0
+            self._silent_cycles = self._unrepaired = 0
+            if self._inflight is not None:
+                self._inflight.retries = 0
         self._unanswered_upgrade = None
         self._subtick = 0                    # a long cycle restarts at an answer
         self._upgrade_granted = False
@@ -1633,6 +1786,7 @@ class PactorArq:
         self.peer_reads += 1
         self.note_peer_heard()
 
+    @_owner_operation
     def on_rx_robust_answer(self, entry: int) -> None:
         """The called station answered our Robust Connect: the link is up.
 
@@ -1650,10 +1804,13 @@ class PactorArq:
         self._enter_connected()
         self.robust_answer = entry
 
+    @_owner_operation
     def on_rx_cs(self, cs_index: int) -> None:
         """A 20-bit control signal decoded from the IRS."""
         self.io.log(f"rx CS {_CS_NAMES.get(cs_index, cs_index)}")
         if self._rx_close_pending:
+            return
+        if self.cfg.host_error_limit is not None and cs_index not in _CS_NAMES:
             return
         self._peer_answered()
         if self._terminal_confirm_pending:
@@ -1953,6 +2110,7 @@ class PactorArq:
                 or self._disconnect_ticks is not None
                 or self.state == State.DISCONNECTING)
 
+    @_owner_operation
     def on_rx_grant(self) -> None:
         """The peer commanded a waveform (`ptc.PtcHost._take_grant`).
 
@@ -2017,6 +2175,7 @@ class PactorArq:
         self._stint_tail = False
         self._start_next_packet()
 
+    @_owner_operation
     def on_rx_packet(self, sl: int, payload: bytes, status: int, crc_ok: bool,
                      breakin: bool = False,
                      protocol: str | None = None,
@@ -2062,7 +2221,7 @@ class PactorArq:
         if self._mail_cs4_wait is not None:
             return
         if not (breakin and self.state == State.CONNECTING):
-            self._peer_answered()
+            self._peer_answered(valid=crc_ok)
         if (crc_ok and self._qrt_keyed is not None
                 and protocol == spec.Protocol.PACTOR3
                 and not status & spec.STATUS_QRT):
@@ -2209,8 +2368,11 @@ class PactorArq:
                 self._unrepaired += 1
             # P3 must reach MAXDown before a two-error legacy guard ends it.
             # Its existing link timeout remains independent and configurable.
-            limit = self.cfg.max_retries if p3 else UNREPAIRED_BUDGET
-            if self._unrepaired > limit:
+            limit = self.air_error_limit if p3 else UNREPAIRED_BUDGET
+            exceeded = (self._charge_host_air_error()
+                        if self.cfg.host_error_limit is not None
+                        else self._unrepaired > limit)
+            if exceeded:
                 self.io.log(f"{self._unrepaired} packets arrived and would not "
                             f"decode -> saying goodbye")
                 self.on_host_disconnect(local=False)
@@ -2842,7 +3004,7 @@ class PactorArq:
             self._p3_receive_only = False
             self._p3_receive_owner_generation = None
         elif (self._dark_windows >= P3_DARK_WINDOWS
-              or self._silent_cycles >= self.cfg.max_retries):
+              or self._silent_cycles >= self.air_error_limit):
             self._enter_receive_only()
         if self.state not in (State.CONNECTED, State.DISCONNECTING):
             return False
@@ -2883,7 +3045,7 @@ class PactorArq:
             elif not self._p3_receive_only:
                 self._silent_cycles = max(self._silent_cycles,
                                           opportunity.silence_before_crc or 0)
-                self._charge_irs_silence()
+                self._charge_irs_silence(host_error_counted=opportunity.host_error_counted)
             self._p3_rx_errors = 0
         elif opportunity.silence_pending and not self._p3_receive_only:
             supported = (opportunity.qualified if opportunity.presence_checked else opportunity.crc)
@@ -2893,15 +3055,18 @@ class PactorArq:
                             else "peer PACTOR-3 carrier")
                 self.io.log(f"{evidence} -> not counting this cycle")
             else:
-                self._charge_irs_silence()
+                self._charge_irs_silence(host_error_counted=opportunity.host_error_counted)
 
-    def _charge_irs_silence(self) -> None:
+    def _charge_irs_silence(self, *, host_error_counted: bool = False) -> None:
         """Queue the current miss, or charge it immediately for legacy callers."""
         if self._receive_opportunity is not None:
             self._receive_opportunity.silence_pending = True
             return
         self._silent_cycles += 1
-        if self._silent_cycles > self.cfg.max_retries:
+        exhausted = (not host_error_counted and self._charge_host_air_error()
+                     if self.cfg.host_error_limit is not None
+                     else self._silent_cycles > self.cfg.max_retries)
+        if exhausted:
             if getattr(self.io, "protocol", None) == spec.Protocol.PACTOR3:
                 self._enter_receive_only()
             else:
@@ -2957,7 +3122,15 @@ class PactorArq:
             if truncated:
                 self._entry_p1_current = False
 
-    def note_upgrade_unread(self, *, p1: bool = False) -> None:
+    def note_entry_grant_repeat(self, reply_token=None) -> None:
+        if not self.entry_pending or self._unanswered_upgrade is None:
+            return
+        if reply_token not in self._entry_reply_credits:
+            self._entry_partial_owned |= self._upgrade_reply_owed
+        self.note_upgrade_unread(p1=False, reply_token=reply_token)
+        self.note_entry_window_truncated(True)
+
+    def note_upgrade_unread(self, *, p1: bool = False, reply_token=None) -> None:
         """The peer asked again for the packet the upgrade was supposed to carry.
 
         NOT SILENCE, AND POINTING THE OTHER WAY. `UPGRADE_SILENCE_CYCLES` counts
@@ -3008,6 +3181,12 @@ class PactorArq:
         answered slots of 2026-09-16 sit at a longest run of nine, well inside
         it: this bounds a stalled campaign, not an answering gateway.
         """
+        if reply_token is not None:
+            if reply_token in self._entry_reply_credits:
+                if p1:
+                    self._entry_p1_current = self._entry_reply_credits[reply_token]
+                return
+            self._entry_reply_credits[reply_token] = self._upgrade_reply_owed
         if self._unanswered_upgrade is not None:
             self._entry_p1_current = p1 and self._upgrade_reply_owed
             self._upgrade_asked = True
@@ -3155,6 +3334,7 @@ class PactorArq:
     # ==================================================================== #
     # Cycle tick — the ISS drives one packet per grid cycle
     # ==================================================================== #
+    @_owner_operation
     def on_cycle(self, *, elapsed_ticks: int = 1, cycle_ticks: int = 1) -> None:
         """Age elapsed base slots, then service at most one present opportunity.
 
@@ -3209,10 +3389,15 @@ class PactorArq:
                     self.io.log(f"ROBUST CALL UNANSWERED AFTER "
                                 f"{self.connect_fallback_after} "
                                 "-- FALLING BACK TO A NORMAL CONNECT")
-            if self._connect_retries > self.cfg.max_connect_retries:
+            exhausted = (self.cfg.host_error_limit != 255
+                         and self._host_sync_packets >= self.cfg.host_error_limit
+                         if self.cfg.host_error_limit is not None
+                         else self._connect_retries > self.cfg.max_connect_retries)
+            if exhausted:
                 self.io.log("connect retries exhausted -> abort")
                 self.on_host_abort()
                 return
+            self._host_sync_packets += 1
             self.io.connect_burst(self.mycall, self.dxcall)  # resend connect
             return
         if self.state not in (State.CONNECTED, State.DISCONNECTING):
@@ -3572,7 +3757,8 @@ class PactorArq:
             return
         asked, self._upgrade_asked = self._upgrade_asked, False
         owned_grant, self._upgrade_owned_grant = self._upgrade_owned_grant, False
-        truncated, self._entry_window_truncated = self._entry_window_truncated, False
+        truncated = self._entry_window_truncated
+        partial, self._entry_partial_owned = self._entry_partial_owned, False
         if self._rx_this_cycle:
             self._rx_this_cycle = False     # on_rx_cs already answered this cycle
             if self._inflight is not None and not self._refused_burst:
@@ -3609,6 +3795,7 @@ class PactorArq:
                     self._inflight.retries = 0
                 if owned_grant:
                     self._upgrade_requests += 1
+                    self._entry_partial_requests += int(partial)
             elif truncated and not self._refused_burst:
                 self._entry_truncated_windows += 1
                 self.io.log("entry P1 reply window truncated -> receive unavailable; "
@@ -3644,7 +3831,9 @@ class PactorArq:
                 ended = (f"entry retry budget exhausted (repeated-grant rule, "
                          f"ENTRY_GRANT_CYCLES={ENTRY_GRANT_CYCLES}): it answered "
                          f"{self._upgrade_requests} cycles since the upgrade "
-                         f"with repeated grants at zero bit errors, but no "
+                         f"with {self._upgrade_requests - self._entry_partial_requests} "
+                         f"complete grants and {self._entry_partial_requests} partial "
+                         f"repeat matches, but no "
                          f"higher-mode entry confirmation was decoded; remote entry "
                          f"reception and mode compatibility remain unknown")
             elif not truncated and self._unanswered_upgrade >= UPGRADE_SILENCE_CYCLES:
@@ -3801,6 +3990,13 @@ class PactorArq:
         acquiring = entry or self.p2_entry_pending
         n = (0 if acquiring else self._payload_bytes(breakin)
              if payload_bytes is None else payload_bytes)
+        fit = getattr(self.io, 'payload_count', None)
+        if n and fit is not None:
+            selected = fit(bytes(self._outbuf), n, breakin=breakin)
+            if selected is not None:  # older seams may leave the policy unimplemented
+                if not isinstance(selected, int) or not 0 <= selected <= len(self._outbuf):
+                    raise ValueError('invalid original-character field count')
+                n = selected
         chunk = bytes(self._outbuf[:n])
         drained = len(self._outbuf) <= n
         # A PACTOR-1 QRT's field is the link address (`pactor1.qrt_field`), so
@@ -3907,6 +4103,8 @@ class PactorArq:
             return False
         self._entry_rung += 1
         self._upgrade_requests = 0
+        self._entry_partial_requests = 0
+        self._entry_partial_owned = False
         if self._inflight is not None:
             self._next_seq -= 1
             self._inflight = None
@@ -3934,6 +4132,8 @@ class PactorArq:
             self._disconnect_ticks = 0
         self.tx_acked_bytes += len(self._inflight.payload)
         self._buffer_raw = max(0, self._buffer_raw - len(self._inflight.payload))
+        self.io.wire_confirmed(len(self._inflight.payload))
+        self.io.payload_confirmed(self.payload_ledger.settle(len(self._inflight.payload)))
         self.io.buffer(self._buffer_raw)
         self.acked += 1
         self.io.acknowledged(self.acked)
@@ -4029,6 +4229,9 @@ class PactorArq:
         self._p3_next_trial_from = None
         self._upgrade_granted = False
         self._unanswered_upgrade = self._upgrade_requests = 0
+        self._entry_reply_credits.clear()
+        self._entry_partial_requests = 0
+        self._entry_partial_owned = False
         self._upgrade_reply_owed = self._upgrade_owned_grant = False
         self._upgrade_refusals = 0
         self._entry_window_truncated = False
@@ -4079,6 +4282,10 @@ class PactorArq:
             return
         self._clean_run = 0
         packet = self._inflight
+        if answered and self.cfg.host_error_limit is not None:
+            # SCS §6.56: a valid request control resets the error counter. It
+            # proves the reverse channel works but acknowledges no payload.
+            packet.retries = 0
         if (not speed_down
                 and getattr(self.io, "protocol", None) == spec.Protocol.PACTOR3
                 and self.role == ISS
@@ -4202,13 +4409,16 @@ class PactorArq:
                         return
             if not refused:
                 self._inflight.retries += 1
+            exhausted = (not refused and self._charge_host_air_error()
+                         if self.cfg.host_error_limit is not None
+                         else self._inflight.retries > self.cfg.max_retries)
             # THE CYCLE AFTER AN UNANSWERED CHANGEOVER IS SPENT LISTENING, and
             # it is THIS cycle's keying that decides it rather than the last
             # one's. See `breakin_listen_due`; `refused` above is the seam's
             # answer to the burst before this one, and a rule taken on it hushes
             # twice in a row and re-keys nothing.
             unread = self.unconfirmed_breakin and not heard
-            if self._inflight.retries > self.cfg.max_retries:
+            if exhausted:
                 # A silent peer is more often a turnaround we lost than a dead
                 # link: if our changeover ACK or the peer's CS3 went missing, both
                 # ends now believe they are the ISS and both transmit, so neither
@@ -4440,6 +4650,7 @@ class PactorArq:
         """
         self._peer_raster_burst = True
 
+    @_owner_operation
     def on_unconfirmed_breakin_head(self) -> None:
         """Wait for the P3 body without settling bytes or rotating the clock."""
         if self.unconfirmed_breakin:
@@ -4682,6 +4893,9 @@ class PactorArq:
         if not wire or not self._outbuf.startswith(wire):
             return False
         del self._outbuf[:len(wire)]
+        offered = len(self._inflight.payload) if self._inflight else 0
+        offered += len(self._p4_lent)
+        self.payload_ledger.discard(offered, offered + len(wire))
         self.tx_retired_setup_bytes += len(wire)
         self._buffer_raw = max(0, self._buffer_raw - len(wire))
         self.io.buffer(self._buffer_raw)
@@ -4721,11 +4935,15 @@ class PactorArq:
             return
         self.tx_acked_bytes += len(self._inflight.payload)
         self._buffer_raw = max(0, self._buffer_raw - len(self._inflight.payload))
+        self.io.wire_confirmed(len(self._inflight.payload))
+        self.io.payload_confirmed(self.payload_ledger.settle(len(self._inflight.payload)))
         self.io.buffer(self._buffer_raw)
         self._inflight = None
 
     # -- lifecycle --------------------------------------------------------
     def _enter_connected(self) -> None:
+        self._host_air_errors = 0
+        self.payload_ledger = PayloadLedger()
         self._link_generation += 1
         self._p3_tx_epoch += 1
         self._p3_receive_only = self._p3_app_failed = self._p3_local_close = False
@@ -4866,6 +5084,8 @@ class PactorArq:
         self._finish_disconnected()
 
     def _finish_disconnected(self) -> None:
+        if self.state in (State.DISCONNECTED, State.LISTENING):
+            return
         self._cancel_p3_proposals()
         self._p3_receive_only = False
         self._p3_receive_owner_generation = None
@@ -4874,6 +5094,15 @@ class PactorArq:
             return
         self._mail_cs4_candidate = None
         self._mail_cs4_wait = None
+        if self.payload_ledger.pending and self.transfer_unconfirmed is None:
+            self.retain_unconfirmed("teardown with unconfirmed host payload")
+        if self.transfer_unconfirmed is not None:
+            self.transfer_unconfirmed.update(
+                host_accepted=self.payload_ledger.accepted,
+                host_confirmed=self.payload_ledger.confirmed,
+                host_unconfirmed=self.payload_ledger.unconfirmed,
+                contact_generation=self._link_generation)
+        self.payload_ledger.retire()
         log = getattr(self.io, "_p3_traffic_log", None)
         if log is not None:
             log.reset_login()
@@ -4914,7 +5143,7 @@ class PactorArq:
         self.connect_variant = "normal"
         self._upgrade_granted = False
         self.io.disconnected()
-        self._to(State.LISTENING if self._listen else State.DISCONNECTED)
+        self._to(State.LISTENING if self._listen and not self._scan_hold else State.DISCONNECTED)
 
 
 # --------------------------------------------------------------------------- #

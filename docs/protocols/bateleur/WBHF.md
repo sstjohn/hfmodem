@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # MIL-STD-188-110C appendix D, 3 kHz
 
 `hfmodem.bateleur.wbhf` sends and receives the 3 kHz waveforms of

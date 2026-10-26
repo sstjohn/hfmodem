@@ -365,7 +365,6 @@ def test_close_drains_the_queued_reply(shutdown_first, monkeypatch):
     closer.start()
     try:
         assert closing.wait(2)
-        closer.join(.02)
         write.set()
         _read(client, b"ERROR bad command\r\n")
         assert client.recv(1) == b""

@@ -33,7 +33,7 @@ import re
 
 from hfmodem.besra import crc
 from hfmodem.besra.arq.session import (
-    BREAK, CONACK, DISC, _UNDELIVERED_BUDGET, ArqSession, _dataack_for,
+    BREAK, CONACK, DISC, END, _UNDELIVERED_BUDGET, ArqSession, _dataack_for,
     _datanak_for, _is_datanak, _type_of,
 )
 from hfmodem.besra.host import protocol as P
@@ -291,6 +291,7 @@ def test_the_budget_starts_each_stint_at_zero():
     link = _Link()
     link.replay(_arrivals()[:-1])                      # two unreadable, budget spent
     link.turnover()
+    assert link.sess.queued == len(b"a reply")  # yielded before its data ACK
     link.wire.sent.clear()
 
     link.replay(_undelivered(_UNDELIVERED_BUDGET + 1))
@@ -299,6 +300,15 @@ def test_the_budget_starts_each_stint_at_zero():
     naks = [ft for ft in link.wire.sent if _is_datanak(ft)]
     assert len(naks) == _UNDELIVERED_BUDGET, \
         f"{len(naks)} NAKs — the new stint did not get the full budget"
+    assert link.sess.queued == len(b"a reply")
+    assert link.sess.confirmed_total == link.sess.discarded_total == 0
+    # An unreadable peer cannot drain our yielded queue. Closing still records
+    # those originals as unconfirmed rather than claiming delivery.
+    link.sess.on_receive(END, b"", _SID, True)
+    assert link.obs.disconnects == 1
+    assert link.sess.last_unconfirmed == b"a reply"
+    assert link.sess.confirmed_total == 0
+    assert link.sess.discarded_total == len(b"a reply")
 
 
 #: The two greetings the budget of two closed, 2026-08-29, verbatim from

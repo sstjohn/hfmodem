@@ -149,7 +149,9 @@ def test_a_continue_burst_off_the_cable_keys_the_next_over():
     path, times = corpora.OVER_CONTINUE_ANSWERS[0]
     x = corpora.wav_mono(path)
     x = x / (np.abs(x).max() or 1.0)
-    hs, io = _queued()
+    hs, io = _queued(3)
+    hs.called = "W1AW"
+    hs._tx_data_over()
     _stream(hs, _cut(x, times[0], VF.OVER_CONTINUE_NSYM))
     assert any("over-continue" in m for m in io.msgs), io.msgs
     assert any("tx DATA over" in m for m in io.msgs), io.msgs

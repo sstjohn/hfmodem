@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # 05 — ARQ & session state machine
 
 For current DATA-answer detection and lost-ACK/NAK recovery, see

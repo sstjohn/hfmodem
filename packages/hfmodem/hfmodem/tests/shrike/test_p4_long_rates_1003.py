@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Standalone normal-LONG gates; no live receiver or transmitter imports."""
 import importlib.util
 import math

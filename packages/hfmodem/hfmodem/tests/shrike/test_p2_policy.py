@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """MYLevel-2-style policy, including grants and peer-initiated transitions.
 
 These tests establish policy/ARQ wiring, not SCS handshake interoperability.

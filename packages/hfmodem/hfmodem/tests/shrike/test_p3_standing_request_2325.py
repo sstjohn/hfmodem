@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """A recorded ordinary role request cannot acknowledge our CS3 payload.
 
 The request is real WS8EOC PCM; the subsequent bare CS1 is a rendered positive

@@ -30,7 +30,7 @@ from pathlib import Path
 from hfhost.config import ConfigError, build_section, choice
 
 from hfmodem.core import band, identification, levels
-from hfmodem.core.config_validation import PROTOCOL_VALIDATORS, check_linking_protection
+from hfmodem.core.config_validation import PROTOCOL_VALIDATORS, check_linking_protection, check_station_rig
 from hfmodem.core.regulatory import Control, Profile, profile
 from hfmodem.winlink.session import CLIENT_SID
 
@@ -63,8 +63,13 @@ GAIN_RANGE = (0.005, 0.10)
 
 @dataclass(frozen=True, slots=True)
 class Station:
+    port: int = 8737
     mycall: str = ""
     grid: str = ""
+    name: str = ""
+    qth: str = ""
+    antenna: str = ""
+    weather: str = ""
     #: `local` covers local and remote control — a human is at the control point.
     #: `automatic` is the station answering on its own, which is what any
     #: `listen = true` amounts to. No default: the operator selects which
@@ -96,7 +101,10 @@ class Ptt:
 @dataclass(frozen=True, slots=True)
 class Rig:
     model: str = ""
-    cat: str = "rigctld"
+    cat: str = "yaesu"
+    identity: str = ""
+    dial_max_age_s: float = 30.0
+    max_watts: float | None = None
     host: str = "127.0.0.1"
     port: int = 4532
     mode: str = "PKTUSB"
@@ -146,6 +154,8 @@ class ChainAudio:
     input_gain: float | None = None
     gain_range: tuple[float, float] | None = None
     tx_drive: float | None = None
+    #: The codec output volume the drives were measured at; None reads as 1.0.
+    codec_output: float | None = None
     p1_drive: float | None = None
     p3_drive: float | None = None
     p4_drive: float | None = None
@@ -178,8 +188,15 @@ class ProtocolConfig:
     host: str = ""
     cmd_port: int = 0
     data_port: int = 0
+    # vara only: stock's KISS port, which VarAC's advanced beacons use; 0 leaves it closed.
+    kiss_port: int = 0
+    # VarAC opt-in export root; relative to station.toml. Empty disables hosting.
+    bbs_directory: str = ""
     port: int = 0
     pty: str = ""
+    # Private broker credential for a supervised Windows TCP/serial adapter. This is
+    # a file path, never the secret itself in configuration/descriptions.
+    auth_token_file: str = ""
     bandwidth: str = ""
     listen: bool = False
     # bateleur with host = "s5066": the modem mode the node starts in
@@ -225,6 +242,40 @@ class ProtocolConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class Models:
+    memory_gb: float = 48.0
+
+
+@dataclass(frozen=True, slots=True)
+class Voice:
+    # Models are local paths; setup fetches weights separately from the package.
+    worker_python: str = ""
+    recognition_model: str = ""
+    synthesis_model: str = ""
+    synthesis_backend: str = "kokoro"
+    synthesis_voice: str = "am_michael"
+    synthesis_speaker: int = 5
+    language_model: str = ""
+    llama_server: str = "llama-server"
+    drive: float = 0.6
+    compression: str = "soft"
+    phonetics: str = "nato"
+    speed: float = 1.05
+    vad_threshold: float = 0.5
+    silence_s: float = 0.8
+    preroll_s: float = 0.32
+    max_over_s: float = 25.0
+    voice_agc: int = 2
+    id_mode: str = "voice"
+    exchange: tuple[str, ...] = ("report", "location")
+
+
+@dataclass(frozen=True, slots=True)
+class Desk:
+    adif_dir: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class StationConfig:
     station: Station
     rig: Rig
@@ -236,6 +287,9 @@ class StationConfig:
     resolved_profile: dict = field(default_factory=dict)
     resolution_sources: dict = field(default_factory=dict)
     audio_calibration: dict = field(default_factory=dict)
+    voice: Voice = field(default_factory=Voice)
+    models: Models = field(default_factory=Models)
+    desk: Desk = field(default_factory=Desk)
 
     def require_audio(self, operation: str, *, input=False, output=False,
                       drive=False, floor=False, preset="", drive_override=None) -> None:
@@ -272,14 +326,14 @@ class StationConfig:
 
 
 _PROTOCOL_HOSTS = {
-    "pactor": ("ptc",),
-    "vara": ("vara",),
-    "ardop": ("ardop",),
+    "pactor": ("ptc", "ptc-managed"),
+    "vara": ("vara", "vara-managed"),
+    "ardop": ("ardop", "ardop-managed"),
     "sabir": ("hostapi",),
     "bateleur": ("bateleur", "s5066"),
     "ale": ("ale",),
     "selcall": ("selcall",),
-    "rpr": ("kiss", "mail"),
+    "rpr": ("kiss", "mail", "tracker", "tracker-managed", "agwpe"),
 }
 
 
@@ -348,18 +402,19 @@ def tx_latency_ms(override: float | None = None) -> float:
     return resolve_tx_timing(override).tx_latency_ms
 
 
-def client_sid(override: str = "") -> str:
+def client_sid(override: str = "", path: str | None = None) -> str:
     """What this run announces itself as to a Winlink gateway: the flag if one
     was given, else the station file's `[station] client_sid`, else ours.
 
     A gateway may refuse a client type it does not know, and that refusal ends
     the session before any mail can move. What a station announces is a claim
     the operator makes about their own station, so it is the operator's to set
-    and this project ships only its own honest name.
+    and this project ships only its own honest name. `path` names the station
+    file when it is not the one in the environment.
     """
     if override:
         return _check_client_sid(override, "--mail-sid")
-    path = os.environ.get(STATION_ENV)
+    path = path or os.environ.get(STATION_ENV)
     if not path:
         return CLIENT_SID
     try:
@@ -485,7 +540,7 @@ def _chain_audio(raw: dict, common: dict, chain: str, *, device_default="") -> C
             else:
                 table[key] = tuple(value)
         elif key in ("input_gain", "tx_drive", "p1_drive", "p3_drive", "p4_drive",
-                     "rx_floor_dbfs", "tx_latency_ms", "rx_hot_rms", "rx_silent_rms",
+                     "codec_output", "rx_floor_dbfs", "tx_latency_ms", "rx_hot_rms", "rx_silent_rms",
                      "peak_limit_dbfs", "peak_target_dbfs"):
             valid = type(value) in (int, float) and math.isfinite(value)
             if key.endswith("drive") or key == "input_gain":
@@ -542,12 +597,12 @@ def _optional_tables(raw, known, where):
 
 
 def parse(raw: dict, *, rig_name=None, environ=None) -> StationConfig:
-    from .rigs import RIGS, resolve_profile
+    from .rigs import RIGS, profile_cat, resolve_profile
     environ = os.environ if environ is None else environ
     if raw.get("schema") != SCHEMA:
         raise ConfigError(f"schema must be {SCHEMA} (got {raw.get('schema')!r})")
     body = {k: v for k, v in raw.items() if k != "schema"}
-    unknown = sorted(set(body) - {"station", "rig", "audio", "protocols", "logging"})
+    unknown = sorted(set(body) - {"station", "rig", "audio", "protocols", "logging", "voice", "models", "desk"})
     if unknown:
         raise ConfigError(f"unknown top-level table(s) {', '.join(unknown)}")
 
@@ -568,14 +623,22 @@ def parse(raw: dict, *, rig_name=None, environ=None) -> StationConfig:
                                               legacy_model=legacy_model, profiles=profiles)
     rig_source = ("operator-flag" if rig_name else "HFMODEM_RIG" if environ.get("HFMODEM_RIG")
                   else "[rig] model" if legacy_model else "default")
+    rig_raw["model"] = name
     ptt_raw = dict(rig_raw.pop("ptt", {}))
-    if name == "ft891":
+    rig_raw.setdefault("cat", profile_cat(name))
+    # The model token also matches Hamlib identities that omit the manufacturer.
+    rig_raw.setdefault("identity", "" if name == "generic" else name)
+    if name == "generic":
+        rig_raw.setdefault("mode", "USB")
+        ptt_raw.setdefault("settle_s", selected["settle"])
+        if "ptt_port" in selected:
+            ptt_raw["port"] = selected["ptt_port"]
+    elif name == "ft891":
         if "ptt_port" in profiles.get("ft891", {}) or environ.get("PTT_PORT"):
             ptt_raw["port"] = selected.get("ptt_port", "")
         if "settle" in profiles.get("ft891", {}):
             ptt_raw["settle_s"] = selected["settle"]
     else:
-        rig_raw["model"] = name
         rig_raw["mode"] = selected["mode"]
         ptt_raw.pop("port", None)  # legacy mobile port never crosses rigs
         ptt_raw["port"] = selected.get("ptt_port", "")
@@ -618,20 +681,62 @@ def parse(raw: dict, *, rig_name=None, environ=None) -> StationConfig:
                 f"[protocols.{name}]: unknown protocol. "
                 f"Known: {', '.join(sorted(_PROTOCOL_HOSTS))}")
         p = build_section(ProtocolConfig, dict(table), f"[protocols.{name}]")
+        if not isinstance(p.bbs_directory, str) or '\x00' in p.bbs_directory:
+            raise ConfigError(f'[protocols.{name}]: bbs_directory must be a path string without NUL')
+        if p.bbs_directory and name != 'vara':
+            raise ConfigError(f'[protocols.{name}]: bbs_directory is only supported for vara')
         if p.enabled:
             choice(p.host, _PROTOCOL_HOSTS[name], f"[protocols.{name}]", "host")
+            if p.host.endswith('-managed') and not p.auth_token_file:
+                raise ConfigError(f'[protocols.{name}]: managed host requires auth_token_file')
+            if p.auth_token_file and not p.host.endswith('-managed'):
+                raise ConfigError(f'[protocols.{name}]: auth_token_file requires a managed host')
+            if p.host.endswith('-managed') and (p.cmd_port or p.data_port):
+                raise ConfigError(f'[protocols.{name}]: managed host uses port, not cmd_port/data_port')
+            if p.host.endswith('-managed') and p.pty:
+                raise ConfigError(f'[protocols.{name}]: managed host cannot expose a pty')
         if name in PROTOCOL_VALIDATORS:
             PROTOCOL_VALIDATORS[name](p, f"[protocols.{name}]", frozenset(table))
         protocols[name] = p
 
+    voice_raw = dict(body.get("voice", {}))
+    if "exchange" in voice_raw:
+        voice_raw["exchange"] = tuple(voice_raw["exchange"])
+    voice = build_section(Voice, voice_raw, "[voice]")
+    models = build_section(Models, dict(body.get("models", {})), "[models]")
     cfg = StationConfig(station, rig, audio, protocols, selected_name, rig_source, chain,
-                        selected, sources, calibration)
+                        selected, sources, calibration, voice, models,
+                        build_section(Desk, dict(body.get("desk", {})), "[desk]"))
     _validate(cfg)
     return cfg
 
 
 def _validate(cfg: StationConfig) -> None:
     st, audio, rig = cfg.station, cfg.audio, cfg.rig
+    check_station_rig(st, rig)
+    if not isinstance(cfg.desk.adif_dir, str) or "\x00" in cfg.desk.adif_dir:
+        raise ConfigError("[desk]: adif_dir must be a path string without NUL characters")
+
+    for name, value in (("models.memory_gb", cfg.models.memory_gb),
+                        ("voice.speed", cfg.voice.speed), ("voice.silence_s", cfg.voice.silence_s),
+                        ("voice.max_over_s", cfg.voice.max_over_s)):
+        if not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
+            raise ConfigError(f"{name} must be finite and positive")
+    for name, value in (("drive", cfg.voice.drive), ("vad_threshold", cfg.voice.vad_threshold)):
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+            raise ConfigError(f"voice.{name} must be finite and between 0 and 1")
+    if not isinstance(cfg.voice.preroll_s, (float, int)) or not math.isfinite(cfg.voice.preroll_s) or not 0 <= cfg.voice.preroll_s <= 2:
+        raise ConfigError("voice.preroll_s must be between 0 and 2 seconds")
+    choice(cfg.voice.id_mode, ("voice",), "[voice]", "id_mode")
+    choice(cfg.voice.compression, ("off", "soft", "medium", "strong"), "[voice]", "compression")
+    choice(cfg.voice.phonetics, ("nato", "alternate", "varied"), "[voice]", "phonetics")
+    choice(cfg.voice.synthesis_backend, ("kokoro", "piper"), "[voice]", "synthesis_backend")
+    if not isinstance(cfg.voice.synthesis_speaker, int) or cfg.voice.synthesis_speaker < 0:
+        raise ConfigError("voice.synthesis_speaker must be a nonnegative speaker ID")
+    if any(field not in ("report", "location", "name") for field in cfg.voice.exchange):
+        raise ConfigError("[voice] exchange fields: report, location, name")
+    if not isinstance(cfg.voice.voice_agc, int) or cfg.voice.voice_agc not in (1, 2, 3, 4, 5):
+        raise ConfigError("[voice] voice_agc must be a hamlib AGC setting from 1 to 5")
 
     if not st.control:
         raise ConfigError(
@@ -678,15 +783,15 @@ def _validate(cfg: StationConfig) -> None:
             "[audio]: output is required when any protocol is enabled. An unset "
             "device means the system default, which is the built-in speakers.")
 
-    seen: dict[int, str] = {}
+    seen: dict[int, str] = {st.port: "station"}
     for name, p in enabled.items():
-        for port in (p.cmd_port, p.data_port, p.port):
+        for port in (p.cmd_port, p.data_port, p.kiss_port, p.port):
             if not port:
                 continue
             if port in seen:
                 raise ConfigError(
                     f"[protocols.{name}]: port {port} is already used by "
-                    f"[protocols.{seen[port]}]")
+                    + ("[station]" if seen[port] == "station" else f"[protocols.{seen[port]}]"))
             seen[port] = name
 
     # There was a guard here comparing the PTT port against the CAT port. It could

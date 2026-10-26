@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Current public Winlink channels, normalized into the console roster."""
 from __future__ import annotations
 import csv

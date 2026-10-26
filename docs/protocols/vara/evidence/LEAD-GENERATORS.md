@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Lead generators: one callsign-keyed Rnd stream per station per session
 
 `lead_study.py` prints every table below (a few minutes; it cuts every data over and fits the L7-9 sub-band

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """VE3KPG 21:42: fresh CS3 packets must not inherit an old receive period."""
 import pytest
 from hfmodem.shrike import arq, onair, rxfront, spec

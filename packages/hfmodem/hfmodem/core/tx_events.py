@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Versioned transmit evidence shared by modem adapters.
 
 No payload bytes, decoder guesses, file writes or radio operations. Producers

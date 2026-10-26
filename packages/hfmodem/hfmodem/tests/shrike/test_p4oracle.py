@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Every probe window reads back as the answer to the chirp before it."""
 import json
 from pathlib import Path

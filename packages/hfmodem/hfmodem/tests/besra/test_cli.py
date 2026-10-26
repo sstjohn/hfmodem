@@ -32,12 +32,12 @@ def _boot(*extra: str):
             proc.wait(timeout=10)
             raise AssertionError(
                 f"no port banner, got {banner!r}: {proc.stderr.read()}")
-        cport = int(m.group(1))
-        c = socket.create_connection(("127.0.0.1", cport), timeout=5)
-        c.sendall(b"VERSION\r")
-        c.settimeout(5)
-        reply = c.recv(200).decode()
-        c.close()
+        cport, dport = map(int, m.groups())
+        # The host admits a complete command/data attachment together.
+        with socket.create_connection(("127.0.0.1", cport), timeout=5) as c, \
+                socket.create_connection(("127.0.0.1", dport), timeout=5):
+            c.sendall(b"VERSION\r")
+            reply = c.recv(200).decode()
         return reply
     finally:
         proc.terminate()
@@ -152,7 +152,7 @@ class _FakeRig:
     def identify(self):
         self.calls.append("identify"); return self.reported
 
-    def set_mode(self, m): self.calls.append(("mode", m))
+    def set_mode(self, m, passband=None): self.calls.append(("mode", m))
 
     def qsy(self, f):
         self.calls.append(("freq", f))

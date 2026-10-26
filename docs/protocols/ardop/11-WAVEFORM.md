@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # ARDOP Physical Layer — Waveform, Framing, FEC (functional record)
 
 Compiled from public documents only: the **ARDOP Specification, Rev 2.0, 2017‑11‑27**
@@ -399,8 +401,9 @@ These 6‑byte fields feed the 12‑byte payload of ConReq (caller‖target), PI
 
 When CW ID is enabled, an IDFRAME may be followed by a Morse callsign sent as two‑tone
 FSK keying — mark **1609.375 Hz**, space **1390.625 Hz** — at 20 wpm or less `[code]`
-`Modulate.c:949‑950`; `[spec-pdf]` §7.2.3.13. (The reference dot length of 768 samples
-is ~12 wpm.)
+`Modulate.c:949‑950`; `[spec-pdf]` §7.2.3.13. The reference dot length of 768 samples
+at 12 kHz is 64 ms, or 18.75 PARIS WPM; its historical approximately-12-WPM comment
+does not agree with that sample count.
 
 ---
 

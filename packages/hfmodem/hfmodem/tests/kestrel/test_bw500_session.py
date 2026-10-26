@@ -28,7 +28,7 @@ import pytest
 from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
-from hfmodem.kestrel.rx import varahf500 as rx500
+from hfmodem.kestrel.rx import bw500_locator as loc, varahf500 as rx500
 from hfmodem.tests.kestrel import corpora
 
 _CALLER, _CALLED = "AAAA1", "BBBB2"
@@ -110,6 +110,8 @@ def test_an_over_is_delivered_whole_and_answered_once(brackets, blocks):
     keyed exactly once. Delivering the first of two would hand the host a message
     with a hole in it that no later over refills."""
     hs, io = _station()
+    if blocks == 2:
+        hs._peer_over_state, hs._peer_run_500 = (4, 0x99), 6
     hs.on_rx_audio(brackets[blocks][0])
     assert len(io.host) == blocks
     assert [len(p) for p in io.host] == [43] * blocks
@@ -134,6 +136,7 @@ def test_a_repeat_of_one_over_reaches_the_host_once(brackets):
     """A peer that missed our answer repeats the over; the repeat is answered
     again and must not be delivered again  [vara_arq._deliver]."""
     hs, io = _station()
+    hs._peer_over_state, hs._peer_run_500 = (4, 0x99), 6
     hs.on_rx_audio(brackets[2][0])
     hs.on_rx_audio(brackets[2][0])
     assert len(io.host) == 2
@@ -142,10 +145,11 @@ def test_a_repeat_of_one_over_reaches_the_host_once(brackets):
 
 @corpora.requires_multiframe_session
 def test_consecutive_overs_join_into_one_byte_stream(brackets, session):
-    """Four bursts in emission order, and what the host holds is what the
-    session's own transfer carried — the blocks in the order they were keyed."""
+    """The six singles and the first two pairs in emission order, and what the
+    host holds is what the session's own transfer carried — the blocks in the
+    order they were keyed."""
     hs, io = _station()
-    order = brackets[2][:2] + brackets[1][:2]
+    order = brackets[1] + brackets[2][:2]
     for br in order:
         hs.on_rx_audio(br)
     want = [bytes(f.payload) for br in order
@@ -166,6 +170,8 @@ def test_an_over_is_read_off_the_stream_and_answered_in_its_turnaround(
     so the answer has to be keyed within a tenth of a second of the end the
     stream measured for itself."""
     hs, io = _station()
+    if blocks == 2:
+        hs._peer_over_state, hs._peer_run_500 = (4, 0x99), 6
     a, b = spans[blocks][0]
     lead = MK.FS
     _stream(hs, io, session[a - lead:b + MK.FS])
@@ -176,10 +182,33 @@ def test_an_over_is_read_off_the_stream_and_answered_in_its_turnaround(
 
 
 @corpora.requires_multiframe_session
+@pytest.mark.parametrize("early", (0.3, 0.7, 1.0))
+def test_a_failing_lock_ahead_of_an_over_does_not_delay_its_answer(session, spans, early):
+    """A base lock on the edge ahead of an over fails its decode over about 1.4 s
+    of budgeted steps; the over behind it is answered on the callback it would be
+    answered on alone, and the lock is retired by it."""
+    a, b = spans[1][0]
+    x = session[a - 2 * MK.FS:b + MK.FS]
+    hs, alone = _station()
+    _stream(hs, alone, x)
+    hs, io = _station()
+    _stream(hs, io, x[:960])
+    at = 2 * MK.FS - int(early * MK.FS)
+    lock = loc.Over(loc.Candidate(4, at, .2, 0, at, (loc.Epoch(at, .2, 0),)),
+                    next_check=at + (rx500.NSYM + 9) * rx500.H + rx500._PAD)
+    hs._base_rx.pending.append(lock)
+    _stream(hs, io, x[960:])
+    assert io.keyed_at == alone.keyed_at
+    assert io.host == alone.host and len(io.host) == 1
+    assert lock not in hs._base_rx.pending
+
+
+@corpora.requires_multiframe_session
 def test_the_bracket_declines_an_over_the_stream_has_answered(session, spans):
     """A transport that feeds the stream brackets the same audio, later. The
     over must reach the host once and draw one burst, not one per route."""
     hs, io = _station()
+    hs._peer_over_state, hs._peer_run_500 = (4, 0x99), 6
     a, b = spans[2][0]
     _stream(hs, io, session[a - MK.FS:b + MK.FS])
     hs.on_rx_audio(session[max(0, a - 6000):b + 6000])

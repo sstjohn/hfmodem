@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Put a capture device on the laptop speakers, so the operator can still hear.
 
 WHY THIS EXISTS. The station has one rig and one pair of ears. Feeding the rig's
@@ -48,6 +50,8 @@ import tty
 
 import numpy as np
 import sounddevice as sd
+from hfcapture import device_claim, device_opened
+from hfmodem.core import claim
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 import codec_gain  # noqa: E402  -- a sibling tool, not a package
@@ -218,114 +222,120 @@ def main() -> int:
     if bool(args.left) != bool(args.right):
         raise SystemExit("name both --left and --right, or neither")
 
-    if args.left:
-        sources = [_Source(_pick(args.left, True), "L"),
-                   _Source(_pick(args.right, True), "R")]
-    else:
-        sources = [_Source(_pick(args.src, True), "both")]
-
-    dst = _pick(args.dst, False)
-    dst_name = sd.query_devices()[dst]["name"]
-    out_ch = min(2, sd.query_devices()[dst]["max_output_channels"])
-    if len(sources) == 2 and out_ch < 2:
-        raise SystemExit(f"{dst_name!r} is mono; two sources need a stereo output")
-
-    sources[0].volume = args.left_gain if args.left_gain is not None else args.gain
-    if len(sources) == 2:
-        sources[1].volume = args.right_gain if args.right_gain is not None else args.gain
-    state = {"swap": False, "solo": None, "muted": False}
-
-    def on_out(outdata, frames, time_info, status):
-        blocks = [src.take(frames) * src.volume for src in sources]
-        if len(blocks) == 1:
-            ears = [blocks[0]] * out_ch
+    with device_claim("rigaudio", devices=claim.Devices(
+            capture=args.left or args.src, playback=args.dst)):
+        if args.left:
+            sources = [_Source(_pick(args.left, True), "L"),
+                       _Source(_pick(args.right, True), "R")]
         else:
-            ears = list(blocks)
-            if state["swap"]:
-                ears.reverse()
-            if state["solo"] is not None:
-                ears = [ears[state["solo"]]] * 2
-        if state["muted"]:
-            outdata[:] = 0.0
-        else:
-            outdata[:] = np.clip(np.column_stack(ears[:out_ch]), -1.0, 1.0)
+            sources = [_Source(_pick(args.src, True), "both")]
 
-    for src in sources:
-        codec = "gain unreadable" if src.codec is None else f"gain {src.codec:.3f}"
-        print(f"  {src.label:>4s}: {src.name}  ({codec})")
-    print(f"    ->  {dst_name}, {args.rate} Hz, {BLOCK} frames "
-          f"({1000 * BLOCK / args.rate:.1f} ms)")
-    print("  nothing here can key a transmitter.")
-    print(KEYS if len(sources) == 2 else "  keys: 1/2 volume, 3/4 gain, m mute, q quit")
-    print()
+        dst = _pick(args.dst, False)
+        dst_name = sd.query_devices()[dst]["name"]
+        out_ch = min(2, sd.query_devices()[dst]["max_output_channels"])
+        if len(sources) == 2 and out_ch < 2:
+            raise SystemExit(f"{dst_name!r} is mono; two sources need a stereo output")
 
-    streams = [src.stream(args.rate) for src in sources]
-    try:
-        with contextlib.ExitStack() as open_streams:
-            for stream in streams:
-                open_streams.enter_context(stream)
-            open_streams.enter_context(sd.OutputStream(
-                device=dst, channels=out_ch, samplerate=args.rate,
-                blocksize=BLOCK, dtype="float32", callback=on_out))
-            with _keys() as pressed:
-                settled = False
-                while True:
-                    sd.sleep(200)
-                    if not settled:
-                        # The rings fill before the output starts pulling, so the
-                        # first tick always shows overruns that never happened in
-                        # anyone's ears. Count drift from a running monitor only.
+        sources[0].volume = args.left_gain if args.left_gain is not None else args.gain
+        if len(sources) == 2:
+            sources[1].volume = args.right_gain if args.right_gain is not None else args.gain
+        state = {"swap": False, "solo": None, "muted": False}
+
+        def on_out(outdata, frames, time_info, status):
+            blocks = [src.take(frames) * src.volume for src in sources]
+            if len(blocks) == 1:
+                ears = [blocks[0]] * out_ch
+            else:
+                ears = list(blocks)
+                if state["swap"]:
+                    ears.reverse()
+                if state["solo"] is not None:
+                    ears = [ears[state["solo"]]] * 2
+            if state["muted"]:
+                outdata[:] = 0.0
+            else:
+                outdata[:] = np.clip(np.column_stack(ears[:out_ch]), -1.0, 1.0)
+
+        for src in sources:
+            codec = "gain unreadable" if src.codec is None else f"gain {src.codec:.3f}"
+            print(f"  {src.label:>4s}: {src.name}  ({codec})")
+        print(f"    ->  {dst_name}, {args.rate} Hz, {BLOCK} frames "
+              f"({1000 * BLOCK / args.rate:.1f} ms)")
+        print("  nothing here can key a transmitter.")
+        print(KEYS if len(sources) == 2 else "  keys: 1/2 volume, 3/4 gain, m mute, q quit")
+        print()
+
+        try:
+            with contextlib.ExitStack() as open_streams:
+                for src in sources:
+                    stream = src.stream(args.rate)
+                    open_streams.callback(stream.close)
+                    open_streams.enter_context(stream)
+                output = sd.OutputStream(
+                    device=dst, channels=out_ch, samplerate=args.rate,
+                    blocksize=BLOCK, dtype="float32", callback=on_out)
+                open_streams.callback(output.close)
+                open_streams.enter_context(output)
+                device_opened()
+                with _keys() as pressed:
+                    settled = False
+                    while True:
+                        sd.sleep(200)
+                        if not settled:
+                            # The rings fill before the output starts pulling, so the
+                            # first tick always shows overruns that never happened in
+                            # anyone's ears. Count drift from a running monitor only.
+                            for src in sources:
+                                src.over = src.under = 0
+                            settled = True
+                        key = pressed()
+                        if key in ("q", "\x03"):
+                            break
+                        if key == "s":
+                            state["swap"] = not state["swap"]
+                        elif key in ("l", "r"):
+                            want = 0 if key == "l" else 1
+                            state["solo"] = None if state["solo"] == want else want
+                        elif key == "b":
+                            state["solo"] = None
+                        elif key == "m":
+                            state["muted"] = not state["muted"]
+                        elif key in VOLUME_KEYS:
+                            which, step = VOLUME_KEYS[key]
+                            if which < len(sources):
+                                src = sources[which]
+                                src.volume = min(16.0, max(0.06, src.volume * step))
+                        elif key in GAIN_KEYS:
+                            which, step = GAIN_KEYS[key]
+                            if which < len(sources):
+                                sources[which].set_codec(step)
+                        if args.quiet:
+                            continue
+                        meters = []
                         for src in sources:
-                            src.over = src.under = 0
-                        settled = True
-                    key = pressed()
-                    if key in ("q", "\x03"):
-                        break
-                    if key == "s":
-                        state["swap"] = not state["swap"]
-                    elif key in ("l", "r"):
-                        want = 0 if key == "l" else 1
-                        state["solo"] = None if state["solo"] == want else want
-                    elif key == "b":
-                        state["solo"] = None
-                    elif key == "m":
-                        state["muted"] = not state["muted"]
-                    elif key in VOLUME_KEYS:
-                        which, step = VOLUME_KEYS[key]
-                        if which < len(sources):
-                            src = sources[which]
-                            src.volume = min(16.0, max(0.06, src.volume * step))
-                    elif key in GAIN_KEYS:
-                        which, step = GAIN_KEYS[key]
-                        if which < len(sources):
-                            sources[which].set_codec(step)
-                    if args.quiet:
-                        continue
-                    meters = []
-                    for src in sources:
-                        peak, src.peak = src.peak, 0.0
-                        bar = "#" * min(14, int(peak * 14 / 0.5))
-                        codec = "  --  " if src.codec is None else f"{src.codec:5.3f}"
-                        meters.append(f"{src.label} {peak:6.4f}|{bar:<14s}| "
-                                      f"vol {src.volume:4.2f} gain {codec}")
-                    drift = sum(s.over for s in sources), sum(s.under for s in sources)
-                    said = "  ".join(meters)
-                    if state["swap"]:
-                        said += " SWAPPED"
-                    if state["solo"] is not None:
-                        said += f" SOLO {sources[state['solo']].label}"
-                    if state["muted"]:
-                        said += " MUTED"
-                    if any(drift):
-                        said += f"  drift {drift[0]}+/{drift[1]}-"
-                    print(f"\r  {said}   ", end="", flush=True)
-    except KeyboardInterrupt:
-        pass
-    except Exception as exc:                                # noqa: BLE001
-        print(f"\n!! monitor failed: {exc}", file=sys.stderr)
-        return 1
-    print("\n  monitor stopped")
-    return 0
+                            peak, src.peak = src.peak, 0.0
+                            bar = "#" * min(14, int(peak * 14 / 0.5))
+                            codec = "  --  " if src.codec is None else f"{src.codec:5.3f}"
+                            meters.append(f"{src.label} {peak:6.4f}|{bar:<14s}| "
+                                          f"vol {src.volume:4.2f} gain {codec}")
+                        drift = sum(s.over for s in sources), sum(s.under for s in sources)
+                        said = "  ".join(meters)
+                        if state["swap"]:
+                            said += " SWAPPED"
+                        if state["solo"] is not None:
+                            said += f" SOLO {sources[state['solo']].label}"
+                        if state["muted"]:
+                            said += " MUTED"
+                        if any(drift):
+                            said += f"  drift {drift[0]}+/{drift[1]}-"
+                        print(f"\r  {said}   ", end="", flush=True)
+        except KeyboardInterrupt:
+            pass
+        except Exception as exc:                                # noqa: BLE001
+            print(f"\n!! monitor failed: {exc}", file=sys.stderr)
+            return 1
+        print("\n  monitor stopped")
+        return 0
 
 
 if __name__ == "__main__":

@@ -281,16 +281,14 @@ def test_k5fit_record0_resend_behind_our_nak_is_read():
     assert any(m.startswith('delivered 9 payload bytes') for m in io.msgs), io.msgs
 
 
-def test_aa5af_unread_over_draws_a_nak_not_an_ack():
-    """AA5AF's second greeting over faded past decoding and we acknowledged the
-    idle behind it, which AA5AF took for that over; 43 bytes were lost. Its grid
-    still locks, so the idle now draws the NAK that asks for it again."""
+def test_aa5af_faded_crc_clean_over_delivers_and_is_acknowledged():
     hs, io = _station('AA5AF')
     hs._peer_offset = -6.5 / (FS / MK.NFFT)
     hs._peer_over, hs._answer_owed, hs._reacks = 1, VA._OWED_OVER, 1
     _stream(hs, clip('aa5af-unread-over-and-idle'))
-    assert any('nothing read it' in m for m in io.msgs), io.msgs
-    assert any(m.startswith('tx NAK (1/4)') for m in io.msgs)
+    assert io.host == [b'JM$]\r;PQ: 04348595\rCMS via AA5AF >\r']
+    assert any(m.startswith('tx per-over response') for m in io.msgs), io.msgs
+    assert not any(m.startswith('tx NAK') for m in io.msgs), io.msgs
 
 
 @pytest.mark.parametrize('name', ['kb0wzi-turn-release-responder', 'kb0wzi-over-nak-responder'])
@@ -376,18 +374,15 @@ def _live(hs, io, x, poll=960):
     return keyed
 
 
-def test_k5fit_unread_over_draws_a_nak_and_the_read_one_an_answer_on_time():
-    """K5FIT 40 m, 2026-09-24 05:30Z: we answered a level-4 over 1.9 s after it
-    ended, then acknowledged it again in the idle behind the next over, which
-    nothing had read; K5FIT took that for the unread over and its 43 bytes were
-    lost."""
+def test_k5fit_crc_clean_overs_are_delivered_and_answered_on_time():
     hs, io = _station('K5FIT')
     keyed = _live(hs, io, clip('k5fit-0530-over-unread-over-idle'))
     end = int((84.46 - 79.6) * FS)
     assert keyed and 0 <= keyed[0] - end <= FS // 2, keyed
-    assert any('nothing read it' in m or 'will not decode' in m for m in io.msgs), io.msgs
-    assert not any(m.startswith('re-acknowledging') for m in io.msgs), io.msgs
-    assert any(m.startswith('tx session-over-nak') for m in io.msgs), io.msgs
+    assert io.host == [b'd versions of Vara are limited to 15 minute',
+                       b's.\r[WL2K-5.0-B2FWIHJM$]\r;PQ: 90755442\rCMS v']
+    assert sum(m.startswith('tx per-over response') for m in io.msgs) == 2, io.msgs
+    assert not any(m.startswith('tx session-over-nak') for m in io.msgs), io.msgs
 
 
 def test_aa5af_record0_resend_behind_an_idle_nak_is_read():
@@ -465,7 +460,8 @@ def test_the_first_message_over_behind_our_release_is_not_keyed_over():
     hs._key(False)
     keyed = _live_ticking(hs, io, clip('stock-noise09-message-behind-release'), 3.4)
     assert keyed and keyed[0] >= int(5.0 * FS), (keyed, io.msgs)
-    assert any('where it was due' in m for m in io.msgs), io.msgs
+    assert any('level 2 while level 4 was predicted, one frame located' in m
+               for m in io.msgs), io.msgs
 
 
 @pytest.mark.parametrize('name,call,offered', [

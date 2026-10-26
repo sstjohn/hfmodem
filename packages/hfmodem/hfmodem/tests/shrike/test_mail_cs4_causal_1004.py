@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Four causal CS4 scenarios, with current outgoing waveform validation.
 
 Recorded controls remain recorded; matching ACKs are a labeled synthetic model.

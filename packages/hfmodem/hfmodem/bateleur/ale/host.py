@@ -5,7 +5,7 @@
 
 MIL-STD-188-141B specifies the ALE controller, not how an application drives
 one, and the radios that implement it each have their own remote control. This
-dialect is small and written down in ``docs/protocols/bateleur/ALE-HOST.md``;
+dialect is small and written down in ``docs/implementation/bateleur/ALE-HOST.md``;
 it is not a copy of any radio's.
 
 Commands are answered with one line, ``OK ...`` or ``ERR <reason>``. Between
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from collections import deque
 
 from hfmodem.core import hostio
@@ -45,6 +46,7 @@ class AleHost(Observer):
         self._lock = threading.Lock()
         self._running = False
         self._threads: list[threading.Thread] = []
+        self._connections: list[hostio.Connection] = []
         self.log = deque(maxlen=1024)                     # every event line, for tests
         self._told: set[str] = set()                 # stations already named
 
@@ -56,19 +58,25 @@ class AleHost(Observer):
         self.port = s.getsockname()[1]
         self._running = True
         t = threading.Thread(target=self._accept, daemon=True, name="ale-host")
-        t.start()
         self._threads.append(t)
+        t.start()
 
-    def stop(self) -> None:
-        self._running = False
-        for s in (self._srv, self._conn):
+    def stop(self, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            self._running = False
+            connections = list(self._connections)
+            threads = list(self._threads)
+        for s in [self._srv] + connections:
             if s is not None:
                 try:
-                    s.close()
+                    s.cancel() if isinstance(s, hostio.Connection) else s.close()
                 except OSError:
                     pass
-        for t in self._threads:
-            t.join(timeout=2.0)
+        ended = hostio.join_threads(threads, deadline)
+        for conn in connections:
+            ended = conn.join(max(0.0, deadline - time.monotonic())) and ended
+        return ended
 
     def _accept(self) -> None:
         while self._running:
@@ -78,15 +86,20 @@ class AleHost(Observer):
                 continue
             except OSError:
                 return
-            if not self._running:
-                conn.close()
-                continue
-            conn = hostio.Connection(conn, line=True)
             with self._lock:
+                if not self._running:
+                    conn.close()
+                    continue
+                self._threads[:] = [t for t in self._threads if t.is_alive()]
+                self._connections[:] = [c for c in self._connections if not c.join(0)]
+                conn = hostio.Connection(conn, line=True)
+                self._connections.append(conn)
                 old, self._conn = self._conn, conn
-            if old is not None:
-                old.close()
-            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+                if old is not None:
+                    old.close()
+                thread = threading.Thread(target=self._serve, args=(conn,), daemon=True)
+                self._threads.append(thread)
+                thread.start()
 
     def _serve(self, conn: socket.socket) -> None:
         hostio.serve_lines(conn, lambda: self._running, self.command, self._send_line)

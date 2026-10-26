@@ -38,9 +38,15 @@ def granted(ladder, *, queued=True):
     offer = 4307951
     m.observe(idle_long(offer), now=offer + round(3.3 * FS))
     grant = m.decide(offer + round(3.4 * FS) - m.lead)
-    assert grant.kind == Kind.BODY and grant.status == 0x40 and not grant.payload
+    assert (grant.kind, grant.word, grant.state, grant.stream_sample) == (
+        Kind.WORD, 'Y27' if queued else 'X27',
+        State.IRS_BREAKIN if queued else State.IRS_ANSWER, offer+163200)
+    assert not grant.payload and not m.outbox.inflight and a.tx_acked_bytes == 0
+    epoch = m._receive_epoch
     m.keyed()
-    assert m.state == (State.IRS_BREAKIN if queued else State.ISS_GRANT)
+    assert m.state == (State.IRS_BREAKIN if queued else State.IRS_ANSWER)
+    assert m._receive_epoch == epoch and m.grants == 0
+    assert not [e for e in m.link_events if e['event'] == 'turn']
     return m, a, grant.stream_sample
 
 
@@ -66,23 +72,38 @@ def test_v27_that_answers_nothing_of_ours_does_not_take_the_turn(ladder):
     stray = grant + round(.600 * FS)
     m.observe(word("V27", stray, extent=.245, responds_to=None), now=stray + round(.28 * FS))
     proposal = m.decide(stray + round(.30 * FS))
-    assert proposal is None or proposal.kind == Kind.SHORT
+    assert proposal is None or (proposal.kind == Kind.WORD and not proposal.payload
+                                and proposal.state in (State.IRS_BREAKIN, State.IRS_ANSWER))
+    assert not [e for e in m.link_events if e['event'] == 'turn']
+    assert a.tx_acked_bytes == 0 and bytes(a._outbuf) == SID
     assert m.outbox.inflight == b""
 
 
-def test_unanswered_body_request_stops_after_four_keys():
+def test_unanswered_word_request_recovers_after_four_actual_keys():
     m, a, grant = granted("none")
     at = grant
     for _ in range(3):
-        m.silence(at + round(1.25 * FS) - m.lead)
-        proposal = m.decide(at + round(1.25 * FS) - m.lead)
-        assert proposal.kind == Kind.BODY and proposal.state == State.IRS_BREAKIN
+        m.silence(at + 60000)
+        proposal = m.decide(at + 180000 - m.lead)
+        assert (proposal.kind, proposal.word, proposal.state) == (
+            Kind.WORD, 'Y27', State.IRS_BREAKIN)
+        assert proposal.stream_sample == at+180000
         at = proposal.stream_sample
         m.keyed()
-    m.silence(at + round(1.25 * FS) - m.lead)
-    assert m.decide(at + round(1.25 * FS) - m.lead) is None
-    assert m.state == State.DOWN and m.breakins == 4
+    m.silence(at + 60000)
+    proposal = m.decide(at + 180000 - m.lead)
+    assert (proposal.kind, proposal.word, proposal.state) == (
+        Kind.WORD, 'X27', State.IRS_ANSWER)
+    assert m.state == State.IRS_ANSWER and m.breakins == 4
+    assert m.peer_watch.attempts == 4 and m.next_offer_at == at+960000
+    assert m._held_answer.answer.word == 'X27'
     assert not m.outbox.inflight and bytes(a._outbuf) == SID
+    assert a.tx_acked_bytes == 0 and not proposal.payload
+    other, _, first = granted('none')
+    other.silence(first+60000)
+    other.decide(first+180000-other.lead)
+    other.refused('deadline')
+    assert other.peer_watch.attempts == 1 and other.breakins == 1
 
 
 @pytest.mark.parametrize("queued", [True, False])
@@ -106,19 +127,22 @@ def test_peer_empty_grant_after_our_v60_answers_with_data_when_bytes_wait(queued
         assert proposal.status == 0x40 and not proposal.payload
 
 
-def test_bytes_arriving_in_iss_hold_are_sent_on_the_next_raster():
-    m, a, grant = granted("none", queued=False)
-    yielded = grant + round(.950 * FS)
-    m.observe(word("V27", yielded, extent=.245, responds_to=grant), now=yielded + round(.28 * FS))
-    idle = m.decide(yielded + round(.30 * FS))
-    assert idle.kind == Kind.NORMAL and idle.status == 0 and not idle.payload
-    assert m.state == State.ISS_HOLD
-    m.keyed()
+def test_bytes_arriving_while_irs_request_and_wait_for_associated_release():
+    m, a, answer = granted("none", queued=False)
+    assert m.state == State.IRS_ANSWER
     a.on_host_data(b"FF\r")
-    later = grant + round(4.0 * FS)
-    proposal = m.decide(later)
-    assert proposal.kind == Kind.BODY and proposal.payload == b"FF\r" and proposal.status == 0x40
-    assert proposal.stream_sample == grant + round(5.0 * FS)
+    m.reschedule_breakin(answer+180000-m.lead)
+    request = m.decide(answer+180000-m.lead)
+    assert (request.kind, request.word, request.state) == (Kind.WORD, 'Y27', State.IRS_BREAKIN)
+    assert request.stream_sample == answer+180000 and not m.outbox.inflight
+    assert a.tx_acked_bytes == 0
+    m.keyed()
+    yielded = request.stream_sample+44880
+    m.observe(word('V27', yielded, extent=.245, responds_to=request.stream_sample), now=yielded+12000)
+    proposal = m.decide(request.stream_sample+180000-m.lead)
+    assert (proposal.kind, proposal.payload, proposal.status) == (Kind.BODY, b'FF\r', 0x40)
+    assert proposal.stream_sample == request.stream_sample+180000
+    assert a.tx_acked_bytes == 0
 
 
 def test_ladder_none_requires_bodies():
@@ -224,7 +248,27 @@ def replay_1024(monkeypatch):
     rx.clock = Clock(Expect.PACKET, offer, .330, 3.75, rx.cfo_hz)
     tx.p4_probe.handoff_audio = offer - 6 * FS, audio[offer - 6 * FS:stream.pos].copy()
     turn = p4turn.P4Turn
-    monkeypatch.setattr(p4turn, "P4Turn", lambda *a, **kw: turn(*a, **{**kw, "role": "irs"}))
+    tx.compat_v27_snapshots = []
+
+    def turn_machine(*args, **kwargs):
+        m = turn(*args, **{**kwargs, 'role': 'irs'})
+        observe = m.observe
+
+        def watched(reg, **kw):
+            obs = reg.observation
+            def snapshot():
+                return (m.state, m.outbox.inflight, bytes(m.outbox.arq._outbuf),
+                        m.outbox.arq._buffer_raw, m.outbox.arq.tx_acked_bytes)
+            before = snapshot()
+            result = observe(reg, **kw)
+            if obs.word == 'V27':
+                tx.compat_v27_snapshots.append((reg, before, snapshot()))
+            return result
+
+        m.observe = watched
+        return m
+
+    monkeypatch.setattr(p4turn, 'P4Turn', turn_machine)
     keyed = tx._tx
 
     def key(audio_out, what):
@@ -239,9 +283,9 @@ def replay_1024(monkeypatch):
 def test_1024_replay_requests_only_on_checked_peer_packets(monkeypatch):
     tx = replay_1024(monkeypatch)
     sent = tx.p4_probe.emissions
-    requests = [e["audio_start"] for e in sent if e["status"] == 0x40 and not e['payload']]
+    requests = [e["audio_start"] for e in sent if e.get('word') == 'Y27' and not e['payload']]
     assert len(requests) == 2
-    assert all(abs(a-b) <= 2 for a, b in zip(requests, (4471151, 4831151)))
+    assert all(abs(a-b) <= 2 for a, b in zip(requests, (4471151, 4651151)))
     assert not any(e.get("value") is not None for e in sent)
     assert not any(e['payload'] for e in sent)
     assert not [r for r in tx.p4_probe.heard if r['kind'] == Kind.BODY
@@ -254,7 +298,21 @@ def test_1024_replay_does_not_infer_a_grant_without_a_reply(monkeypatch):
     tx = replay_1024(monkeypatch)
     v27 = [r for r in tx.p4_probe.heard if r.get("word") == "V27" and not r["provisional"]
            and abs(r["onset_sample"] - round(97.849 * FS)) < FS // 50]
-    assert not v27
+    assert len(v27) == 1
+    assert v27[0]['onset_sample'] == 4696755
+    partial, = [r for r in tx.p4_probe.heard if r.get('word') == 'V27' and r['provisional']]
+    assert partial['onset_sample'] == 4696757
+    for row in (partial, v27[0]):
+        assert row['responds_to'] == 4651151 and row['extent_s'] is None
+        assert not row['weak'] and not row['unexpected']
+    assert len(tx.compat_v27_snapshots) == 2
+    for reg, before, after in tx.compat_v27_snapshots:
+        assert reg.responds_to == 4651151 and reg.observation.extent_s is None
+        assert before == after == (State.IRS_BREAKIN, b'', SID, len(SID), 0)
+    assert not [e for e in tx.p4_probe.link_events if e['event'] == 'turn']
+    assert tx.p4_link_host.arq.tx_acked_bytes == 0
+    assert tx.p4_link_host.arq._buffer_raw == len(SID)
+    assert bytes(tx.p4_link_host.arq._outbuf) == SID
     assert not [e for e in tx.p4_probe.emissions if e['payload']]
     assert tx.p4_probe.reason == 'session ceiling'
 

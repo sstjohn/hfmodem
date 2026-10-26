@@ -28,6 +28,8 @@ from __future__ import annotations
 import threading
 import time
 
+from hfmodem.core.hostio import join_threads
+
 from ..modem import BateleurModem, Mode, ModemError, Observer
 from ..spec import BAUD, MODES110, MODES4285, PREAMBLE_BLOCK_SYMBOLS
 from .. import s4539, wbhf
@@ -138,11 +140,9 @@ class OnAir(Observer):
         self._thread = threading.Thread(target=self._ticker, daemon=True, name="s5066")
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 5.0) -> bool:
         self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
+        return join_threads((self._thread,), time.monotonic() + timeout)
 
     def _ticker(self) -> None:
         busy = threading.Event()

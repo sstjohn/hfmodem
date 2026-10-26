@@ -1,0 +1,8 @@
+{
+  "source": "operator-data/working/vara-chat/sessions/20261025T180352106235Z/receive.flac",
+  "start_sample": 10349760,
+  "end_sample": 10597376,
+  "pcm_sha256": "1c9f6e7c40bd4e0a2d417875e64a7b88c42747765f641d72f934ecfa26763cbb",
+  "description": "Original KR7V level-2 TEXT setup; no normalization or filtering.",
+  "frame_hex": "2d28960000000083149d0000000000000000000000034204d6"
+}

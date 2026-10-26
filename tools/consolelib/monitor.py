@@ -1,12 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """What the rig is hearing, as it happens, and the same stream on disk.
 
 Receive-only. Every record the runners raise goes to two sinks, the terminal and
 `events.jsonl`, and the terminal is the one that is thinned: a held track prints
 when it moves or changes shape, the file gets every update.
 
-THE RIG SOURCE TAKES EVERY MODE'S ARM LOCK. Each mode keeps its own `arm.lock`,
-so holding one would leave the other two free to fly into a card this is already
-reading. The Kiwi, a recording and an arm's tap touch no card and take none,
+THE RIG SOURCE TAKES THE SHARED HARDWARE CLAIM. Every local mode contends for
+the same claim, so no launcher can fly into a card this is already reading.
+The Kiwi, a recording and an arm's tap touch no card and take no claim,
 which is what lets a Kiwi monitor stand witness beside a flying arm.
 
 AN ARM IS REHEARD, NOT RE-RECORDED. Its tap is already the audio, and a
@@ -38,7 +40,7 @@ from hfhost.audio import FS, SAMPLE_WIDTH, AudioError, AudioSource, KiwiSource
 from hfmodem.core import wav
 import numpy as np
 
-from . import arm, claim, modes, rigsource
+from . import arm, claim, rigsource
 
 INTERRUPTED = 130
 CHANNEL_EVERY_S = 10.0
@@ -85,20 +87,15 @@ def holder(mode):
 
 
 @contextmanager
-def every_lock():
-    with ExitStack() as held:
-        for name in modes.RIG_HOLDERS:
-            mode = modes.holder(name)
-            try:
-                held.enter_context(claim.lease(mode))
-            except RuntimeError:
-                flying = holder(mode)
-                raise RuntimeError(
-                    f'a {name} arm holds {mode.lock}'
-                    + (f' ({flying} is flying)' if flying else '')
-                    + ', and the rig monitor would be a second stream on its card. '
-                      'Let it finish, or listen with --kiwi beside it.') from None
-        yield
+def every_lock(*, env=None):
+    try:
+        with claim.lease('monitor', env=env) as held:
+            yield held
+    except claim.hardware.ClaimBusy as error:
+        # Contention names the holder; a remote receiver can still listen while
+        # that owner uses the local radio and sound card.
+        raise claim.hardware.ClaimBusy(
+            f'{error}\nUse --kiwi HOST:PORT to monitor a remote receiver.') from None
 
 
 def open_source(args):
@@ -566,14 +563,11 @@ def window_record(window):
 
 @contextmanager
 def stopping():
-    """SIGINT and SIGTERM end the pass the way the source running out would.
-
-    The runners are then given their drain; a second one is the operator
-    declining to wait for it.
-    """
     stop, caught = threading.Event(), []
 
     def handler(signum, frame):
+        # The first interrupt drains queued detections. That drain has no time
+        # bound, so a second interrupt must let the operator stop waiting.
         if caught:
             raise KeyboardInterrupt
         caught.append(signum)

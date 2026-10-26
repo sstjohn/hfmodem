@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """D2(b)/D3: recorded IRS chirps, host extension and explicit decode charges."""
 from pathlib import Path
 import runpy
@@ -119,7 +121,7 @@ def test_recorded_chirp_read_paths_share_decode_and_registration(monkeypatch, fa
     from hfmodem.shrike.p4observation import Kind
     from hfmodem.shrike.p4receiver import Clock, Expect, P4Receiver
 
-    with np.load(Path(__file__).parent / 'fixtures/p4-chirps/audio.npz') as fixture:
+    with np.load(Path(__file__).parent / 'fixtures/sigidwiki/p4-chirps/audio.npz') as fixture:
         fs = int(fixture['fs'])
         audio = np.r_[np.zeros(fs//3), fixture['audio'][0], np.zeros(fs//3)]
     rx = P4Receiver(fs, admitted=True, chirp=True)

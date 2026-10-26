@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Fresh operator storage and refusals, with no hardware or private session data."""
 from datetime import datetime, timezone
 import json
@@ -7,6 +9,8 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("fake_claim")
 
 from consolelib import arm, claim, mail, modes, operator, power, roster, station, vara_evidence
 
@@ -39,8 +43,10 @@ def test_first_use_empty_and_explicit_roster_import(fresh):
         assert roster.peers(mode) == []
         with pytest.raises(ValueError, match='No .* peers'):
             roster.peer_for(mode, 'N1TEST', 40)
-        with claim.lease(mode):
-            assert mode.lock.is_file()
+        with claim.lease(mode) as held:
+            assert claim.hardware.inherited(9).offset() == held.offset()
+            assert claim.hardware.claim_path().is_file()
+            assert not mode.lock.exists()  # One station claim replaces per-mode locks.
     peer = dict(id='N1TEST-40', call='N1TEST', band_m=40, centre_hz=7101500, dial_hz=7100000)
     path = fresh / 'roster.json'
     path.write_text(json.dumps({'peers': [peer]}))
@@ -129,3 +135,15 @@ def test_transmit_disabled_refuses_before_capture_or_devices(fresh, monkeypatch)
     monkeypatch.setattr(arm, 'capture_plan', lambda *a: pytest.fail('allocated a capture'))
     with pytest.raises(ValueError, match='transmit=false'):
         arm.fly(None, {'env': {}})
+
+
+def test_public_offline_storage_needs_no_private_rosters(tmp_path, monkeypatch):
+    from . import conftest
+
+    monkeypatch.setattr(conftest, 'FLOWN', tmp_path / 'absent-private-records')
+    root = conftest.seed_operator_data(tmp_path / 'public-data', private=False)
+    for name in modes.KNOWN:
+        directory = root / 'working' / name
+        assert directory.is_dir()
+        assert not (directory / 'peers.json').exists()
+    assert list((root / 'working' / 'vara' / 'messages').iterdir()) == []

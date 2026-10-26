@@ -77,7 +77,7 @@ def _version(args: list[str]) -> dict | None:
 
 
 def _bitrate(args: list[str]) -> dict | None:
-    # Spec §7.3: "BITRATE (N) x bps TX" / "... RX". Neither modem emits it yet.
+    # Spec §7.3: "BITRATE (N)  x bps TX" / "... RX".
     if len(args) != 4:
         return None
     level, bps, unit, direction = args

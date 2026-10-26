@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """One guided path from a connected radio to a Winlink mail session."""
 from __future__ import annotations
 import argparse

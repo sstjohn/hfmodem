@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """PACTOR corpus detector. Runs in its own process; never opens radio/audio IO."""
 import json
 from functools import lru_cache

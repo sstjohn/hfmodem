@@ -13,3 +13,14 @@ from hfmodem.shrike import hostmode
 
 def test_framing_selftest():
     hostmode._selftest()
+
+
+def test_tracker_and_ptc_share_transport_framing_without_modem_imports():
+    from hfmodem.core import hostmode as shared
+    from hfmodem.brubru.host import tracker
+
+    assert hostmode.Decoder is shared.Decoder is tracker.hm.Decoder
+    wire = shared.unwrap(shared.command(1, 'I W9SSJ'))
+    [packet] = tracker.hm.Decoder(crc=False).feed(wire)
+    assert packet.channel == 1 and packet.is_command
+    assert packet.text == 'I W9SSJ'

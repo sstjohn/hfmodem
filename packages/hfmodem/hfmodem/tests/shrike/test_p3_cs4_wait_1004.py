@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Approved 96-tick CS4 opportunity: synthetic models, not post-recording RF.
 
 Reuse the existing sender's wire fixture. No new ACK eligibility rule is
@@ -327,6 +329,7 @@ def test_actual_main_hold_loop_respects_outer_and_cs4_bounds(monkeypatch, tmp_pa
             a._inflight = copy.copy(source.arq._inflight)
             a._next_seq = source.arq._next_seq
             a._outbuf = bytearray(source.arq._outbuf)
+            a.payload_ledger = copy.deepcopy(source.arq.payload_ledger)
             a._buffer_raw = source.arq._buffer_raw
             control(host, 4)
             control(host, 4)

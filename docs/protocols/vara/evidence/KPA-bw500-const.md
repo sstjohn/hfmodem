@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # BW500 levels 7-13 closed from known plaintext
 
 `kpa_bw500_const.py` prints every table below (about 25 s, nothing written). It takes the BW2300 law

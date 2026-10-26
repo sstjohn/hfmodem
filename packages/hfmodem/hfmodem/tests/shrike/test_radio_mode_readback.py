@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from hfmodem.core import rxreadiness as rx
+from hfmodem.core.claim import ClaimError
 from hfmodem.shrike import ota
 
 
@@ -48,14 +49,14 @@ def fake_rig(monkeypatch, result=None, fail=None):
     rig.serial = "/mock/CAT"; rig.baud = 38400; rig.ptt_port = "/mock/PTT"
     calls = []
     monkeypatch.setattr(rig, "_close", lambda: calls.append("close"))
-    def run(argv, **kwargs):
+    def run(argv, timeout):
         calls.append(argv)
-        assert calls[0] == "close" and kwargs["timeout"] == 8
+        assert calls[0] == "close" and timeout == 8
         assert "-p" not in argv and "/mock/PTT" not in argv
         assert argv[-3:] == ["-P", "NONE", "m"]
         if fail: raise fail
         return result or SimpleNamespace(stdout="PKTUSB\n2400\n", stderr="", returncode=0)
-    monkeypatch.setattr(ota.subprocess, "run", run)
+    monkeypatch.setattr(ota, "cat_once", run)
     return rig, calls
 
 
@@ -65,7 +66,8 @@ def test_real_rig_getter_closes_owner_and_reads_cat_only(monkeypatch):
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("fail", [OSError("gone"), subprocess.TimeoutExpired("m", 8)])
+@pytest.mark.parametrize("fail", [OSError("gone"), subprocess.TimeoutExpired("m", 8),
+                                  ClaimError("cleanup in progress (pid 1)")])
 def test_real_getter_timeout_error_fails_closed(monkeypatch, fail):
     rig, _ = fake_rig(monkeypatch, fail=fail)
     with pytest.raises(rx.ReceiverReadbackError): rig.get_mode()
@@ -177,13 +179,13 @@ def test_raw_receiver_getter_uses_cat_only(monkeypatch, reply, rc):
     rig.serial = '/mock/CAT'; rig.baud = 38400
     calls = []
     monkeypatch.setattr(rig, '_close', lambda: calls.append('close'))
-    def run(argv, **kwargs):
+    def run(argv, timeout):
         assert calls == ['close']
         assert argv[-12:] == ['-P', 'NONE', 'w', 'VS;', 'w', 'MD0;',
                               'w', 'MD1;', 'w', 'SH0;', 'w', 'RF0;']
-        assert kwargs['timeout'] == 8
+        assert timeout == 8
         return SimpleNamespace(stdout='VS0; ' + reply, stderr='', returncode=rc)
-    monkeypatch.setattr(ota.subprocess, 'run', run)
+    monkeypatch.setattr(ota, 'cat_once', run)
     if rc or 'RF0' not in reply or 'MD0' not in reply or 'SH0023;' in reply:
         with pytest.raises(rx.ReceiverReadbackError): rig.get_receiver_filters()
     else:
@@ -198,7 +200,7 @@ def test_raw_receiver_getter_observes_selected_vfo(monkeypatch):
     rig.rigctl = Path('/mock/rigctl'); rig.model = 1042
     rig.serial = '/mock/CAT'; rig.baud = 38400
     monkeypatch.setattr(rig, '_close', lambda: None)
-    monkeypatch.setattr(ota.subprocess, 'run', lambda *a, **k: SimpleNamespace(
+    monkeypatch.setattr(ota, 'cat_once', lambda *a, **k: SimpleNamespace(
         stdout='VS1; MD01; MD1C; SH0021; RF06;', stderr='', returncode=0))
     actual, roof = rig.get_receiver_filters()
     assert actual.mode == 'PKTUSB' and actual.passband_hz == 4000 and roof == 12000

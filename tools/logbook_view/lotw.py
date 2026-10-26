@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Sign the logbook's completed contacts for LoTW and upload them, without TQSL.
 
     .venv/bin/python tools/logbook_view/lotw.py --p12 PATH --locations locations.json [--root PATH] [--since YYYY-MM-DD]
@@ -35,7 +37,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.serialization import Encoding, pkcs12
 
-from serve import COMPLETE, Logbook, adif_band, adif_logs, band_m, default_root, qso_adif, qso_time, read_adif
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from desk.face import COMPLETE, Logbook, adif_band, adif_logs, band_m, default_root, qso_adif, qso_time, read_adif
 
 UPLOAD_URL = 'https://lotw.arrl.org/lotw/upload'
 LEDGER = default_root() / 'lotw-uploaded.txt'
@@ -243,7 +247,7 @@ def main(argv=None):
             r = read_adif(qso_adif(e, book.station))[0] | {'MY_GRIDSQUARE': e['my_grid']}
             c = contact(r, locations)
         except KeyError as err:
-            print(f"  skipped {e['call']} {e['started_utc']}: serve.qso_adif has no ADIF mode for {err}")
+            print(f"  skipped {e['call']} {e['started_utc']}: face.qso_adif has no ADIF mode for {err}")
             continue
         except ValueError as err:
             print(f"  skipped {e['call']} {e['started_utc']}: {err}")

@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Extended receive attempts preserve B timing without experiment cutoffs."""
 import json
 import pytest
 import sys
 import numpy as np
 
-from hfmodem.shrike import onair, placement
+from hfmodem.shrike import arq, onair, placement
 from hfmodem.shrike.p3trial import TimingTrial, FS, CYCLE, ROTATION
 from hfmodem.tests.shrike.test_entry_delay import _parsed
 from hfmodem.tests.shrike.test_p3_timing_trial import setup, receive
@@ -88,7 +90,6 @@ def test_unbounded_requires_reply_trial_before_io():
 @requires_ws8eoc_p3
 def test_recorded_loop_continues_after_three_fields_then_ends_on_link_loss(monkeypatch, tmp_path):
     from hfmodem.tests.shrike import test_late_entry_loop as loop
-    from hfmodem.shrike import arq
     peers = []
     original_peer = loop.LatePeer
 
@@ -100,13 +101,34 @@ def test_recorded_loop_continues_after_three_fields_then_ends_on_link_loss(monke
         def start_p3(self, entry_at):
             super().start_p3(entry_at)
             end = max(end for _, end in self.responses)
-            needed = end + (arq.P3_CRC_WAIT_TICKS + 2) * CYCLE
+            needed = end + _lifetime_and_closing_id()
             if needed > self.limit:
                 self.audio = np.pad(self.audio, (0, needed - self.limit))
                 self.limit = len(self.audio)
 
     monkeypatch.setattr(loop, "LatePeer", LifetimePeer)
     lifetime = _trace_p3_lifetime(monkeypatch, lambda: peers[0] if peers else None)
+    identify = onair.RadioTx.identify
+    def identify_after_link_loss(tx, mycall, **kwargs):
+        from hfmodem.core import cwid
+        peer = peers[0]
+        # Keep the original fixture ceiling throughout acquisition and ARQ.
+        # Only an already completed, exactly bounded link-loss transition may
+        # enter the separately bounded closing-identification phase.
+        assert lifetime[-1]['state'] is arq.State.DISCONNECTED
+        assert lifetime[-1]['ticks'] == arq.P3_CRC_WAIT_TICKS
+        peer.contact_closed_at, peer.contact_limit = peer.now, peer.limit
+        assert peer.contact_closed_at <= peer.contact_limit
+        closing_samples = len(cwid.audio(mycall, wpm=tx._host_cw_lpm/5))
+        peer.limit = (max(peer.now, tx.boundary)
+                      + (onair.ISS_GUARD_CYCLES+2)*CYCLE + closing_samples
+                      + round(tx.settle*FS) + peer.key_notice)
+        peer.audio = np.pad(peer.audio, (0, max(0, peer.limit-len(peer.audio))))
+        before = len(tx.keyed)
+        identify(tx, mycall, **kwargs)
+        assert len(tx.keyed) == before+1  # The closing ID must actually finish.
+        assert peer.now <= peer.limit
+    monkeypatch.setattr(onair.RadioTx, 'identify', identify_after_link_loss)
     main = onair.main
     def extended():
         sys.argv += ['--p3-timing-trial','B','--p3-timing-unbounded']
@@ -114,12 +136,21 @@ def test_recorded_loop_continues_after_three_fields_then_ends_on_link_loss(monke
     monkeypatch.setattr(onair, 'main', extended)
     got = loop.run_late(monkeypatch, tmp_path, 1, False)
     _assert_p3_lifetime(lifetime, got, charged_phase_extra=2560)
+    assert got['peer'].contact_closed_at <= got['peer'].contact_limit
+    assert 'IDENTIFICATION NOT CONFIRMED' not in got['log']
     report = json.loads((got['outdir']/'p3-timing-trial.json').read_text())
     assert report['unbounded'] and len(report['progress']) == 3, got['log']
     assert report['opportunities'] > 12
     assert report['replies'][-1]['audio_start'] > report['progress'][-1]['phase']+CYCLE
     assert 'limit' not in report['reason'] and 'PTT off.' in got['log']
     assert 'without an experiment/hold cutoff' in got['log']
+
+
+def _lifetime_and_closing_id():
+    from hfmodem.core import cwid
+    from hfmodem.shrike import arq
+    return ((arq.P3_CRC_WAIT_TICKS + 2 + onair.ISS_GUARD_CYCLES + 2) * CYCLE
+            + len(cwid.audio("W9SSJ")))
 
 
 def _trace_p3_lifetime(monkeypatch, peer):
@@ -187,3 +218,4 @@ def _assert_p3_lifetime(rows, got, *, expect_current=True, charged_phase_extra=0
     assert a.transfer_unconfirmed["suffix"] == quiet["queued"]
     assert a.tx_acked_bytes == quiet["acked"]
     assert got["peer"].now <= got["peer"].limit
+    assert "] ID W9SSJ " in got["log"] and "IDENTIFICATION NOT CONFIRMED" not in got["log"]

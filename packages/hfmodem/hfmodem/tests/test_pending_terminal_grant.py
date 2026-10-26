@@ -35,8 +35,7 @@ def _connected(baud=100):
     arq.cfg.traffic_sl = 1
     arq.cfg.max_retries = 8
     arq._next_seq = 1
-    arq._outbuf.extend(b'1w9ssj\r')
-    arq._buffer_raw = 7
+    arq._queue(b'1w9ssj\r')
     arq._start_next_packet()
     return host, seam
 
@@ -177,7 +176,7 @@ def test_fresh_session_can_upgrade_after_prior_terminal_refusal():
     # acquisition is outside this regression's event/terminal ordering scope.
     host.arq.state = State.CONNECTED
     host.arq._next_seq = 1
-    host.arq._outbuf.extend(b'1w9ssj\r')
+    host.arq._queue(b'1w9ssj\r')
     host.arq._start_next_packet()
     _grant(host)
     assert host.protocol is Protocol.PACTOR3

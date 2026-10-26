@@ -545,12 +545,17 @@ def test_r2_data_exhaustion_preserves_other_budgets(state, ladder):
         assert turn._next.value == 13 and turn.close_context is None
         assert turn.outbox.inflight == b''
     elif state == State.ISS_GRANT:
-        assert turn.state == State.ISS_GRANT and turn._next is None
+        assert turn._next.state == State.ISS_CLOSE and turn._next.status == 0x20
+        assert turn.close_context is not None and turn.close_context.end <= turn._next.stream_sample+30*FS
         rx = P4Receiver(FS, admitted=True)
         rx.note_emission(Emission(Kind.BODY, Role.ISS, turn.last.stream_sample, .798))
         q = turn.last.stream_sample+round(.935*FS)
+        selected, context = turn._next, turn.close_context
+        end, wall_started = context.end, context.wall_started
         _close_audio(turn, rx, q, p4robusttx.robust_word('V27'), ready=.280)
-        assert turn._next.payload == b'pending' and turn.close_context is None
+        assert turn._next is selected and turn.close_context is context
+        assert (context.end, context.wall_started) == (end, wall_started)
+        assert turn.outbox.inflight == b'' and arq.tx_acked_bytes == 0
     else:
         assert turn.state == State.DOWN and turn.reason == 'retry budget exhausted'
         assert turn.close_context is None
@@ -915,7 +920,7 @@ def test_r2_2218_first_request_on_peer_phase():
     turn, _, peer, head = _breakin_prefix()
     first = peer + round((3.400 + 3.750) * FS)
     assert turn._next.stream_sample == first
-    assert turn._next.kind == Kind.BODY and turn._next.status == 0x40
+    assert turn._next.kind == Kind.WORD and turn._next.word == 'Y27'
     assert turn.breakins == 0
     assert turn.breakin_due(first - turn.lead) == first
     assert turn.breakin_due(first - turn.lead + 1) == first + round(3.750 * FS)
@@ -982,8 +987,10 @@ def test_r2_breakin_phase_transitions():
         due += round(3.750 * FS)
         bounded.silence(due - bounded.lead)
         ledger.check()
-    assert bounded.state == State.DOWN
-    assert bounded.reason == 'break-in unanswered'
+    assert bounded.state == State.IRS_ANSWER
+    assert bounded._next.kind == Kind.WORD and bounded._next.current_slot_accepted is False
+    assert bounded.next_offer_at == first+3*round(3.750*FS)+20*FS
+    assert bounded.peer_watch.attempts == 4
     assert bytes(bounded_arq._outbuf) == b'our mail'
 
 

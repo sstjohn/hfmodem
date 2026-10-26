@@ -27,6 +27,8 @@ otherwise walks the working corpora, which are tens of gigabytes.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -57,7 +59,7 @@ DISTS = {
 # Every subpackage of hfmodem, by equality. Adding one is a deliberate act and has
 # to be recorded here; `host` joins this set when the dialects are extracted.
 TOP = {"ax25", "brubru", "core", "station", "besra", "kestrel", "lanner", "monitor", "sabir", "shrike",
-       "bateleur", "winlink", "operator", "_operator", "tests"}
+       "bateleur", "winlink", "operator", "_operator", "contact", "macagua", "merlin", "tests"}
 
 # Per protocol, so an explicit-list regression cannot ship a modem's top-level
 # modules with nothing under them.
@@ -79,8 +81,8 @@ SUB = {
 # pulse remains a synthesis resource. Private recordings do not ship in wheels.
 WHEEL_DATA = {
     "hfmodem/kestrel/tx/assets/prototype_pulse.npz",
-    "hfmodem/shrike/c2proof/cml_generate.c",
-    "hfmodem/shrike/c2proof/upstream/srandom.h",
+    "hfmodem/shrike/c2proof/cml/cml_generate.c",
+    "hfmodem/shrike/c2proof/cml/upstream/srandom.h",
     "hfmodem/shrike/c2proof/NOTICE.md",
     "hfmodem/shrike/c2proof/COPYING.LESSER",
 } | {f"hfmodem/shrike/assets/c2-{n}.swaps.z" for n in
@@ -115,8 +117,19 @@ def wheels(tmp_path_factory):
     def build(dist: str) -> zipfile.ZipFile:
         if dist not in _built:
             out = tmp_path_factory.mktemp(f"wheel-{dist}")
+            source = out / 'source'
+            package = source / 'packages' / dist
+            shutil.copytree(REPO / 'packages' / dist, package,
+                            ignore=shutil.ignore_patterns('build', '*.egg-info', '__pycache__'))
+            if dist == 'hfmodem':
+                (source / 'publish').mkdir()
+                shutil.copy2(REPO / 'publish/operator-tools.toml', source / 'publish/operator-tools.toml')
+                for name in _OPERATOR_INVENTORY:
+                    target = source / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(REPO / name, target)
             r = subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "-q",
-                                "-w", str(out), str(REPO / "packages" / dist)],
+                                "-w", str(out), str(package)],
                                capture_output=True, text=True, timeout=900)
             if r.returncode != 0:
                 pytest.fail(f"{dist} wheel build failed:\n"
@@ -228,3 +241,70 @@ def test_hfhost_wheel_is_stdlib_only(wheels):
                 assert r not in banned, f"{name} imports {r}"
                 assert r in sys.stdlib_module_names or r == "hfhost", (
                     f"{name} imports {r}, which is neither stdlib nor hfhost")
+
+
+@pytest.mark.parametrize('resources', [True, False], ids=['mounted-face', 'resource-less-api'])
+def test_installed_station_face(wheels, tmp_path, resources):
+    target = tmp_path / 'installed'
+    wheel_paths = [wheels(dist).filename for dist in DISTS]
+    installed = subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps',
+                                '--no-compile', '--target', str(target), *wheel_paths],
+                               capture_output=True, text=True, timeout=120)
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+    if not resources:
+        shutil.rmtree(target / 'hfmodem/_operator')
+    home = tmp_path / 'home'
+    home.mkdir()
+    data = tmp_path / 'data'
+    data.mkdir()
+    (data / 'station.toml').write_text('schema=1\n[station]\ncontrol="local"\nregulatory="part97"\n'
+                                       'licence="general"\nmycall="N0CALL"\ngrid="EN63"\n')
+    script = r'''
+import http.client
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from hfmodem.core.config import load
+from hfmodem.operator import bootstrap
+from hfmodem.station.service import Service
+assert Path(bootstrap.__file__).is_relative_to(Path(sys.argv[1]))
+resources = sys.argv[3] == 'True'
+module = bootstrap.face()
+assert (module is not None) == resources
+service = Service(Path(sys.argv[2]) / 'station.toml', port=0)
+if module is not None:
+    assert Path(module.__file__).is_relative_to(Path.home())
+    module.mount(service, Path(sys.argv[2]), load(service.station_file))
+service.bind()
+try:
+    connection = http.client.HTTPConnection('127.0.0.1', service.port, timeout=5)
+    connection.request('GET', '/')
+    response = connection.getresponse()
+    body = response.read()
+    assert response.status == (200 if resources else 404), body
+    if resources:
+        assert b'<html' in body.lower()
+        connection.request('HEAD', '/')
+        response = connection.getresponse()
+        assert response.status == 200 and response.read() == b''
+        connection.request('GET', '/log.json')
+        response = connection.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())['station']['call'] == 'N0CALL'
+    else:
+        assert json.loads(body)['error'] == 'no face mounted'
+    connection.request('GET', '/state')
+    response = connection.getresponse()
+    assert response.status == 200
+    assert json.loads(response.read())['service']['state'] == 'starting'
+    connection.close()
+finally:
+    service.close()
+'''
+    env = dict(os.environ, HOME=str(home), XDG_CACHE_HOME=str(home / 'cache'),
+               XDG_DATA_HOME=str(home / 'data'), HFMODEM_DATA_DIR=str(data),
+               HFMODEM_STATION=str(data / 'station.toml'), PYTHONDONTWRITEBYTECODE='1')
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', script, str(target), str(data), str(resources)],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

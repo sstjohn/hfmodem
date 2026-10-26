@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # NAK-triggered repacketization
 
 For a missing full base-record DATA frame, stock's response to the caller's

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Opted-in QRT completion requires an emitted marker and the opposite ACK.
 
 Exercises PtcHost's real wire-counter mapping, ARQ lifecycle and transmit-seam

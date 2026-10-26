@@ -25,8 +25,8 @@ knowledge anywhere in the path). Section references are to spec/03 §3.6:
        offset of emission column 0 over [-9, +2) columns of the detected burst
        start, maximise the differential collapse |E[(v_k conj v_{k-1})^2/|.|^2]|
        — payload-blind, and immune to a carrier offset (:func:`_lock_alignment`).
-    4. burst detect: 1150-1850 Hz envelope; ~4.3 s bursts are data/link-setup frames.
-       The link-setup frame (decoded body starts 04 10 41) is dropped.
+    4. stream admission: shared 6 kHz lattice/reference features, followed by
+       full-rate alignment. Decoded structure distinguishes link setup from DATA.
     5. per data frame, frame-start column c0: scan 0..71, maximise turbo
        self-consistency (encode(sys)==coded) — payload-blind; locks c0 = 9. §3.6.2
     6. differential-BPSK across columns over the data cells  (§3.6.1/§3.6.2/§3.6.3)
@@ -108,17 +108,17 @@ The turbo codec is ``hfmodem.kestrel.coding.turbo``.
 """
 from __future__ import annotations
 
-import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import cache, partial
 
 import numpy as np
-from scipy.signal import fftconvolve, firwin
+from scipy.signal import fftconvolve, firwin, welch
 
 from . import tablegen
 from ..coding import turbo as _turbo
 from ..coding.crc import crc16_genibus
+from ..vara.vara_frames import is_link_setup
 
 # --------------------------------------------------------------------------- #
 # fixed parameters (VARA HF 500, Level 4, off=3 SHORT frame)
@@ -135,14 +135,9 @@ _FRAME_COLS = 470             # per-frame demod window (a frame + the c0 headroo
 _NCOL_DEMOD = NSYM + _FRAME_COLS   # 864: reaches a second frame's window in full
 _C0_MAX = 72
 _PREAMBLE = 9                 # columns ahead of the first frame (the c0 lock)
-# A link-setup is told from a DATA over by its fixed structure bytes  [spec 04
-# §4.2A], never by its leading bytes — those hold the 6-bit packed CALLER
-# callsign. This test read "041041", which is not a signature at all but the
-# packing of a call beginning "AAAA": every BW500 recording held until
-# 2026-08-15 was the same AAAA1 -> BBBB2 loopback pair. Bench captures of five
-# other callsigns that day put the structure bytes at these three offsets in all
-# five, and the same three carry the BW2300 frame's  [spec 04 §4.2A].
-_SETUP_STRUCTURE = ((7, 0x80), (8, 0x14), (42, 0x04))
+# Setup structure varies with speed, capability and compression. Use the same
+# classifier as the handshake; a fixed level-4/free-mode signature leaks other
+# setup frames into DATA (KR7V's recorded level-2 TEXT setup, 2026-10-25).
 _PAD = 1500                   # guard samples kept either side of the burst
 #: Columns the alignment search reaches ahead of the detected burst start and
 #: behind it. Ahead is bounded by the preamble: a burst that lost more than its
@@ -315,6 +310,7 @@ class FrameResult:
     # decoded span can be compared against the transmitted one
     burst_columns: int = 0
     frames_in_burst: int = 1
+    quality: float | None = None
 
     @property
     def payload(self) -> bytes:  # the payload bytes this frame carries
@@ -329,6 +325,9 @@ class FrameResult:
 class DecodeResult:
     frames: list[FrameResult]
     data_frames: list[FrameResult] = field(default_factory=list)
+    observation_complete: bool = True
+    refined_lock: float = 0.
+    unread_shape: bool = False
 
     @property
     def payload(self) -> bytes:
@@ -360,7 +359,7 @@ class DecodeResult:
         be able to tell a clean transfer from a partial one, and the CRCs cannot
         tell it — nothing fails a CRC that was never demodulated.
         """
-        return (bool(self.data_frames) and not self.frames_skipped
+        return (self.observation_complete and bool(self.data_frames) and not self.frames_skipped
                 and all(f.crc_ok for f in self.data_frames))
 
 
@@ -411,6 +410,15 @@ def _lock_scored(bb: np.ndarray, ref: np.ndarray, lead: int) -> tuple[int, float
     segment, or an onset whose last cell falls past the end of a truncated
     segment, is not a candidate.
     """
+    work = _lock_scored_steps(bb, ref, lead)
+    while True:
+        try:
+            next(work)
+        except StopIteration as done:
+            return done.value
+
+
+def _lock_scored_steps(bb, ref, lead):
     best, best_offset = -1.0, 0
     for k in range(-_ALIGN_EARLY, _ALIGN_LATE):
         base = lead + k * H
@@ -433,33 +441,52 @@ def _lock_scored(bb: np.ndarray, ref: np.ndarray, lead: int) -> tuple[int, float
         o = int(score.argmax())
         if score[o] > best:
             best, best_offset = float(score[o]), k * H + o
+        yield
     return best_offset, best
 
 
-def _demod_burst(samples: np.ndarray, start: int):
-    """Down-convert + alignment-lock -> ``({sub: per-column complex}, onsets)``.
-
-    Returns the raw onset-sampled columns of the whole demodulated window; the
-    grid480 de-rotation is applied per frame (:func:`_frame_gh`), because a
-    burst's second frame reads the reference one entry advanced.
-    """
-    # A capture that begins mid-burst — a bracket cut at our own un-mute — has
-    # fewer than _LEAD samples ahead of `start`. Silence stands in for them: the
-    # columns it holds are dead to the lock and to the cells alike, and the
-    # alignment can still be read off the columns that are there.
+def _demod_aligned(samples: np.ndarray, start: int, onsets=None):
     lead = min(start, _LEAD)
     seg = samples[start - lead: start + (_NCOL_DEMOD + 8) * H + _PAD]
     if lead < _LEAD:
         seg = np.concatenate([np.zeros(_LEAD - lead, seg.dtype), seg])
-    # both sub-bands mixed to baseband and low-passed in one batched transform
     bb = fftconvolve(seg * _MIX[:, :len(seg)], _LP[None, :], "same", axes=-1)
-    cols, onsets = {}, {}
+    cols, offsets, scores = {}, {}, []
     for k, (sub, _) in enumerate(SUBBANDS):
-        ref = _GRID480[grid480_index(sub, NSYM)]     # the lock reads frame 0's grid
-        onset = _lock_alignment(bb[k], ref, _LEAD)
+        if onsets is None:
+            onset, score = _lock_scored(bb[k], _GRID480[grid480_index(sub, NSYM)], _LEAD)
+            scores.append(score)
+        else:
+            onset = onsets[k]
         c = _LEAD + onset + np.arange(_NCOL_DEMOD) * H
-        cols[sub] = bb[k][c[c < bb.shape[1]]]
-        onsets[sub] = onset
+        cols[sub] = bb[k][c[(c >= 0) & (c < bb.shape[1])]]
+        offsets[sub] = onset
+    return cols, offsets, min(scores) if scores else 0.
+
+
+def _demod_aligned_steps(samples, start, onsets=None):
+    lead = min(start, _LEAD)
+    seg = samples[start - lead: start + (_NCOL_DEMOD + 8) * H + _PAD]
+    if lead < _LEAD:
+        seg = np.concatenate([np.zeros(_LEAD - lead, seg.dtype), seg])
+    bb = fftconvolve(seg * _MIX[:, :len(seg)], _LP[None, :], "same", axes=-1)
+    yield
+    cols, offsets, scores = {}, {}, []
+    for k, (sub, _) in enumerate(SUBBANDS):
+        if onsets is None:
+            onset, score = yield from _lock_scored_steps(
+                bb[k], _GRID480[grid480_index(sub, NSYM)], _LEAD)
+            scores.append(score)
+        else:
+            onset = onsets[k]
+        c = _LEAD + onset + np.arange(_NCOL_DEMOD) * H
+        cols[sub] = bb[k][c[(c >= 0) & (c < bb.shape[1])]]
+        offsets[sub] = onset
+    return cols, offsets, min(scores) if scores else 0.
+
+
+def _demod_burst(samples: np.ndarray, start: int):
+    cols, onsets, _ = _demod_aligned(samples, start)
     return cols, onsets
 
 
@@ -569,24 +596,33 @@ def _decode_cells(gh, fk: int = 0,
     dec = _turbo.decode_from_coded_llr(Lc, N_SRC, iters=12, check=_frame_crc_ok)
     by = _dewhiten(dec)
     crc_ok = _frame_crc_ok(dec)
-    is_connect = all(by[i] == v for i, v in _SETUP_STRUCTURE)
+    is_connect = crc_ok and is_link_setup(by[:46])
     return sc, c0, crc_ok, by[:46], is_connect
+
+
+def _decode_cells_steps(gh, fk, c0):
+    sc, Lc = _cells_llr(gh, fk, c0)
+    if Lc is None:
+        return 0.0, c0, False, b"", False
+    dec = yield from _turbo.decode_from_coded_llr_steps(Lc, N_SRC, iters=12, check=_frame_crc_ok)
+    by = _dewhiten(dec)
+    crc_ok = _frame_crc_ok(dec)
+    return sc, c0, crc_ok, by[:46], crc_ok and is_link_setup(by[:46])
 
 
 # --------------------------------------------------------------------------- #
 # the index ladder (host BITRATE(3), (2), (1)): one-hot columns, three bits a column
 def _l3_band(samples: np.ndarray, off: int, ncol: int,
-             level: int = ROBUST_LEVEL) -> np.ndarray:
-    """``ncol × span`` band readings from block ``off``, equalised per bin.
-
-    One column lights one bin, so the median down a bin is what that bin reads
-    while unlit — its share of the channel's response — and dividing it out puts
-    every bin's lit and unlit readings on one scale before anything compares them.
-    """
+             level: int = ROBUST_LEVEL, *, raw: bool = False) -> np.ndarray:
+    """``ncol × span`` FFT magnitudes, optionally retaining their raw scale."""
     r = INDEX_RECORDS[level]
     b = np.asarray(samples[off:off + ncol * r.dw], float).reshape(ncol, r.dw)
     m = np.abs(np.fft.rfft(b, axis=1)[:, r.first_bin:r.first_bin + r.span])
-    return m / np.maximum(np.median(m, axis=0), _L3_BIN_FLOOR * m.max() + 1e-12)
+    return m if raw else _l3_equalize(m)
+
+
+def _l3_equalize(band):
+    return band / np.maximum(np.median(band, axis=0), _L3_BIN_FLOOR * band.max() + 1e-12)
 
 
 def _l3_purity(band: np.ndarray) -> float:
@@ -635,26 +671,6 @@ def _l3_ref_hits(band: np.ndarray, col: int, level: int = ROBUST_LEVEL) -> int:
     return int((lit == ref_bin).sum())
 
 
-def frame_follows(samples: np.ndarray, frame: FrameResult, refs: int = 2) -> bool | None:
-    """Whether another frame of the index-record burst ``frame`` was read from
-    opens behind it: the first ``refs`` reference columns of the next frame's
-    slot all light the bin they predict. ``None`` until the audio reaches them.
-
-    A sender keys a pair with no gap and no training between its frames, so
-    its second frame's references are there 0.4 s behind the first frame; on
-    an empty band two of them agree by chance once in a few hundred."""
-    r = INDEX_RECORDS[frame.level]
-    order = np.argsort(_l3_tables(frame.level)[0])
-    cols = _l3_tables(frame.level)[0][order][:refs]
-    bins = _l3_tables(frame.level)[1][order][:refs]
-    off, c0 = frame.start + frame.onset[0], frame.c0 + r.ncols
-    ncol = c0 + int(cols[-1]) + 1
-    if off < 0 or off + ncol * r.dw > len(samples):
-        return None
-    lit = _l3_band(samples, off, ncol, frame.level)[c0 + cols].argmax(1) + r.first_bin
-    return bool((lit == bins).all())
-
-
 def _l3_align(samples: np.ndarray, start: int, stop: int | None,
               level: int = ROBUST_LEVEL):
     """``(offset, lead, matched, band)`` for an index-record burst at ``start``.
@@ -673,8 +689,9 @@ def _l3_align(samples: np.ndarray, start: int, stop: int | None,
         ncol = min(ncol, r.ncols + _L3_LEAD_MAX)
     if ncol < r.ncols:
         return off, 0, 0, None
-    band = _l3_band(samples, off, ncol, level)
-    hits = [_l3_ref_hits(band, lead, level)
+    band = _l3_band(samples, off, ncol, level, raw=True)
+    whitened = _l3_equalize(band)
+    hits = [_l3_ref_hits(whitened, lead, level)
             for lead in range(min(ncol - r.ncols, _L3_LEAD_MAX) + 1)]
     lead = int(np.argmax(hits))
     return off, lead, hits[lead], band
@@ -689,24 +706,46 @@ def _l3_crc_ok(bits: np.ndarray, level: int = ROBUST_LEVEL) -> bool:
     return by[n - 2:n] == bytes(((c >> 8) & 0xFF, c & 0xFF))
 
 
-def _l3_decode(band: np.ndarray, lead: int,
-               level: int = ROBUST_LEVEL) -> tuple[bytes, bool]:
-    """Band readings -> ``(frame bytes, crc_ok)`` for the frame starting at ``lead``.
-
-    A data column's three bits are one joint decision over its whole band reading
-    rather than three independent ones: the LLR of a bit is the log-ratio of the
-    energy in the bins carrying it as zero to the energy in those carrying it as
-    one, over the eight offsets that mean anything at all.
-    """
+def _l3_llr(band, lead, level, *, pooled):
     r = INDEX_RECORDS[level]
-    _, _, data, labels, valid, place, perm = _l3_tables(level)
-    p = band[lead + data] ** 2
-    ll = p / (np.median(p, axis=1, keepdims=True) + 1e-18)
+    _, _, data, labels, valid, place, _ = _l3_tables(level)
+    p = (band if pooled else _l3_equalize(band))[lead + data] ** 2
+    scale = max(np.median(p[~valid]) / np.log(2), 1e-18) if pooled else (
+        np.median(p, axis=1, keepdims=True) + 1e-18)
+    ll = p / scale
     lik = (np.exp(ll - ll.max(axis=1, keepdims=True)) * valid)[:, :, None]
     bits = (np.log((lik * (labels == 0)).sum(1) + 1e-300)
             - np.log((lik * (labels == 1)).sum(1) + 1e-300)).ravel()
     Lc = np.zeros(r.coded)
     Lc[place] = np.clip(bits[:r.coded], -_L3_LLR_CAP, _L3_LLR_CAP)
+    return Lc
+
+
+def _l3_decode(band: np.ndarray, lead: int,
+               level: int = ROBUST_LEVEL, *, pooled: bool | None = False) -> tuple[bytes, bool]:
+    """Raw FFT magnitudes -> soft index bits -> turbo -> frame CRC.
+
+    Pooled noise (``True``, or ``None`` behind a failed per-bin read) is the
+    locator's to ask for, where it knows whether a pair partner guards the read."""
+    result = (b'', False)
+    if pooled is not True:
+        result = _l3_decode_llr(_l3_llr(band, lead, level, pooled=False), level)
+        if result[1] or pooled is False:
+            return result
+    _, _, data, _, valid, _, _ = _l3_tables(level)
+    p = band[lead + data] ** 2
+    noise = np.nanmedian(np.where(valid, np.nan, p), axis=0)
+    low, high = np.percentile(noise, (10, 90))
+    if high <= 3 * max(low, 1e-18):
+        alternative = _l3_decode_llr(_l3_llr(band, lead, level, pooled=True), level)
+        if alternative[1]:
+            return alternative
+    return result
+
+
+def _l3_decode_llr(Lc, level):
+    r = INDEX_RECORDS[level]
+    perm = _l3_tables(level)[-1]
     check = partial(_l3_crc_ok, level=level)
     if r.rate13:
         dec = _turbo.decode_r13(Lc, r.n_src, perm, iters=12, check=check)
@@ -718,7 +757,7 @@ def _l3_decode(band: np.ndarray, lead: int,
 
 def _l3_frames(start: int, stop: int | None, off: int, lead: int,
                matched: int, band: np.ndarray | None,
-               level: int = ROBUST_LEVEL) -> list[FrameResult]:
+               level: int = ROBUST_LEVEL, *, pooled: bool | None = False) -> list[FrameResult]:
     """Every frame of an index-record burst from its alignment, in emission
     order. ``self_consistency`` is the share of the frame's 24 reference columns
     that matched, ``c0`` the column the frame opens at, and ``onset`` the block
@@ -739,11 +778,12 @@ def _l3_frames(start: int, stop: int | None, off: int, lead: int,
     nf = max(1, round((len(band) - lead) / r.ncols))
     out = []
     for c0 in range(lead, len(band) - r.ncols + 1, r.ncols)[:nf]:
-        by, crc_ok = _l3_decode(band, c0, level)
-        hit = matched if c0 == lead else _l3_ref_hits(band, c0, level)
+        by, crc_ok = _l3_decode(band, c0, level, pooled=pooled)
+        hit = matched if c0 == lead else _l3_ref_hits(_l3_equalize(band), c0, level)
         out.append(FrameResult(start=start, onset=(off - start,), c0=c0,
                                self_consistency=hit / len(_l3_tables(level)[0]),
-                               crc_ok=crc_ok, frame_bytes=by, burst_columns=ncol,
+                               crc_ok=crc_ok, frame_bytes=by,
+                               is_connect=crc_ok and is_link_setup(by), burst_columns=ncol,
                                frames_in_burst=nf, level=level))
     return out
 
@@ -752,10 +792,36 @@ def decode_l3_burst(samples: np.ndarray, start: int, stop: int | None = None,
                     level: int = ROBUST_LEVEL) -> FrameResult:
     """The first frame the burst at ``start`` carries, read as the index record
     of host ``level``."""
-    return _l3_frames(start, stop, *_l3_align(samples, start, stop, level), level)[0]
+    frame = _l3_frames(start, stop, *_l3_align(samples, start, stop, level), level)[0]
+    if frame.crc_ok:
+        frame.quality = quality(samples[start:stop])
+    return frame
 
 
 # --------------------------------------------------------------------------- #
+def quality(samples: np.ndarray) -> float | None:
+    x = np.asarray(samples, dtype=float)
+    if len(x) < 4096 or not np.any(x):
+        return None
+    freq, power = welch(x, FS, nperseg=4096)
+    noise = power[((freq >= 300) & (freq < 1000))
+                  | ((freq > 2000) & (freq <= 2900))].mean()
+    band = (freq >= 1000) & (freq <= 2000)
+    signal = (power[band].sum() - noise * band.sum()) * (freq[1] - freq[0])
+    if signal <= 0:
+        return None
+    db = 10 * np.log10(signal / max(noise * 2900, 1e-30))
+    return stock_sn(db)
+
+
+def stock_sn(db: float) -> float:
+    physical = [-5.6, -2.0, -.1, 1.5, 3.5, 4.0, 7.5, 9.5, 11.9,
+                18.0, 19.9, 27.5, 45.0]
+    reported = [-9.3, -6.55, -3.9, -2.2, -1.7, -1.3, 4.9, 5.8, 6.9,
+                12.5, 13.8, 15.3, 21.4]
+    return float(db - 3.7 if db < physical[0] else np.interp(db, physical, reported))
+
+
 def decode_burst_frames(samples: np.ndarray, start: int, stop: int | None = None,
                         level: int | None = None) -> list[FrameResult]:
     """Every frame the burst at ``start`` holds, in emission order.
@@ -776,8 +842,17 @@ def decode_burst_frames(samples: np.ndarray, start: int, stop: int | None = None
         aligned = {lv: _l3_align(samples, start, stop, lv) for lv in levels}
         lv = max(aligned, key=lambda lv: aligned[lv][2])
         if level is not None or aligned[lv][2] >= _L3_GUARD_MIN:
-            return _l3_frames(start, stop, *aligned[lv], lv)
-    return _decode_base_frames(samples, start, stop)
+            frames = _l3_frames(start, stop, *aligned[lv], lv)
+        else:
+            frames = _decode_base_frames(samples, start, stop)
+    else:
+        frames = _decode_base_frames(samples, start, stop)
+    if any(frame.crc_ok for frame in frames):
+        sn = quality(samples[start:stop])
+        for frame in frames:
+            if frame.crc_ok:
+                frame.quality = sn
+    return frames
 
 
 def _decode_base_frames(samples: np.ndarray, start: int, stop: int | None) -> list[FrameResult]:
@@ -812,22 +887,7 @@ def decode_burst(samples: np.ndarray, start: int, stop: int | None = None) -> Fr
     return decode_burst_frames(samples, start, stop)[0]
 
 
-def decode_stream(samples: np.ndarray) -> DecodeResult:
-    """Decode a full VARA-A TX recording (mono, 48 kHz float)."""
-    samples = np.asarray(samples, dtype=float)
-    frames: list[FrameResult] = []
-    for span in burst_spans(samples):
-        group = decode_burst_frames(samples, *span)
-        frames.extend(group)
-        # An operator watching a transfer go past has to see a hole in it; a
-        # silent skip here is what let half a session go missing unremarked. With
-        # both frames now demodulated this fires only on a genuinely truncated
-        # burst — the frames its length promised that the columns could not yield.
-        if (lost := group[0].frames_in_burst - len(group)) > 0:
-            print(f"[bw500] {span[0] / FS:7.2f} s burst: {group[0].burst_columns} "
-                  f"columns hold {group[0].frames_in_burst} frames, {len(group)} "
-                  f"demodulated — {lost} frame(s) skipped, "
-                  f"{lost * _PAYLOAD[group[0].level]} payload bytes not read",
-                  file=sys.stderr, flush=True)
-    data = [f for f in frames if not f.is_connect]
-    return DecodeResult(frames=frames, data_frames=data)
+def decode_stream(samples: np.ndarray, *, expect_pair=None) -> DecodeResult:
+    """Decode a finite observation; pairing is unknown, a bool, or a level predicate."""
+    from .bw500_locator import decode
+    return decode(np.asarray(samples, dtype=float), expect_pair=expect_pair)

@@ -34,6 +34,7 @@ import pytest
 
 from hfmodem.core import busy
 from hfmodem.core.ptt import PttError, RtsPtt, arming_refusal, drop_rts
+from hfmodem.tests import hermetic
 from hfmodem.tests.kestrel import corpora
 
 _TOOLS = Path(__file__).resolve().parents[5] / "tools"
@@ -72,14 +73,15 @@ requires_launcher_python = pytest.mark.skipif(not _LAUNCHER_PY.exists(),
 requires_launcher = pytest.mark.skipif(
     not _ONAIR.exists(), reason=f"{_ONAIR} is not present (installed-wheel run)")
 
-#: The station's PTT line, taken from the same PTT_PORT the tools/ scripts
-#: honour, so one export configures both. Unset means "not at the radio" and the
-#: hardware test below skips saying exactly what would turn it on; set, the test
-#: FAILS rather than skipping if the line does not drop -- including when the
-#: named port is absent. This was a hardcoded path once, and redacting it to a
+#: The station's PTT line, named for this test alone: PTT_PORT is exported for the
+#: launchers wherever the station is, and a suite run there must not drop RTS on
+#: the line under a live arm. Unset means "not at the radio" and the hardware
+#: test below skips saying exactly what would turn it on; set, the test FAILS
+#: rather than skipping if the line does not drop -- including when the named
+#: port is absent. This was a hardcoded path once, and redacting it to a
 #: placeholder that exists on no machine turned the guard off everywhere, the
 #: station included, while this comment went on promising it had teeth.
-STATION_PTT = os.environ.get("PTT_PORT")
+STATION_PTT = hermetic.REAL_PTT
 
 
 #: The port every faked test points at. It must be a real character device —
@@ -259,11 +261,9 @@ def test_it_reports_rather_than_raises_when_it_cannot_get_at_the_line():
     assert any("/dev/cu.no-such-adapter" in m for m in said), said
 
 
-@pytest.mark.skipif(not STATION_PTT,
-                    reason="set PTT_PORT to the station's PTT adapter to run "
-                           "against the real line")
+@pytest.mark.hardware(opt_in="HFMODEM_TEST_REAL_PTT")
 def test_the_stations_own_adapter_goes_low():
-    """No fake in the path. With PTT_PORT set this is the real thing, and it
+    """No fake in the path. With HFMODEM_TEST_REAL_PTT set this is the real thing, and it
     fails rather than skips when it does not work -- a port that is named but
     absent is one of the ways it does not work."""
     said = []
@@ -339,9 +339,18 @@ def test_an_unconfirmed_key_up_still_lowers_the_line(monkeypatch):
     stays False -- which blinds the watchdog, the one guard sized for a line
     left up. The only safe exit is the drop-to-be-sure the daemon branch
     already takes."""
-    p = _wire(monkeypatch, _BlindPort())
+    p = _wire(monkeypatch, _FakePort())
     said = []
     rig = _rig(said.append, line_ptt=True)
+    # Arm must first read low; lose readback only after that proof.
+    real_ioctl = p.ioctl
+
+    def unreadable(fd, request, arg):
+        if request == termios.TIOCMGET:
+            raise OSError(6, "Device not configured")
+        return real_ioctl(fd, request, arg)
+
+    monkeypatch.setattr(fcntl, "ioctl", unreadable)
     assert rig.key(True, "burst") is False
     assert not (p.bits & termios.TIOCM_RTS), (
         "the ioctl may have raised the pin; an unconfirmed key-up must deassert")
@@ -352,9 +361,11 @@ def test_an_unconfirmed_key_up_still_lowers_the_line(monkeypatch):
 def test_a_line_that_will_not_unkey_still_raises_the_alarm(monkeypatch):
     """The one case that must keep the loud message: the ioctl path itself has
     failed, so nothing is left to try and the operator does need to go to the rig."""
-    _wire(monkeypatch, _FakePort(stuck=termios.TIOCM_RTS))
+    p = _wire(monkeypatch, _FakePort())
     said = []
     rig = _rig(said.append, line_ptt=True)
+    assert rig.key(True) is True
+    p.stuck = termios.TIOCM_RTS
     assert rig.key(False) is False
     joined = " ".join(said)
     assert "MAY BE STUCK" in joined and "manually" in joined, said
@@ -371,29 +382,34 @@ def test_shutdown_hands_the_line_back(port):
     assert port.closed, "shutdown kept the port against the next session"
 
 
-# -- and the daemon path, for the tools that still use it --------------------------
+# -- confirmed low must not produce a stuck-transmitter alarm ------------------
 
 
 @requires_bridge
 def test_a_line_confirmed_low_is_not_reported_as_maybe_stuck(port):
-    """The first version of this path cleared RTS, read the line LOW, and then said
-    "TRANSMITTER MAY BE STUCK. Unkey it manually now." -- on air, twice, at the
-    radio. Reading the line low is BETTER evidence than the reply rigctld failed to
-    give: the ioctl went to the driver rather than over the link that just failed.
-
-    The rig is still retired, because with the daemon keying it a daemon that has
-    stopped answering ends the session whatever the line reads. What must not happen
-    is sending the operator to a transmitter that is demonstrably down.
-    """
+    """The line's low readback is the verdict, even when CAT is unavailable."""
     said = []
-    rig = _rig(said.append)                     # daemon-keyed: no line keyer
-    rig.keyed = True
-    assert rig._unkey(0.2, 0.05) is True, said
+    rig = _rig(said.append, line_ptt=True)
+    assert rig.key(True) is True
+    assert rig.key(False) is True, said
     joined = " ".join(said)
-    assert "CONFIRMED DOWN" in joined, said
+    assert "PTT OFF -> line (reads low)" in joined, said
     assert "MAY BE STUCK" not in joined and "manually" not in joined, said
-    assert rig.retired, "a daemon that stopped answering must still end the session"
+    assert not rig.retired, "confirmed line unkey must not retire a healthy keyer"
     assert rig.keyed is False
+    assert not (port.bits & termios.TIOCM_RTS)
+
+
+@requires_bridge
+@pytest.mark.parametrize("fault", ["high", "unreadable"])
+def test_arm_refuses_a_line_without_positive_low_readback(monkeypatch, fault):
+    port = (_FakePort(stuck=termios.TIOCM_RTS)
+            if fault == "high" else _BlindPort())
+    _wire(monkeypatch, port)
+    with pytest.raises(PttError, match="not confirmed low"):
+        _rig(lambda message: None, line_ptt=True)
+    assert termios.TIOCMBIS not in port.calls
+    assert port.closed
 
 
 # -- arming without the last resort is refused --------------------------------------
@@ -434,11 +450,17 @@ def test_arming_on_a_keying_line_that_is_not_there_is_refused(monkeypatch, capsy
     assert arming_refusal("/dev/cu.usbserial-XXXXB1") in out, out
 
 
+def test_arming_on_a_real_line_that_hamlib_would_key_is_refused(monkeypatch, capsys):
+    rc, out = _kc_main(monkeypatch, capsys, "--ptt-device", FAKE_DEV)
+    assert rc == 2
+    assert "--arm requires --line-ptt" in out, out
+
+
 def test_arming_with_a_real_line_named_gets_past_the_gate(monkeypatch, capsys):
     """A refusal gate that also refuses the armed-correctly case would just be
     the transmitter switched off. The next hardware-free check in main is the
     mail-file load, so reaching MAIL REFUSED proves the gate opened."""
-    rc, out = _kc_main(monkeypatch, capsys, "--ptt-device", FAKE_DEV,
+    rc, out = _kc_main(monkeypatch, capsys, "--ptt-device", FAKE_DEV, "--line-ptt",
                        "--mail-send", "/no/such/mail.b2f")
     assert rc == 7
     assert "MAIL REFUSED" in out and "--ptt-device" not in out, out
@@ -629,7 +651,9 @@ def _sense(tmp_path, name, channel, *, deaf=False):
     status and the windows it actually listened in, `5c` a clear five seconds."""
     (tmp_path / "sounddevice.py").write_text(_STUB.read_text())
     src = tmp_path / "sense.py"
-    src.write_text(_sense_source(name, repo=str(tmp_path)))
+    src.write_text("from stub_claim import install; install()\n" +
+                   _sense_source(name, repo=str(tmp_path)))
+    (tmp_path / "stub_claim.py").write_text((_TOOLS / "tests/stub_claim.py").read_text())
     log = tmp_path / "windows"
     log.unlink(missing_ok=True)                 # the stub appends; one run per file
     env = corpora.child_env(CHANNEL=channel, WINDOW_LOG=str(log))
@@ -824,21 +848,23 @@ def test_a_template_edited_but_for_the_keying_line_is_refused_by_name(tmp_path, 
     assert "[rig.ptt] port" in err and "unset" in err, err
 
 
-def _launch(*argv, **env):
-    """Run the launcher with the station's ports out of the environment. Every
-    case below is refused before `require_hardware` stats anything, so nothing
-    here opens a port, a codec or a transmitter."""
-    e = {k: v for k, v in os.environ.items() if k not in ("CAT_PORT", "PTT_PORT")}
-    return subprocess.run(["bash", str(_ONAIR), *argv], env={**e, **env},
+def _launch(tmp_path, *argv, **env):
+    """Run the launcher with the station's settings out of the environment
+    (hermetic.py's fixture takes them out of every test). Every case below is
+    refused before `require_hardware` stats anything, so nothing here opens a
+    port, a codec or a transmitter, and RIG_CLAIMED says the claim was inherited,
+    so a launch that got as far as claiming is refused for want of one on fd 9."""
+    return subprocess.run(["bash", str(_ONAIR), *argv],
+                          env={**os.environ, "RIG_CLAIMED": str(tmp_path / "claim"), **env},
                           capture_output=True, text=True, timeout=120)
 
 
 @requires_launcher
 @requires_launcher_python
-def test_an_unconfigured_station_is_told_that_and_not_that_its_cabling_is_bad():
+def test_an_unconfigured_station_is_told_that_and_not_that_its_cabling_is_bad(tmp_path):
     """The operator meets this before anything is stated about the radio: which
     variables to set, and how to find the device names on this machine."""
-    r = _launch("check")
+    r = _launch(tmp_path, "check")
     assert r.returncode == 1
     assert "CAT_PORT" in r.stderr and "PTT_PORT" in r.stderr, r.stderr
     assert re.search(r"ls /dev/\S+", r.stderr), r.stderr
@@ -848,24 +874,25 @@ def test_an_unconfigured_station_is_told_that_and_not_that_its_cabling_is_bad():
 
 @requires_launcher
 @requires_launcher_python
-def test_one_adapter_needs_one_variable():
+def test_one_adapter_needs_one_variable(tmp_path):
     """CAT_PORT alone is enough on the two-interface adapter this station keys
     through: PTT is derived, and the run gets as far as the hardware check, which
     is the first thing entitled to talk about cables — the port it names is one
     the operator named first."""
-    r = _launch("check", CAT_PORT="/dev/cu.usbserial-FAKE0B0")
+    cat = tmp_path / "cu.usbserial-FAKE0B0"
+    r = _launch(tmp_path, "check", CAT_PORT=str(cat))
     assert r.returncode == 1
-    assert "CAT port /dev/cu.usbserial-FAKE0B0 missing" in r.stderr, r.stderr
+    assert f"CAT port {cat} missing" in r.stderr, r.stderr
     assert "PTT_PORT" not in r.stderr, ("the keying line was not derived", r.stderr)
 
 
 @requires_launcher
 @requires_launcher_python
-def test_a_keying_line_that_cannot_be_derived_is_asked_for_rather_than_guessed():
+def test_a_keying_line_that_cannot_be_derived_is_asked_for_rather_than_guessed(tmp_path):
     """`derive_ptt_port`'s narrow rule, reaching the operator: a name it does not
     recognise is refused here rather than advanced into whatever adapter happens
     to answer to the next index."""
-    r = _launch("check", CAT_PORT="/dev/cu.Bluetooth-Incoming-Port")
+    r = _launch(tmp_path, "check", CAT_PORT=str(tmp_path / "cu.Bluetooth-Incoming-Port"))
     assert r.returncode == 1
     assert "cannot derive a PTT port" in r.stderr, r.stderr
     assert "set PTT_PORT" in r.stderr, r.stderr
@@ -897,14 +924,12 @@ def test_the_reaper_asks_before_it_insists():
     This opened with SIGKILL and nothing else, which is `kill_and_respawn`'s own
     closed bug living on one directory over.
     """
-    body = _function_body(_ONAIR.read_text(), "reap_orphans")
-    assert "SIGTERM" in body and "-TERM" in body, (
-        "the reaper no longer asks the orphan to put its own key down first")
-    assert body.index("-TERM") < body.index("-9"), (
-        "the reaper kills before it asks, which is a modem that cannot unkey")
-    assert "REAP_GRACE_S" in body, (
-        "no bounded wait between the ask and the kill -- either it does not wait, "
-        "or it waits without a bound, and one of those hangs the cleanup verb")
+    ports = (_TOOLS / "lib/ports.sh").read_text()
+    body = ports.split('def end(children):', 1)[1].split('def inventory():', 1)[0]
+    assert body.index('child.terminate()') < body.index('child.wait_gone(') < body.index('child.kill()')
+    assert 'REAP_GRACE_S' in body
+    assert 'cleanup in progress' in body and 'no escalation' in body
+    assert 'termination unresolved' in body
 
 
 @requires_launcher
@@ -919,11 +944,12 @@ def test_the_cleanup_verb_reads_the_line_back_after_it_kills():
     Before `prove_unkeyed` and not after: that one exits 1 on a quiet band, and
     under `set -e` it would take the line verdict down with it.
     """
-    text = _ONAIR.read_text()
-    down = text.split("\ndown)", 1)[1]
-    assert "prove_down" in down, (
-        "onair.sh down kills three ways and never reads the keying line back")
-    assert down.index("reap_orphans") < down.index("prove_down"), (
-        "the line is proved before the reaping that could raise it")
-    assert down.index("prove_down") < down.index("prove_unkeyed"), (
-        "a quiet band would exit 1 before the line verdict was printed")
+    # U7 consolidates the three pattern reapers into one checked inventory.
+    # Quiet-band audio is no longer cleanup evidence: line, CAT and publication
+    # are checked separately, with completion only after every configured check.
+    down = _function_body((_TOOLS / "lib/rig.sh").read_text(), "station_down")
+    assert down.index('claim_processes down') < down.index('prove_down')
+    assert down.index('prove_down') < down.index('claim_native rigctl')
+    assert down.index('claim_native rigctl') < down.index('claim_processes evidence')
+    assert down.index('claim_processes evidence') < down.index('CLEANUP COMPLETE')
+    assert 'prove_unkeyed' not in down

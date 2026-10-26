@@ -11,6 +11,8 @@ import time
 import numpy as np
 import pytest
 
+from hfmodem.tests.core.test_host_teardown import loopback_bind as loopback_bind
+
 from hfmodem.bateleur.modem import Mode
 from hfmodem.bateleur.s5066 import primitives as P
 from hfmodem.tests.bateleur.s5066.ether import AudioEther, Client

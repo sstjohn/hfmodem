@@ -678,8 +678,8 @@ P4_TAIL_PADDING = _reg(Unknown(
           "terminated. Both start from state (0,0,0). Rate 1/3 keeps V0, C1 "
           "and C2 whole, so nothing is punctured",
     evidence="All four CRC-valid Dragon frames on file -- two in tests/shrike/"
-             "fixtures/p4-short, two in fixtures/p4-long -- spend them that "
-             "way: re-rendered from their own decoded bytes under this packing "
+             "fixtures/sigidwiki/p4-short, two in fixtures/sigidwiki/p4-long "
+             "-- spend them that way: re-rendered from their own decoded bytes under this packing "
              "they read back as the identical frame, and the encoder leaves "
              "the first component in state (0,0,0) (test_p4shorttx.py and "
              "test_p4longtx.py, test_recorded_frames_survive_a_round_trip and "
@@ -723,8 +723,8 @@ P4_NORMAL_LAYOUT = _reg(Unknown(
     candidates=["176 versus literal 175 short data symbols",
                 "32 code-generated versus 33 prose-generated training symbols",
                 "B+1 training blocks from figure versus B from numbering prose"],
-    evidence="The four CRC-valid frames in tests/shrike/fixtures/p4-short and "
-             "fixtures/p4-long are decoded on 176x6 and 207x24 behind "
+    evidence="The four CRC-valid frames in tests/shrike/fixtures/sigidwiki/"
+             "p4-short and fixtures/sigidwiki/p4-long are decoded on 176x6 and 207x24 behind "
              "32-symbol trainings and re-render byte-exact on the same "
              "geometry. The terminal training is the measured half: in all "
              "four, the slot after the last data block scores with the "

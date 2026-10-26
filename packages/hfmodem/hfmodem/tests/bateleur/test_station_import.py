@@ -548,16 +548,17 @@ def test_long_burst_preserves_commands_and_station_activity(kind):
     from hfmodem.core.regulatory import centred
     from hfmodem.station.arbiter import ERRAND, TxArbiter, TxRequest
 
-    def wait_until(at):
+    def wait_until(at, **kwargs):
         if at:
             playing.set()
             if not release.wait(10):
                 errors.append("burst was not released")
 
     audio = SimpleNamespace(sample_now=lambda: 0, arm_burst=lambda samples, at: at,
-                            wait_until=wait_until, finish_burst=lambda: 576000)
+                            wait_until=wait_until, finish_burst=lambda: 576000,
+                            alive=lambda: None, cancel_burst=lambda: None, tx_latency_n=0)
     rig = SimpleNamespace(max_key_s=60, key=lambda *a, **kw: 1,
-                          unkey=lambda token: None, retired=False)
+                          unkey=lambda token: None, retired=False, line_state="low")
     arbiter = TxArbiter(audio, rig)
 
     def burst():

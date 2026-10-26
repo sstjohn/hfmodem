@@ -1,0 +1,8 @@
+{
+  "source": "operator-data/working/vara-chat/vmail/file-captures/bbs-capture-3henwik7",
+  "received_sha256": "45bcd65261b9d8c1fff6ffc1e61daa1364be7ba5534a8ac6ba58a1981cac84f7",
+  "received_bytes": 12774,
+  "duplicate_bytes": 541,
+  "original_chunk_offset": 11743,
+  "note": "Recorded host receive stream at the application framing failure; the transfer is incomplete, not a validated file."
+}

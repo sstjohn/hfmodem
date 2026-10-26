@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Field capture kit for kestrel: record a VARA HF session off the rig.
 
     hfcapture.py devices
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import array
+from contextlib import ExitStack, contextmanager
 import json
 import math
 import os
@@ -34,7 +37,8 @@ import time
 import wave
 from datetime import UTC, datetime
 from pathlib import Path
-from hfmodem.core import band
+from hfmodem.core import band, claim
+from hfmodem.core.native import NativeChild, spawn_native
 
 RATE = 48000
 SEGMENT_SECONDS = 600
@@ -82,6 +86,114 @@ DEVICE_HELP = "capture input: a name as `devices` prints it, or its index there"
 # to the centre by mistake and the whole signal lands near 0 Hz audio, outside
 # the passband — a silently dead capture.
 DIAL_OFFSET_HZ = band.DIAL_OFFSET_HZ
+
+
+_tool_claims = threading.local()
+
+
+def inherited_claim():
+    # Only a launcher that exported RIG_CLAIMED passed the claim; any other fd 9
+    # is whatever the parent left open, never a claim to verify.
+    if not os.environ.get("RIG_CLAIMED"):
+        return None
+    try:
+        os.fstat(9)
+    except OSError as exc:
+        raise claim.ClaimError("missing inherited claim descriptor") from exc
+    return claim.inherited(9)
+
+
+@contextmanager
+def device_claim(operation, *, devices=None):
+    stack = getattr(_tool_claims, "stack", [])
+    source = stack[-1].claim if stack else None
+    acquired = False
+    if source is None:
+        source = inherited_claim()
+    if source is None:
+        source = claim.acquire("tool", "-".join(operation.split()), devices=devices,
+                               prove_line=True,
+                               ptt_factory=claim.line_factory(devices.ptt_port) if devices else None)
+        acquired = True
+    descriptor = source if acquired else claim.ClaimDescriptor(os.dup(source.fd))
+    admission = None
+    complete = False
+    try:
+        admission = claim.inherited(descriptor, launch=True)
+        _tool_claims.stack = [*stack, admission]
+        yield admission
+        complete = True
+    finally:
+        _tool_claims.stack = stack
+        if admission is not None:
+            admission.failed()
+        if acquired and complete:
+            claim.release(descriptor)
+        else:
+            claim.close(descriptor)
+
+
+def device_opened():
+    stack = getattr(_tool_claims, "stack", [])
+    for admission in reversed(stack):
+        if admission.fd is not None:
+            if admission is stack[0]:
+                admission.opened()
+            else:
+                # Each open closes its admission barrier; only the outer scope
+                # acknowledges this process to its parent.
+                admission.failed()
+
+
+def stop_native(child, timeout=3.0):
+    child.terminate()
+    if not child.wait_gone(timeout):
+        child.kill()
+        if not child.wait_gone(5.0):
+            raise claim.ClaimError(f"termination unresolved for pid {child.pid}")
+
+
+def close_native(child, *, stopped=False):
+    if not stopped:
+        stop_native(child)
+    for stream in (child.stdin, child.stdout, child.stderr):
+        if stream is not None:
+            stream.close()
+
+
+def native_command(argv, *, input=None, timeout=4):
+    if not 0 < timeout <= claim.ADMISSION_TIMEOUT:
+        raise ValueError("native timeout must be in (0, 30] seconds")
+    with ExitStack() as stack:
+        try:
+            held = stack.enter_context(device_claim("CAT", devices=claim.Devices(
+                cat_port=argv[argv.index("-r") + 1] if "-r" in argv else None,
+                cat="rigctld" if "-m" in argv and argv[argv.index("-m") + 1] == "2" else "serial")))
+        except OSError as exc:
+            raise claim.ClaimError(f"CLAIM REFUSED: CAT admission: {exc}") from exc
+        fd = held.claim.fd
+        result = subprocess.run([sys.executable, "-m", "hfmodem.core.claim", "spawn",
+                                 "--fd", str(fd), "--timeout", str(timeout), "--", *argv],
+                                input=input, capture_output=True, text=True, pass_fds=(fd,))
+        # claim spawn and rigctl share exit codes 1/2. The diagnostic, rather
+        # than the code, distinguishes a refusal from a radio command failure.
+        if "CLAIM REFUSED" in result.stderr:
+            raise claim.ClaimError(result.stderr.strip())
+        return result
+
+
+def drain_native(child, log, *, stdout=True):
+    child.stdin.close()
+    threads = []
+    def drain(stream):
+        for block in iter(lambda: stream.read(4096), b""):
+            log.write(block.decode(errors="replace"))
+            log.flush()
+    for stream in ((child.stdout, child.stderr) if stdout else (child.stderr,)):
+        thread = threading.Thread(target=drain, args=(stream,), daemon=True)
+        thread.start()
+        threads.append(thread)
+    return threads
 
 
 def die(msg: str) -> None:
@@ -227,25 +339,31 @@ def measure(path: Path) -> tuple[float, float, int]:
 
 
 def cmd_check(args: argparse.Namespace) -> None:
-    sd = portaudio()
-    index, name = sound_input(sd, args.device)
-    print(f"Recording {args.seconds}s from [{index}] {name} — "
-          "have the receiver hearing the band you'll work.")
-    heard = sd.rec(int(args.seconds * RATE), samplerate=RATE, channels=1,
-                   device=index, dtype="int16", blocking=True)
-    samples = array.array("h")
-    samples.frombytes(heard.tobytes())
-    peak, rms, clipped = levels(samples)
-    print(f"\n  peak {peak:6.1f} dBFS")
-    print(f"  rms  {rms:6.1f} dBFS")
-    print(f"  clipped samples: {clipped}")
+    with device_claim("hfcapture check", devices=claim.Devices(capture=args.device)):
+        sd = portaudio()
+        index, name = sound_input(sd, args.device)
+        print(f"Recording {args.seconds}s from [{index}] {name} — "
+              "have the receiver hearing the band you'll work.")
+        heard = sd.rec(int(args.seconds * RATE), samplerate=RATE, channels=1,
+                       device=index, dtype="int16", blocking=False)
+        device_opened()
+        try:
+            sd.wait()
+        finally:
+            sd.stop()
+        samples = array.array("h")
+        samples.frombytes(heard.tobytes())
+        peak, rms, clipped = levels(samples)
+        print(f"\n  peak {peak:6.1f} dBFS")
+        print(f"  rms  {rms:6.1f} dBFS")
+        print(f"  clipped samples: {clipped}")
 
-    if clipped or peak > -1.0:
-        print("\n  TOO HOT — clipping. Turn the soundcard input level down.")
-    elif peak < -30.0:
-        print("\n  TOO QUIET — turn the input level up. Aim for peaks near -10 dBFS.")
-    else:
-        print("\n  Good. Aim for peaks around -10 dBFS on a strong signal.")
+        if clipped or peak > -1.0:
+            print("\n  TOO HOT — clipping. Turn the soundcard input level down.")
+        elif peak < -30.0:
+            print("\n  TOO QUIET — turn the input level up. Aim for peaks near -10 dBFS.")
+        else:
+            print("\n  Good. Aim for peaks around -10 dBFS on a strong signal.")
 
 
 # --- rig (via rigctld only) ------------------------------------------------
@@ -254,7 +372,7 @@ def cmd_check(args: argparse.Namespace) -> None:
 # Capture opens it disarmed: it reads and tunes, and cannot key the transmitter.
 
 
-def start_rigctld(model: int, device: str, baud: int | None = None) -> subprocess.Popen:
+def start_rigctld(model: int, device: str, baud: int | None = None, *, claim_fd, log, children) -> NativeChild:
     exe = shutil.which("rigctld")
     if exe is None:
         # The launchers' contract (tools/lib/ports.sh): HAMLIB_BIN names the bin
@@ -268,10 +386,12 @@ def start_rigctld(model: int, device: str, baud: int | None = None) -> subproces
         else:
             die("rigctld not found — install hamlib, export HAMLIB_BIN=<bin dir of "
                 "your build>, or start it yourself and pass --rigctld host:port")
-    cmd = [exe, "-m", str(model), "-r", device, "-t", str(RIGCTLD[1])]
+    cmd = [exe, "-m", str(model), "-r", device, "-t", str(RIGCTLD[1]),
+           "--set-conf=ptt_type=None"]
     if baud:
         cmd += ["-s", str(baud)]
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = spawn_native(cmd, claim_fd=claim_fd, long_lived=True, device=device)
+    children.append((proc, drain_native(proc, log)))
     for _ in range(20):
         time.sleep(0.25)
         try:
@@ -279,7 +399,7 @@ def start_rigctld(model: int, device: str, baud: int | None = None) -> subproces
                 return proc
         except OSError:
             continue
-    proc.terminate()
+    stop_native(proc)
     die(f"rigctld would not answer on {device} (model {model})")
 
 
@@ -573,6 +693,27 @@ class Capture:
 
 
 def cmd_record(args: argparse.Namespace) -> None:
+    args.outdir = args.outdir or f"cap-{datetime.now():%Y%m%d-%H%M}"
+    Path(args.outdir).mkdir(parents=True, exist_ok=True)
+    with device_claim("hfcapture record", devices=claim.Devices(
+            cat_port=args.rig_device, capture=args.device,
+            cat="rigctld" if args.rigctld else "serial")) as held:
+        with (Path(args.outdir or ".") / "rigctld.log").open("a") as log:
+            children = []
+            try:
+                with ExitStack() as cleanup:
+                    _record(args, held.claim, children, log, cleanup)
+            finally:
+                for child, readers in children:
+                    stop_native(child)
+                    for reader in readers:
+                        reader.join(timeout=2)
+                        if reader.is_alive():
+                            raise claim.ClaimError("native diagnostic reader did not stop")
+                    close_native(child, stopped=True)
+
+
+def _record(args, descriptor, children, log, cleanup):
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     session = Path(args.outdir or f"cap-{stamp}")
     session.mkdir(parents=True, exist_ok=True)
@@ -583,7 +724,7 @@ def cmd_record(args: argparse.Namespace) -> None:
     index, card = sound_input(sd, args.device)
     print(f"  input: [{index}] {card}\n")
 
-    spawned, rig, state = None, None, None
+    rig, state = None, None
     if args.rig_model or args.rigctld:
         from vara_rig_bridge import Rig
 
@@ -596,9 +737,11 @@ def cmd_record(args: argparse.Namespace) -> None:
             if not args.rig_device:
                 die("--rig-model needs --rig-device (e.g. /dev/cu.usbserial-1420)")
             baud = args.rig_baud or RIG_BAUD.get(name)
-            spawned = start_rigctld(int(model), args.rig_device, baud)
+            start_rigctld(int(model), args.rig_device, baud, claim_fd=descriptor,
+                        log=log, children=children)
             hostport = f"{RIGCTLD[0]}:{RIGCTLD[1]}"
         rig = Rig(hostport, armed=False, log=print)
+        cleanup.callback(rig.shutdown)
         if args.set_freq:
             rig.set_freq(float(args.set_freq) * 1000)
         if args.set_mode:
@@ -611,6 +754,7 @@ def cmd_record(args: argparse.Namespace) -> None:
             print("           signal — widen the receive filter before transmitting.")
         print()
 
+    device_opened()
     meta = {
         "utc_start": datetime.now(UTC).isoformat(timespec="seconds"),
         "my_call": args.call or ask("your callsign"),
@@ -646,35 +790,44 @@ def cmd_record(args: argparse.Namespace) -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
 
+    watcher = None
     if rig:
-        threading.Thread(target=watch_rig,
-                         args=(rig, session / "rig.log", args.rig_poll, stop),
-                         daemon=True).start()
+        watcher = threading.Thread(target=watch_rig,
+                                   args=(rig, session / "rig.log", args.rig_poll, stop),
+                                   daemon=True)
+        watcher.start()
 
-    started = shown = time.time()
-    with sd.RawInputStream(device=index, channels=1, samplerate=RATE,
-                           dtype="int16", callback=on_block):
-        while not stop.is_set():
-            try:
-                pcm, adc = blocks.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if cap.feed(pcm, adc):
-                at, secs = cap.gaps[-1]
-                print(f"\n  !! GAP {secs:.3f} s lost at {at:.2f} s into the capture")
-            if time.time() - shown >= 1.0:
-                shown = time.time()
-                mins, sec = divmod(int(shown - started), 60)
-                # Both clocks, side by side: the failure this replaced was one of
-                # them running away from the other for two days unnoticed.
-                print(f"\r  recording {mins:02d}:{sec:02d}  "
-                      f"audio {cap.seconds:.1f} s", end="", flush=True)
-    while not blocks.empty():
-        cap.feed(*blocks.get())
-    cap.close()
+    try:
+        started = shown = time.time()
+        with device_claim("hfcapture input", devices=claim.Devices(capture=args.device)):
+            with sd.RawInputStream(device=index, channels=1, samplerate=RATE,
+                                   dtype="int16", callback=on_block):
+                device_opened()
+                while not stop.is_set():
+                    try:
+                        pcm, adc = blocks.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if cap.feed(pcm, adc):
+                        at, secs = cap.gaps[-1]
+                        print(f"\n  !! GAP {secs:.3f} s lost at {at:.2f} s into the capture")
+                    if time.time() - shown >= 1.0:
+                        shown = time.time()
+                        mins, sec = divmod(int(shown - started), 60)
+                        # Both clocks, side by side: the failure this replaced was one of
+                        # them running away from the other for two days unnoticed.
+                        print(f"\r  recording {mins:02d}:{sec:02d}  "
+                              f"audio {cap.seconds:.1f} s", end="", flush=True)
+        while not blocks.empty():
+            cap.feed(*blocks.get())
+    finally:
+        stop.set()
+        cap.close()
+        if watcher is not None:
+            watcher.join(timeout=5)
+            if watcher.is_alive():
+                raise claim.ClaimError("rig watcher did not stop")
     elapsed = time.time() - started
-    if spawned:
-        spawned.terminate()
     print("\n")
 
     parts = cap.parts

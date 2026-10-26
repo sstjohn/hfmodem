@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # 08 — Payload compression (host bytes → pre-FEC frame)
 
 VARA HF 4.9.0 has two distinct link codecs: TEXT uses static prefix codes;
@@ -21,7 +23,7 @@ Bit 0 denotes high-speed capability, bit 1 TEXT, bit 2 FILES. Speed-limited
 callers send plain data regardless of their compression preference. The called
 station follows the caller even when its own preference differs. OFF sends
 host bytes directly, without a container. The compression setting is frozen
-for the connection; host changes affect the next outbound connection.
+for the connection; host changes require an idle contact.
 
 ## FILES
 
@@ -56,24 +58,34 @@ header:
 
 | Header | Meaning supported today |
 |---|---|
-| `000` | Eight-bit line header follows |
+| `000` | A line prefix follows |
 | `001` | Prose table, coded |
 | `010` | Prose table, continuing a raw escape run |
-| Other | Unsupported |
+| `011` | SFI/date table |
+| `100` | SID/version table |
+| `101` | Uppercase/word table |
+| `110` | Numeric table |
+| `111` | FW symbol table, continuing mid-line |
 
-Only line header `AD` is implemented. It has 87 byte codes, two known tokens
-(` VARA`, ` has `), and ESC. The explicit table lives in
-`hfmodem.kestrel.vara.compression`. Its code space remains incomplete.
+The receive dictionaries cover prose, SFI/date, SID/version, uppercase/word,
+numeric and FW forms. Line prefixes select a dictionary and may insert a
+literal or a complete line. The tables are in
+`hfmodem.kestrel.vara.compression`.
 
 ESC introduces raw eight-bit bytes until and including the first byte having
-a code in the table. CR introduces framing: optional `10000` for LF, then an
-eight-bit line header unless the over ends there. This applies to raw CR too.
+a code in the table. CR introduces framing: optional `10000` for LF, then a
+variable line prefix unless the over ends there. This applies to raw CR too.
 Padding is 1–8 copies of the complement of the last data bit. All reads,
 including the optional LF, must stay before the pad-stripped end.
 
 Unsupported headers, unknown code prefixes and unfinished symbols/raw bytes/
-line headers stop decoding. The verified prefix can be delivered; nothing
+line prefixes stop decoding. The verified prefix can be delivered; nothing
 from or after the unreadable portion can be passed as intact host data.
+
+Line prefixes include `;FW: `, `; `, `FC EM `, `F> `, SID/version forms and
+complete lines such as `FF\r`. Continuation headers resume the selected table
+without repeating the line prefix. Escapes and table transitions preserve
+partial lines across overs.
 
 ## Implementation and host integration
 
@@ -93,7 +105,7 @@ a bit position within the failing over. A new session clears the latch.
 `VaraHostModem` to `VaraServer` and drives the existing audio transport plus
 connection/recovery/idle cadences on one owner thread. Host threads enqueue
 commands; receive faults reach the command socket. The adapter defaults to
-high-speed capability; `--speed-limited` explicitly disables it. The separate
+high-speed capability; `--winlink-cartel-mode` explicitly disables it. The separate
 package host CLI still defaults to loopback.
 
 The launcher defaults to BlackHole cables and reports PTT ON/OFF to the host;
@@ -105,22 +117,21 @@ python tools/kestrel_host.py --tx-device "BlackHole 16ch" --rx-device "BlackHole
 
 A defensive DISCONNECT while idle or connecting cancels that attempt, without
 arming a close on the next session. A connected caller drains its queue before
-closing. The existing driver cannot key a called-station close: that request
-reports `WRONG DISCONNECT` and leaves no close pending. LISTEN preserves
+closing. The caller and answering station both use their measured close
+descriptors; transport refusal leaves the close pending for retry. LISTEN preserves
 pre-connect host writes until the caller's mode is known. Public driver methods
 provide queue accounting and pre-connect data; the adapter does not inspect
 private queue fields.
 
-Direct callers select `compression="FILES"` with `high_speed=True`, or use
-`tools/kestrel_connect.py --compression FILES`. OFF remains the CLI default.
-TEXT requests advertise OFF until the remaining receive tables are derived.
-An inbound TEXT caller receives plain, flag-clear responses while the partial
-TEXT receiver decodes supported overs and reports/latches gaps.
+Direct callers select OFF, TEXT or FILES with `compression=...`, or through
+`tools/kestrel_connect.py --compression`. OFF remains that CLI's default.
+The live TCP host defaults to TEXT; legacy `COMPRESSION ON` selects TEXT.
+High-speed callers advertise their selected mode. Speed-limited callers use OFF.
 
-The prose encoder is available for generated tests, **not live transmission**.
-Stock acceptance of `AD` on lines that stock would code with a different table
-still needs a bench check. The non-prose tables and additional tokens are also
-unresolved. No bench audio or extracted vectors are shipped.
+TEXT transmission codes intermediate prose overs and uses plain fallback for
+terminal overs and unsuitable input. Retry and BUFFER accounting retain the
+original host bytes. Independent virtual-audio checks cover TEXT reception,
+prose transmission, binary replies and closing against stock VARA.
 
 ## Verification
 

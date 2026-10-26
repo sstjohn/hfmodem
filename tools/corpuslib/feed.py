@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Rank exact centers from the Winlink completed-session propagation feed.
 
 This is session evidence, not the RMS channel heartbeat. Missing client grids

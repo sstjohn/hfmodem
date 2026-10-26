@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # The tone-family lead law at BW2750 and BW500
 
 `lead_check_tone.py` prints every table behind this note in about 3 minutes. It reads the high speed capable

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # One bounded, sensed, unattended call attempt per mode, and the readback between
 # them. Sourced by tools/campaign.sh and tools/autopilot.sh, which differ in how
 # they choose targets and in nothing else that touches the transmitter.
@@ -36,20 +38,13 @@
 # and whether the line falls when the owning process dies is unmeasured on this
 # hardware (core/ptt.py). So read it back rather than assume.
 settle() {
-  local held
-  # `|| true` is load-bearing: lsof exits 1 when NOTHING holds the port, which is
-  # the case this function exists to confirm, and under `pipefail` that would take
-  # the whole run down at the first correctly-released transmitter.
-  held=$(lsof "$PTT_PORT" 2>/dev/null | tail -n +2 || true)
-  if [ -n "$held" ]; then
-    printf '  !! %s still held after the attempt:\n%s\n' "$PTT_PORT" "$held"
-    pkill -f "hfmodem.shrike.onair" 2>/dev/null || true
-    pkill -f "kestrel_connect.py" 2>/dev/null || true
-    pkill -f "besra.host.run_server" 2>/dev/null || true
-    sleep 2
-    lsof "$PTT_PORT" >/dev/null 2>&1 && printf '  !! STILL HELD -- not starting another attempt\n' && exit 1
+  claim_processes owner || return
+  exec 7>&-
+  CLAIM_LAUNCH=0
+  if [ "$CLAIM_OWNED" = 0 ] && [ "$CLAIM_ADMITTED" = 0 ]; then
+    die "CLAIM NOT ADMITTED attempt failed before readiness"
   fi
-  sleep 3
+  "$REPO/tools/onair.sh" down 7>&- 8>&-
 }
 
 # Clear to call? Exit 0 yes, 1 the attempt is over -- because somebody else is on
@@ -199,7 +194,7 @@ pactor_try() {
   shift 2
   # --serial/--ptt-port are the arm gate's demand: without them shrike refuses
   # at "NOT KEYING" and an unattended pass logs 'nothing' for every target.
-  local cmd=(timeout 200 "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.shrike.onair --transmit
+  local cmd=(claim_run timeout -k 5 200 "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.shrike.onair --transmit
       --serial "$CAT_PORT" --ptt-port "$PTT_PORT"
       --audio-out "$AUDIO" --audio-in "$AUDIO"
       --mycall "$MYCALL" --dxcall "$call" --dial "$((centre - 1500))"
@@ -218,7 +213,7 @@ pactor_try() {
   fi
   # The daemon lets go of the CAT port first: shrike opens it itself, and the
   # sense's oneshot rigctl needs it free for the tune.
-  pkill -f "rigctld -m $MODEL" 2>/dev/null || true; sleep 1
+  claim_processes daemon || return
   gate_unattended PACTOR "$call" "$centre" pactor "" || return 0
   "${cmd[@]}" >"$tag.log" 2>&1 || true
   local cs res cy
@@ -252,9 +247,7 @@ vara_try() {
   # out of twelve, while the line itself read LOW instantly, eight of eight.
   # Unattended, that is a pass of ~8.4 s carriers nobody is there to hear.
   # Reuse a daemon that is already up rather than paying the CAT port's reopen.
-  pgrep -f "rigctld -m $MODEL" >/dev/null 2>&1 || rigctld -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" \
-      --set-conf=ptt_type=None >"$tag.rigctld" 2>&1 &
-  sleep 3
+  claim_daemon_start "$tag.rigctld" || return
   # kestrel senses in the last moment before key-down and that sense stands, but
   # it has no way to wait: a budget is spent out here first, and with none there
   # is nothing to add and the occupancy gate would only be a second opinion. What
@@ -267,7 +260,7 @@ vara_try() {
     *) gate_unattended VARA "$call" "$centre" vara 2300 || return 0 ;;
   esac
   mkdir -p "$tag"
-  timeout 300 "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_connect.py" \
+  claim_run timeout -k 5 300 "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_connect.py" \
       --gateway "$call" --mycall "$MYCALL" --bw 2300 \
       --tx-device "$AUDIO" --rx-device "$AUDIO" \
       --rigctld 127.0.0.1:4532 --freq "$(printf '%d.%03d' "$(((centre - 1500) / 1000))" "$(((centre - 1500) % 1000))")" \
@@ -311,14 +304,12 @@ ardop_try() {
   shift 3
   # besra drives $PTT_PORT itself and rigctld is left to tune, which it does
   # before there is any RF about — the shape onair.sh's ardop-mail verb holds.
-  pgrep -f "rigctld -m $MODEL" >/dev/null 2>&1 || rigctld -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" \
-      --set-conf=ptt_type=None >"$tag.rigctld" 2>&1 &
-  sleep 3
+  claim_daemon_start "$tag.rigctld" || return
   gate_unattended ARDOP "$call" "$centre" ardop "$bw" || return 0
   mkdir -p "$tag"
   # One process owns the radio AND the B2F session: no host client, and the
   # whole exchange is bounded by --mail-timeout inside and `timeout` outside.
-  timeout 420 "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.besra.host.run_server \
+  claim_run timeout -k 5 420 "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.besra.host.run_server \
       --radio ft891 --rigctld 127.0.0.1:4532 \
       --audio-in "$AUDIO" --audio-out "$AUDIO" \
       --channel "$centre" --bandwidth "$bw" \

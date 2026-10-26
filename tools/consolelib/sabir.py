@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Prepare, witness and verify one-way Sabir waveform proofs.
 
 Preparation and verification are offline. Plans read the rig dial if no channel
@@ -15,7 +17,6 @@ import math
 import os
 from pathlib import Path
 import re
-import signal
 import socket
 import subprocess
 import time
@@ -23,7 +24,7 @@ import tomllib
 
 from hfmodem.sabir.proof import PROOF_PROFILES
 
-from . import arm, station
+from . import arm, claim, station
 
 
 def utc():
@@ -184,7 +185,10 @@ def plan(args):
     callsign = contents['callsign']
     if args.channel is None:
         say('Reading the rig’s current dial…')
-    rig_readback = read_rig_dial() if args.channel is None else None
+    rig_readback = None
+    if args.channel is None:
+        with claim.lease('sabir-plan'):
+            rig_readback = read_rig_dial()
     channel = args.channel if args.channel is not None else rig_readback['dial_hz'] + 1500
     name = 'sabir-proof-' + stamp
     command = [str(station.ONAIR), 'sabir', str(channel), '--log', name,
@@ -332,23 +336,9 @@ def wait_ready(process, log, requested, timeout):
 
 
 def _stop(process, *, group=False):
-    if process is None or process.poll() is not None:
-        return
-    try:
-        if group:
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except ProcessLookupError:
-        return
-    try:
-        process.wait(timeout=20)
-    except subprocess.TimeoutExpired:
-        if group:
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-        process.wait(timeout=10)
+    if process is not None:
+        return claim.end_group(process) if group else claim.end_child(process)
+
 
 
 def _artifacts(directory):
@@ -361,14 +351,18 @@ def _artifacts(directory):
 
 
 def execute(prepared):
+    with claim.lease('sabir', env=prepared.get('env')):
+        return _execute(prepared)
+
+
+def _execute(prepared):
     """Record first, launch the existing guarded TX path, then decode the recording."""
     from hfmodem.sabir import proof
     directory = Path(prepared['directory'])
     directory.mkdir(parents=True, exist_ok=False)
     evidence = dict(prepared, started_utc=utc(), transmitted=False)
     record = directory / 'provenance.json'
-    recorder = launcher = None
-    aborted = False
+    recorder = launcher = admission = None
     code = 2
     show_plan(prepared)
     try:
@@ -377,8 +371,9 @@ def execute(prepared):
         record.write_text(json.dumps(evidence, indent=2) + '\n')
         with (directory / 'witness.log').open('w') as remote_log:
             say('Finding a remote receiver and waiting for live audio…')
-            recorder = subprocess.Popen(prepared['recorder_command'], cwd=station.ROOT,
-                                        stdout=remote_log, stderr=subprocess.STDOUT)
+            with claim.defer_interrupts():
+                recorder = claim.remember(subprocess.Popen(prepared['recorder_command'], cwd=station.ROOT,
+                                            stdout=remote_log, stderr=subprocess.STDOUT))
             evidence['receiver_ready'] = wait_ready(recorder, directory / 'witness.log',
                                                     prepared['receiver_requested'], prepared['ready_timeout_s'])
             say(f"Recording from {evidence['receiver_ready']['receiver']}.")
@@ -399,14 +394,22 @@ def execute(prepared):
             say('Checking the rig and channel before transmission…')
             with (directory / 'transmit.log').open('w') as tx_log, \
                     (directory / 'transmit.log').open() as progress:
-                launcher = subprocess.Popen(prepared['command'], cwd=station.ROOT,
-                                            env=dict(os.environ, **prepared['env']),
-                                            stdout=tx_log, stderr=subprocess.STDOUT,
-                                            start_new_session=True)
+                admission = claim.hardware.inherited(9, launch=True)
+                with claim.defer_interrupts():
+                    launcher = claim.remember(subprocess.Popen(prepared['command'], cwd=station.ROOT,
+                                                env=dict(os.environ, **prepared['env']),
+                                                stdout=tx_log, stderr=subprocess.STDOUT,
+                                                start_new_session=True, pass_fds=(9,)))
+                admission_deadline = time.monotonic() + claim.ADMISSION_TIMEOUT_S
                 deadline = time.monotonic() + prepared['timeout_s']
                 next_update = time.monotonic() + 15
                 while launcher.poll() is None:
                     show_launcher_progress(progress)
+                    if admission.fd is not None:
+                        if 'CLAIM ADMITTED' in (directory / 'transmit.log').read_text().splitlines():
+                            admission.failed()
+                        elif time.monotonic() >= admission_deadline:
+                            raise RuntimeError('CLAIM NOT ADMITTED: acknowledgement timed out')
                     if recorder.poll() is not None:
                         raise RuntimeError('remote recorder ended while launcher was active')
                     if time.monotonic() >= deadline:
@@ -419,12 +422,16 @@ def execute(prepared):
                 evidence['launcher_ended_utc'] = utc()
                 tx_log.flush()
                 show_launcher_progress(progress)
+                if 'CLAIM ADMITTED' in (directory / 'transmit.log').read_text().splitlines():
+                    admission.failed()
             if evidence['launcher_returncode']:
                 lines = (directory / 'transmit.log').read_text(errors='replace').splitlines()
                 refusal = next((line.strip().removeprefix('!!').strip()
                                 for line in reversed(lines) if line.strip().startswith('!!')), None)
                 reason = f': {refusal}' if refusal else '; see transmit.log'
                 raise RuntimeError(f'transmitter launcher returned {evidence["launcher_returncode"]}{reason}')
+            if admission.fd is not None:
+                raise RuntimeError('CLAIM NOT ADMITTED: launcher exited without acknowledgement')
             if prepared['tail_s']:
                 say(f"Finishing remote recording ({prepared['tail_s']:g} s tail)…")
                 time.sleep(prepared['tail_s'])
@@ -438,61 +445,71 @@ def execute(prepared):
         evidence['verification'] = report
         code = 0 if report['ok'] else 1
     except KeyboardInterrupt:
-        aborted = True
         evidence['error'] = 'interrupted'
         code = 130
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-        aborted = True
         evidence['error'] = str(exc)
     finally:
-        def cleanup(process, *, group=False):
-            try:
-                _stop(process, group=group)
-            except (OSError, subprocess.SubprocessError) as exc:
-                evidence.setdefault('cleanup_errors', []).append(str(exc))
+        with claim.uninterrupted():
+            def cleanup(process, *, group=False):
+                try:
+                    _stop(process, group=group)
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    evidence.setdefault('cleanup_errors', []).append(str(exc))
 
-        cleanup(launcher, group=True)
-        if (aborted or evidence.get('cleanup_errors')) and launcher is not None:
-            say('Stopping the test and checking that PTT is down…')
             try:
-                evidence['ptt_verdict'] = arm.bring_down(directory, env=prepared['env'])
-            except (OSError, subprocess.SubprocessError) as exc:
-                evidence.setdefault('cleanup_errors', []).append(str(exc))
-        cleanup(recorder)
-        tx_path = directory / 'transmit.log'
-        evidence['transmitted'] = tx_path.exists() and any(
-            line.startswith('transmitted ') for line in tx_path.read_text(errors='replace').splitlines())
-        evidence['ended_utc'] = utc()
-        evidence['artifacts'] = _artifacts(directory)
-        sidecar = directory / 'witness.json'
-        if sidecar.exists():
-            try:
-                evidence['receiver_metadata'] = json.loads(sidecar.read_text())
-                if not isinstance(evidence['receiver_metadata'], dict):
-                    evidence['receiver_metadata'] = {}
-                    raise ValueError('receiver metadata is not an object')
-            except (ValueError, OSError) as exc:
-                evidence['receiver_metadata_error'] = str(exc)
-        metadata = evidence.get('receiver_metadata', {})
-        ready_receiver = evidence.get('receiver_ready', {}).get('receiver')
-        valid_receiver = bool(
-            not evidence.get('receiver_metadata_error')
-            and metadata.get('receiver') == ready_receiver
-            and ready_receiver is not None
-            and _receiver_matches(ready_receiver, prepared['receiver_requested'])
-            and metadata.get('requested_settings') == prepared['receiver_settings']
-            and isinstance(metadata.get('seconds'), (int, float))
-            and math.isfinite(metadata['seconds']) and metadata['seconds'] > 0
-            and evidence['artifacts'].get('witness.wav', {}).get('bytes', 0) > 44)
-        evidence['receiver_provenance_valid'] = valid_receiver
-        evidence['radio_proof'] = bool(
-            code == 0 and evidence['transmitted'] and not evidence.get('cleanup_errors')
-            and valid_receiver and metadata.get('complete') is True
-            and evidence.get('verification', {}).get('byte_exact')
-            and not evidence.get('verification', {}).get('capture_is_reference', False))
-        if code == 0 and not evidence['radio_proof']:
-            code = 1
-        record.write_text(json.dumps(evidence, indent=2) + '\n')
+                if launcher is not None:
+                    cleanup(launcher, group=True)
+            finally:
+                if admission is not None:
+                    admission.failed()
+            cleanup(recorder)
+            claim.end_children(allow_cleanup=True)
+            if launcher is not None:
+                say('Stopping the test and checking that PTT is down…')
+                try:
+                    inherited = arm.cleanup_result((directory / 'transmit.log').read_text(),
+                                                   evidence.get('launcher_returncode'))
+                    evidence['cleanup'] = inherited if inherited['complete'] else arm.bring_down(directory, env=prepared['env'])
+                    evidence['ptt_verdict'] = evidence['cleanup']['line']
+                    if not evidence['cleanup']['complete']:
+                        evidence.setdefault('cleanup_errors', []).append('cleanup NOT CONFIRMED')
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    evidence.setdefault('cleanup_errors', []).append(str(exc))
+            tx_path = directory / 'transmit.log'
+            evidence['transmitted'] = tx_path.exists() and any(
+                line.startswith('transmitted ') for line in tx_path.read_text(errors='replace').splitlines())
+            evidence['ended_utc'] = utc()
+            evidence['artifacts'] = _artifacts(directory)
+            sidecar = directory / 'witness.json'
+            if sidecar.exists():
+                try:
+                    evidence['receiver_metadata'] = json.loads(sidecar.read_text())
+                    if not isinstance(evidence['receiver_metadata'], dict):
+                        evidence['receiver_metadata'] = {}
+                        raise ValueError('receiver metadata is not an object')
+                except (ValueError, OSError) as exc:
+                    evidence['receiver_metadata_error'] = str(exc)
+            metadata = evidence.get('receiver_metadata', {})
+            ready_receiver = evidence.get('receiver_ready', {}).get('receiver')
+            valid_receiver = bool(
+                not evidence.get('receiver_metadata_error')
+                and metadata.get('receiver') == ready_receiver
+                and ready_receiver is not None
+                and _receiver_matches(ready_receiver, prepared['receiver_requested'])
+                and metadata.get('requested_settings') == prepared['receiver_settings']
+                and isinstance(metadata.get('seconds'), (int, float))
+                and math.isfinite(metadata['seconds']) and metadata['seconds'] > 0
+                and evidence['artifacts'].get('witness.wav', {}).get('bytes', 0) > 44)
+            evidence['receiver_provenance_valid'] = valid_receiver
+            evidence['radio_proof'] = bool(
+                code == 0 and evidence['transmitted'] and not evidence.get('cleanup_errors')
+                and valid_receiver and metadata.get('complete') is True
+                and evidence.get('verification', {}).get('byte_exact')
+                and not evidence.get('verification', {}).get('capture_is_reference', False))
+            if code == 0 and not evidence['radio_proof']:
+                code = 1
+            record.write_text(json.dumps(evidence, indent=2) + '\n')
     show_result(evidence)
     return code
 

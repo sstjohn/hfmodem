@@ -18,7 +18,7 @@ from hfmodem.tests.shrike import test_p4_placed_carrier_0929 as placed
 
 RATES = (8000, 12000, 24000, 28800, 44100, 48000, 96000)
 FIELDS = ((b'', 0x20), (b'', 0x40), (b'data', 0x20), (b'data', 0x40), *((b'counted data', n) for n in range(4)))
-FROZEN = Path(__file__).with_name('fixtures')/'p4-word-render-1010.json'
+FROZEN = Path(__file__).with_name('p4-word-render-1010.json')
 
 
 def waves(fs, mode=None):

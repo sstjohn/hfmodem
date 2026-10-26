@@ -1126,7 +1126,7 @@ KNOWN_PHANTOM = {
     # watch: not a report inventing a figure, a report quoting a terminal.
     #
     # `tools/rehear` against arm 05's own session log, at the terminal. The first
-    # is `rehear/__init__.py:177` verbatim; the second joins that run's
+    # is `rehear/__init__.py:179` verbatim; the second joins that run's
     # "live 3, ungated 3" to a `discarded` figure only the `totals` line carries.
     # Re-running it with the output kept under `working/` is the repair.
     "reproduces 5 of the 6 frames this session logged",
@@ -1520,7 +1520,7 @@ def _carries_the_record(text: str) -> bool:
 #: become false: `logs/mail/JWKY65C2OZES.b2f` is 643 bytes fetched over a live VARA
 #: link. The sabir clause was narrowed rather than dropped -- two public receivers
 #: decoded the beacon, so what survives is the *exchange*, and README's row now
-#: cites `docs/protocols/sabir/ONAIR.md` for why a WebSDR cannot supply one.
+#: cites `docs/implementation/sabir/ONAIR.md` for why a WebSDR cannot supply one.
 KNOWN_UNCITED: set[str] = set()
 
 

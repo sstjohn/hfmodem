@@ -136,6 +136,10 @@ def test_hostmode_takes_the_operator_and_refuses_both():
     assert (m.host.arq.dxcall, m.host.arq.connect_variant) == ("WS8EOC", "robust")
 
     m.host.arq.on_host_abort()
+    refused = m.cmd('C')
+    assert refused.code == hostmode.FAIL and b'OUTPUT NOT RETIRED' in refused.data
+    event = m.cmd('G')
+    assert event.code == hostmode.LINK and b'LINK FAILURE with WS8EOC' in event.data
     assert m.cmd("C %!WS8EOC").code == hostmode.FAIL
     assert m.host.arq.state == State.DISCONNECTED
 

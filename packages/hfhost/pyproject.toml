@@ -1,10 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hfhost"
-version = "0.2.1"
+version = "0.3.0"
 description = "Host clients for HF modems, including VARA-style TCP and Sabir framed CBOR"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE", "NOTICE"]

@@ -41,7 +41,7 @@ def _resent_a_record_lower(hs):
 
 
 @pytest.mark.parametrize("stream", (False, True))
-def test_a_nak_resends_the_over_a_record_lower_before_the_next_mail_block(stream):
+def test_a_nak_resends_the_over_a_record_lower_before_the_next_mail_block(stream, monkeypatch):
     hs, io = _sending()
     audio = _nak()
     assert hs._peer_nak_at(audio) is not None
@@ -54,7 +54,24 @@ def test_a_nak_resends_the_over_a_record_lower_before_the_next_mail_block(stream
         hs.on_rx_audio(audio)
     assert len(io.sent) == 2 and _resent_a_record_lower(hs)
     assert hs._over == 1 and hs._txq == [b"second block"]
+    now = [100.0]
+    monkeypatch.setattr(VA.time, "monotonic", lambda: now[0])
+    kinds = []
+    io.tx_metadata = lambda **metadata: kinds.append(metadata["packet_kind"])
     hs._took_control_burst()
+    assert kinds == ["session-turn-release"]
+    assert hs._tx_pending is None and hs.turn == VA._TURN_PEER
+    assert hs._txq == [b"second block"] and hs._ask_owed
+    now[0] += .294
+    hs.idle_keepalive()
+    assert kinds == ["session-turn-release"]
+    now[0] += .002
+    hs.idle_keepalive()
+    assert kinds == ["session-turn-release", "session-turn-request"]
+    assert hs._tx_pending is None and hs.turn == VA._TURN_ASKED
+    assert not hs._ask_owed
+    hs._turn_granted((), said="session-drained-responder")
+    assert kinds[-1] == "data"
     assert hs._over == 2 and not hs._txq
     assert hs._tx_pending is not None
     hs._took_control_burst()

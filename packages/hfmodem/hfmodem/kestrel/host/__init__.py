@@ -5,7 +5,7 @@
 
 This package implements the *modem* side of VARA's documented dual-socket TCP
 host interface (command 8300 + data 8301). An application (Winlink Express,
-Pat, VarAC, or any conforming host-API client) attaches to the two sockets and
+Pat, or any conforming host-API client) attaches to the two sockets and
 speaks the ``\\r``-terminated ASCII protocol; the link behaviour is delegated
 to a pluggable :class:`~host_api.modem_core.ModemCore` (the bundled
 :class:`~host_api.modem_core.LoopbackModem` runs the whole stack with no radio).

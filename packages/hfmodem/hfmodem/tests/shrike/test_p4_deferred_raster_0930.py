@@ -87,13 +87,17 @@ def test_0210_deferred_opening_does_not_poison_following_deadlines(monkeypatch, 
     deferred = [e for e in result.link_events if e['event'] == 'answer-deferred']
     if body_ms == 50:
         # B: a 50 ms read leaves the opening keyable, so it is ACKed in its own slot.
-        assert not deferred and result.emissions[1]['audio_start'] == 527685+round(.920*fs)
+        # Later measured reads may legitimately defer a different packet;
+        # those events must not be mistaken for this opening's disposition.
+        assert not [e for e in deferred if e['at'] == 527685]
+        assert result.emissions[1]['audio_start'] == 527685+round(.920*fs)
     else:
         assert (deferred[0]['at'], deferred[0]['due']) == (527685, 631845)
         assert result.emissions[1]['audio_start'] == deferred[0]['due']
         # The post-key read really did leave the prior, unread copy to expire.
         assert any(h['kind'] == Kind.NORMAL and 12.24*fs < h['onset_sample'] < 12.27*fs
                    and h.get('status') is None for h in result.heard)
+    assert all(e['due'] >= e['at']+round(.90*fs) for e in deferred)
     decisions = [e for e in result.link_events if e['event'] == 'Decision'
                  and e['expected'] == 'packet' and 13*fs < e['at'] < 24*fs]
     assert decisions

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from hfmodem.core import config
+from hfmodem.tests.kestrel.fake_line_keyer import FakeLineKeyer
 
 _REPO = Path(__file__).resolve().parents[5]
 _TOOLS = _REPO / "tools"
@@ -53,8 +54,9 @@ def clock(monkeypatch):
 
 @pytest.fixture
 def rig(monkeypatch):
-    """An armed `Rig` with no daemon behind it, under a named station file or
+    """An armed `Rig` with a fake line, under a named station file or
     none, keeping its log."""
+    monkeypatch.setattr(bridge, "LineKeyer", FakeLineKeyer)
     made = []
 
     def make(station: Path | None = None):
@@ -63,14 +65,15 @@ def rig(monkeypatch):
         else:
             monkeypatch.setenv(config.STATION_ENV, str(station))
         logged: list[str] = []
-        r = bridge.Rig(None, armed=True, log=logged.append)
+        r = bridge.Rig(None, armed=True, log=logged.append,
+                       line_ptt=True, ptt_device="/dev/fake")
         r.logged = logged
         made.append(r)
         return r
 
     yield make
     for r in made:
-        r.retire()
+        r.shutdown()
 
 
 def _reminders(r) -> list[str]:

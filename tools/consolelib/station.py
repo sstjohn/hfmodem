@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """CHECK THE RIG: what this station is set to, read back and said in one voice.
 
 Nothing here writes to the radio. The console reads the whole rig in one CAT
@@ -26,6 +28,8 @@ from types import SimpleNamespace
 import wave
 
 from . import power, roster
+from hfcapture import native_command
+from hfmodem.core import claim, coexist
 from hfmodem.core import config as station_config
 from hfmodem.core.rigs import resolve_profile
 
@@ -37,6 +41,8 @@ TXWITNESS = ROOT / 'tools/txwitness.py'
 VENV = Path(os.environ.get('HFMODEM_PYTHON', str(ROOT / '.venv/bin/python')))
 
 TAP_DEVICE = 'CUBILUX HLMS-C4 Line IN'
+#: Where the station stands when its file declares no grid: the witness is placed from here.
+STATION_GRID = 'EN63bc'
 
 HAMLIB_BIN = Path(os.environ.get('HAMLIB_BIN', Path.home() / 'src/radio/hamlib/_install/bin'))
 
@@ -53,7 +59,7 @@ def resolve_selection(rig=None, *, environ=None, allow_missing=False):
     audio_in = cfg.audio.input if cfg else profile.get('audio_device', '')
     audio_out = cfg.audio.output if cfg else profile.get('audio_device', '')
     rigctl = (str(HAMLIB_BIN / 'rigctl') if (HAMLIB_BIN / 'rigctl').is_file() else 'rigctl',
-              '-m', str(profile['model']), '-r', cat_port, '-s', str(profile['baud']))
+              '-P', 'NONE', '-m', str(profile['model']), '-r', cat_port, '-s', str(profile['baud']))
     return SimpleNamespace(RIG_NAME=name, RIG_PROFILE=profile, CAT_PORT=cat_port,
                            PTT_PORT=ptt_port, AUDIO_IN=audio_in, AUDIO_OUT=audio_out,
                            AUDIO_DEVICE=audio_in, RIGCTL=rigctl, _STATION_CONFIG=cfg,
@@ -113,7 +119,7 @@ def cat(*words, joined=False, selection=None):
     """
     selection = selection or default_selection()
     try:
-        result = subprocess.run([*selection.RIGCTL, *words], capture_output=True, text=True, timeout=4)
+        result = native_command([*selection.RIGCTL, *words], timeout=4)
     except (subprocess.SubprocessError, OSError):
         return None                      # a busy port is not worth an arm
     if result.returncode != 0 or not result.stdout.strip():
@@ -225,6 +231,30 @@ def spell_advice(advice):
     return [line for line in lines if line]
 
 
+def recorded_codec_output(selection):
+    """The rig's one recorded codec output volume: what `vara txcal --set` measured the
+    drive at, else the rig profile's, else None when nothing is recorded."""
+    chain = getattr(getattr(selection._STATION_CONFIG, 'audio', None), 'codec_output', None)
+    return chain if chain is not None else (selection.RIG_PROFILE or {}).get('codec_output')
+
+
+def codec_warning(env, *, selection=None):
+    """A loud line when the codec's output volume is not the rig's recorded one.
+
+    The volume is the operator's, and macOS keeps it per device, so it can move between
+    two arms with nobody choosing it. The console says so and goes on; it never sets it.
+    """
+    selection = selection or default_selection()
+    output = (env.get('codec_levels') or {}).get('output')
+    recorded = recorded_codec_output(selection)
+    if not isinstance(output, float) or recorded is None or round(output, 3) == round(recorded, 3):
+        return None
+    moved = 20 * math.log10(max(output, 1e-6) / recorded)
+    return (f'  *** codec output reads {output:.3f}, and this rig is recorded at {recorded:.3f}: '
+            f'transmit will be about {abs(moved):.0f} dB {"quieter" if moved < 0 else "louder"} '
+            'than recorded; set it in Audio MIDI Setup ***')
+
+
 def menu_number(item):
     """`0811` as the front panel prints it, 08-11; `010413` as 01-04-13."""
     return '-'.join(item[at:at + 2] for at in range(0, len(item), 2))
@@ -260,7 +290,8 @@ def spell_environment(env, band_m=None, working_point=None, *, selection=None):
     codec = env.get('codec_levels')
     level = lambda value: ('unread' if value is None else value if value == NO_CONTROL
                            else f'{value:.3f}')
-    lines = [(f'  codec input {level(codec.get("input"))}, output {level(codec.get("output"))}'
+    lines = [*filter(None, [codec_warning(env, selection=selection)]),
+             (f'  codec input {level(codec.get("input"))}, output {level(codec.get("output"))}'
               if codec else f'  codec gain reads {gain if gain is None else f"{gain:.3f}"}')
              + (f', {band_m} m has worked at {working_point}' if band_m and working_point
                 else f', no {band_m} m reading is on file for this hour' if band_m else '')
@@ -479,8 +510,9 @@ def rig_settings(*, selection=None):
                       *(f'w EX{item};' for item in selection.MENU_ITEMS),
                       *(f'w {command}' for command, _, _ in selection.RAW_READS), 'q'])
     try:
-        result = subprocess.run(list(selection.RIGCTL), input=script, capture_output=True,
-                                text=True, timeout=25)
+        result = native_command(list(selection.RIGCTL), input=script, timeout=25)
+    except claim.ClaimError as trouble:
+        return dict(levels={}, funcs={}, unread=f'CAT claim problem: {trouble}')
     except (subprocess.SubprocessError, OSError) as trouble:
         return dict(levels={}, funcs={}, unread=f'{type(trouble).__name__}')
     said = {}
@@ -555,13 +587,16 @@ def prepare_radio(plan):
                 *(f'w EX{item}{value};' for item, value in settings.items()),
                 f'L RFPOWER {cfg.rig.power_w / 100:g}', 'q']
     try:
-        result = subprocess.run(list(selection.RIGCTL), input='\n'.join(commands) + '\n',
-                                capture_output=True, text=True, timeout=25)
+        result = native_command(list(selection.RIGCTL), input='\n'.join(commands) + '\n', timeout=25)
+    except claim.ClaimError as exc:
+        raise ValueError(f'CAT claim problem: {exc}. Nothing was keyed.') from exc
     except (subprocess.SubprocessError, OSError) as exc:
         raise ValueError('The radio is not responding. Check its USB control connection and set CAT rate to 38400 baud. Nothing was keyed.') from exc
     if result.returncode or re.search(r'RPRT -\d+|error =', result.stdout + result.stderr):
         raise ValueError('The radio did not accept its data settings. Check its USB control connection and 38400-baud CAT setting; nothing was keyed.')
     reading = rig_settings(selection=selection)
+    if (reading.get('unread') or '').startswith('CAT claim problem:'):
+        raise ValueError(f'{reading["unread"]}. Nothing was keyed.')
     mismatches = [selection.MENU_LABELS.get(item, item) for item, value in settings.items()
                   if (reading.get('menu', {}).get(item) or '').lstrip('0') != value.lstrip('0')]
     if any(reading.get('menu', {}).get(item) is None for item in settings):
@@ -723,55 +758,106 @@ def start_tap(plan, directory, *, writer=None, say=None, spawned=None, stop=None
     tap_device = os.environ.get('HFMODEM_TAP_DEVICE')
     if not tap_device and not (plan['adjustments'].get('prepare_radio') or os.environ.get('HFMODEM_OPERATOR_INSTALLED')):
         tap_device = TAP_DEVICE
-    if selection.RIG_NAME != 'ft891' or not tap_device:
+    if selection.RIG_NAME != 'ft891':
+        say(f'  NO TAP: no tap converter is configured for the {selection.RIG_NAME}. The arm goes on.')
+        return None
+    if not tap_device:
+        say('  NO TAP: HFMODEM_TAP_DEVICE names no converter. The arm goes on.')
         return None
     log = directory / 'tap.log'
     ownership = writer.reserve('tap.log') if writer else None
     extra = (['--capture-id', plan['capture_id'], '--capture-root', str(directory),
               '--capture-role', 'tap'] if writer else [])
-    process = subprocess.Popen(
-        [str(VENV), str(TXWITNESS), 'record', str(plan['adjustments']['witness_seconds']),
-         str(directory / 'tap.wav'), '--device', tap_device, *extra],
-        stdout=ownership.open() if ownership else log.open('w'), stderr=subprocess.STDOUT)
-    if spawned:
-        spawned(process)
-    pause = stop.wait if stop else time.sleep
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if 'recording' in log.read_text(errors='replace'):
-            say(f'  tap recording, pid {process.pid} -> {directory / "tap.wav"}')
-            return process
-        if process.poll() is not None:
-            say(f'  NO TAP: {log} says why. The arm goes on.')
-            return None
-        if pause(0.5):
-            return process
-    return process
+    admission = claim.inherited(9, launch=True)
+    process = None
+    admitted = False
+    try:
+        with (ownership.open() if ownership else log.open('w')) as output:
+            process = subprocess.Popen(
+                [str(VENV), str(TXWITNESS), 'record', str(plan['adjustments']['witness_seconds']),
+                 str(directory / 'tap.wav'), '--device', tap_device, *extra],
+                pass_fds=(9,), stdout=output, stderr=subprocess.STDOUT)
+        coexist.event("tool_spawn", child_pid=process.pid,
+                      child_started=claim.process_started(process.pid), operation="tap")
+        if spawned:
+            spawned(process)
+        pause = stop.wait if stop else time.sleep
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if 'CLAIM ADMITTED' in log.read_text(errors='replace').splitlines():
+                admitted = True
+                say(f'  tap recording, pid {process.pid} -> {directory / "tap.wav"}')
+                return process
+            if process.poll() is not None:
+                say(f'  NO TAP: {log} says why. The arm goes on.')
+                return None
+            if pause(0.5):
+                break
+        say(f'  NO TAP: CLAIM NOT ADMITTED; {log} says why. The arm goes on.')
+        return None
+    finally:
+        try:
+            if process is not None and not admitted and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        finally:
+            admission.failed()
 
 
-def place_kiwi(plan, directory, *, writer=None, say=None, spawned=None, stop=None):
+def station_grid(plan):
+    """`[station] grid` from the file the plan names, else the station default."""
+    path = plan.get('env', {}).get(station_config.STATION_ENV) or os.environ.get(station_config.STATION_ENV)
+    try:
+        return (station_config.load(path).station.grid if path else '') or STATION_GRID
+    except (OSError, ValueError):
+        return STATION_GRID
+
+
+#: Miles from us a witness is sought in, by band. Inside 500 mi a 40 m or 20 m Kiwi
+#: can sit in our skip zone, and its silence cannot tell a weak signal from a skipped
+#: one (AUDIT-1023-TX). 80 m keeps the witness's near default.
+WITNESS_MI = {40: (500, 1000), 20: (500, 1000)}
+
+
+def band_m_of(plan):
+    return plan.get('band_m') or {3: 80, 7: 40, 14: 20}.get(int((plan.get('dial_hz') or 0) // 1_000_000))
+
+
+def place_kiwi(plan, directory, *, writer=None, say=None, spawned=None, stop=None, stem='witness'):
     """A witness that is not recording before key-down is a null [witness-must-be-placed-before-the-arm].
 
     `spawned` is handed the process the moment it exists, and a set `stop` ends the
     wait for readiness at once, for a caller that may be torn down mid-hunt; both
-    recorders take them."""
+    recorders take them. `stem` names its recording and log."""
     say = say or (lambda line: print(line, flush=True))
     from .operator import witness_inventory
     inventory = witness_inventory()
     if not inventory.is_file():
         say(f'  NO WITNESS: configure witness_candidates ({inventory}).')
         return None
-    log = directory / 'witness.log'
-    ownership = writer.reserve('witness.log') if writer else None
+    grid = station_grid(plan)
+    say(f'  witness placed from the station grid {grid}' if grid != STATION_GRID
+        else f'  witness placed from {grid}, the station default; set [station] grid to change it')
+    band_m = band_m_of(plan)
+    window = WITNESS_MI.get(band_m)
+    if window:
+        say(f'  witness sought {window[0]}-{window[1]} mi out on {band_m} m, beyond the skip zone')
+    log = directory / f'{stem}.log'
+    ownership = writer.reserve(log.name) if writer else None
     extra = (['--capture-id', plan['capture_id'], '--capture-root', str(directory),
               '--capture-role', 'console-witness'] if writer else [])
     process = subprocess.Popen(
         [str(VENV), str(KIWI), '--dial', f'{plan["dial_hz"] / 1000:.3f}',
          '--seconds', str(plan['adjustments']['witness_seconds']),
-         '--out', str(directory / 'witness.wav'),
-         '--candidates', str(inventory),
+         '--out', str(directory / f'{stem}.wav'),
+         '--candidates', str(inventory), '--grid', grid,
          *(['--peer', plan['call']] if plan['call'] else []),
          *(['--prefer', plan['adjustments']['kiwi']] if plan['adjustments']['kiwi'] else []),
+         *(['--near', str(window[0]), '--far', str(window[1])] if window else []),
          *extra],
         stdout=ownership.open() if ownership else log.open('w'), stderr=subprocess.STDOUT)
     if spawned:
@@ -779,8 +865,10 @@ def place_kiwi(plan, directory, *, writer=None, say=None, spawned=None, stop=Non
     pause = stop.wait if stop else time.sleep
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
-        if 'WITNESS PLACED' in log.read_text(errors='replace'):
-            say(f'  witness placed, pid {process.pid} -> {directory / "witness.wav"}')
+        if placed := re.search(r'^WITNESS PLACED.*$', log.read_text(errors='replace'), re.M):
+            where = re.search(r': (\S+), (\d+ mi) from us', placed.group())
+            say(f'  witness placed{f" at {where[1]}, {where[2]} from us" if where else ""}, '
+                f'pid {process.pid} -> {directory / f"{stem}.wav"}')
             return process
         if process.poll() is not None:
             say(f'  NO WITNESS: {log} says why. The arm goes on.')

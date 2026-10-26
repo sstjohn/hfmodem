@@ -210,6 +210,7 @@ def test_owned_crc_miss_does_not_start_a_level_ladder(recording, monkeypatch):
     assert s.rx._p3_packet(pcm) is None
 
 
+@pytest.mark.wall_clock
 def test_full_receive_tick_render_keeps_first_packet_reply(recording, tmp_path, capsys):
     row, pcm = recording
     s = receiver()

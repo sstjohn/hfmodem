@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # The ack-placement experiment, start to finish, with the transmitter proved
 # down at the end whatever happens.
 #
@@ -48,7 +50,8 @@ air() {
   [ -n "$GW" ] && [ "$CENTRE" -gt 0 ] || die "Set GW and CENTRE explicitly before a test transmission."
   local argv=("$@")
   [ -n "${POUNCE:-}" ] && argv=(pounce "${argv[@]}")
-  "$REPO/tools/onair.sh" "${argv[@]}"
+  claim_rig rigtest || return
+  claim_run "$REPO/tools/onair.sh" "${argv[@]}"
 }
 
 # TRANSMIT POWER, AT BOTH ENDS OF EVERY SESSION -- OUT OF THE RUN'S OWN LOG.
@@ -78,11 +81,12 @@ record_power() {
       "$SESSION/session.log"
 }
 
-trap 'echo; echo "-- proving the transmitter is down --"; prove_down' EXIT
+
 
 # -- checks that key nothing --------------------------------------------------
 
 preflight() {
+  claim_rig rigtest || return
   require_ports
   require_hamlib
   say "station"
@@ -103,7 +107,7 @@ preflight() {
   say "the receiver is alive"
   # `onair.sh check` opens no transmitter. A reading near 0.00007 is a radio
   # that is off or unplugged, and reads exactly like a quiet band.
-  "$REPO/tools/onair.sh" check || die "the check failed — do not go on"
+  claim_run "$REPO/tools/onair.sh" check || die "the check failed — do not go on"
 
   say "preflight passed"
   note "nothing above keyed anything"
@@ -307,7 +311,7 @@ case "${1:-}" in
   run)       shift; run "$@" ;;
   ardop)     shift; ardop "$@" ;;
   vara)      shift; vara "$@" ;;
-  down)      require_ports; prove_down; trap - EXIT ;;
+  down)      station_down ;;
   *)         die "usage: $0 preflight                                  keys nothing
        $0 run   [gw] [centre] [extra shrike flags]     PACTOR, the ack experiment
        $0 ardop <gw> <centre> [bw] [extra flags]       ARDOP

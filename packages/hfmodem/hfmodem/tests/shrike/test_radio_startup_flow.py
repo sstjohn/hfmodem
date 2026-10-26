@@ -10,6 +10,7 @@ import pytest
 
 from hfmodem.core import rxreadiness as rx
 from hfmodem.shrike import onair, ota
+from hfmodem.tests import fakeclaim
 from hfmodem.tests.shrike.test_armdefaults import _parsed
 
 
@@ -111,13 +112,14 @@ def test_real_startup_reaches_readback_before_any_rf(tmp_path, monkeypatch, mode
     monkeypatch.setattr(onair, "_LiveInput", forbidden)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
     monkeypatch.setattr(subprocess, "run", forbidden)
+    admissions = fakeclaim.install(monkeypatch, spawner=forbidden)
     monkeypatch.setattr(onair.config, "tx_drive", lambda *a, **k: 0.5)
     monkeypatch.setattr(onair.config, "tx_latency_ms", lambda *a, **k: 20)
     expected = (KeyboardInterrupt if failure == "abort" else
                 StopBeforeRF if mode == "PKTUSB" and failure is None else SystemExit)
     with pytest.raises(expected):
         onair.run(args)
-    assert reached == [True]
+    assert reached == [True] and admissions == ["inherited", "failed"]
     assert ("set_mode", "PKTUSB", 3000) in rig.calls
     assert (("get_mode",) in rig.calls) == (failure not in ("write", "abort"))
     report = json.loads((tmp_path / 'capture' / "radio-readback.json").read_text())

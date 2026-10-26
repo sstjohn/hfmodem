@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """An IRS cycle's header and cold control reads, taken while it still listens.
 
 0923-1321, KB5LZK-30: on the IRS holds whose tracked read missed its CRC, the

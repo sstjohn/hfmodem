@@ -17,6 +17,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from hfmodem.tests.core.test_host_teardown import loopback_bind as loopback_bind
+
 from hfmodem.bateleur import mil110, s4285, sim, tone16, tone39
 from hfmodem.bateleur.host import BateleurHost
 from hfmodem.bateleur.modem import BateleurModem, Mode
@@ -171,7 +173,7 @@ def keyed():
     rig = Rig(model="ft891", cat=Cat("127.0.0.1", fake.port), ptt=ptt,
               profile=BENCH, control=config.Control.LOCAL, mycall="N0CALL",
               transmit=True, max_key_s=20.0)
-    rig.cat.open(); rig._armed = True; rig._dial_hz = fake.freq
+    rig.arm(prove_ptt=False)
     audio = ReplayAudio(np.zeros(CARD_RATE_HZ * 2, np.float32))
     arb = TxArbiter(audio, rig, identity=Identity("N0CALL", interval_s=600.0))
 
@@ -323,8 +325,13 @@ def test_fsk_from_the_host_port_and_back_through_the_station(keyed):
         app.data.sendall(MSG)
         app.settle()
         assert app.ask("SEND") == f"OK SEND {len(MSG)}"
-        app.wait(lambda ln: ln.startswith("TX START FSK 75W"))
-        app.wait(lambda ln: ln == "TX END", timeout=60.0)
+        # TX END reports one key-up; await both within one original send bound.
+        deadline = time.monotonic() + 60.0
+        for _ in range(2):
+            app.wait(lambda ln: ln.startswith("TX START FSK 75W"),
+                     timeout=max(0.0, deadline - time.monotonic()))
+            app.wait(lambda ln: ln == "TX END",
+                     timeout=max(0.0, deadline - time.monotonic()))
         app.close()
     finally:
         host.stop()

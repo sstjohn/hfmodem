@@ -551,11 +551,18 @@ class ArqFsm:
         self._t_connect = self._clock() + self.cfg.connect_timeout_s
 
     def _rx_disc_request(self) -> None:
+        if self.state is State.DISCONNECTED:
+            self._send_control(F.DC)
+            return
+        if self.state not in (State.CONNECTED, State.DISCONNECTING):
+            return
         self._to(State.DISCONNECTING)
         self._send_control(F.DC)                          # burst 2
         self._finish_disconnected()
 
     def _rx_disc_answer(self) -> None:
+        if self.state != State.DISCONNECTING:
+            return
         self._send_control(F.DF)                          # burst 3
         self._finish_disconnected()
 

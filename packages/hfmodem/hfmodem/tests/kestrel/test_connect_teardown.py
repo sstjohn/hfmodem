@@ -20,9 +20,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from hfmodem.tests import fakeclaim
 from hfmodem.tests.kestrel import corpora
 
 kc = corpora.harness("kestrel_connect")
+
+
+@pytest.fixture(autouse=True)
+def admitted(monkeypatch):
+    return fakeclaim.install(monkeypatch)
 
 
 def _handshake(*_a, **_kw):

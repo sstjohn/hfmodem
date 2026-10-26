@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Pure console planning only: never invoke fly, a launcher or a device hook."""
 from copy import deepcopy
 from pathlib import Path
@@ -104,7 +106,7 @@ def _fake_console_environment(tmp_path, monkeypatch):
                     adjustments={'kiwi': False, 'tap_tail_s': 0})
     resided = {'modules': 'synthetic-ready', 'refusal': ''}
     monkeypatch.setattr(arm, 'qualified', lambda mode, plan, qualify: (plan, resided))
-    monkeypatch.setattr(arm.claim, 'lease', lambda mode: nullcontext())
+    monkeypatch.setattr(arm.claim, 'lease', lambda mode, *, env=None: nullcontext())
     monkeypatch.setattr(arm, 'ready', lambda mode, plan: nullcontext())
     monkeypatch.setattr(arm.claim, 'spacing_note', lambda *a: None)
     monkeypatch.setattr(arm.station, 'check_rig', lambda *a: {'codec_gain_working_point': {}})
@@ -117,6 +119,12 @@ def _fake_console_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(arm, 'spelled', lambda *a: 'synthetic')
     monkeypatch.setattr(arm, 'verdict', lambda *a: {'reached': '', 'adjustments': [], 'modules': '', 'line': 'synthetic'})
     monkeypatch.setattr(arm.station, 'start_tap', lambda *a, **k: None)
+    monkeypatch.setattr(arm.claim.hardware, 'inherited',
+                        lambda fd, *, launch=False: SimpleNamespace(fd=None, failed=lambda: None))
+    monkeypatch.setattr(arm.claim, 'remember', lambda process: process)
+    monkeypatch.setattr(arm.claim, 'end_child', lambda process, **kw: None)
+    monkeypatch.setattr(arm.claim, 'end_children', lambda **kw: None)
+    monkeypatch.setattr(arm, '_down_once', lambda env, timeout: (0, 'PTT LINE low\nCLEANUP COMPLETE\n'))
     return arm, prepared
 
 
@@ -173,7 +181,7 @@ def test_actual_console_fake_complete_run_ends_and_finishes_native_writers(tmp_p
 
 def test_actual_console_primary_failure_survives_cleanup_failure(tmp_path, monkeypatch):
     arm, prepared = _fake_console_environment(tmp_path, monkeypatch)
-    monkeypatch.setattr(arm.subprocess, 'Popen', lambda *a, **k: object())
+    monkeypatch.setattr(arm.subprocess, 'Popen', lambda *a, **k: SimpleNamespace())
     original = OSError('synthetic pump failure')
     def fail_pump(*args):
         raise original

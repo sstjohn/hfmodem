@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Connect responses select the setup speed
 
 Stock VARA HF 4.9.0 caller replays on 2026-09-20 correct the earlier reading of

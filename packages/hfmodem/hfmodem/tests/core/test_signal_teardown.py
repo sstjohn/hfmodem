@@ -26,7 +26,7 @@ rigctld on an ephemeral loopback port.
 """
 from __future__ import annotations
 
-import re
+import os
 import signal
 import subprocess
 import sys
@@ -39,6 +39,7 @@ import pytest
 from hfmodem.core import config, wav
 from hfmodem.station.process import Station
 from hfmodem.tests.core.fakerig import FakeRigctld
+from hfmodem.tests.core.test_host_teardown import loopback_bind as loopback_bind
 
 CONFIG = """\
 schema = 1
@@ -53,9 +54,14 @@ id_interval_s = 600
 
 [rig]
 model     = "ft891"
+cat       = "{cat}"
 centre_hz = 7101500
 host      = "127.0.0.1"
 port      = {port}
+
+[rig.profiles.ft891]
+cat_port = "fake-cat"
+ptt_port = "{ptt}"
 
 [rig.ptt]
 port     = "{ptt}"
@@ -90,11 +96,17 @@ def rigctld():
 
 
 @pytest.fixture
-def station_file(tmp_path, rigctld):
+def station_file(tmp_path, request):
+    in_process = request.node.name in {
+        'test_a_dropped_terminal_brings_the_stations_radio_down',
+        'test_the_signals_are_taken_over_before_a_client_can_ask_for_the_key',
+        'test_a_lane_that_will_not_come_down_does_not_keep_the_radio_up'}
+    port = 1 if in_process else request.getfixturevalue('rigctld').port
     def write(*, transmit: bool = True) -> Path:
         path = tmp_path / "station.toml"
         path.write_text(CONFIG.format(transmit=str(transmit).lower(),
-                                      port=rigctld.port,
+                                      cat="yaesu" if in_process else "rigctld",
+                                      port=port,
                                       ptt=tmp_path / "no-such-tty"),
                         encoding="utf-8")
         return path
@@ -102,10 +114,11 @@ def station_file(tmp_path, rigctld):
 
 
 @pytest.fixture(autouse=True)
-def _no_handler_outlives_its_test():
+def _no_handler_outlives_its_test(monkeypatch):
     """Signal disposition is process-global and belongs to no one test. sabir's
     orphaned SIGTERM handler once caught a signal meant for pytest twenty minutes
     later; the in-process subjects here take over the same three."""
+    monkeypatch.setattr(Station, "fatal_shutdown", lambda self, why: None)
     signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     before = {s: signal.getsignal(s) for s in signals}
     yield
@@ -168,6 +181,9 @@ _PREFLIGHT = """
 from hfmodem.core import config
 from hfmodem.station import preflight
 preflight.RtsPtt = MarkingPtt
+def _no_card(name, kind):
+    raise preflight.AudioError("this child has no card")
+preflight._device = _no_card
 raise SystemExit(preflight.run(config.load(cfg_path)))
 """
 
@@ -177,12 +193,51 @@ raise SystemExit(cli.main(["rig", cfg_path, "--arm"]))
 """
 
 _STATION = """
-import numpy as np
+import builtins
+original_import = builtins.__import__
+def no_serial(name, *args, **kwargs):
+    if name == 'serial' or name.startswith('serial.'):
+        raise AssertionError('station child must not import a serial driver')
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = no_serial
+from contextlib import nullcontext
 from hfmodem.core import config
 from hfmodem.station import hosts, process
-process.RtsPtt = MarkingPtt
-hosts.build = lambda cfg, station=None, log=print: {}
-st = process.Station(config.load(cfg_path), replay=np.zeros(48000 * 120, np.float32))
+
+class FakeCat:
+    cache_free = reads_ptt = True
+    def __init__(self, *args, **kwargs):
+        assert args[0] == 'fake-cat', 'resolved a real CAT endpoint'
+    def open(self):
+        pass
+    def close(self):
+        pass
+    def identify(self):
+        return 'FT-891'
+    def freq(self):
+        return 7100000
+    def ptt_state(self, **kw):
+        return False
+    def sole_ptt_owner(self, notes):
+        return True
+    def hold(self):
+        return nullcontext(True)
+    def emergency_unkey(self):
+        return True
+
+process.YaesuCat = process.RigctldCat = FakeCat
+class CheckedLine(MarkingPtt):
+    def open(self):
+        assert type(st._driver) is FakeCat, 'a real CAT driver was built'
+        self._mark('FAKE_DRIVER')
+        super().open()
+process.RtsPtt = CheckedLine
+hosts.build = lambda cfg, station=None, log=print, **kw: {}
+st = process.Station(config.load(cfg_path))
+process.claim.acquire = lambda *a, **kw: None
+st.preflight_reference = lambda: None
+st.preflight_measure = lambda reference: None
+st.open_audio = lambda: setattr(st, 'audio', type('Card', (), {'close': lambda self: None})())
 raise SystemExit(st.run())
 """
 
@@ -201,7 +256,7 @@ finally:
 """
 
 #: What the wedged child's deadman is cut to, so the parent can hold the death to
-#: that clock rather than to `_DIE_S`. The shipped 10 s is asserted against the
+#: that clock rather than to `_DIE_S`. The shipped budget is asserted against the
 #: launcher's grace below.
 _WEDGED_DEADMAN_S = 1.5
 
@@ -211,9 +266,9 @@ _WEDGED_DEADMAN_S = 1.5
 #: that has stopped answering. Nothing but the deadman can end this process.
 _ONAIR_WEDGED = f"""
 import time
-from hfmodem.shrike import onair
+from hfmodem.shrike import onair, ota
 
-onair.DEADMAN_BUDGET_S = {_WEDGED_DEADMAN_S}
+ota.DEADMAN_BUDGET_S = {_WEDGED_DEADMAN_S}
 onair._unkey_on_signal()
 line = MarkingPtt()
 line.open()
@@ -248,18 +303,24 @@ class Child(subprocess.Popen):
 
 
 @pytest.fixture
-def child(tmp_path, rigctld):
+def child(tmp_path, request):
     started: list[Child] = []
 
     def start(body: str = "", cfg: Path | None = None, *,
               argv: tuple[str, ...] = ()) -> Child:
         marks = tmp_path / f"keying-line-{len(started)}.txt"
         log = tmp_path / f"child-{len(started)}.log"
+        port = 1 if body == _STATION else request.getfixturevalue('rigctld').port
         cmd = ([sys.executable, *argv] if argv else
                [sys.executable, "-c", _PRELUDE + body,
-                str(marks), str(rigctld.port), str(cfg)])
+                str(marks), str(port), str(cfg)])
         with log.open("w") as out:
-            proc = Child(cmd, stdout=out, stderr=subprocess.STDOUT)
+            state = tmp_path / f"state-{len(started)}"
+            state.mkdir()
+            proc = Child(cmd, stdout=out, stderr=subprocess.STDOUT,
+                         env={**{k: v for k, v in os.environ.items()
+                                 if k not in {'HFMODEM_RIG', 'CAT_PORT', 'PTT_PORT'}},
+                              'HFMODEM_STATE_DIR': str(state)})
         proc.marks, proc.log = marks, log
         started.append(proc)
         return proc
@@ -308,7 +369,9 @@ def test_hfmodem_rig_arm_killed_mid_proof_leaves_the_line_down(child, station_fi
 def test_a_dropped_terminal_brings_the_stations_radio_down(child, station_file):
     """`Station` answered SIGINT and SIGTERM and not SIGHUP, so a closed terminal or
     a dropped ssh mid-over skipped `shutdown()` and `Rig.panic()` alike."""
-    _dies_with_the_line_down(child(_STATION, station_file()), signal.SIGHUP, "OPEN")
+    proc = child(_STATION, station_file())
+    _dies_with_the_line_down(proc, signal.SIGHUP, "KEYED")
+    assert "FAKE_DRIVER" in proc.edges()
 
 
 # -- shrike.onair, whose handler raises into an unwind ---------------------------------
@@ -377,29 +440,31 @@ _ONAIR_DRY = ("-m", "hfmodem.shrike.onair", "--replay-realtime",
               "--mycall", "N0CALL", "--dxcall", "N0CALL", "--dial", "7100000")
 
 
+def _connecting(proc: Child) -> bool:
+    end = time.monotonic() + _APPEAR_S
+    while "connecting" not in proc.output() and time.monotonic() < end:
+        if proc.poll() is not None:
+            return False
+        time.sleep(0.01)
+    return "connecting" in proc.output()
+
+
 @pytest.mark.realtime
 def test_ctrl_c_on_a_healthy_session_still_leaves_the_verdict_on_the_screen(
         child, tmp_path):
     """The other half of the same handler, and the reason it cannot answer SIGINT
     the way it answers the other two.
 
-    `run` catches `KeyboardInterrupt` on purpose, so that an operator who stops a
-    run early gets the summary last instead of a traceback printed after the
+    `run` unkeys and writes the summary on the way out, and the entry point then
+    answers the interrupt with 130 instead of a traceback printed after the
     `finally` that scrolls the verdict away -- every slot report this project has
-    is built out of that block. `SystemExit` is not caught by that clause, so a
-    handler that raised one here would buy the backstop above by spending the one
-    thing the operator was reading, and would change the exit status under
-    `tools/onair.sh` besides.
+    is built out of that block, and the launchers read 130 as a hand stop.
     """
     replay = tmp_path / "silence.wav"
     wav.write(replay, np.zeros(30 * 48000, dtype=np.float32), 48000)
     proc = child(argv=_ONAIR_DRY + ("--replay", str(replay),
                                     "--outdir", str(tmp_path / "captures")))
-    end = time.monotonic() + _APPEAR_S
-    while "connecting" not in proc.output() and time.monotonic() < end:
-        assert proc.poll() is None, f"the session never started:\n{proc.output()}"
-        time.sleep(0.01)
-    assert "connecting" in proc.output(), f"the session never started:\n{proc.output()}"
+    assert _connecting(proc), f"the session never started:\n{proc.output()}"
 
     proc.send_signal(signal.SIGINT)
     try:
@@ -408,32 +473,565 @@ def test_ctrl_c_on_a_healthy_session_still_leaves_the_verdict_on_the_screen(
         raise AssertionError(f"Ctrl-C did not end it:\n{proc.output()}") from None
 
     out = proc.output()
-    assert proc.returncode == 0, (
-        f"an interrupted run exits with the session's own status, and a launcher "
+    assert proc.returncode == 130, (
+        f"an interrupted run exits with the shell's status for Ctrl-C, and a launcher "
         f"reads it:\n{out}")
     assert "unkeying and stopping" not in out, (
-        f"Ctrl-C came out as the other two signals' SystemExit, which `run` does "
-        f"not catch:\n{out}")
+        f"Ctrl-C came out as the other two signals' SystemExit:\n{out}")
     assert "session ended: the operator interrupted it" in out, (
         f"the interrupt did not reach the clause that writes the summary:\n{out}")
     assert out.rstrip().splitlines()[-1].startswith("verdict:"), (
         f"the verdict was not the last thing on the screen:\n{out}")
 
 
-def test_the_deadman_fires_before_the_launcher_reaches_for_sigkill():
-    """The budget is bounded ABOVE by what reaps this modem. `tools/onair.sh` gives
-    an orphan `REAP_GRACE_S` to unkey itself and then sends SIGKILL, which ends the
-    unwind, the handler and the deadman together -- so a budget at or past that
-    grace is a deadman that never fires."""
+@pytest.mark.realtime
+@pytest.mark.parametrize("sig,status", [(signal.SIGTERM, 143), (signal.SIGHUP, 129)])
+def test_the_other_stop_signals_exit_with_the_launchers_status(
+        child, tmp_path, sig, status):
+    """`tools/onair.sh` traps TERM to 143 and HUP to 129; the modem says the same."""
+    replay = tmp_path / "silence.wav"
+    wav.write(replay, np.zeros(30 * 48000, dtype=np.float32), 48000)
+    proc = child(argv=_ONAIR_DRY + ("--replay", str(replay),
+                                    "--outdir", str(tmp_path / "captures")))
+    assert _connecting(proc), f"the session never started:\n{proc.output()}"
+    proc.send_signal(sig)
+    try:
+        proc.wait(timeout=_DIE_S)
+    except subprocess.TimeoutExpired:
+        raise AssertionError(f"{sig.name} did not end it:\n{proc.output()}") from None
+    out = proc.output()
+    assert proc.returncode == status, f"{sig.name} came out as {proc.returncode}:\n{out}"
+    assert "unkeying and stopping" in out and "verdict:" in out, out
+
+
+#: A healthy session whose captures take longer to store than either deadman
+#: budget: the store holds no device, and the verdict must still be reached.
+_ONAIR_SLOW_STORE = """
+import sys, time
+from pathlib import Path
+from hfmodem.shrike import onair, ota
+
+ota.DEADMAN_BUDGET_S = onair.UNWIND_REST_S = 0.5
+stored = Path(sys.argv[-1], "stored")
+
+
+class SlowStore:
+    pending, unstored = 0, []
+
+    def drain(self, timeout):
+        pass
+
+    def store(self):
+        time.sleep(1.5)
+        stored.touch()
+
+    def report(self):
+        return "captures stored slowly"
+
+
+onair._WRITER = SlowStore()
+onair._unkey_on_signal()
+sys.argv = ["onair", *sys.argv[1:-1]]
+sys.exit(onair.main_refusing())
+"""
+
+
+@pytest.mark.realtime
+def test_a_slow_capture_store_after_ctrl_c_still_reaches_the_verdict(child, tmp_path):
+    replay = tmp_path / "silence.wav"
+    wav.write(replay, np.zeros(30 * 48000, dtype=np.float32), 48000)
+    proc = child(argv=("-c", _ONAIR_SLOW_STORE, *_ONAIR_DRY[2:], "--replay", str(replay),
+                       "--outdir", str(tmp_path / "captures"), str(tmp_path)))
+    assert _connecting(proc), f"the session never started:\n{proc.output()}"
+    proc.send_signal(signal.SIGINT)
+    try:
+        proc.wait(timeout=_DIE_S)
+    except subprocess.TimeoutExpired:
+        raise AssertionError(f"Ctrl-C did not end it:\n{proc.output()}") from None
+    out = proc.output()
+    assert (tmp_path / "stored").exists(), f"the store never ran:\n{out}"
+    assert proc.returncode == 130, f"came out as {proc.returncode}:\n{out}"
+    assert out.rstrip().splitlines()[-1].startswith("verdict:"), out
+
+
+#: A rigctl that says it started, then waits on a FIFO the test opens only after
+#: the terminal's Ctrl-C has gone to the whole foreground process group.
+_FAKE_RIGCTL = """#!{python}
+import pathlib, sys
+here = pathlib.Path(sys.argv[0]).parent
+(here / "started").touch()
+open(here / "go").close()
+(here / "done").write_text(" ".join(sys.argv[1:]))
+"""
+
+#: A launch claim on fd 9, as a launcher hands every modem one, in the state
+#: directory the test gives it.
+_CLAIMED = """
+import os
+from hfmodem.core import claim
+fd = os.open(claim.bootstrap()[0], os.O_RDWR)
+os.dup2(fd, 9)
+os.close(fd)
+claim.acquire("test", "teardown", fd=9)
+"""
+
+_TEARDOWN_ONESHOT = {
+    "power restore": _CLAIMED + """
+import sys
+from pathlib import Path
+from hfmodem.shrike import onair, ota
+onair._unkey_on_signal()
+ota.find_rigctl = lambda *_a: Path(sys.argv[1])
+rig = ota.Rig(1036, "/dev/null", 38400)
+with ota.signals_held():
+    print("restored" if rig.set_power_once(0.5) else "NOT restored", flush=True)
+""",
+}
+
+
+@pytest.mark.realtime
+@pytest.mark.parametrize("step,said", [("power restore", "restored")])
+def test_a_terminal_ctrl_c_does_not_reach_the_teardowns_rigctl(tmp_path, step, said):
+    rigctl = tmp_path / "rigctl"
+    rigctl.write_text(_FAKE_RIGCTL.format(python=sys.executable))
+    rigctl.chmod(0o755)
+    os.mkfifo(tmp_path / "go")
+    log = tmp_path / "harness.log"
+    env = dict(os.environ, HFMODEM_STATE_DIR=str(tmp_path / "state"),
+               HFMODEM_COEXIST_HARNESS="1")
+    with log.open("w") as out:
+        proc = subprocess.Popen([sys.executable, "-c", _TEARDOWN_ONESHOT[step], str(rigctl)],
+                                stdout=out, stderr=subprocess.STDOUT, env=env,
+                                start_new_session=True)
+    try:
+        end = time.monotonic() + _APPEAR_S
+        while not (tmp_path / "started").exists():
+            assert time.monotonic() < end and proc.poll() is None, log.read_text()
+            time.sleep(0.005)
+        os.killpg(proc.pid, signal.SIGINT)
+        try:
+            os.close(os.open(tmp_path / "go", os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
+        proc.wait(timeout=_DIE_S)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    assert (tmp_path / "done").exists(), f"Ctrl-C ended the {step}:\n{log.read_text()}"
+    assert said in log.read_text().splitlines(), log.read_text()
+
+
+#: The same session with a drain that never returns: past the rig, the unwind
+#: is still bounded, by its own budget.
+_ONAIR_HUNG_DRAIN = """
+import sys, time
+from hfmodem.shrike import onair
+
+onair.UNWIND_REST_S = 0.5
+onair._drain_captures = lambda **_kw: time.sleep(300)
+onair._unkey_on_signal()
+sys.argv = ["onair", *sys.argv[1:]]
+sys.exit(onair.main_refusing())
+"""
+
+
+@pytest.mark.realtime
+def test_a_hung_drain_after_ctrl_c_is_still_taken_down(child, tmp_path):
+    replay = tmp_path / "silence.wav"
+    wav.write(replay, np.zeros(30 * 48000, dtype=np.float32), 48000)
+    proc = child(argv=("-c", _ONAIR_HUNG_DRAIN, *_ONAIR_DRY[2:], "--replay", str(replay),
+                       "--outdir", str(tmp_path / "captures")))
+    assert _connecting(proc), f"the session never started:\n{proc.output()}"
+    asked_at = time.monotonic()
+    proc.send_signal(signal.SIGINT)
+    try:
+        proc.wait(timeout=_DIE_S)
+    except subprocess.TimeoutExpired:
+        raise AssertionError(f"a hung drain outlived the deadman:\n{proc.output()}") from None
+    assert proc.returncode == 1, f"came out as {proc.returncode}:\n{proc.output()}"
+    assert "Traceback" not in proc.output(), proc.output()
+    assert time.monotonic() - asked_at < 4, proc.output()
+
+
+@pytest.fixture
+def timed_stop_handler(monkeypatch):
+    """The stop handler over a real interval timer, with the deadman's kill
+    swapped for nothing and every handler put back afterwards."""
+    from hfmodem.shrike import onair, ota
+
+    before = {sig: signal.getsignal(sig)
+              for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGALRM)}
+    monkeypatch.setattr(ota, "arm_deadman", lambda budget: signal.setitimer(
+        signal.ITIMER_REAL, budget))
+    monkeypatch.setattr(ota, "_depth", 0)
+    monkeypatch.setattr(ota, "_pending", None)
+    onair._unkey_on_signal()
+    signal.signal(signal.SIGALRM, lambda *_: None)
+    yield ota
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    for sig, handler in before.items():
+        signal.signal(sig, handler)
+
+
+def test_a_held_signal_delivered_after_the_hold_keeps_the_bound_it_was_given(
+        timed_stop_handler):
+    ota = timed_stop_handler
+    signal.setitimer(signal.ITIMER_REAL, 600)
+    with pytest.raises(KeyboardInterrupt):
+        with ota.signals_held(after_s=300):
+            signal.raise_signal(signal.SIGINT)
+    left = signal.getitimer(signal.ITIMER_REAL)[0]
+    assert 290 < left <= 300, f"the deadman has {left:.1f} s, not the 300 s handed over"
+
+
+def test_a_signal_the_hold_takes_still_arms_the_deadman(timed_stop_handler):
+    ota = timed_stop_handler
+    with pytest.raises(KeyboardInterrupt):
+        with ota.signals_held(after_s=300):
+            signal.raise_signal(signal.SIGINT)
+            left = signal.getitimer(signal.ITIMER_REAL)[0]
+    assert ota.DEADMAN_BUDGET_S - 1 < left <= ota.DEADMAN_BUDGET_S, (
+        f"a held Ctrl-C left the ladder under a {left:.1f} s deadman")
+
+
+@pytest.mark.parametrize("unwinding", [False, True])
+def test_a_stop_after_the_teardown_is_answered_at_once(timed_stop_handler, unwinding):
+    """Once the hold has delivered its stop, the next one is not held for a
+    teardown that has already happened."""
     from hfmodem.shrike import onair
 
-    launcher = Path(__file__).resolve().parents[4].parent / "tools" / "onair.sh"
-    if not launcher.exists():
-        pytest.skip(f"{launcher} is not present (installed-wheel run)")
-    grace = re.search(r"^REAP_GRACE_S=(\d+)", launcher.read_text(), re.M)
-    assert grace, "the launcher no longer states the grace it gives an orphan"
-    assert 0 < onair.DEADMAN_BUDGET_S < int(grace.group(1)), (
-        f"deadman {onair.DEADMAN_BUDGET_S} s against a {grace.group(1)} s grace")
+    ota = timed_stop_handler
+    ota._pending = [] if unwinding else None
+    with pytest.raises(KeyboardInterrupt):
+        with ota.signals_held(after_s=300):
+            signal.raise_signal(signal.SIGINT)
+    with pytest.raises(onair.Signalled):
+        signal.raise_signal(signal.SIGTERM)
+
+
+#: A stop whose ladder has used up the deadman's budget but for one second, then
+#: a power restore into a rigctl that never answers.
+_HUNG_RESTORE = _CLAIMED + """
+import signal, sys
+from pathlib import Path
+from hfmodem.shrike import onair, ota
+
+onair._unkey_on_signal()
+ota.DEADMAN_BUDGET_S = 1.0
+ota.find_rigctl = lambda *_a: Path(sys.argv[1])
+power = onair._PhasePower.__new__(onair._PhasePower)
+power.rig, power.baseline, power.level = ota.Rig(1036, "/dev/null", 38400), 0.25, 0.5
+
+
+def session():
+    try:
+        signal.raise_signal(int(sys.argv[2]))
+    finally:
+        with ota.signals_held(after_s=5):
+            power.restore()
+
+
+onair.main = session
+sys.exit(onair.main_refusing())
+"""
+
+
+@pytest.mark.realtime
+@pytest.mark.parametrize("sig,status", [(signal.SIGINT, 130), (signal.SIGTERM, 143)])
+def test_a_hung_power_restore_is_a_reported_failure_not_a_deadman(tmp_path, sig, status):
+    rigctl = tmp_path / "rigctl"
+    rigctl.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
+    rigctl.chmod(0o755)
+    env = dict(os.environ, HFMODEM_STATE_DIR=str(tmp_path / "state"),
+               HFMODEM_COEXIST_HARNESS="1")
+    done = subprocess.run([sys.executable, "-c", _HUNG_RESTORE, str(rigctl), str(int(sig))],
+                          capture_output=True, text=True, env=env, timeout=_DIE_S)
+    said = done.stdout + done.stderr
+    assert done.returncode == status, f"came out as {done.returncode}:\n{said}"
+    assert "RFPOWER NOT RESTORED" in said, said
+
+
+#: A stop that never reached the teardown, with captures still queued: the drain
+#: `atexit` runs knows nothing of the rig, so whatever deadman is armed stays.
+_ATEXIT_STORE = """
+import atexit, signal, sys, time
+from hfmodem.shrike import onair, ota
+
+ota.DEADMAN_BUDGET_S = 1.0
+
+
+class Queued:
+    pending, unstored = 1, ["capture"]
+
+    def drain(self, timeout):
+        self.pending = 0
+
+    def store(self):
+        time.sleep(5)
+        print("store finished", flush=True)
+
+    def report(self):
+        return "captures stored"
+
+
+onair._WRITER = Queued()
+atexit.register(onair._drain_at_exit)
+onair._unkey_on_signal()
+signal.raise_signal(signal.SIGINT)
+"""
+
+
+@pytest.mark.realtime
+def test_the_exit_time_drain_stays_under_the_armed_deadman(tmp_path):
+    env = dict(os.environ, HFMODEM_STATE_DIR=str(tmp_path / "state"),
+               HFMODEM_COEXIST_HARNESS="1")
+    began = time.monotonic()
+    done = subprocess.run([sys.executable, "-c", _ATEXIT_STORE], capture_output=True,
+                          text=True, env=env, timeout=_DIE_S)
+    said = done.stdout + done.stderr
+    assert "store finished" not in said and done.returncode == 1, (
+        f"the exit-time store outlived the deadman ({done.returncode}):\n{said}")
+    assert time.monotonic() - began < 4, said
+
+
+def test_the_deadman_fires_before_the_launcher_reaches_for_sigkill():
+    """The budget is bounded ABOVE by what reaps this modem. `tools/onair.sh` ends
+    its children through the claim, which gives each `REAP_GRACE_S` to unkey itself
+    and then sends SIGKILL, ending the unwind, the handler and the deadman together
+    -- so a budget at or past that grace is a deadman that never fires."""
+    from hfmodem.core import native
+    from hfmodem.shrike import ota
+
+    ports = Path(__file__).resolve().parents[4].parent / "tools" / "lib" / "ports.sh"
+    if not ports.exists():
+        pytest.skip(f"{ports} is not present (installed-wheel run)")
+    assert "from hfmodem.core.native import NativeChild, REAP_GRACE_S" in ports.read_text(), (
+        "the launcher no longer reaps with the claim's grace")
+    assert 0 < ota.DEADMAN_BUDGET_S < native.REAP_GRACE_S, (
+        f"deadman {ota.DEADMAN_BUDGET_S} s against a {native.REAP_GRACE_S} s grace")
+
+
+def test_the_deadman_outlasts_the_slowest_unkey_ladder(monkeypatch):
+    """`Rig.stop` with every rung at its worst, on a clock that only the ladder
+    moves: the keying line is dropped and handed back through the real
+    `LineKeyer`, rigctl's stdin is then a full pipe that drains only at the real
+    `_put`'s own deadline for the quit, and rigctl neither quits, ends nor dies
+    inside `_close`'s waits. Each rung is held to the constant the deadman's
+    budget is summed from, and the whole ladder to the budget, which ends a
+    wedged unwind no more than a quarter second after it."""
+    from types import SimpleNamespace
+
+    from hfmodem.core import ptt
+    from hfmodem.shrike import ota
+
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += max(0.0, seconds)
+
+    def drained_at_the_deadline(_r, w, _x, timeout):
+        sleep(timeout)
+        os.read(read_end, 1 << 20)
+        return [], w, []
+
+    def fill():
+        try:
+            while True:
+                os.write(write_end, bytes(65536))
+        except BlockingIOError:
+            pass
+
+    clock = SimpleNamespace(monotonic=lambda: now[0], sleep=sleep, time=time.time)
+    monkeypatch.setattr(ota, "time", clock)
+    monkeypatch.setattr(ota, "select", SimpleNamespace(select=drained_at_the_deadline))
+
+    read_end, write_end = os.pipe()
+    os.set_blocking(write_end, False)
+    rungs, waits = [], []
+
+    class Line:
+        released_low = None
+
+        def __init__(self, port):
+            self.high = False
+
+        def open(self):
+            pass
+
+        def assert_(self, on):
+            rungs.append(f"line {'up' if on else 'down'}")
+            self.high = on
+
+        def sense(self):
+            return self.high
+
+        def release(self):
+            rungs.append("hand back")
+            self.released_low = not self.high
+
+    class Stuck:
+        pid = 4242
+        stdin = SimpleNamespace(fileno=lambda: write_end)
+        stdout = stderr = None
+
+        def alive(self):
+            return True
+
+        def wait_gone(self, timeout):
+            waits.append(timeout)
+            sleep(timeout)
+            return False
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    armed = []
+    monkeypatch.setattr(ptt, "RtsPtt", Line)
+    monkeypatch.setattr(ota, "arm_deadman", lambda budget: armed.append((now[0], budget)))
+    monkeypatch.setattr(ota, "find_rigctl", lambda *_a: Path("rigctl"))
+    rig = ota.Rig(1036, "/dev/null", 38400, ptt_port="/dev/null")
+    assert rig.ptt(True), rungs
+    rig._proc, put, writes = Stuck(), rig._put, []
+
+    def timed_put(line):
+        fill()
+        began = now[0]
+        try:
+            return put(line)
+        finally:
+            writes.append(now[0] - began)
+
+    rig._put = timed_put
+    try:
+        ota.arm_unwind_deadman()
+        rig.stop()
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+
+    (began, budget), = armed
+    took = now[0] - began
+    assert rungs == ["line up", "line down", "hand back"], rungs
+    assert rig._keyer.released_low is True
+    assert writes == [ota.WRITE_TIMEOUT_S], (
+        f"pipe writes took {writes}, against {ota.WRITE_TIMEOUT_S} s")
+    assert waits == [ota.QUIT_WAIT_S, ota.TERM_WAIT_S, ota.KILL_WAIT_S], f"_close waited {waits}"
+    assert took == ota.LADDER_WORST_S < budget <= took + 0.25, (
+        f"the ladder took {took} s against a {budget} s deadman")
+
+
+@pytest.mark.realtime
+def test_a_real_ladder_spawns_nothing_and_ends_inside_the_deadman(monkeypatch):
+    """The same ladder against a real rigctl stand-in that will not read its
+    quit, end or die: each wait polls the child, and nothing else in the ladder
+    may spend time the budget does not count."""
+    from hfmodem.core import claim, native
+    from hfmodem.shrike import ota
+
+    stuck = subprocess.Popen([sys.executable, "-c", "import signal, time; "
+                              "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)"],
+                             stdin=subprocess.PIPE)
+    child = native.NativeChild(stuck.pid, claim.process_started(stuck.pid), stuck.stdin,
+                               None, None, stuck)
+    signal_child = native.NativeChild._signal
+    monkeypatch.setattr(native.NativeChild, "_signal", lambda self, sig: signal_child(
+        self, signal.SIGSTOP if sig == signal.SIGKILL else sig))
+    os.set_blocking(stuck.stdin.fileno(), False)
+    try:
+        while True:
+            os.write(stuck.stdin.fileno(), bytes(65536))
+    except BlockingIOError:
+        pass
+    monkeypatch.setattr(ota, "find_rigctl", lambda *_a: Path("rigctl"))
+    rig = ota.Rig(1036, "/dev/null", 38400)
+    rig._proc = child
+    spawned, run = [], subprocess.run
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: spawned.append(argv) or run(argv, **kw))
+    try:
+        began = time.monotonic()
+        rig.stop()
+        took = time.monotonic() - began
+    finally:
+        monkeypatch.undo()
+        stuck.kill()
+        os.kill(stuck.pid, signal.SIGCONT)
+        stuck.wait()
+    assert not spawned, f"the ladder ran {len(spawned)} processes: {spawned[:2]}..."
+    assert ota.LADDER_WORST_S <= took < ota.DEADMAN_BUDGET_S, (
+        f"the ladder took {took:.3f} s: constants {ota.LADDER_WORST_S} s, deadman {ota.DEADMAN_BUDGET_S} s")
+
+
+def test_an_unkey_that_raises_still_hands_the_line_back_and_ends_rigctl(monkeypatch):
+    from hfmodem.shrike import ota
+
+    monkeypatch.setattr(ota, "find_rigctl", lambda *_a: Path("rigctl"))
+    rig = ota.Rig(1036, "/dev/null", 38400)
+    rungs = []
+
+    class Keyer:
+        def unkey(self):
+            rungs.append("unkey")
+            raise OSError("the line would not drop")
+
+        def hand_back(self):
+            rungs.append("hand back")
+
+    rig._keyer = Keyer()
+    monkeypatch.setattr(rig, "_close", lambda: rungs.append("close"))
+    with pytest.raises(OSError, match="would not drop"):
+        rig.stop()
+    assert rungs == ["unkey", "hand back", "close"]
+
+
+def test_only_the_power_restore_runs_in_a_session_of_its_own(monkeypatch):
+    """The restore runs after a Ctrl-C, which must not reach it. A readback runs
+    while the operator may still want a Ctrl-C to end it."""
+    from types import SimpleNamespace
+
+    from hfmodem.core import native
+    from hfmodem.shrike import ota
+
+    sessions = []
+
+    class Answered:
+        returncode = 0
+
+        def communicate(self, timeout):
+            return b"7101500\n", b""
+
+    def spawn(argv, *, claim_fd, own_session=False):
+        sessions.append((argv[9], own_session))
+        return SimpleNamespace(_process=Answered())
+
+    monkeypatch.setattr(native, "spawn_native", spawn)
+    monkeypatch.setattr(ota, "find_rigctl", lambda *_a: Path("rigctl"))
+    rig = ota.Rig(1036, "/dev/null", 38400)
+    rig.get_freq()
+    rig.get_power()
+    assert rig.set_power_once(0.5)
+    assert sessions == [("f", False), ("l", False), ("L", True)]
+
+
+def test_a_later_signal_does_not_move_an_armed_deadman_later(monkeypatch):
+    from hfmodem.shrike import ota
+
+    armed = []
+    monkeypatch.setattr(ota, "arm_deadman", armed.append)
+    alarm = signal.signal(signal.SIGALRM, lambda *_: None)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 600)
+        ota.arm_unwind_deadman()
+        assert not armed
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        ota.arm_unwind_deadman()
+        assert armed == [ota.DEADMAN_BUDGET_S]
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, alarm)
 
 
 # -- the station, in process ---------------------------------------------------------
@@ -452,14 +1050,13 @@ def test_the_signals_are_taken_over_before_a_client_can_ask_for_the_key(
 
     seen: dict[str, object] = {}
 
-    def build(cfg, *, station=None, log=print):
+    def build(cfg, *, station=None, log=print, **kw):
         seen.update({s.name: signal.getsignal(s)
                      for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)})
-        station._stop.set()
         return {}
 
     monkeypatch.setattr(hosts, "build", build)
-    _station(station_file, transmit=False).run()
+    _station(station_file, transmit=False).run(on_ready=lambda st: st._stop.set())
 
     assert seen, "hosts.build was never reached"
     unowned = [name for name, handler in seen.items()
@@ -648,8 +1245,10 @@ def test_a_watchdog_panic_goes_on_to_cat_when_the_keying_line_will_not_answer(
     assert "confirmed down" in proc.output(), (
         f"the panic is still waiting on a keying line that will not answer, with "
         f"the transmitter up and CAT untried:\n{proc.output()}")
-    assert "T 0" in rigctld.log, (
+    assert "+T 0" in rigctld.log, (
         f"nothing reached the independent path:\n{proc.output()}")
+    assert rigctld.log.index("+\\set_cache 0") < rigctld.log.index("+T 0") < rigctld.log.index("+t"), (
+        f"CAT confirmation must follow an uncached unkey/readback: {rigctld.log}")
     assert proc.poll() is None, (
         f"the watchdog took the process down. A panic that confirmed the "
         f"transmitter down is not an ask to end the run, and the deadman that "
@@ -711,3 +1310,52 @@ def test_a_signal_during_preflight_is_not_a_failed_measurement(child, station_fi
     assert proc.returncode == 128 + sig, (
         f"{sig.name} came out as {proc.returncode}, which is a preflight verdict "
         f"rather than a signal:\n{proc.output()}")
+
+
+def test_a_ctrl_c_in_preflights_keyed_window_unkeys_before_the_card_closes(monkeypatch):
+    """Closing a stream waits on the driver, so the line comes down first."""
+    from types import SimpleNamespace
+
+    from hfmodem.shrike import onair
+
+    events = []
+
+    class Live:
+        _lat = _blk = underruns = xruns = lost = pos = 0
+        fs = 48000
+
+        def __init__(self, in_dev, out_dev=None, **_):
+            self.name = "capture-only" if out_dev is None else "duplex"
+
+        def read_ready(self):
+            return np.full(4800, 0.01, dtype=np.float32)
+
+        def sample_now(self):
+            return 0
+
+        def close(self):
+            events.append(f"{self.name} closed")
+
+    class Rig:
+        ptt_port = serial = "/dev/null"
+        ptt_type = "LINE"
+        up = False
+
+        def ptt(self, on):
+            self.up = on
+            return True
+
+        def stop(self):
+            events.append("stopped keyed" if self.up else "stopped")
+            self.up = False
+
+    def sleep(s):
+        if s == 0.25:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(onair, "_LiveInput", Live)
+    monkeypatch.setattr(onair, "time", SimpleNamespace(sleep=sleep, monotonic=time.monotonic,
+                                                       perf_counter=time.perf_counter))
+    with pytest.raises(KeyboardInterrupt):
+        onair._preflight("in", "out", Rig(), 0.04, key=True)
+    assert events == ["capture-only closed", "stopped keyed", "duplex closed"]

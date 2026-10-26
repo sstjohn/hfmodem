@@ -224,3 +224,85 @@ def test_responder_holds_preconnect_bytes_instead_of_losing_them():
     assert a._preconnect, "the held blobs were thrown away"
     assert io.buffer_reports[-1] == 20, (
         "the host was never re-told the true queue depth")
+
+
+def _isolated_in_state(state, role):
+    if state in (State.CONNECTED, State.DISCONNECTING):
+        a, _, io, peer_io, clock = _linked()
+        io.peer = peer_io.peer = None
+        if state == State.DISCONNECTING:
+            a.on_host_disconnect()
+    else:
+        clock = _Clock()
+        io = _IO("A")
+        a = ArqFsm(io, clock=clock)
+        if state == State.LISTENING or (state == State.CONNECTING and role == "responder"):
+            a.on_host_listen(True)
+        if state == State.CONNECTING:
+            if role == "initiator":
+                a.on_host_connect("W9SSJ", "K7ABC", "500")
+            else:
+                _receive_control(a, F.CR)
+        a.on_host_data(b"pending bytes")
+    assert a.state == state
+    io.sent.clear()
+    io.events.clear()
+    return a, io, clock
+
+
+def _receive_control(fsm, ctype):
+    control = F.Control(ctype=ctype, seq=0, src="K7ABC", dst="W9SSJ", bw="500")
+    payload, marker = F.encode_control(control)
+    fsm.on_rx_frame(F.classify(_Result(payload, marker)))
+
+
+@pytest.mark.parametrize("ctype,state,role", [
+    (ctype, state, role)
+    for ctype in (F.DC, F.DR)
+    for state in State
+    if state != State.DISCONNECTING
+    and (ctype != F.DR or state not in (State.CONNECTED, State.DISCONNECTED))
+    for role in (["initiator", "responder"] if state == State.CONNECTING else [None])
+])
+def test_stale_disconnect_control_is_ignored(ctype, state, role):
+    a, io, _ = _isolated_in_state(state, role)
+    timers = (a._t_connect, a._t_ack, a._t_keepalive)
+    pending = (a._buffer_raw, list(a._preconnect), list(a._blockq), a._over)
+    session = (a.role, a.src, a.dst, a.bw)
+
+    _receive_control(a, ctype)
+
+    assert a.state == state
+    assert io.sent == []
+    assert io.events == []
+    assert (a._t_connect, a._t_ack, a._t_keepalive) == timers
+    assert (a._buffer_raw, a._preconnect, list(a._blockq), a._over) == pending
+    assert (a.role, a.src, a.dst, a.bw) == session
+
+
+def test_a_repeated_disconnect_request_is_answered_again():
+    a, io, _ = _isolated_in_state(State.DISCONNECTED, None)
+
+    _receive_control(a, F.DR)
+
+    assert a.state == State.DISCONNECTED
+    assert io.events == []
+    assert len(io.sent) == 1
+    assert F.classify(_Result(*io.sent[0])).control.ctype == F.DC
+
+
+@pytest.mark.parametrize("ctype,state,answer", [
+    (F.DR, State.CONNECTED, F.DC),
+    (F.DR, State.DISCONNECTING, F.DC),
+    (F.DC, State.DISCONNECTING, F.DF),
+])
+def test_matching_disconnect_control_closes_session(ctype, state, answer):
+    a, io, _ = _isolated_in_state(state, "initiator")
+
+    _receive_control(a, ctype)
+
+    assert a.state == State.DISCONNECTED
+    assert io.events == ["DISCONNECTED"]
+    assert len(io.sent) == 1
+    assert F.classify(_Result(*io.sent[0])).control.ctype == answer
+    assert (a._t_connect, a._t_ack, a._t_keepalive) == (None, None, None)

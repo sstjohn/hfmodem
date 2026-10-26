@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The answer to a Robust Connect, read, and what the caller does with it.
 
 KB5LZK answered this station's first keyed robust call (onair-0923-1413) with a
@@ -244,6 +246,7 @@ def test_only_a_robust_call_is_answered_this_way():
     arq, _ = _calling("")
     arq.on_rx_robust_answer(0)
     assert arq.state == State.CONNECTING and arq.robust_answer is None
+    arq.on_host_abort()
     arq.on_host_connect("W9SSJ", "%KB5LZK")
     assert arq.robust_answer is None
 

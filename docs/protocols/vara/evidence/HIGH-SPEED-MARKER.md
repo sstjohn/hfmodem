@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # What marks a VARA HF link-setup as high speed capable
 
 Corpus: the bench tapes, VARA HF high speed capable on both ends, calling as

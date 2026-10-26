@@ -157,7 +157,7 @@ def link_setup_rx(samples: np.ndarray, tries: int = 6,
 
 
 def link_setup_read(samples: np.ndarray, tries: int = 6,
-                    bw: str = "2300") -> bytes | None:
+                    bw: str = "2300", on_quality=None) -> bytes | None:
     """The link-setup frame :func:`link_setup_rx` reads the caller from, or None."""
     x = np.asarray(samples, float)
     if str(bw) == "500":
@@ -170,4 +170,6 @@ def link_setup_read(samples: np.ndarray, tries: int = 6,
                              level=_rx.BASE_LEVELS[str(bw)])
     if not fr.crc_ok or not _vf.is_link_setup(fr.frame_bytes):
         return None
+    if on_quality is not None and fr.quality is not None:
+        on_quality(fr.quality)
     return bytes(fr.frame_bytes)

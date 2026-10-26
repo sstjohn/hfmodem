@@ -12,6 +12,7 @@ import threading
 import time
 
 from hfmodem.ax25.kiss import Parser, encode
+from hfmodem.core.hostio import join_threads
 
 _HTTP = (b'GET ', b'HEAD ', b'POST ', b'PUT ', b'DELETE ', b'CONNECT ',
          b'OPTIONS ', b'TRACE ', b'PATCH ', b'PRI ')
@@ -159,13 +160,14 @@ class KissServer:
         finally:
             self._disconnect()
 
-    def stop(self):
+    def stop(self, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
         self._stop.set()
         self._disconnect()
         if self._listener is not None:
             self._listener.close()
-        if self._thread is not None:
-            self._thread.join(2.2)
+        ended = join_threads((self._thread,), deadline)
         self.link.drop_pending()
         if self.link.host is self:
             self.link.host = None
+        return ended

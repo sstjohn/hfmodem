@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # BW2300 levels 5-9 (records 4-8): the sub-band waveform, closed from known plaintext
 
 `kpa_bw2300_subband.py` prints every table below in about 90 s (`--rows` adds the measured grid rows).

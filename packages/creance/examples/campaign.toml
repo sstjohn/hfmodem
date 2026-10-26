@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # An unattended initiator matrix: every protocol, small to large, repeated
 # enough to see spread. Sessions run in order, failures do not stop the run,
 # and the aggregate lands in results/<site>/<date>/campaign-<ts>.txt.

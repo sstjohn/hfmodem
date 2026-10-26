@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The on-air history from before the arms, converted into arm records.
 
     .venv/bin/python tools/logbook_view/legacy.py [--root PATH] [--dry-run]
@@ -27,6 +29,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
@@ -34,7 +37,9 @@ from pathlib import Path
 
 import audio
 import link
-from serve import Logbook, band_m, default_root, mail_words
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from desk.face import Logbook, band_m, default_root, mail_words
 
 CONVERTER = 'tools/logbook_view/legacy.py'
 LOCAL = timezone(timedelta(hours=-5))  # every folder name was written in CDT
@@ -232,17 +237,23 @@ def vara_speed(analyzer, text: str, bw: int | None) -> tuple[str | None, str | N
 
 
 class Converter:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, book=None, stop=None):
         self.root = root.resolve()
         self.working = self.root / 'working'
         self.out = self.working / 'legacy-air' / 'arms'
-        self.mycall = Logbook(self.root).station['call']
+        self.book = book or Logbook(self.root)
+        self.stop = stop
+        self.mycall = self.book.station['call']
         self.skipped: Counter = Counter()
         self.skipped_names: dict[str, list[str]] = defaultdict(list)
         self.deduped: Counter = Counter()
         self.parsed: dict[tuple, list[Attempt]] = {}
         from consolelib import vara_evidence
         self.analyzer = vara_evidence
+
+    def check_cancelled(self):
+        if self.stop is not None and self.stop.is_set():
+            raise InterruptedError("logbook conversion stopped")
 
     def rel(self, path: Path | str) -> str:
         return str(Path(path).resolve().relative_to(self.root))
@@ -254,6 +265,7 @@ class Converter:
     def native(self) -> list[dict]:
         found = []
         for p in self.working.glob('*/arms/*/provenance.json'):
+            self.check_cancelled()
             if p.is_relative_to(self.out):
                 continue
             r = recorded(*version(p))
@@ -271,6 +283,7 @@ class Converter:
         arms = {p.parent.name for p in self.working.glob('*/arms/*/provenance.json')}
         found = []
         for p in sorted(self.working.glob('onair-*/**/*.log')):
+            self.check_cancelled()
             if p.stem in arms:
                 self.skip('already an arm', p)
             elif SKIP_NAMES.match(p.name):
@@ -280,6 +293,7 @@ class Converter:
         found += [('rig-session', p) for p in sorted(self.working.glob('rig-session-202608*/session.log'))]
         loose = sorted(self.working.glob('*.log')) + sorted(q for d in LOOSE_DIRS for q in self.working.glob(f'{d}/*.log'))
         for p in loose:
+            self.check_cancelled()
             if SKIP_NAMES.match(p.name):
                 self.skip('witness, rehearsal, tap, monitor or sabir log', p)
             else:
@@ -298,6 +312,7 @@ class Converter:
     def read(self) -> list[Attempt]:
         seen: dict[str, Path] = {}
         for n in self.native():
+            self.check_cancelled()
             if (log := n['dir'] / 'arm.log').is_file():
                 identity = n.get('capture_id')
                 key = ('bound', identity, n.get('registry_sha256')) if identity else transcript(*version(log))[0]
@@ -306,6 +321,7 @@ class Converter:
         found = []
         parsed = {}
         for family, path in self.sources():
+            self.check_cancelled()
             key = version(path)
             digest, text = transcript(*key)
             from hfmodem.core.capture_identity import evidence_reference
@@ -398,11 +414,13 @@ class Converter:
         """One record per attempt: an arm wins, then an onair transcript, a rig session, a loose log."""
         native = defaultdict(list)
         for n in self.native():
+            self.check_cancelled()
             native[n['protocol'], n['base']].append(n)
         order = {'onair': 0, 'rig-session': 1, 'loose': 2}
         kept: list[Attempt] = []
         same = defaultdict(list)
         for a in sorted(found, key=lambda a: (order[a.family], a.started)):
+            self.check_cancelled()
             identity = a.capture_reference.get('capture_id')
             if identity:
                 matching = [n for n in native[a.protocol, a.base] if n.get('capture_id') == identity]
@@ -441,6 +459,7 @@ class Converter:
         """Our receiver's logs/onair recordings by what follows the stamp: MYCALL-PEER or besra-DIAL."""
         found = defaultdict(list)
         for p in sorted((self.root / 'logs' / 'onair').glob('*')):
+            self.check_cancelled()
             if p.suffix in ('.wav', '.flac') and UTC_STAMP.match(p.name):
                 found[p.stem.split('-', 1)[1]].append(p)
         return found
@@ -515,7 +534,7 @@ class Converter:
 
     def grids(self, found: list[Attempt]) -> dict[str, str]:
         """Grids for the gateways the listings do not carry, as the transcripts and the ARDOP roster give them."""
-        located = Logbook(self.root).gateways().keys()
+        located = self.book.gateways().keys()
         missing = {a.base for a in found if a.base not in located and a.call.upper() not in located}
         said: dict[str, Counter] = defaultdict(Counter)
         peers = self.working / 'ardop-air-0922' / 'peers.json'
@@ -524,6 +543,7 @@ class Converter:
                 if p.get('grid'):
                     said[p['call'].upper().split('-')[0]][p['grid']] += 1
         for a in found:
+            self.check_cancelled()
             if a.base in missing:
                 for m in re.finditer(rf'\b{re.escape(a.call)}\b[ ,]+\(?{GRID}', a.text):
                     said[a.base][m[1]] += 1
@@ -531,15 +551,19 @@ class Converter:
 
     def run(self, write: bool = True) -> dict:
         self.skipped, self.skipped_names, self.deduped = Counter(), defaultdict(list), Counter()
+        self.check_cancelled()
         found = self.dedupe(self.read())
+        self.check_cancelled()
         shared = {p for p, n in Counter(onair_folder(a.source) for a in found if a.family == 'onair').items() if n > 1}
         tapes = self.recordings()
         for a in found:
+            self.check_cancelled()
             self.listen(a, shared, tapes)
         grids = self.grids(found)
         now = datetime.now(UTC).isoformat()
         records = {}
         for a in found:
+            self.check_cancelled()
             name, record = self.record(a, now, grids)
             # Two runs a minute apart in folders named to the minute can land on one stamp.
             n = 1

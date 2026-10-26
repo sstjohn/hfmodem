@@ -1,0 +1,77 @@
+{
+  "source": "working/varac-p3/bench/b3-rx/20261020-224435-chat.jsonl",
+  "sha256": "21852f3513c74f7dfed68e582ea7d837d07521e62e7501b60701414e4f7f88f7",
+  "cases": [
+    {
+      "start_line": 80,
+      "stop_line": 127,
+      "commands": [
+        "LISTEN ON"
+      ],
+      "reports": []
+    },
+    {
+      "start_line": 128,
+      "stop_line": 191,
+      "commands": [
+        "LISTEN CQ"
+      ],
+      "reports": [
+        "BITRATE (1)  18 bps RX",
+        "SN -1.2",
+        "CQFRAME WI9YZA 500",
+        "BITRATE (1)  18 bps RX",
+        "SN 1.2",
+        "CQFRAME WI9YZA-7 2750"
+      ]
+    },
+    {
+      "start_line": 192,
+      "stop_line": 250,
+      "commands": [
+        "CHAT ON",
+        "LISTEN OFF"
+      ],
+      "reports": []
+    },
+    {
+      "start_line": 251,
+      "stop_line": 308,
+      "commands": [
+        "CHAT ON",
+        "CHAT OFF"
+      ],
+      "reports": []
+    },
+    {
+      "start_line": 309,
+      "stop_line": 366,
+      "commands": [
+        "CHAT ON"
+      ],
+      "reports": [
+        "BITRATE (1)  18 bps RX",
+        "SN -1.2",
+        "CQFRAME WI9YZA 500",
+        "BITRATE (1)  18 bps RX",
+        "SN 1.2",
+        "CQFRAME WI9YZA-7 2750"
+      ]
+    },
+    {
+      "start_line": 367,
+      "stop_line": 441,
+      "commands": [
+        "LISTEN CQ"
+      ],
+      "reports": [
+        "BITRATE (1)  18 bps RX",
+        "SN -1.2",
+        "CQFRAME WI9YZA 500",
+        "BITRATE (1)  18 bps RX",
+        "SN 1.2",
+        "CQFRAME WI9YZA-7 2750"
+      ]
+    }
+  ]
+}

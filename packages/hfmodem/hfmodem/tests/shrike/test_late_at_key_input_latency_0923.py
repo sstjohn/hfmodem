@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The batch `_late_at_key` carries is one the driver will deliver, not the input latency.
 
 0923-1405, PACTOR-1 IRS: `sample_now()` leads the delivered count by the

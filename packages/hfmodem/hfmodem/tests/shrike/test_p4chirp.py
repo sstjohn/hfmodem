@@ -15,8 +15,9 @@ Two things here are no longer the document's, both off the sigidwiki recording
 codeword-to-carrier assignment, crossed against PACTOR-2's, and the whitened
 CRC residual `p4chirp.CHIRP_CRC_XOR`. Dewhitening restores ordinary X-25;
 the residual is not an alternative CRC convention. `REAL_FIELDS` carries the fields
-as literals -- each is an exact codeword of `coding.CODE_K9` under 11.6's
-pointer walk, so the coding chain under the field is a station's and not ours.
+from the recording's fixture -- each is an exact codeword of `coding.CODE_K9`
+under 11.6's pointer walk, so the coding chain under the field is a station's
+and not ours.
 
 The four captures include marker codewords 8 and 9. PACTOR-4 renders marker
 identity and lane order independently; the captures do not establish that the
@@ -25,9 +26,14 @@ renderer.
 """
 from __future__ import annotations
 
+import json
 import sys
+from collections.abc import Sequence
+from functools import cached_property
+from pathlib import Path
 
 import numpy as np
+import pytest
 from scipy.signal import resample_poly
 
 from hfmodem.shrike import coding, onair, p4chirp, p4frame, pactor1, pactor2, placement, spec
@@ -37,12 +43,26 @@ from hfmodem.tests.shrike.test_p3_offer import MESSAGE, Keyed, cs_event
 
 FS = spec.SAMPLE_RATE
 
-REAL_FIELDS = tuple(bytes.fromhex(h) for h in (
-    "d10d19432d8a01c23424c563e89169fca2912c47257af59f8a",   # marker codeword 9
-    "1af34e13ef95b5ff41f36189dce49d5c227101fd134cf67594",   # 9
-    "d10c02fc28d325d44b18020b0915937e4789ef76daa2f76e75",   # 8
-    "5dadcbb6a78bad08263df70d1d6a882b83da22639beaf56d87",   # 8
-))
+FIELDS = Path(__file__).parent / "fixtures/sigidwiki/p4-chirps/fields.json"
+
+
+class _Recorded(Sequence):
+    """The fixture's fields, read on first use: without it, the test using them skips."""
+
+    @cached_property
+    def _fields(self) -> tuple[bytes, ...]:
+        if not FIELDS.exists():
+            pytest.skip(f"{FIELDS} is absent")
+        return tuple(map(bytes.fromhex, json.loads(FIELDS.read_text())))
+
+    def __getitem__(self, index):
+        return self._fields[index]
+
+    def __len__(self):
+        return len(self._fields)
+
+
+REAL_FIELDS = _Recorded()
 """Four P4dragon chirp packets' fields, in transmission order, read off
 `Pactor_IV_chirps` -- 22 payload bytes, the status byte, the CRC-16 last."""
 

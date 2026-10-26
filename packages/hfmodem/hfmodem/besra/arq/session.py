@@ -38,6 +38,8 @@ v1 simplifications (reference behaviour noted):
 from __future__ import annotations
 
 import logging
+from collections import deque
+from collections.abc import Callable
 from enum import Enum
 from typing import Protocol
 
@@ -326,13 +328,18 @@ class ArqSession:
 
     def __init__(self, mycall: str, transport: Transport, observer: Observer,
                  *, bandwidth: int = 500, timeout_s: float = 90.0,
-                 listen: bool = False) -> None:
+                 listen: bool = False,
+                 identify: Callable[[str], None] | None = None) -> None:
         self.mycall = mycall
         self._tx = transport
         self._obs = observer
+        # The production modem supplies the IDFrame/CW producer. Frame-only
+        # consumers can omit it without adding DSP to this state machine.
+        self._identify = identify
         self.bandwidth = bandwidth           # our ARQBW ceiling (MAX-style)
         self._timeout_s = timeout_s
         self.listen = listen
+        self.autobreak = True
 
         self._state = P.ArdopState.DISC
         self._sub = _Sub.NONE
@@ -343,6 +350,14 @@ class ArqSession:
 
         # outbound / stop-and-wait bookkeeping (ISS side)
         self._outbound = bytearray()
+        self.accepted_total = self.confirmed_total = self.discarded_total = 0
+        self.last_unconfirmed = b""
+        self.retired = deque(maxlen=16)
+        self._retired_totals = (0, 0, 0)
+        self._tearing_down = False
+        self._ending_contact = False
+        self._close_requested = False
+        self.host_buffer_limit = 65536
         self._tx_even = True                 # next new data frame's even/odd parity
         self._last_data_type = -1            # data frame currently outstanding
         self._in_process = 0                 # bytes of _outbound in that frame
@@ -438,7 +453,7 @@ class ArqSession:
     def connect(self, target: str, repeats: int = 10) -> None:
         """Become the caller: fire the first ConReq and await ConAck."""
         if self._state != P.ArdopState.DISC:
-            return
+            raise ValueError('contact already active')
         self._remote = _canon_call(target)
         self._session = crc.session_id(_canon_call(self.mycall), self._remote)
         self._session_bw = self.bandwidth
@@ -462,6 +477,11 @@ class ArqSession:
     def queue_data(self, data: bytes) -> None:
         if not data:
             return
+        if self._close_requested or self._disc_repeating:
+            raise ValueError("link is closing")
+        if len(self._outbound) + len(data) > self.host_buffer_limit:
+            raise ValueError("transmit buffer full")
+        self.accepted_total += len(data)
         self._outbound += data
         self._obs.buffer(len(self._outbound))
         # Kick the pipe if we're idle and own (or can seize) the link.
@@ -471,7 +491,13 @@ class ArqSession:
             self._set_state(P.ArdopState.ISS)
             self._sub = _Sub.ISS_DATA
             self._send_data()
-        elif self._state == P.ArdopState.IRS and self._sub == _Sub.IRS_DATA:
+        elif (self.autobreak and self._state == P.ArdopState.IRS
+              and self._sub == _Sub.IRS_DATA):
+            self._begin_break()
+
+    def request_break(self) -> None:
+        """Host BREAK: manual turnover, independent of AUTOBREAK."""
+        if self._state == P.ArdopState.IRS and self._sub == _Sub.IRS_DATA:
             self._begin_break()
 
     def purge(self) -> None:
@@ -480,6 +506,7 @@ class ArqSession:
         The frame already in flight is kept: stop-and-wait deletes those bytes
         only when the peer ACKs them, so dropping them here would step the queue
         past data the peer never received."""
+        self.discarded_total += len(self._outbound) - self._in_process
         del self._outbound[self._in_process:]
         self._obs.buffer(len(self._outbound))
 
@@ -487,6 +514,12 @@ class ArqSession:
         """Graceful close: DISC (retried up to 5×) awaiting END."""
         if self._state == P.ArdopState.DISC:
             return
+        self._close_requested = True
+        if self._outbound:
+            return
+        self._begin_disconnect()
+
+    def _begin_disconnect(self) -> None:
         self._obs.status("INITIATING ARQ DISCONNECT")
         self._disc_repeating = True
         self._disc_repeats = 1
@@ -511,12 +544,19 @@ class ArqSession:
         if self._disc_repeating:
             self._tick_disc()
             return
+        if self._close_requested and not self._outbound:
+            self._begin_disconnect()
+            return
 
         if self.connected and now - self._last_progress > self._timeout_s:
             self._obs.status(f"ARQ Timeout from Protocol State: {self._state}")
             self._progress()
-            self._tx.send(DISC, b"", self._session)
-            self._teardown(notify=True)
+            try:
+                if self._identify is not None:
+                    self._identify('timeout')
+                self._tx.send(DISC, b"", self._session)
+            finally:
+                self._teardown(notify=True)
             return
 
         # Repeat an outstanding DATA frame until it is ACKed: a lost DATA or lost
@@ -717,9 +757,9 @@ class ArqSession:
             self._concede_to_break()
         elif ok and ft == DISC:
             self._tx.send(END, b"", self._session)
-            self._teardown(notify=True)
+            self._end_contact('peer_disc')
         elif ok and ft == END:
-            self._teardown(notify=True)
+            self._end_contact('peer_end')
 
     # IRS: callee through the handshake, then receiving data.
     def _rx_irs(self, ft: int, payload: bytes, ok: bool) -> None:
@@ -755,9 +795,9 @@ class ArqSession:
         elif ok and ft == DISC:
             if self._corroborated(ft):
                 self._tx.send(END, b"", self._session)
-                self._teardown(notify=True)
+                self._end_contact('peer_disc')
         elif ok and ft == END:
-            self._teardown(notify=True)
+            self._end_contact('peer_end')
         elif ok and ft == BREAK:
             if self._corroborated(ft):
                 self._concede_again()
@@ -769,7 +809,7 @@ class ArqSession:
             # queued mid-handover — the instant between conceding and the new
             # ISS's first frame, when `queue_data` cannot kick — seizes the
             # link now; one with nothing to say acknowledges the keepalive.
-            if self._outbound:
+            if self._outbound and self.autobreak:
                 self._begin_break()
             else:
                 # Answering the chirp is not progress: the peer has said its piece
@@ -805,9 +845,9 @@ class ArqSession:
             self._progress()
         elif ft == DISC:
             self._tx.send(END, b"", self._session)
-            self._teardown(notify=True)
+            self._end_contact('peer_disc')
         elif ft == END:
-            self._teardown(notify=True)
+            self._end_contact('peer_end')
 
     # IRStoISS: repeating BREAK; any ACK completes the seizure.
     def _rx_irs_to_iss(self, ft: int, payload: bytes, ok: bool) -> None:
@@ -834,9 +874,9 @@ class ArqSession:
             # repeated at a station that is gone holds the seizure open
             # forever. Answer the disconnect and let the queue go with it.
             self._tx.send(END, b"", self._session)
-            self._teardown(notify=True)
+            self._end_contact('peer_disc')
         elif ok and ft == END:
-            self._teardown(notify=True)
+            self._end_contact('peer_end')
 
     # -- data engine -------------------------------------------------------
 
@@ -962,6 +1002,7 @@ class ArqSession:
         if self._now < self._ack_guard_until:
             return
         repeated = self._frame_was_repeated
+        self.confirmed_total += self._in_process
         del self._outbound[:self._in_process]
         self._in_process = 0
         self._last_data_type = -1
@@ -1034,7 +1075,12 @@ class ArqSession:
             if not delivered:
                 self._obs.status(f"{head} AND NOTHING DELIVERED THIS STINT, "
                                  f"DISCONNECTING")
-                self.disconnect()
+                # This is a failed receive stint, not a host's request to
+                # drain its queue. A yielded, unacknowledged outbound frame
+                # must not defer the bound while the unreadable peer owns ISS.
+                self._close_requested = True
+                if not self._disc_repeating:
+                    self._begin_disconnect()
                 return
             if self._unrepaired == budget + 1:
                 self._obs.status(f"{head}, BUT THIS STINT HAS DELIVERED, "
@@ -1239,7 +1285,7 @@ class ArqSession:
         self._disc_repeats += 1
         if self._disc_repeats > 5:
             self._obs.status(f"END NOT RECEIVED CLOSING ARQ SESSION WITH {self._remote}")
-            self._teardown(notify=True)
+            self._end_contact('disc_timeout')
             return
         self._progress()
         self._tx.send(DISC, b"", self._session)
@@ -1264,8 +1310,45 @@ class ArqSession:
         self._next_chirp = self._now + 2.0
 
     def _teardown(self, *, notify: bool) -> None:
+        if self._tearing_down:
+            return
+        self._tearing_down = True
+        try:
+            self._finish_teardown(notify=notify)
+        finally:
+            self._tearing_down = False
+
+    def _end_contact(self, reason):
+        if self._ending_contact:
+            return
+        self._ending_contact = True
+        try:
+            if self._identify is not None:
+                self._identify(reason)
+        finally:
+            # A refused identification cannot leave a retired contact or its
+            # unconfirmed originals live. ABORT itself never transmits an ID.
+            try:
+                self._teardown(notify=True)
+            finally:
+                self._ending_contact = False
+
+    def _finish_teardown(self, *, notify: bool) -> None:
         self._disc_repeating = False
+        self._close_requested = False
         self._sub = _Sub.NONE
+        original = bytes(self._outbound)
+        self.discarded_total += len(self._outbound)
+        totals = self.accepted_total, self.confirmed_total, self.discarded_total
+        # An attachment may abort once on loss and again while stopping. Keep
+        # the first disposition; an empty repeated abort must not erase it.
+        if totals != self._retired_totals or self._state != P.ArdopState.DISC:
+            accepted, confirmed, discarded = (
+                new-old for new, old in zip(totals, self._retired_totals))
+            self.last_unconfirmed = original
+            self.retired.append(dict(remote=self._remote, accepted=accepted,
+                confirmed=confirmed, discarded=discarded, unconfirmed=original))
+            self._retired_totals = totals
         self._outbound.clear()
         self._in_process = 0
         self._last_data_type = -1

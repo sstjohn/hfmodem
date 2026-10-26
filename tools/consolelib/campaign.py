@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """A campaign: a pounce across frequency, run again until every station has answered.
 
 One loop does both things the operator asked for, because they are the same loop.
@@ -58,7 +60,7 @@ from pathlib import Path
 import sys
 import time
 
-from . import arm, modes, report, roster, station
+from . import arm, claim, modes, report, roster, station
 
 RETUNE_S = 2.0          # what a within-band hop costs before the dwell starts
 DWELL_S = 8.0           # a stop's default read; pactor's instrument reads this
@@ -110,7 +112,9 @@ def assessment(mode, args, peer):
         return modes.UNASSESSED
     try:
         return mode.assess(mode, peer, args.dwell)
-    except Exception as trouble:        # an assessor may never cost the pass an arm
+    except (claim.hardware.ClaimError, claim.station_client.ClientError):
+        raise
+    except Exception as trouble:
         return replace(modes.UNASSESSED,
                        detail=f'the assessor failed ({type(trouble).__name__}: {trouble})')
 
@@ -134,6 +138,18 @@ def disposition(mode, code, record):
 
 
 def fly_one(call):
+    try:
+        with claim.lease(call.mode):
+            return _fly_one(call)
+    except (RuntimeError, claim.station_client.ClientError) as error:
+        peer = call.peer
+        return dict(peer_id=peer['id'], gateway=peer['call'], band_m=peer['band_m'],
+                    centre_hz=peer['centre_hz'], mode=call.mode.name, key=call.key,
+                    asks=call.asks, returncode=None, outcome=modes.NOT_ATTEMPTED,
+                    refusal_exit_code=claim.exit_code(error), note=str(error)), str(error)
+
+
+def _fly_one(call):
     """One arm at one channel: ask what is there, key or not, and classify it.
 
     Everything the arm needs is the call's -- the mode that transmits, that
@@ -178,9 +194,10 @@ def fly_one(call):
         entry.update(outcome=classify(mode, record, None) if record else modes.NOT_ATTEMPTED,
                      note='Interrupted during the arm.')
         return entry, STOPPED_BY_HAND
-    except (ValueError, RuntimeError, OSError, KeyError) as error:
+    except (claim.station_client.ClientError, ValueError, RuntimeError, OSError, KeyError) as error:
         print(f'REFUSED: {error}', file=sys.stderr, flush=True)
-        entry.update(outcome=modes.NOT_ATTEMPTED, note=str(error))
+        entry.update(outcome=modes.NOT_ATTEMPTED, note=str(error),
+                     refusal_exit_code=claim.exit_code(error))
         return entry, str(error)
     entry.update(verdict=record.get('verdict'),
                  outcome=classify(mode, record, entry['returncode']),
@@ -264,6 +281,7 @@ class Rescue:
         return None
 
 
+@claim.release_confirmation()
 def execute(calls, campaign, records, now):
     """One arm at a time, through the same plan/fly path the `fly` verb uses.
 
@@ -354,7 +372,7 @@ def execute(calls, campaign, records, now):
     # above turns that into a status that reads as interrupted rather than failed.
     if stop == STOPPED_BY_HAND:
         raise KeyboardInterrupt
-    return 2 if stop else 0
+    return entry.get('refusal_exit_code', 2) if stop else 0
 
 
 def preview(calls, heading, notes, now):

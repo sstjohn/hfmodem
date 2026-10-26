@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # PACTOR-1 data packets
 
 A PACTOR-1 data packet is a header byte, a fixed-length data field, a status byte

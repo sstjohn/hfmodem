@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Entry timing evidence and later decoded traffic are separate diagnostics."""
 from copy import deepcopy
 from hfmodem.shrike import arq, onair

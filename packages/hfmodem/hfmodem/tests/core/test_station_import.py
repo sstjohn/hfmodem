@@ -3,6 +3,7 @@
 
 """Station import regressions, with no radio attached."""
 import threading
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import numpy as np
@@ -27,11 +28,15 @@ def test_tune_cannot_move_between_check_and_key():
 
     fake = SimpleNamespace(freq=7_100_000)
     cat = SimpleNamespace(freq=lambda: fake.freq,
-                          set_freq=lambda value: setattr(fake, "freq", value))
+                          set_freq=lambda value: setattr(fake, "freq", value),
+                          open=lambda: None, close=lambda: None, cache_free=True,
+                          identify=lambda: "FT-891", ptt_state=lambda **kw: False,
+                          hold=lambda deadline_index=None: nullcontext(True),
+                          clock=lambda: 0, protect=lambda *a: object(),
+                          unprotect=lambda token: None)
     r = Rig(model="ft891", cat=cat, ptt=FakePtt(), profile=Profile(),
             control=Control.LOCAL, mycall="N0CALL", transmit=True)
-    r._armed = True
-    r._dial_hz = fake.freq
+    r.arm(prove_ptt=False)
     original = r.ptt.assert_
 
     def key_line(up):
@@ -97,27 +102,31 @@ def test_broken_lane_constructor_stops_bringup(monkeypatch):
 
 def test_cat_rechecks_keyed_after_lock_wait():
     from hfmodem.core.rig import Cat
-    reached = threading.Event()
+    waiting = threading.Event()
     keyed = False
     sent, errors = [], []
 
-    class Lock:
-        def __enter__(self):
-            nonlocal keyed
-            reached.set()
-            keyed = True
-        def __exit__(self, *args): pass
+    def probe():
+        waiting.set()
+        return keyed
 
     cat = Cat("unused", 1)
-    cat.keyed_probe = lambda: keyed
-    cat._lock = Lock()
-    cat._sock = SimpleNamespace(sendall=sent.append)
-    cat._read_reply = lambda: "RPRT 0"
-    try:
-        cat.command("F 14109000")
-    except RigError as exc:
-        errors.append(str(exc))
-    assert reached.is_set() and errors and not sent
+    cat.keyed_probe = probe
+    cat._sock = SimpleNamespace(sendall=sent.append, settimeout=lambda timeout: None)
+
+    def command():
+        try:
+            cat.command("F 14109000")
+        except RigError as exc:
+            errors.append(str(exc))
+
+    with cat.hold():
+        worker = threading.Thread(target=command)
+        worker.start()
+        assert waiting.wait(1)
+        keyed = True
+    worker.join(2)
+    assert errors and not sent
 
 
 def test_active_link_reserves_transmitter():
@@ -146,9 +155,11 @@ def test_ale_stop_restores_configured_centre():
     from hfmodem.station.link import AleLink
     lane = object.__new__(AleLink)
     calls = []
-    lane.modem = SimpleNamespace(stop=lambda: calls.append("stop"))
-    lane.station = SimpleNamespace(rig=SimpleNamespace(tune=calls.append),
-                                   cfg=SimpleNamespace(rig=SimpleNamespace(centre_hz=7101500)))
+    lane.modem = SimpleNamespace(stop=lambda timeout: calls.append("stop") or True,
+                                 _audio_limit=307200, card_rate=48000)
+    rig = SimpleNamespace(centre_hz=7101500, max_key_s=30, ptt=SimpleNamespace(settle_s=.04))
+    lane.station = SimpleNamespace(arbiter=None, rig=SimpleNamespace(tune=calls.append),
+                                   cfg=SimpleNamespace(rig=rig))
     lane.stop()
     assert calls == ["stop", 7101500]
 
@@ -192,9 +203,10 @@ def test_errand_cannot_bypass_due_identification():
     from hfmodem.station.arbiter import ERRAND, Identity, Refused, TxArbiter, TxRequest
     identity = Identity("N0CALL", interval_s=0)
     arb = TxArbiter(None, SimpleNamespace(max_key_s=30), identity=identity)
-    arb._transmit = lambda req: 0
+    arb._transmit = lambda *args: 0
     with pytest.raises(Refused, match="identification is due"):
-        arb.submit(TxRequest(ERRAND, 0, "bateleur", np.zeros(1), 8000))
+        arb.submit(TxRequest(ERRAND, 0, "bateleur", np.zeros(1), 8000,
+                             emission=centred(7_100_000, 500)))
 
 
 def test_other_errand_does_not_reset_identity_timer():
@@ -202,7 +214,8 @@ def test_other_errand_does_not_reset_identity_timer():
     from hfmodem.station.arbiter import ERRAND, Identity, TxArbiter, TxRequest
     identity = Identity("N0CALL")
     before = identity._last
-    rig = SimpleNamespace(max_key_s=30, key=lambda *a, **kw: 1, unkey=lambda t: None, retired=False)
+    rig = SimpleNamespace(max_key_s=30, key=lambda *a, **kw: 1, unkey=lambda t: None, retired=False,
+                          line_state="low")
     arb = TxArbiter(ReplayAudio(np.zeros(48000)), rig, identity=identity)
     arb.submit(TxRequest(ERRAND, 0, "bateleur", np.zeros(100), 8000,
                          emission=centred(7_100_000, 500)))

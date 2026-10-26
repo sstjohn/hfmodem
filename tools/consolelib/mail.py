@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """THE MESSAGE AN ARM CARRIES OUT, and the one claim a mailbox can check.
 
 VARA transmit arms default to a delivery test; `--send delivery` selects the

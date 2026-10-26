@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # 06 — Speed level & gear-shift logic
 
 VARA adapts its throughput by stepping a **speed level** up and down. This
@@ -316,7 +318,7 @@ the index family's 1–4 and, at BW500, the base tone level. The step codes are 
 same (0, 6, 4, 5 and the NAK), a BW500 sender doubles after six singles at level 4
 as the high speed capable top does, and the level that closes a delivery drops a record
 ([`05 §5.4`](05-arq-session-state-machine.md)). Recovery from NAKs at levels 1–4 is
-[`29`](29-low-level-data-nacks.md); the link-setup's level negotiation is
+[`29`](../../implementation/vara/29-low-level-data-nacks.md); the link-setup's level negotiation is
 [`30`](30-connect-speed-negotiation.md).
 
 ## 6.5 Limits of this description

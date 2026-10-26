@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """One logbook, and it is a reader.
 
 There is no logbook file and there should not be one. Every arm writes
@@ -16,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import modes, roster, station
+from . import modes, operator, roster, station
 
 
 def records(mode):
@@ -30,6 +32,14 @@ def records(mode):
     from hfmodem.core.capture_identity import metadata_record
     read = (mode.records(mode) if mode.records else
             [metadata_record(path) for path in mode.arms.glob('*/provenance.json')])
+    # Attended applications write ordinary arms too. A mode's roster/launcher
+    # directory is not an exhaustive list of its contact producers.
+    for path in (operator.data_root() / 'working').glob('*/arms/*/provenance.json'):
+        if path.parent.parent.resolve() == mode.arms.resolve():
+            continue
+        record = metadata_record(path)
+        if (record.get('protocol') or record['arm'].split('-', 1)[0]) == mode.name:
+            read.append(record)
     return sorted(read, key=lambda record: record['started_utc'], reverse=True)
 
 

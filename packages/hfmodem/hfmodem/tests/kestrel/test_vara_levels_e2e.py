@@ -210,13 +210,13 @@ def test_high_speed_capable_stations_climb_into_ofdm_both_ways_and_recover_a_nak
     assert "rx link-setup — caller is W9SSJ (high speed capable, ask 6)" in callee.io.msgs
     assert "the caller's confirm starts our first over at level 6" in callee.io.msgs
 
-    # 10 was a jump from 6, so both ends fall back to 6
-    assert "rx KB8AY's over at level 10: 0 of 1 frame(s) clean — NAK, its retry " \
-        "due at level 6" in caller.io.msgs
+    # stock's 2300 ladder resends a heard-but-unread level 10 at 7
+    assert "rx expected DATA at level 10 failed (expected peer KB8AY; identity unverified): " \
+        "NAK, retry due at level 7" in caller.io.msgs
     nak = next(m for m in callee.io.msgs if "NAK; retaining over #2" in m)
-    assert nak.endswith(f"retrying at record {phy.level_key(BW, 6)}")
-    assert _keyed_levels(callee) == [6, 10, 6, 10, 14, 13]
-    assert _read_at(caller) == [6, 6, 10, 14, 13]
+    assert nak.endswith(f"retrying at record {phy.level_key(BW, 7)}")
+    assert _keyed_levels(callee) == [6, 10, 7, 11, 14, 13]
+    assert _read_at(caller) == [6, 7, 11, 14, 13]
 
     assert _keyed_levels(caller) == link.read_levels == [4, 6, 10, 14, 15]
 

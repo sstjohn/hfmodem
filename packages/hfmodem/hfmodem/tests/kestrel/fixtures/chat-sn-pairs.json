@@ -1,0 +1,309 @@
+{
+  "measurement": "PTT ON through PTT OFF + 0.1 s; 48 kHz float WAV; decode_burst at transcript BW500 RX level; raw metric before host mapping",
+  "roots": {
+    "item": "working/vara/oracle/chat-p0",
+    "gate": "working/varac-p2/gates"
+  },
+  "pairs": [
+    {
+      "source": "item2/20261018-142208-chat.jsonl",
+      "t": 779.67351,
+      "bw": 500,
+      "level": 5,
+      "stock": 25.2,
+      "raw": 34.630100860698526,
+      "decoded_level": 5,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140347-chat.jsonl",
+      "t": 28.983436,
+      "bw": 500,
+      "level": 8,
+      "stock": 29.8,
+      "raw": 61.83124128750465,
+      "decoded_level": 8,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140347-chat.jsonl",
+      "t": 33.458698,
+      "bw": 500,
+      "level": 12,
+      "stock": 26.9,
+      "raw": 54.811403359880856,
+      "decoded_level": 12,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140347-chat.jsonl",
+      "t": 37.760373,
+      "bw": 500,
+      "level": 11,
+      "stock": 27.9,
+      "raw": 63.01,
+      "decoded_level": 11,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140347-chat.jsonl",
+      "t": 42.056831,
+      "bw": 500,
+      "level": 10,
+      "stock": 28.1,
+      "raw": 63.01,
+      "decoded_level": 10,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140347-chat.jsonl",
+      "t": 75.907597,
+      "bw": 500,
+      "level": 10,
+      "stock": 29.4,
+      "raw": 63.01,
+      "decoded_level": 10,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "t": 28.936684,
+      "bw": 500,
+      "level": 8,
+      "stock": 30.6,
+      "raw": 63.01,
+      "decoded_level": 8,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "t": 33.39015,
+      "bw": 500,
+      "level": 12,
+      "stock": 28.7,
+      "raw": 58.20656085911236,
+      "decoded_level": 12,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "t": 37.830678,
+      "bw": 500,
+      "level": 13,
+      "stock": 26.0,
+      "raw": 59.54667484852187,
+      "decoded_level": 13,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "t": 42.280555,
+      "bw": 500,
+      "level": 13,
+      "stock": 27.6,
+      "raw": 59.45220593986236,
+      "decoded_level": 13,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "t": 46.72915,
+      "bw": 500,
+      "level": 13,
+      "stock": 28.5,
+      "raw": 58.455993864149264,
+      "decoded_level": 13,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "t": 51.169453,
+      "bw": 500,
+      "level": 13,
+      "stock": 29.4,
+      "raw": 58.88777498836782,
+      "decoded_level": 13,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "t": 55.607631,
+      "bw": 500,
+      "level": 12,
+      "stock": 26.5,
+      "raw": 58.34502216938759,
+      "decoded_level": 12,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "t": 59.87589,
+      "bw": 500,
+      "level": 11,
+      "stock": 29.1,
+      "raw": 63.01,
+      "decoded_level": 11,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140546-chat.jsonl",
+      "t": 79.186257,
+      "bw": 500,
+      "level": 11,
+      "stock": 27.0,
+      "raw": 61.88351166995693,
+      "decoded_level": 11,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140750-chat.jsonl",
+      "t": 32.283674,
+      "bw": 500,
+      "level": 8,
+      "stock": 30.4,
+      "raw": 63.01,
+      "decoded_level": 8,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140750-chat.jsonl",
+      "t": 36.71696,
+      "bw": 500,
+      "level": 12,
+      "stock": 28.8,
+      "raw": 58.20656085911236,
+      "decoded_level": 12,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140750-chat.jsonl",
+      "t": 41.157727,
+      "bw": 500,
+      "level": 13,
+      "stock": 27.9,
+      "raw": 55.63090369217275,
+      "decoded_level": 13,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140750-chat.jsonl",
+      "t": 45.59585,
+      "bw": 500,
+      "level": 12,
+      "stock": 31.4,
+      "raw": 56.78576519403024,
+      "decoded_level": 12,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140750-chat.jsonl",
+      "t": 50.028005,
+      "bw": 500,
+      "level": 12,
+      "stock": 27.7,
+      "raw": 55.8526259019503,
+      "decoded_level": 12,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140856-chat.jsonl",
+      "t": 28.941796,
+      "bw": 500,
+      "level": 8,
+      "stock": 30.7,
+      "raw": 63.01,
+      "decoded_level": 8,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140856-chat.jsonl",
+      "t": 33.375614,
+      "bw": 500,
+      "level": 12,
+      "stock": 28.7,
+      "raw": 58.20656085911236,
+      "decoded_level": 12,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140856-chat.jsonl",
+      "t": 37.831298,
+      "bw": 500,
+      "level": 13,
+      "stock": 28.2,
+      "raw": 55.62833357349082,
+      "decoded_level": 13,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140856-chat.jsonl",
+      "t": 42.282225,
+      "bw": 500,
+      "level": 12,
+      "stock": 31.3,
+      "raw": 56.78576519404412,
+      "decoded_level": 12,
+      "frames": 1
+    },
+    {
+      "source": "item5/20261018-140856-chat.jsonl",
+      "t": 46.711018,
+      "bw": 500,
+      "level": 12,
+      "stock": 27.7,
+      "raw": 55.852625901950425,
+      "decoded_level": 12,
+      "frames": 1
+    },
+    {
+      "source": "item7/20261018-140023-chat.jsonl",
+      "t": 39.857496,
+      "bw": 500,
+      "level": 5,
+      "stock": 27.1,
+      "raw": 34.64014249170247,
+      "decoded_level": 5,
+      "frames": 1
+    },
+    {
+      "source": "item7/20261018-140129-chat.jsonl",
+      "t": 39.662029,
+      "bw": 500,
+      "level": 6,
+      "stock": 28.1,
+      "raw": 39.6417922656993,
+      "decoded_level": 6,
+      "frames": 1
+    },
+    {
+      "source": "item7/20261018-140233-chat.jsonl",
+      "t": 39.993493,
+      "bw": 500,
+      "level": 6,
+      "stock": 24.6,
+      "raw": 39.39520130347226,
+      "decoded_level": 6,
+      "frames": 1
+    },
+    {
+      "source": "gate1/20261018-162049-chat.jsonl",
+      "t": 147.998129,
+      "bw": 500,
+      "level": 7,
+      "stock": 33.4,
+      "raw": 63.01,
+      "decoded_level": 7,
+      "frames": 1
+    },
+    {
+      "source": "gate1/20261018-162049-chat.jsonl",
+      "t": 893.302285,
+      "bw": 500,
+      "level": 7,
+      "stock": 26.5,
+      "raw": 61.2266090186779,
+      "decoded_level": 7,
+      "frames": 1
+    }
+  ]
+}

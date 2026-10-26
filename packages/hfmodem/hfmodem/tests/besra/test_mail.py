@@ -342,6 +342,22 @@ def _closing(monkeypatch, tmp_path, *flags, played=None, interrupt=False, fail=F
     monkeypatch.setattr(radio, "play_drained", play)
     monkeypatch.setattr(radio, "warm_output", lambda device: None)
     monkeypatch.setattr(run_server, "_radio_modem", lambda args: (modem, link))
+    from hfmodem.core import claim
+    admissions = []
+
+    class Admission:
+        def opened(self):
+            admissions.append("opened")
+
+        def failed(self):
+            admissions.append("failed")
+
+    def inherited(fd, *, launch):
+        assert (fd, launch) == (9, True)
+        admissions.append("inherited")
+        return Admission()
+
+    monkeypatch.setattr(claim, "inherited", inherited)
     if cleanup == "report":
         def failed_report():
             raise RuntimeError("host report failed")
@@ -349,7 +365,10 @@ def _closing(monkeypatch, tmp_path, *flags, played=None, interrupt=False, fail=F
     monkeypatch.setattr(sys, "argv", ["besra", "--radio", "ft891", "--transmit",
         "--call", "K7ABC", "--mycall", "W9SSJ", "--mail-fetch",
         "--mail-out", str(tmp_path), *flags])
-    run_server.main()
+    try:
+        run_server.main()
+    finally:
+        assert admissions == ["inherited", "opened", "failed"]
     return events
 
 

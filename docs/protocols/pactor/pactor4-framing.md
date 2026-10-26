@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # PACTOR-4 packet framing
 
 The net packet is the source-coded data field, one status byte, then little-endian
@@ -166,7 +168,8 @@ different station: four short packets on the same raster at
 0.257/1.507/2.757/4.007 s, 757-759 ms, spending 0.905-0.912 of their energy on
 the published spreading sequence, and unchanged across four analysis windows.
 Seven packets in all, and they are the whole population everything below rests
-on. Their dibits are in `tests/shrike/fixtures/p4-robust/`.
+on. Their dibits are in `tests/shrike/fixtures/sigidwiki/p4-robust/` and
+`tests/shrike/fixtures/p4-robust-taunus/`.
 
 The carrier is the branch, not a residual. A differential quaternary alphabet
 leaves a tone at four times the offset, and it repeats every 28.125 Hz; each

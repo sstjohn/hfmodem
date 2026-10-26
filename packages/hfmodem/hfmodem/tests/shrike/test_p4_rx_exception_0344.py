@@ -73,7 +73,7 @@ def test_reply_carrier_rejects_nonfinite_nonempty_search(value):
 
 
 def run_reporting(read_partial, cleanup, tx, **scope):
-    tree = ast.parse(inspect.getsource(inspect.unwrap(onair.run)))
+    tree = ast.parse(inspect.getsource(onair._drive_session))
     run = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
     outer = next(node for node in run.body if isinstance(node, ast.Try)
                  and any(isinstance(handler.type, ast.Name)

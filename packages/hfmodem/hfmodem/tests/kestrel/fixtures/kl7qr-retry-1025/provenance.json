@@ -1,0 +1,8 @@
+{
+  "source": "operator-data/working/vara-chat/sessions/20261025T215622291998Z/receive.wav",
+  "start_sample": 35620864,
+  "end_sample": 35939328,
+  "sample_rate": 48000,
+  "sha256": "9206042c103036967f0c0c83ab9bb1a3b52ffeaedadc43b2100f9eb6d142f9da",
+  "description": "CRC-clean L3 rejected after NAK history inferred L1; tx81 to subsequent idle."
+}

@@ -54,7 +54,7 @@ def test_unmeasured_feedback_does_not_repacketize(state):
 
 
 @pytest.mark.parametrize('bw',['2300','2750'])
-def test_short_remainder_holds_lower_record_then_next_delivery_reenters_base(bw):
+def test_short_remainder_holds_lower_record_then_next_delivery_reenters_base(bw, monkeypatch):
     hs,io,data=pending(bw,94)
     hs.send(b'next host write')
     hs._took_responder_nak()
@@ -70,7 +70,24 @@ def test_short_remainder_holds_lower_record_then_next_delivery_reenters_base(bw)
     assert phy.over_is_last(body,hs.caller)
     delivered.extend(phy.vara_payload(body,caller=hs.caller,body_len=len(body)))
     assert bytes(delivered)==data
+    now = [100.0]
+    monkeypatch.setattr(VA.time, "monotonic", lambda: now[0])
+    kinds = []
+    io.tx_metadata = lambda **metadata: kinds.append(metadata["packet_kind"])
     hs._took_control_burst()
+    assert kinds == ["session-turn-release"]
+    assert hs._tx_pending is None and hs.turn == VA._TURN_PEER
+    assert hs._txq == [b'next host write'] and hs._ask_owed
+    now[0] += .294
+    hs.idle_keepalive()
+    assert kinds == ["session-turn-release"]
+    now[0] += .002
+    hs.idle_keepalive()
+    assert kinds == ["session-turn-release", "session-turn-request"]
+    assert hs._tx_pending is None and hs.turn == VA._TURN_ASKED
+    assert not hs._ask_owed
+    hs._turn_granted((), said="session-drained-responder")
+    assert kinds[-1] == "data"
     assert hs._tx_pending[2]==phy.base_level(bw)
     assert unconfirmed(hs)==b'next host write'
 

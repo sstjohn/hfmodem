@@ -61,6 +61,12 @@ requires_source_tree = pytest.mark.skipif(
 # rather than the marker itself.
 _SELF = "packages/hfmodem/hfmodem/tests/kestrel/test_static.py"
 _NEVER_CROSSES = {
+    # Private measurement tools, denied by the release manifest.
+    'tools/compatibility/prepare_vara_bench.py',
+    'tools/compatibility/probe_vara_commands.py',
+    'tools/compatibility/probe_vara_pair.py',
+    'tools/p4_ledger.py',
+    'tools/tests/test_vara_probe_startup.py',
     "packages/hfmodem/hfmodem/kestrel/CLEAN" "ROOM-AND-LICENSE.md",
     "packages/hfmodem/hfmodem/kestrel/rx/PRO" "VENANCE.md",
 }
@@ -92,6 +98,22 @@ def _scanned() -> list[Path]:
                 continue
             out.append(f)
     return sorted(set(out))
+
+
+@pytest.mark.skipif(not (_ROOT / "publish" / "manifest.toml").is_file(),
+                    reason="publication manifest belongs to development source trees")
+def test_ratchet_exclusions_never_ship():
+    """A private-file exemption must stop applying before that file can ship."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("ratchet_publish_build",
+                                                  _ROOT / "publish" / "build.py")
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    manifest = build.load()
+    selected = {p.relative_to(_ROOT).as_posix() for p in build.expand(manifest)}
+    assert not selected & _NEVER_CROSSES
+    assert set(build.denied(manifest, [_ROOT / name for name in _NEVER_CROSSES])) == _NEVER_CROSSES
 
 
 # One letter of each term is bracketed, so the pattern text is not itself an

@@ -7,6 +7,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from hfmodem.tests.core.test_host_teardown import loopback_bind as loopback_bind
+
 from hfmodem.core import config
 from hfmodem.core.audio import ReplayAudio
 from hfmodem.core.occupied import keyed_hz
@@ -47,7 +49,7 @@ def station():
     fake.ptt_line = ptt
     rig = Rig(model="ft891", cat=Cat("127.0.0.1", fake.port), ptt=ptt,
               profile=BENCH, control=Control.LOCAL, mycall="N0CALL", transmit=True)
-    rig.cat.open(); rig._armed = True; rig._dial_hz = fake.freq
+    rig.arm(prove_ptt=False)
     audio = ReplayAudio(np.zeros(48000 * 4, np.int16))
     arb = TxArbiter(audio, rig, identity=Identity("N0CALL", interval_s=600.0))
     cfg = config.load(_repo() / "examples" / "station.toml")
@@ -66,6 +68,22 @@ def _ephemeral(raw: dict) -> dict:
     for p in raw["protocols"].values():
         p.update({k: 0 for k in ("cmd_port", "data_port", "port") if k in p})
     return raw
+
+
+def _stage0():
+    import tomllib
+    raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
+    for name, protocol in raw["protocols"].items():
+        protocol["enabled"] = name in {"bateleur", "ale", "selcall"}
+    raw["protocols"]["ale"]["directory"] = []
+    return raw
+
+
+def _host_station():
+    from types import SimpleNamespace as NS
+    return NS(enabled=['bateleur', 'ale', 'selcall', 'pactor'], arbiter=None,
+              lanes={name: NS(modem=NS(ctl=NS(cfg=NS(channels=['A'])), abort=lambda: None))
+                     for name in ('bateleur', 'ale', 'selcall')})
 
 
 def test_a_protocol_receives_through_its_lane(station):
@@ -93,6 +111,27 @@ def test_a_refusal_is_reported_rather_than_raised(station):
     link = _Toy(station)
     assert link.transmit(np.zeros(4800, np.float32), why="test") is None
     assert link.sent == 0 and link.refusals
+
+
+def test_ptt_notifications_follow_the_actual_arbiter_key(station):
+    link = _Toy(station)
+    events = []
+    def observe(on):
+        events.append((on, station.rig.keyed))
+    assert link.transmit(np.zeros(4800, np.float32), on_ptt=observe) is not None
+    assert events == [(True, True), (False, False)]
+    events.clear()
+    station.rig.transmit = False
+    assert link.transmit(np.zeros(4800, np.float32), on_ptt=observe) is None
+    assert not events
+
+
+def test_host_notification_failure_cannot_leave_the_station_keyed(station):
+    link = _Toy(station)
+    def broken(on):
+        raise RuntimeError('host notification unavailable')
+    assert link.transmit(np.zeros(4800, np.float32), on_ptt=broken) is not None
+    assert not station.rig.keyed
 
 
 def test_every_burst_describes_itself(station):
@@ -146,13 +185,13 @@ def test_the_station_builds_a_lane_per_enabled_protocol():
     This is the thing the merge was for, and it runs on a recording."""
     import numpy as np
     from hfmodem.station.process import Station
-    cfg = config.load(_repo() / "examples" / "station.toml")
+    cfg = config.parse(_stage0())
     tone = (np.sin(2 * np.pi * 1500 * np.arange(48000) / 48000) * 6000).astype(np.int16)
     st = Station(cfg, replay=tone)
     st.open_audio()
     lanes = st.build_lanes()
     try:
-        assert set(lanes) == {"pactor", "vara", "sabir"}, sorted(lanes)
+        assert set(lanes) == {"bateleur", "ale", "selcall"}, sorted(lanes)
         while st.audio.pump(128):
             pass
         # every lane saw the same capture
@@ -161,19 +200,37 @@ def test_the_station_builds_a_lane_per_enabled_protocol():
         st.shutdown()
 
 
-def test_a_lane_that_cannot_be_built_does_not_stop_the_station():
-    """besra's adapter needs its modem. A station without one runs the others
-    rather than refusing to start — containment, not all-or-nothing."""
+def test_station_builds_ardop_with_its_own_passive_modem():
+    """ARDOP now shares the station audio instead of requiring another backend."""
     import numpy as np
     from hfmodem.station.process import Station
-    import tomllib
-    raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
+    raw = _stage0()
     raw["protocols"]["ardop"]["enabled"] = True
     st = Station(config.parse(raw), replay=np.zeros(4800, np.int16))
     st.open_audio()
     try:
         lanes = st.build_lanes()
-        assert "ardop" not in lanes and len(lanes) == 3
+        assert "ardop" in lanes and len(lanes) == 4
+        assert lanes['ardop'].modem.core.audio_out == lanes['ardop']._output
+        assert not lanes['ardop'].modem.core._running
+    finally:
+        st.shutdown()
+
+
+def test_read_only_compatibility_lanes_do_not_require_a_ptc_transmitter():
+    from hfmodem.station.process import Station
+    raw = _stage0()
+    for name in ('pactor', 'vara', 'ardop'):
+        raw['protocols'][name]['enabled'] = True
+    st = Station(config.parse(raw), replay=np.zeros(4800, np.int16))
+    st.open_audio()
+    try:
+        lanes = st.build_lanes()
+        assert {'pactor', 'vara', 'ardop'} <= lanes.keys()
+        assert lanes['pactor'].runtime is None
+        with pytest.raises(ValueError, match='native PACTOR owner'):
+            from hfmodem.station import hosts
+            hosts._build_one('pactor', st.cfg.protocols['pactor'], st)
     finally:
         st.shutdown()
 
@@ -184,17 +241,16 @@ def test_the_station_serves_each_dialect_on_its_own_port():
     they run, so a station with four enabled is indistinguishable from four
     stations, from the application's side."""
     import socket
-    import tomllib
     from hfmodem.station import hosts
     from hfmodem.station.process import Station
-    raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
+    raw = _stage0()
     raw["protocols"]["ardop"]["enabled"] = True
     st = Station(config.parse(_ephemeral(raw)), replay=np.zeros(4800, np.int16))
     st.open_audio()
     st.build_lanes()
     served = hosts.build(st.cfg, station=st, log=lambda *_: None)
     try:
-        assert {"vara", "ardop", "sabir"} <= set(served), sorted(served)
+        assert {"bateleur", "ale", "selcall", "ardop"} == set(served), sorted(served)
         ports = [port for sv in served.values() for port in sv.ports]
         assert len(set(ports)) == len(ports), ports
         for name, sv in served.items():
@@ -211,32 +267,27 @@ def test_the_station_serves_each_dialect_on_its_own_port():
 
 def test_a_dialect_that_will_not_start_does_not_stop_the_others():
     """The containment property four separate processes gave for free."""
-    import tomllib
     from hfmodem.station import hosts
-    raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
-    # pactor's dialect is a pty and the station does not own it yet
-    served = hosts.build(config.parse(_ephemeral(raw)), log=lambda *_: None)
+    raw = _stage0()
+    raw["protocols"]["pactor"]["enabled"] = True
+    served = hosts.build(config.parse(_ephemeral(raw)), station=_host_station(), log=lambda *_: None)
     try:
-        assert "pactor" not in served and "vara" in served
+        assert "pactor" not in served and "ale" in served
     finally:
         hosts.stop_all(served)
 
 
 def test_a_lane_that_could_not_bind_does_not_read_as_serving():
-    """ardop is the lane that used to bind on a thread of its own, so a port
-    already taken never reached `build` — it escaped as a warning and `served`
-    went on claiming a dialect nothing was listening on."""
-    import tomllib
+    """A bind failure must not leave a dialect reported as serving."""
     from hfmodem.station import hosts
-    raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
-    raw["protocols"]["ardop"]["enabled"] = True
-    holding = hosts.build(config.parse(_ephemeral(raw)), log=lambda *_: None)
+    raw = _stage0()
+    holding = hosts.build(config.parse(_ephemeral(raw)), station=_host_station(), log=lambda *_: None)
     try:
-        cmd, data = holding["ardop"].ports
-        raw["protocols"]["ardop"].update(cmd_port=cmd, data_port=data)
-        second = hosts.build(config.parse(raw), log=lambda *_: None)
+        (port,) = holding["ale"].ports
+        raw["protocols"]["ale"].update(port=port)
+        second = hosts.build(config.parse(raw), station=_host_station(), log=lambda *_: None)
         try:
-            assert "ardop" not in second, sorted(second)
+            assert "ale" not in second, sorted(second)
         finally:
             hosts.stop_all(second)
     finally:
@@ -254,17 +305,16 @@ def test_a_lane_that_cannot_key_says_so_on_the_line_it_comes_up_on():
     place it can be said is the line the lane comes up on. `Served.keys` is the
     fact and the line is its report; wiring a real modem in has to move both.
     """
-    import tomllib
     from hfmodem.station import hosts
-    raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
-    raw["protocols"]["ardop"]["enabled"] = True
+    raw = _stage0()
+    raw["protocols"]["pactor"]["enabled"] = True
     lines: list[str] = []
-    served = hosts.build(config.parse(_ephemeral(raw)), log=lines.append)
+    served = hosts.build(config.parse(_ephemeral(raw)), station=_host_station(), log=lines.append)
     try:
         for name, sv in served.items():
             line = next(ln for ln in lines if ln.startswith(f"{name}: "))
             assert sv.keys is ("NO RADIO" not in line), line
-        for name in ("vara", "ardop"):
+        for name in ("bateleur", "ale", "selcall"):
             assert not served[name].keys, f"{name} claims a transmitter"
     finally:
         hosts.stop_all(served)
@@ -274,15 +324,15 @@ def test_a_dialect_with_no_server_is_named_rather_than_skipped():
     """The `pactor` branch returned None into a bare `continue`: no log line, no
     warning, and a station whose SCS port simply was not there. Absent is a
     result, and one an operator waiting for a client to attach has to be told."""
-    import tomllib
     from hfmodem.station import hosts
-    raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
+    raw = _stage0()
+    raw["protocols"]["pactor"]["enabled"] = True
     lines: list[str] = []
-    served = hosts.build(config.parse(_ephemeral(raw)), log=lines.append)
+    served = hosts.build(config.parse(_ephemeral(raw)), station=_host_station(), log=lines.append)
     try:
         assert "pactor" not in served
         said = [ln for ln in lines if ln.startswith("pactor:")]
-        assert said and "pty" in said[0], lines
+        assert said and "native PACTOR owner" in said[0], lines
     finally:
         hosts.stop_all(served)
 
@@ -309,23 +359,25 @@ def test_sabir_mounts_a_real_endpoint_on_the_station_air():
     binding it here means supplying that same `clock`/`post`/`register` port over
     a real radio, and the proof is that the endpoint registers on it.
     """
-    import tomllib
     from hfmodem.station import hosts
     from hfmodem.station.process import Station
-    raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
+    raw = _stage0()
     raw["protocols"] = {"sabir": dict(raw["protocols"]["sabir"], port=0)}
     st = Station(config.parse(raw), replay=np.zeros(4800, np.int16))
     st.open_audio()
-    st.build_lanes()
+    from hfmodem.station.link import SabirLink
+    link = st.lanes["sabir"] = SabirLink(st)
+    st.audio.subscribe(link.lane)
+    link.start()
     try:
         air = st.lanes["sabir"].air
-        served = hosts.build(st.cfg, station=st, log=lambda *_: None)
+        served = {"sabir": hosts._build_one("sabir", st.cfg.protocols["sabir"], st)}
         try:
             modem = served["sabir"].server._factory()
             assert air._end is modem, "the endpoint did not register on the air"
             assert modem.air is air
         finally:
-            hosts.stop_all(served)
+            served["sabir"].server.stop()
     finally:
         st.lanes["sabir"].stop()
         st.audio.close()
@@ -334,15 +386,15 @@ def test_sabir_mounts_a_real_endpoint_on_the_station_air():
 def test_sabir_without_a_station_says_what_is_missing():
     """The factory runs inside a server thread, where a TypeError about a
     positional argument is indistinguishable from the connection simply failing."""
-    import tomllib
     from hfmodem.station import hosts
-    raw = tomllib.loads((_repo() / "examples" / "station.toml").read_text())
-    served = hosts.build(config.parse(_ephemeral(raw)), log=lambda *_: None)
+    raw = _stage0()
+    cfg = config.parse(_ephemeral(raw))
+    served = {"sabir": hosts._build_one("sabir", cfg.protocols["sabir"])}
     try:
         with pytest.raises(RuntimeError, match="needs a station"):
             served["sabir"].server._factory()
     finally:
-        hosts.stop_all(served)
+        served["sabir"].server.stop()
 
 
 def test_a_replay_delivers_what_a_card_delivers():

@@ -962,6 +962,21 @@ def rigctld_dial(admit=lambda: True, *, port=4532):
 
 
 def main(argv=None) -> int:
+    from hfmodem.core.claim import ClaimError, inherited
+
+    args = parser().parse_args(argv)
+    try:
+        admission = inherited(9, launch=True)
+    except ClaimError as exc:
+        print(f'CLAIM NOT ADMITTED: {exc}', flush=True)
+        return 2
+    try:
+        return _run(args, admission)
+    finally:
+        admission.failed()
+
+
+def _run(args, admission) -> int:
     from hfmodem.core import config, levels, rigs
     from hfmodem.core.audio import StationAudio
     from hfmodem.core.devices import find_device
@@ -969,7 +984,6 @@ def main(argv=None) -> int:
     from hfmodem.lanner import terminal
     from hfmodem.station.qsolog import QsoLog
 
-    args = parser().parse_args(argv)
     rate = rtty.Rate.parse(args.rate)
     path = os.environ.get(config.STATION_ENV)
     cfg = config.load(path, rig_name=args.rig) if path and Path(path).is_file() else None
@@ -1048,6 +1062,7 @@ def main(argv=None) -> int:
     try:
         keyer.arm()
         audio.open()
+        admission.opened()
         session = Session(audio, keyer, QsoLog(args.adif, mycall, grid=grid, contest=args.contest),
                           rate=rate, centre_hz=args.centre, dial_hz=args.dial, drive=drive,
                           settle_s=profile['settle'], tr_switch_s=profile['tr_switch_s'],

@@ -194,20 +194,26 @@ def test_plain_hostmode() -> None:
 
 
 def test_parameter_read_back() -> None:
-    """A command with no argument answers code 1 with the value [WA8DED guide]."""
+    """Implemented parameters read back; packet-only controls cannot invent effects."""
     host, m = open_hostmode()
+    before = dict(host.settings)
     for verb, value in (("Y", "5"), ("N", "12"), ("K", "1")):
-        check(f"{verb} {value} accepted",
-              m.cmd(PACTOR_CH, f"{verb} {value}").code == hostmode.OK)
+        check(f"unimplemented packet parameter {verb} {value} refuses",
+              m.cmd(PACTOR_CH, f"{verb} {value}").code == hostmode.FAIL)
         resp = m.cmd(PACTOR_CH, verb)
-        check(f"{verb} reads back", (resp.code, resp.data) == (hostmode.MSG,
-                                                              value.encode()), str(resp))
-    check("an unset parameter reads back 0",
-          m.cmd(PACTOR_CH, "U").data == b"0")
+        check(f"{verb} cannot report an invented effective value", resp.code == hostmode.FAIL, str(resp))
+    check("an unsupported unset parameter refuses",
+          m.cmd(PACTOR_CH, "U").code == hostmode.FAIL)
+    check("refused parameters do not mutate settings", host.settings == before)
+    check("M N disables the absent packet monitor", m.cmd(PACTOR_CH, 'M N').code == hostmode.OK)
+    check("M reads the effective disabled profile", m.cmd(PACTOR_CH, 'M').data == b'N')
+    check("enabling packet monitor refuses", m.cmd(PACTOR_CH, 'M I').code == hostmode.FAIL)
     check("%M reads back", m.cmd(PACTOR_CH, "%M").data == b"0")
-    resp = m.cmd(PACTOR_CH, "%M1")
+    check("%M1 delayed echo enabled [§10.4.32]",
+          m.cmd(PACTOR_CH, "%M1").code == hostmode.OK)
+    resp = m.cmd(PACTOR_CH, "%M2")
     check("%M above the supported level is refused with the maximum [§10.4.32]",
-          (resp.code, resp.data) == (hostmode.FAIL, b"0"), str(resp))
+          (resp.code, resp.data) == (hostmode.FAIL, b"1"), str(resp))
 
 
 def test_l_takes_a_channel_argument() -> None:
@@ -365,6 +371,7 @@ def test_percent_t_and_per_channel_callsign() -> None:
     m.cmd(PACTOR_CH, "DD")
     check("...and is reset when the connection ends",
           m.cmd(PACTOR_CH, "%T").data == b"0", m.cmd(PACTOR_CH, "%T").data.decode())
+    m.drain()  # retire the previous contact's host output before a new call
 
     check("I<call> with no space is the callsign, not a parameter [BPQ32]",
           m.cmd(PACTOR_CH, "IW1ABC").code == hostmode.OK)

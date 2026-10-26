@@ -16,7 +16,7 @@ SILENCE = 4800
 
 @pytest.fixture(scope='module')
 def recordings():
-    path = Path(__file__).parent / 'fixtures/p4-short/audio.npz'
+    path = Path(__file__).parent / 'fixtures/sigidwiki/p4-short/audio.npz'
     if not path.exists():
         # The release manifest ships no npz, so the drop has no recordings.
         pytest.skip(f'{path.name} is not in this tree')

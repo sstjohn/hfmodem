@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The rig as a monitor source: its receive audio, its filter, and its dial.
 
 Receive-only. The dial and mode come from one read-only CAT read. The one write

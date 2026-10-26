@@ -123,3 +123,39 @@ def test_invalid_permutations_rejected(order):
 def test_invalid_iterations_rejected(iterations):
     with pytest.raises(ValueError):
         p4decode.turbo_decode([1, 2], [1, 2], [1, 2], [0, 1], iterations)
+
+
+def test_flat_recurrence_mapping_and_workspace_aliases():
+    expected = np.empty((2, 8, 2), dtype=int)
+    for state in range(8):
+        a, b, c = (state >> 2) & 1, (state >> 1) & 1, state & 1
+        for branch in range(2):
+            expected[0, state, branch] = (b << 2) | (c << 1) | branch
+            expected[1, state, branch] = 8 + (((branch ^ b ^ c) << 2) | (a << 1) | b)
+    np.testing.assert_array_equal(p4decode._FLAT_NEIGHBORS, expected)
+    assert expected.min() == 0 and expected.max() == 15
+    metrics = np.empty((4, 2, 8))
+    flat_metrics = metrics.reshape(4, 16)
+    workspace = np.empty((2, 8, 2), dtype=np.float64)
+    branch0, branch1 = workspace[:, :, 0], workspace[:, :, 1]
+    edges = np.arange(96, dtype=float).reshape(3, 2, 8, 2) / -17
+    metrics[0] = np.arange(16).reshape(2, 8) / -13
+    reference = metrics[0].copy()
+    assert np.shares_memory(metrics, flat_metrics)
+    assert not np.shares_memory(workspace, metrics)
+    assert not np.shares_memory(workspace, edges)
+    assert np.shares_memory(branch0, workspace) and np.shares_memory(branch1, workspace)
+    assert not np.shares_memory(branch0, branch1)
+    for t in range(3):
+        assert not np.shares_memory(metrics[t], metrics[t + 1])
+        original = reference[p4decode._DIRECTIONS, p4decode._NEIGHBORS] + edges[t]
+        reference = np.logaddexp(original[:, :, 0], original[:, :, 1])
+        reference -= np.logaddexp.reduce(reference, axis=1)[:, None]
+        flat_metrics[t].take(p4decode._FLAT_NEIGHBORS, out=workspace, mode='clip')
+        np.add(workspace, edges[t], out=workspace)
+        np.testing.assert_array_equal(branch0, original[:, :, 0])
+        np.testing.assert_array_equal(branch1, original[:, :, 1])
+        row = metrics[t + 1]
+        np.logaddexp(branch0, branch1, out=row)
+        row -= np.logaddexp.reduce(row, axis=1)[:, None]
+        np.testing.assert_array_equal(row, reference)

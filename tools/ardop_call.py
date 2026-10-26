@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Call an ARDOP gateway through besra, driven by hfhost's ARDOP client.
 
 The client was written from the protocol document rather than from besra's

@@ -61,17 +61,10 @@ def parser() -> argparse.ArgumentParser:
                     help="hamlib rigctl to drive (default: on PATH; pass a full path "
                          "for a from-source build)")
     rg.add_argument("--ptt-device", metavar="DEV",
-                    help="serial line whose RTS is the PTT. Without --line-ptt it "
-                         "is the emergency unkey's route only: the hamlib one-shot "
-                         "that unkey falls back on travels the link RF disrupts, "
-                         "and this does not")
+                    help="serial line whose RTS is the PTT")
     rg.add_argument("--line-ptt", action="store_true",
-                    help="key that line directly, holding it for the session, and "
-                         "leave hamlib to set frequency and mode. On this station "
-                         "rigctld stopped answering on the first key-down of a "
-                         "session under RF; a transmit path that has to work while "
-                         "the antenna radiates must not travel that link. Start the "
-                         "daemon with ptt_type=None so nothing else owns the line")
+                    help="required with --radio: key --ptt-device directly and "
+                         "leave hamlib to tune, with daemon ptt_type=None")
     rg.add_argument("--rigctld", metavar="HOST:PORT",
                     help="drive a shared rigctld (netrigctl) instead of opening the CAT "
                          "port directly — the station rule; e.g. localhost:4532")
@@ -188,9 +181,22 @@ def main() -> int:
             refusal := arming_refusal(args.ptt_device)):
         ap.error(refusal)
 
+    if args.radio and (args.serial or args.rigctld) and not args.line_ptt:
+        ap.error("--radio requires --line-ptt: hamlib may tune but may not key")
+
     link = None
     if args.radio:
-        modem, link = _radio_modem(args)
+        from ...core.claim import ClaimError, inherited
+        try:
+            admission = inherited(9, launch=True)
+        except ClaimError as exc:
+            print(f"CLAIM NOT ADMITTED: {exc}", flush=True)
+            return 2
+        try:
+            modem, link = _radio_modem(args)
+            admission.opened()
+        finally:
+            admission.failed()
     elif args.modem == "besra":
         from ..sim.echo import besra_with_echo_peer
         modem = besra_with_echo_peer(args.peer_call, bandwidth=args.bandwidth)
@@ -392,7 +398,8 @@ def _radio_modem(args):
     """A threaded BesraModem bound to a real rig via RadioLink. Tunes the rig if a
     dial/channel is given and starts the receive stream."""
     from ..arq.modem import BesraModem
-    from ...core.rigs import RIGS
+    from ...core.occupied import FILTER_HZ
+    from ...core.rigs import RIGS, mode_passband
     from ..radio import Rig, RadioLink, center_to_dial
 
     import logging
@@ -483,7 +490,7 @@ def _radio_modem(args):
                 f"-- not keying")
         # Mode AFTER frequency: the FT-891 keeps a mode per band, so a band
         # jump can restore whatever the new band was last left in.
-        rig.set_mode(RIGS[args.radio]["mode"])
+        rig.set_mode(RIGS[args.radio]["mode"], mode_passband(RIGS[args.radio], FILTER_HZ))
     wav = recording_path(args.record, dial) if args.record else None
     # Resolved here rather than in `main`, because this is where the transmitter
     # is built and `main` is not its only caller.

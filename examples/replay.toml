@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # A station that cannot transmit, running on a recording.
 #
 # This is the configuration to develop against: no CAT port is opened, no keying

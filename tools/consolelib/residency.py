@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """WHAT THE INTERPRETER LOADED, which is not what the filesystem holds.
 
 A manifest checks files on disk, and a file on disk is not proof of an import.

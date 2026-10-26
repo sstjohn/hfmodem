@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The ARDOP profile: one Winlink exchange over one held link, `onair.sh ardop-mail`.
 
 besra's `run_server` owns the radio and the B2F session together, and `onair.sh`

@@ -871,7 +871,12 @@ def test_the_rig_carries_the_settle_from_the_one_table(monkeypatch):
     for name, spec in RIGS.items():
         # rigctl="/bin/sh": always present, so construction clears the
         # missing-hamlib refusal; nothing here ever spawns it.
-        assert R.Rig.named(name, "/dev/null", rigctl="/bin/sh").settle == spec["settle"]
+        daemon = {} if "baud" in spec else {"rigctld": "127.0.0.1:4532"}
+        rig = R.Rig.named(name, "/dev/null", rigctl="/bin/sh", **daemon)
+        assert rig.settle == spec["settle"]
+        if daemon:
+            with pytest.raises(ValueError, match="through rigctld"):
+                R.Rig.named(name, "/dev/null", rigctl="/bin/sh")
 
 
 def test_tune_atu_warms_the_device_then_waits_the_rig_s_settle(monkeypatch):
@@ -968,67 +973,57 @@ def test_a_retired_rig_reports_the_refusal_it_already_makes(monkeypatch):
     assert rig.ptt(False) is True, "the unkey stays allowed on a retired rig"
 
 
-def _pipe_dead_rig(tmp_path, monkeypatch):
-    """A hamlib-keyed rig whose persistent pipe takes the key-down and is dead
-    by the key-up: `_write` answers True for `T 1` and False for `T 0` — and
-    False is proof the command cannot have gone (`Rig._write`). The one-shot
-    rigctl exits nonzero instantly, the way rigctl reports a dead rigctld, so
-    the ladder — `core.ptt.Keyer.unkey` now, which is also where the drop is
-    intercepted — has to fall through to `drop_rts` and the retire."""
+def _stuck_line_rig(monkeypatch):
     from hfmodem.core import ptt as core_ptt
 
-    exe = tmp_path / "rigctl"
-    exe.write_text("#!/bin/sh\nexit 2\n")
-    exe.chmod(0o755)
+    class StuckLine:
+        def __init__(self, device):
+            self.high = False
+            self.calls = []
+
+        def open(self):
+            pass
+
+        def assert_(self, on):
+            self.calls.append(on)
+            if on:
+                self.high = True
+
+        def sense(self):
+            return self.high
+
+    monkeypatch.setattr(core_ptt, "RtsPtt", StuckLine)
     monkeypatch.setattr(R.atexit, "register", lambda *a, **k: None)
-    rig = R.Rig(1036, "/dev/null", 38400, rigctl=str(exe), ptt_device="/dev/null")
-    monkeypatch.setattr(rig, "_write", lambda *a: list(a) != ["T", "0"])
-    dropped: list[str] = []
-    monkeypatch.setattr(core_ptt, "drop_rts",
-                        lambda dev, log: dropped.append(dev) or False)
-    monkeypatch.setattr(core_ptt, "UNKEY_BUDGET_S", 0.2)   # real seconds, hurried
-    return rig, dropped
+    rig = R.Rig(1036, "/dev/fake-cat", 38400, rigctl="/bin/sh",
+                ptt_device="/dev/fake-ptt", line_ptt=True)
+    return rig, rig._keyer.transport._ptt
 
 
-def test_a_key_up_the_pipe_refused_escalates_to_the_emergency_unkey(
-        monkeypatch, tmp_path, caplog):
-    """`ptt(False)` returning False on the hamlib path is proof `T 0` never
-    left, and CAT PTT latches at the rig — so a frame's `finally` must hand the
-    rig to `unkey`'s ladder (one-shot, `drop_rts`, alarm, retire) rather than
-    cancel the watchdog, clear `muted`, and go back to listening with the
-    transmitter keyed. The verdict was added for the key-down; the one place
-    False means "the transmitter may still be up" must read it too."""
+def test_failed_line_unkey_alarms_and_retires_after_a_burst(monkeypatch, caplog):
     caplog.set_level("ERROR", logger="hfmodem.besra.radio")
     played = _stub_sounddevice(monkeypatch)
-    rig, dropped = _pipe_dead_rig(tmp_path, monkeypatch)
+    rig, line = _stuck_line_rig(monkeypatch)
     link = R.RadioLink(_Sink(), rig=rig, out_device="stub")
 
     link._transmit(M.render_frame(0x4A, payload=b"stuck", session_id=1))
 
-    assert played, "the burst itself went out — the failure is the key-up"
-    assert dropped == ["/dev/null"], (
-        "ptt(False)'s False was discarded: the emergency unkey never ran")
-    assert rig.retired, ("a transmitter nobody has confirmed down is not one "
-                         "this program may key again")
-    assert "MAY BE STUCK" in caplog.text, caplog.text
-    assert link.muted is False, "the receive path still comes back"
+    assert any(a.any() for _, a, _ in played)
+    assert line.calls == [True, False]
+    assert rig.retired
+    assert "MAY BE STUCK" in caplog.text
+    assert link.muted is False
 
 
-def test_tune_atu_escalates_a_key_up_the_pipe_refused(
-        monkeypatch, tmp_path, caplog):
-    """The same shape in `tune_atu`'s `finally`: a bare keyed carrier is the
-    burst this discipline exists for, and its key-up verdict was discarded the
-    same way."""
+def test_failed_line_unkey_alarms_and_retires_after_tuning(monkeypatch, caplog):
     caplog.set_level("ERROR", logger="hfmodem.besra.radio")
     _stub_sounddevice(monkeypatch)
-    rig, dropped = _pipe_dead_rig(tmp_path, monkeypatch)
+    rig, line = _stuck_line_rig(monkeypatch)
 
     R.tune_atu(rig, out_device="stub", seconds=0.02)
 
-    assert dropped == ["/dev/null"], (
-        "ptt(False)'s False was discarded: the emergency unkey never ran")
+    assert line.calls == [True, False]
     assert rig.retired
-    assert "MAY BE STUCK" in caplog.text, caplog.text
+    assert "MAY BE STUCK" in caplog.text
 
 
 def test_transmit_mutes_own_capture(monkeypatch):

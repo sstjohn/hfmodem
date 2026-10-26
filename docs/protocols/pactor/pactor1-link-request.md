@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # PACTOR-1 link-request frame
 
 The link request ("Synchronisationspaket") is the frame a master sends to call a

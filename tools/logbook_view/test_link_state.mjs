@@ -1,6 +1,13 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {linkState,radioMode} from './link_state.mjs';
+import {linkState,radioMode,directionLabel} from './link_state.mjs';
+test('incoming contacts label the called station as local',()=>{
+ const manifest={caller:'K6HN',called:'W9SSJ',local_role:'called'};
+ assert.equal(directionLabel({direction:'tx'},manifest),'Local TX · W9SSJ');
+ assert.equal(directionLabel({direction:'rx'},manifest),'RX · K6HN');
+});
 const call={t0:1,t1:2,kind:'connect->PEER',direction:'tx',status:'logged PTT interval'};
 const answer={t0:3,t1:3.2,kind:'Robust answer 0',direction:'rx',status:'decoded control'};
 const entry={t0:4,t1:4.8,kind:'P3 SL1 data',transmit_label:'SL1 ENTRY',level:1,stage:'P3 differential BPSK',carrier_hz:[1400,1600],direction:'tx',status:'CRC pass',frame_type:'data'};

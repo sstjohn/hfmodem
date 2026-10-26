@@ -33,19 +33,22 @@ class Sender(Seam):
         return n
 
 
-def sender(enabled=True):
+def sender(enabled=True, *, payload=b'\x01/W' + BODY, hostmode=False):
     seam = Sender()
     host = PtcHost(peer=seam, mycall='W9SSJ')
+    if hostmode:
+        host.feed(b'\x1bJHOST4\r')
     host.arq.role, host.arq.dxcall = arq.ISS, 'K0NTS'
     host.arq._enter_connected()
     host.protocol = spec.Protocol.PACTOR3
     host.p3_tx_gear_hold = enabled
     a = host.arq
     a.cfg.long_cycle = False
-    a._inflight = arq._Packet(0,b'\x01/W',1,breakin=True)
+    a.on_host_data(payload)
+    wire = bytes(a._outbuf)
+    a._inflight = arq._Packet(0,wire[:3],1,breakin=True)
     a._next_seq = 1
-    a._outbuf = bytearray(BODY)
-    a._buffer_raw = len(BODY)+3
+    del a._outbuf[:3]
     return host,seam
 
 

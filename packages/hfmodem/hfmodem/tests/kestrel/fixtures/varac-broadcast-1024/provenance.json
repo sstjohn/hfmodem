@@ -1,0 +1,145 @@
+[
+  {
+    "name": "standard-short",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T194601Z/standard-short.wav",
+    "sha256": "ffa0b922c3cba5af267de3fe251fc149bf222d0c918c5d3ab204e0b1e48f610d",
+    "corpus_path": "varac-broadcast-1024/standard-short.wav",
+    "command": 0,
+    "source": "W9SSJ",
+    "destination": "ALL",
+    "info_hex": "5549302054455354",
+    "stock_received_frame": "82989840404060ae72a6a694406103f05549302054455354"
+  },
+  {
+    "name": "tactical-seven",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T194601Z/tactical-seven.wav",
+    "sha256": "5bb1332127cc1cba7c15c9200c0dba49be6ba6574bad60b2a1b652b8d42e904a",
+    "corpus_path": "varac-broadcast-1024/tactical-seven.wav",
+    "command": 1,
+    "source": "X",
+    "destination": "ALL",
+    "info_hex": "544143544943414c",
+    "stock_received_frame": "8298984040404060b04040404040406103f0544143544943414c"
+  },
+  {
+    "name": "varac-long77",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T194601Z/varac-long77.wav",
+    "sha256": "014e75adfc243a9efdc37483eec5f7554ec892f1e09a3587e2b1f0a9ca434f4a",
+    "corpus_path": "varac-broadcast-1024/varac-long77.wav",
+    "command": 1,
+    "source": "W9SSJ",
+    "destination": "ALL",
+    "info_hex": "30313233343536373839204142434445464748494a2030313233343536373839204142434445464748494a2030313233343536373839204142434445464748494a203031323334353637383920",
+    "stock_received_frame": "8298984040404060ae72a6a69440406103f030313233343536373839204142434445464748494a2030313233343536373839204142434445464748494a2030313233343536373839204142434445464748494a203031323334353637383920"
+  },
+  {
+    "name": "varac-short",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T194601Z/varac-short.wav",
+    "sha256": "9a26a56533029bca6532d6557c8e84fae51b3d9af7c775ae002e530bb2a8f07f",
+    "corpus_path": "varac-broadcast-1024/varac-short.wav",
+    "command": 1,
+    "source": "W9SSJ",
+    "destination": "ALL",
+    "info_hex": "5549312054455354",
+    "stock_received_frame": "8298984040404060ae72a6a69440406103f05549312054455354"
+  },
+  {
+    "name": "varac-utf8",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T194601Z/varac-utf8.wav",
+    "sha256": "dd359a5a4c377de39ff120846392a3a42f190ca35c48eff3f4a0b80a1d4252e5",
+    "corpus_path": "varac-broadcast-1024/varac-utf8.wav",
+    "command": 1,
+    "source": "W9SSJ",
+    "destination": "ALL",
+    "info_hex": "436166c3a920e29883",
+    "stock_received_frame": "8298984040404060ae72a6a69440406103f0436166c3a920e29883"
+  },
+  {
+    "name": "seven-alpha",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T195612Z/seven-alpha.wav",
+    "sha256": "fd911795cdb001ef885c4469d0678d7ccefe1a79382e87234e68b47dffdf9826",
+    "corpus_path": "varac-broadcast-1024/seven-alpha.wav",
+    "command": 1,
+    "source": "KC1ABCD",
+    "destination": "ALL",
+    "info_hex": "534556454e",
+    "stock_received_frame": "8298984040404060968662828486886103f0534556454e"
+  },
+  {
+    "name": "source-ssid7",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T195612Z/source-ssid7.wav",
+    "sha256": "cf2066dfcee902f2569bab76de97cf94ce983c15e2bff13287db251a1f5d3bb7",
+    "corpus_path": "varac-broadcast-1024/source-ssid7.wav",
+    "command": 1,
+    "source": "W9SSJ-7",
+    "destination": "ALL",
+    "info_hex": "53534944",
+    "stock_received_frame": "8298984040404060ae72a6a69440406f03f053534944"
+  },
+  {
+    "name": "destination-test",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T195612Z/destination-test.wav",
+    "sha256": "1919b44ce9a815bfb732884a9e07fb68848bde2d5437068ae79d4d57db342b3e",
+    "corpus_path": "varac-broadcast-1024/destination-test.wav",
+    "command": 1,
+    "source": "W9SSJ",
+    "destination": "TEST",
+    "info_hex": "44455354",
+    "stock_received_frame": "a88aa6a840404060ae72a6a69440406103f044455354"
+  },
+  {
+    "name": "utf8-77bytes",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T195612Z/utf8-77bytes.wav",
+    "sha256": "81c09148d03a6259d8240e326cb0d6df27819382ba8a7f87e4ccadac26bc9789",
+    "corpus_path": "varac-broadcast-1024/utf8-77bytes.wav",
+    "command": 1,
+    "source": "W9SSJ",
+    "destination": "ALL",
+    "info_hex": "414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414120436166c3a9",
+    "stock_received_frame": "8298984040404060ae72a6a69440406103f0414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414120436166c3a9"
+  },
+  {
+    "name": "one-A",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T201135Z/one-A.wav",
+    "sha256": "fe337c4f99e4ddf351efa9b4eb91f23a62b5d4cb7a3944e23ecb1ce09d20b41b",
+    "corpus_path": "varac-broadcast-1024/one-A.wav",
+    "command": 1,
+    "source": "W9SSJ",
+    "destination": "ALL",
+    "info_hex": "41",
+    "stock_received_frame": "8298984040404060ae72a6a69440406103f041"
+  },
+  {
+    "name": "two-AA",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T201135Z/two-AA.wav",
+    "sha256": "fc7e811c109bdf9f5dc50e682312046ef74a7a02e94ccd5f3a25ff37ac1bba07",
+    "corpus_path": "varac-broadcast-1024/two-AA.wav",
+    "command": 1,
+    "source": "W9SSJ",
+    "destination": "ALL",
+    "info_hex": "4141",
+    "stock_received_frame": "8298984040404060ae72a6a69440406103f04141"
+  },
+  {
+    "name": "mid25",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T201135Z/mid25.wav",
+    "sha256": "b79159367f8f06bdd6cca1d26d3cabb2dacd82c7a4917d8524b354f2970d2519",
+    "corpus_path": "varac-broadcast-1024/mid25.wav",
+    "command": 1,
+    "source": "W9SSJ",
+    "destination": "ALL",
+    "info_hex": "4142434445464748494a4b4c4d4e4f50515253545556575859",
+    "stock_received_frame": "8298984040404060ae72a6a69440406103f04142434445464748494a4b4c4d4e4f50515253545556575859"
+  },
+  {
+    "name": "mid50",
+    "source_recording": "/Users/saul/src/radio/hfmodem/working/varac-on-air/broadcast-1024/stock-20261024T201135Z/mid50.wav",
+    "sha256": "ad34d3e965f36555dec94bd958bacac89009a557b4e1027f29d0856830e6b671",
+    "corpus_path": "varac-broadcast-1024/mid50.wav",
+    "command": 1,
+    "source": "W9SSJ",
+    "destination": "ALL",
+    "info_hex": "4142434445464748494a4b4c4d4e4f505152535455565758595a4142434445464748494a4b4c4d4e4f505152535455565758",
+    "stock_received_frame": "8298984040404060ae72a6a69440406103f04142434445464748494a4b4c4d4e4f505152535455565758595a4142434445464748494a4b4c4d4e4f505152535455565758"
+  }
+]

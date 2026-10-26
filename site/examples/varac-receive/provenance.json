@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "date": "2026-10-24",
+  "mode": "VARA HF",
+  "application": "VarAC",
+  "reception": "passive",
+  "bandwidth_hz": 500,
+  "slot": 1,
+  "receiver_dial_hz": 14105000,
+  "rf_endpoints": null,
+  "duration_s": 125,
+  "sample_rate": 48000,
+  "channels": 1,
+  "samples": 6000000,
+  "source_session": "20261024T153733654022Z",
+  "source_first_sample": 37500000,
+  "source_last_sample": 43500000,
+  "pcm_sha256": "820a8aa70426bb211cc78fc759541f5498de8c728a288ec126a75acd65ab68f7",
+  "audio": "audio/receiver.flac",
+  "audio_sha256": "17c559926de09821ac0d335423a8783332c795331dadcf1200f7301e480b5c9a",
+  "decoded_frames": [
+    {
+      "level": 6,
+      "crc": "pass",
+      "start_s": 25.1,
+      "end_s": 29.18,
+      "frame_sha256": "03443f9657c91267b73c3f029250c30e396d208fa12b081e36ec39fe81b102a3"
+    },
+    {
+      "level": 7,
+      "crc": "pass",
+      "start_s": 30.62,
+      "end_s": 34.26,
+      "frame_sha256": "2b00555d1275a61a253d8457b70ca7367158c0d0eeefa7519fa77a25543c0681"
+    },
+    {
+      "level": 6,
+      "crc": "pass",
+      "start_s": 35.7,
+      "end_s": 39.6,
+      "frame_sha256": "1aa3d4e221f2bdc727c233acb6f8dc71c655600d50939904c8804e44761f860b"
+    },
+    {
+      "level": 5,
+      "crc": "pass",
+      "start_s": 41.88,
+      "end_s": 46.12,
+      "frame_sha256": "ac2905ef36437981f9bdc873b3f0ddfbb86f96960a3646d4650b9476e369df79"
+    }
+  ],
+  "result": "CRC-valid L6, L7, L6 and L5 frames carrying TEXT-compressed forwarded VMail fragments.",
+  "limits": [
+    "RF endpoints are unknown; embedded message authors do not identify the transmitting station.",
+    "Partial passive reception; no complete-message delivery or local transmit result is claimed."
+  ],
+  "timing": "Start and end of each detected emission, in seconds from the first recording sample; 20 ms detection resolution."
+}

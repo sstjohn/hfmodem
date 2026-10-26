@@ -1,4 +1,42 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Changelog
+
+## 0.3.0 — 2026-10-25
+
+Changes since 0.2.1:
+
+- Added a recorded-evidence index and VarAC BW500 receive audio at L5, L6 and L7.
+
+- Added Kestrel chat with VarAC peers at 500, 2300 and 2750 Hz, including
+  CQ, beacons, slot changes, away replies and VMail.
+- Added passive QSO transcripts, slot and frequency following, all-stations
+  broadcasts and optional PSKReporter reception reports.
+- Added email-gateway submission, BBS directory requests, verified BBS downloads
+  and serving an explicitly selected directory. Download validation is covered
+  by recorded replay and software round trips; live RF interoperability of the
+  automatic receiver and sender remains unverified. Raw capture remains separate.
+- Improved VARA weak-signal reception, signal reports, connection recovery,
+  turn changes and closing.
+- Added experimental supervised voice and CW contacts.
+- Added connected Robust Packet hosts for Tracker and AGWPE clients.
+- Expanded PTC, VARA and ARDOP host compatibility, including VARA TEXT
+  compression and legacy `COMPRESSION ON`.
+- Added supervised Windows TCP and serial adapters for station hosts.
+- Improved PACTOR session timing and delivery accounting.
+<!-- site:omit:start -->
+- Added a public PACTOR-4 protocol guide and exact C2 PRNG description.
+- Improved partial experimental PACTOR-4 reception and turn handling.
+  On-air PACTOR-4 mail transfer remains unproven.
+<!-- site:omit:end -->
+- Added station-service ownership controls and native Yaesu CAT support.
+  Transmit operation requires a separate PTT line; `--ptt-type` was removed.
+- Added console attach, own and release commands, station session records,
+  logbook export and explicit inbox delivery checks.
+- Improved interruption, shutdown and host reconnection handling.
+- Added VARA transmit calibration and transmit-level monitoring; preserved
+  FTDX10 filter settings across frequency changes.
+- Renamed VARA's `--speed-limited` option to `--winlink-cartel-mode`.
 
 ## 0.2.1 — 2026-10-12
 

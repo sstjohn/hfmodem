@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """An unanswered CS3 still needs bounded packet/control reads in recovered slots.
 
 WS8EOC2300 spent three recovered slots per hold after its first listening turn:

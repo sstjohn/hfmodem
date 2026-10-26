@@ -10,6 +10,7 @@ from unittest import mock
 import pytest
 from hfmodem.core import rigs, rxreadiness as rx
 from hfmodem.shrike import onair, ota
+from hfmodem.tests import fakeclaim
 from hfmodem.tests.shrike.test_radio_startup_flow import FakeRig
 from hfmodem.tests.shrike.test_armdefaults import _parsed
 
@@ -47,6 +48,7 @@ def scene(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", forbidden)
     monkeypatch.setattr(onair, "find_device", forbidden)
     monkeypatch.setattr(onair, "_LiveInput", forbidden)
+    fakeclaim.install(monkeypatch, spawner=forbidden)
     return args, record, rig, constructors
 
 

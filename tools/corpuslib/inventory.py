@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Rebuild a capture inventory from durable visit metadata and event logs."""
 from collections import Counter
 from datetime import datetime, timezone

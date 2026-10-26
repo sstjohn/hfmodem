@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """WS8EOC 2026-09-20 23:25Z: repeated 0x6A9 is not silence.
 
 The first response at 7.36 s opened P2. Subsequent slots were 0x6A9,

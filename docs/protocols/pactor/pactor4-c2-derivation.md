@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # PACTOR-4 C2 permutations: runtime representation and offline derivation
 
 The runtime needs **13** distinct C2 permutation sizes:
@@ -54,6 +56,9 @@ The input bits are then gathered directly, never through the inverse table.
 | 12420 | 12412 | [c2-12420.swaps.z](../../../packages/hfmodem/hfmodem/shrike/assets/c2-12420.swaps.z) | `4c4b450028c6ac66b87647702dfeeafa04f0621583f60fc3161a1ecc31036a17` |
 | 16560 | 16548 | [c2-16560.swaps.z](../../../packages/hfmodem/hfmodem/shrike/assets/c2-16560.swaps.z) | `c2fadc1e3764cc08f66e0286751eb201012277aed8424dedd3a77e620a55cfff` |
 | 20700 | 20688 | [c2-20700.swaps.z](../../../packages/hfmodem/hfmodem/shrike/assets/c2-20700.swaps.z) | `2a3bd42d9d423fc7ad84df654c4e80f9e801dc842d2c57364cf4965b35c4565b` |
+
+For the exact PRNG recurrence, initialization and draw order, see
+[C2 generator and PRNG](pactor4-prng.md).
 
 ## Original CML constructor
 

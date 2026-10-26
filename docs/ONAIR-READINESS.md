@@ -1,4 +1,10 @@
-# On-air readiness — shrike, confirmed back
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
+# On-air readiness — shrike
+
+The demonstrated PACTOR mail transfers use PACTOR-1 and PACTOR-3.
+PACTOR-4 has partial experimental support; no successful on-air mail transfer
+has been demonstrated. See [PACTOR-4 limits](STATUS.md#pactor-4).
 
 Select the radio with `HFMODEM_RIG=ftdx10` or `--rig ftdx10` where offered;
 use `ft891` for the FT-891. `HFMODEM_STATION` selects the station TOML. Explicit
@@ -60,18 +66,12 @@ different directions:*
 
 Recorded in `ota.Rig`'s docstring so it does not have to be relearned.
 
-**1b. Keying is not on the CAT wire — changed 2026-07-28.** `T 1`/`T 0` no longer
-become `TX1;`/`TX0;` on the FT-891. They set **RTS on the Standard port**
-`/dev/cu.usbserial-XXXXB1`, the second port of the same CP2105, which is the
-rig's PTT input; hamlib dispatches on the PTT type in its frontend, so the Yaesu
-backend is never reached and keying is one ioctl. A CAT PTT change is a
-transaction — write, wait 50 ms, read back, re-send while the rig withholds its
-answer — and on 2026-07-28 the key stayed down across five bursts while the log
-read `PTT keyed 0.998 s` every cycle.
+**Current keying.** Transmit operation uses the separate PTT line. Hamlib
+runs with PTT disabled. `--ptt-port` overrides the endpoint derived from
+`--serial`; `--ptt-type` has been removed. A rig without a keying line remains
+receive-only. See [station setup](STATION.md).
 
-That is a flag, not a rewrite: `--ptt-type {RTS,DTR,RIG}` and `--ptt-port`, both
-defaulting from the rig's own entry (`RIGS`), with the PTT port derived from
-`--serial` so one flag still names the station. The Xiegus keep `RIG`.
+The following incident describes the former Hamlib keying path.
 
 The row above needs one qualification for it, and it is smaller than it used to
 read here. RTS is held by the **open port** rather than latched at the rig, so

@@ -1,4 +1,6 @@
 <!doctype html>
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -240,7 +242,7 @@ html{scroll-padding-top:170px}
 </style>
 <link rel="stylesheet" href="guide.css">
 
-<header class="site-header"><div class="site-header-inner"><div class="site-heading"><a class="site-home" href="../README.md">Documentation</a><span class="site-title">hfmodem / PACTOR</span></div><nav class="site-nav" aria-label="Modes"><a href="flock-compared.html" data-route="compared">Comparison</a><a href="pactor-explained.html" data-route="pactor" aria-current="page">PACTOR</a><a href="vara-explained.html" data-route="vara">VARA</a><a href="ardop-explained.html" data-route="ardop">ARDOP</a><a href="sabir-explained.html" data-route="sabir">sabir</a><a href="robust-packet-explained.html" data-route="robust-packet">Robust Packet</a><a href="stanag-explained.html" data-route="stanag">STANAG</a><a href="rtty-explained.html" data-route="rtty">RTTY / SITOR / NAVTEX</a></nav><details class="page-contents"><summary>On this page</summary><nav class="rail" aria-label="sections"><a href="#tones">Channel occupancy</a><a href="#connect">Link entry</a><a href="#generations">Generations</a><a href="#packet">Frame structure and coding</a><a href="#arq">ARQ and host interface</a><a href="#numbers">Rate selection and values</a><a href="#results">Observed results</a></nav></details></div></header>
+<header class="site-header"><div class="site-header-inner"><div class="site-heading"><a class="site-home" href="../README.md">Documentation</a><span class="site-title">hfmodem / PACTOR</span></div><nav class="site-nav" aria-label="Modes"><a href="flock-compared.html" data-route="compared">Comparison</a><a href="pactor-explained.html" data-route="pactor" aria-current="page">PACTOR</a><a href="pactor4-explained.html" data-route="pactor-4">PACTOR-4</a><a href="vara-explained.html" data-route="vara">VARA</a><a href="ardop-explained.html" data-route="ardop">ARDOP</a><a href="sabir-explained.html" data-route="sabir">sabir</a><a href="robust-packet-explained.html" data-route="robust-packet">Robust Packet</a><a href="stanag-explained.html" data-route="stanag">STANAG</a><a href="rtty-explained.html" data-route="rtty">RTTY / SITOR / NAVTEX</a></nav><details class="page-contents"><summary>On this page</summary><nav class="rail" aria-label="sections"><a href="#tones">Channel occupancy</a><a href="#connect">Link entry</a><a href="#generations">Generations</a><a href="#packet">Frame structure and coding</a><a href="#arq">ARQ and host interface</a><a href="#numbers">Rate selection and values</a><a href="#pactor4">PACTOR-4 limits</a><a href="#results">Observed results</a></nav></details></div></header>
 <main id="main" tabindex="-1">
 
 
@@ -249,12 +251,13 @@ html{scroll-padding-top:170px}
 <header class="hero wrap" id="air">
   <span class="kicker">Functional specification &nbsp;·&nbsp; <b>waveform, coding, ARQ</b></span>
   <h1>PACTOR</h1>
-  <p class="lede">The PACTOR mode in hfmodem uses shrike for PACTOR-1, PACTOR-2 and PACTOR-3.
+  <p class="lede">The PACTOR mode in hfmodem uses shrike for PACTOR-1, PACTOR-2 and PACTOR-3, with partial experimental PACTOR-4 support.
     Links begin with FSK and can select multicarrier waveforms. Data and replies share a fixed cycle.</p>
   <div class="tbl-scroll"><table><thead><tr><th>Generation</th><th>Waveform</th><th>Link structure</th></tr></thead><tbody>
     <tr><td>PACTOR-1</td><td>100 / 200 Bd FSK</td><td>Link entry, data packets and control signals</td></tr>
     <tr><td>PACTOR-2</td><td>Two differential PSK carriers</td><td>Coded data and negotiated speed levels</td></tr>
     <tr><td>PACTOR-3</td><td>2–18 differential PSK carriers</td><td>Six speed levels on a 120 Hz grid</td></tr>
+    <tr><td>PACTOR-4 · experimental</td><td>Chirp, spread-spectrum and normal-mode waveforms</td><td>Partial receive, transmit and link support; <a href="#pactor4">limits below</a></td></tr>
   </tbody></table></div>
 
   <div class="metastrip">
@@ -547,6 +550,13 @@ LSB-first · continuous phase · no CRC</pre>
 <p><a href="../protocols/pactor/implementation-constants.md">Complete PACTOR-3 implementation inputs</a> maps the codewords, coding, framing and carrier placement to the public source.</p>
 </div></section>
 
+<section id="pactor4"><div class="wrap"><div class="sechead"><h2>PACTOR-4: experimental, partial support</h2>
+<p>Shrike decodes selected chirp, changeover and normal frames from recordings. It also has transmit waveforms and an experimental link and host-data path.</p>
+<p>Coverage is incomplete. Normal-long SL6–10 decoding is available as offline diagnostics, outside the live receiver. Robust-long transmission is unimplemented.</p>
+<p>Recorded replay reaches a CMS prompt and queues B2F login/proposal traffic. <strong>No successful on-air PACTOR-4 mail transfer has been demonstrated.</strong> The Winlink results below are PACTOR-1 and PACTOR-3.</p>
+<p><a href="pactor4-explained.html">PACTOR-4 protocol guide</a> covers packet families, coding, permutations and the PRNG. <a href="../STATUS.md#pactor-4">Support and limits</a>.</p>
+</div></div></section>
+
 <section id="results"><div class="wrap"><div class="sechead"><h2>Observed results</h2>
 <p>Winlink mail sent and received through WS8EOC over hfmodem’s PACTOR-3. Four messages received through KB5LZK over PACTOR-1, with a normal session close.</p>
 <p>PACTOR-2 codec behavior has bench evidence. Reliability across gateways and confirmed
@@ -577,7 +587,7 @@ function guideData(id,title,head,rows){
 </script>
 <script>
 "use strict";
-/* ---- generated by docs/viz/build.py; do not edit by hand ---- */
+/* ---- generated by docs/viz/tools/build.py; do not edit by hand ---- */
 const FIG = {"coding": {"crc_poly": "0x1021", "interleave": "Implemented SHORT/LONG path walks; legacy general research registry U3: OPEN", "puncture_3_4": [[1, 1, 0], [0, 1, 1]], "puncture_8_9": [[0, 1, 0, 1, 1, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 1]], "tx_generators": ["0o171", "0o133"]}, "control": {"bits": 20, "names": ["ACK", "REQ", "BREAK-IN", "SPEED-UP", "NAK", "CYCLE-TOG"], "words": ["52D56", "AABA2", "AD45A", "95AC5", "74339", "4B4AD"]}, "cycle": {"cs_window_s": 0.29, "long_longpath_s": 4.2, "long_s": 3.75, "pulse_slot_s": 0.01, "short_longpath_s": 1.4, "short_s": 1.25}, "levels": [{"bits_per_symbol": 1, "channels": [5, 12], "crest_db": 1.9, "generators": ["0o753", "0o561"], "k": 9, "n_buf": 144, "ndr": 76.8, "payload_long": 36, "payload_short": 5, "pdr": 200, "puncture": [[1], [1]], "rate": "1/2", "sl": 1, "stride": 0}, {"bits_per_symbol": 1, "channels": [3, 5, 7, 10, 12, 14], "crest_db": 2.6, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 432, "ndr": 247.5, "payload_long": 116, "payload_short": 23, "pdr": 600, "puncture": [[1], [1]], "rate": "1/2", "sl": 2, "stride": 35}, {"bits_per_symbol": 1, "channels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "crest_db": 3.1, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 1008, "ndr": 588.8, "payload_long": 276, "payload_short": 59, "pdr": 1400, "puncture": [[1], [1]], "rate": "1/2", "sl": 3, "stride": 69}, {"bits_per_symbol": 2, "channels": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "crest_db": 3.8, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2016, "ndr": 1186.1, "payload_long": 556, "payload_short": 122, "pdr": 2800, "puncture": [[1], [1]], "rate": "1/2", "sl": 4, "stride": 250}, {"bits_per_symbol": 2, "channels": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "crest_db": 5.2, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2304, "ndr": 2039.5, "payload_long": 956, "payload_short": 212, "pdr": 3200, "puncture": [[1, 1, 0], [0, 1, 1]], "rate": "3/4", "sl": 5, "stride": 563}, {"bits_per_symbol": 2, "channels": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17], "crest_db": 5.7, "generators": ["0o133", "0o171"], "k": 7, "n_buf": 2592, "ndr": 2722.1, "payload_long": 1276, "payload_short": 284, "pdr": 3600, "puncture": [[0, 1, 0, 1, 1, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 1]], "rate": "8/9", "sl": 6, "stride": 909}], "packet": {"constant_headers": 16, "data_offset": 9, "header_symbols": 8, "packet_s": 0.81, "rows_long": 320, "rows_short": 72, "variable_headers": 16}, "phase": {"bit_deg": [315.0, 135.0], "dibit_deg": [135.0, 45.0, -135.0, -45.0], "pattern_a_deg": [0.0, 180.0, 0.0, 90.0, 180.0, 180.0, 180.0, 90.0], "start_deg": [0.0, 340.0, 300.0, 240.0, 160.0, 60.0, 300.0, 160.0, 0.0, 180.0, 340.0, 120.0, 240.0, 340.0, 60.0, 120.0, 160.0, 180.0]}, "physical": {"baud": 100.0, "centre_hz": 1500.0, "chan0_hz": 480.0, "emission": "2K20J2D", "hi_hz": 2520.0, "n_channels": 18, "spacing_hz": 120.0, "vh": [5, 12]}};
 /* ---- end generated ---- */
 /* ===================================================================== */

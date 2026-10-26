@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Operator station planning and native message exchanges, without hardware."""
 import io
 import json
@@ -5,6 +7,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+pytestmark = pytest.mark.usefixtures("fake_claim")
 
 from . import hflink
 from hfmodem.bateleur.ale import words as W
@@ -312,11 +316,13 @@ def test_ready_attaches_ui_and_transmit_observation(source, monkeypatch):
     assert out.tunes == 1
 
 
-def test_station_claims_all_console_arm_locks(mode):
+def test_station_claims_the_shared_hardware_claim():
+    from . import modes
+
+    mode = modes.resolve('pactor')
     with hflink.claimed():
-        for name in hflink.modes.KNOWN:
-            with pytest.raises(RuntimeError, match='holds the lock'):
-                with hflink.claim.lease(hflink.modes.resolve(name)):
-                    pytest.fail('second operator claimed this station')
+        assert hflink.claim.hardware.inherited(9).offset() > 0
+        with pytest.raises(hflink.claim.hardware.ClaimBusy):
+            hflink.claim.hardware.acquire('console', 'pactor')
     with hflink.claim.lease(mode):
         pass

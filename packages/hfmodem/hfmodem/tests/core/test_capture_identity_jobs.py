@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Deferred capture work remains bound to its original root and sample clock."""
 import json
 from pathlib import Path
@@ -441,7 +443,7 @@ def test_actual_tx_diagnostic_wavs_and_results_bind_existing_owner():
         ownership = next(k.value for k in call.keywords if k.arg == "ownership")
         assert isinstance(ownership, ast.Call) and ownership.func.id == "_capture_recording_for"
         assert ast.dump(ownership.args[0]) == ast.dump(call.args[0])
-    for name in ["_run_robust_bridge", "run"]:
+    for name in ["_run_robust_bridge", "_drive_session"]:
         function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
         assert any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_capture_write_text"
                    for n in ast.walk(function))

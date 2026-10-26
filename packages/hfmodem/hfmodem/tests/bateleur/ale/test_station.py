@@ -11,6 +11,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
+from hfmodem.tests.core.test_host_teardown import loopback_bind as loopback_bind
+
 from hfmodem.bateleur.ale import fsk, words as W
 from hfmodem.bateleur.ale.host import AleHost
 from hfmodem.core import band, config
@@ -20,7 +22,7 @@ from hfmodem.core.rates import CARD_RATE_HZ
 from hfmodem.core.resample import for_card
 from hfmodem.core.rig import Cat, Rig
 from hfmodem.station import hosts
-from hfmodem.station.arbiter import Identity, TxArbiter
+from hfmodem.station.arbiter import Identity, TxArbiter, longest_burst_s
 from hfmodem.station.link import AleLink
 from hfmodem.station.process import Station
 from hfmodem.tests.core.fakerig import FakePtt, FakeRigctld
@@ -131,15 +133,16 @@ def test_a_sound_heard_on_the_air_reaches_the_host_port():
 
 
 @pytest.fixture
-def keyed():
+def keyed(request):
     """An ALE lane on a fake rig and a real arbiter."""
+    max_key_s = getattr(request, "param", 30.0)
     fake = FakeRigctld()
     ptt = FakePtt()
     fake.ptt_line = ptt
     rig = Rig(model="ft891", cat=Cat("127.0.0.1", fake.port), ptt=ptt,
               profile=BENCH, control=config.Control.LOCAL, mycall="N0CALL",
-              transmit=True, max_key_s=30.0)
-    rig.cat.open(); rig._armed = True; rig._dial_hz = fake.freq
+              transmit=True, max_key_s=max_key_s)
+    rig.arm(prove_ptt=False)
     audio = ReplayAudio(np.zeros(CARD_RATE_HZ * 2, np.float32))
     arb = TxArbiter(audio, rig, identity=Identity("N0CALL", interval_s=600.0))
 
@@ -149,7 +152,7 @@ def keyed():
     st.lanes = {}
     st.arbiter, st.rig, st.audio = arb, rig, audio
     st.cfg = _cfg(channels=CHANNELS)
-    st.cfg = replace(st.cfg, rig=replace(st.cfg.rig, max_key_s=30.0))
+    st.cfg = replace(st.cfg, rig=replace(st.cfg.rig, max_key_s=max_key_s))
     link = AleLink(st)
     link.start()
     yield link, audio, fake
@@ -241,6 +244,26 @@ def test_other_traffic_on_the_link_holds_off_twa(occupied):
     for i in range(100):                                   # 10 s
         m._audio(i * n, rng.normal(0, 0.02, n).astype(np.float32))
     assert (m.ctl.state == "linked") is occupied
+
+
+@pytest.mark.parametrize("keyed", [10.0], indirect=True)
+def test_a_frame_is_sized_to_the_arbiters_burst_budget(keyed):
+    from hfmodem.bateleur.ale.controller import Trw
+    link, audio, _ = keyed
+    ctl, rig = link.modem.ctl, link.station.cfg.rig
+    fits = int(longest_burst_s(rig.max_key_s, rig.ptt.settle_s) / Trw)
+    assert (fits + 1) * Trw < rig.max_key_s
+    word = W.call("JOE", "W9SSJ")[0]
+    box = []
+    link.modem.post(lambda: box.append([(ctl._transmit([word] * n, 0.0), ctl.refusal)
+                                        for n in (fits + 1, fits)]))
+    t0 = time.monotonic()
+    while not box and time.monotonic() - t0 < 10:
+        time.sleep(0.01)
+    (longer, why), (fitting, _) = box[0]
+    assert longer is None and why.startswith("frame ")
+    assert link.station.arbiter.refused == 0
+    assert fitting is not None and len(audio.transmitted) == 1
 
 
 def test_another_protocols_burst_is_link_activity(keyed):
@@ -337,7 +360,7 @@ def test_response_turnaround_through_replay_arbiter():
         return actual
     audio.arm_burst = remember
     rig = SimpleNamespace(max_key_s=30, key=lambda *a, **kw: 1,
-                          unkey=lambda token: None, retired=False)
+                          unkey=lambda token: None, retired=False, line_state="low")
     arb = TxArbiter(audio, rig)
     def send(wave, rate):
         return arb.submit(TxRequest(LIVE, 0, "ale", wave, rate,

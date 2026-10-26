@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Robust Packet framing
 
 AX.25 values at the library boundary exclude FCS bytes. A bare radio packet

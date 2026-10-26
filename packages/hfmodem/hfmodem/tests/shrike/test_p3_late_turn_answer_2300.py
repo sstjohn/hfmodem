@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """An emitted CS3 still owns its ACK across listening and recovered slots."""
 import numpy as np
 import pytest

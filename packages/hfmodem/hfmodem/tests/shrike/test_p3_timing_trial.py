@@ -205,20 +205,49 @@ def test_preset_and_conflicts_are_checked_before_io(monkeypatch):
 def test_complete_recorded_session_loop_closes_trial(monkeypatch, tmp_path, arm):
     from hfmodem.tests.shrike import test_late_entry_loop as loop
     main = onair.main
+    rigs = []
+
+    class ObservedRig(loop._Rig):
+        stopped = False
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            rigs.append(self)
+
+        def stop(self):
+            self.stopped = True
+            return super().stop()
 
     def trial_main():
         sys.argv += ['--p3-timing-trial', arm]
         return main()
 
     monkeypatch.setattr(onair, 'main', trial_main)
+    monkeypatch.setattr(loop, '_Rig', ObservedRig)
     result = loop.run_late(monkeypatch, tmp_path, 1, False)
     trial = json.loads((result['outdir']/'p3-timing-trial.json').read_text())
     assert trial['opened'] is not None, result['log']
     assert trial['closing'] and trial['reason'], result['log']
     assert trial['opportunities'] <= 12
     assert result['host'].arq.state in (arq.State.DISCONNECTED, arq.State.DISCONNECTING)
-    assert 'PTT off.' in result['log'] and 'the goodbye' in result['log']
-    assert result['log'].strip().splitlines()[-1].startswith('verdict: P3 TIMING TRIAL')
+    rig, = rigs
+    assert rig.stopped and rig.edges and rig.edges[-1] is False
+    assert 'PTT off.' in result['log']
+    a = result['host'].arq
+    assert a.said_goodbye or a.goodbye_unplaceable
+    if a.goodbye_unplaceable:
+        assert 'goodbye could not be placed' in result['log']
+    else:
+        assert 'the goodbye' in result['log']
+    verdicts = [line for line in result['log'].splitlines() if line.startswith('verdict:')]
+    assert any(line.startswith(f'verdict: P3 TIMING TRIAL {arm}:') for line in verdicts)
+    if a.transfer_unconfirmed is not None:
+        assert verdicts[-1] == 'verdict: transfer unconfirmed'
+        retained = a.transfer_unconfirmed
+        assert ((result['outdir']/'p3-transfer-unconfirmed.bin').read_bytes()
+                == retained['field'] + retained['suffix'])
+    else:
+        assert verdicts[-1].startswith('verdict: P3 TIMING TRIAL')
     assert trial['replies'], result['log']
     for reply in trial['replies']:
         assert reply['cs'] in (1,2)

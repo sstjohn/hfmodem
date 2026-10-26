@@ -1,0 +1,123 @@
+{
+ "ab4ej-cq500-late-body": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T155947666857Z/receive.wav",
+  "samples": [
+   18950912,
+   21110912
+  ],
+  "rate": 48000,
+  "sha256": "505976437f5ddbb1f1edfc7aa66238978b9dee4220ed17a966c03406b235bca0",
+  "flac_sha256": "5868ef4afce675b91a22fa856ffa064e05780b8ca1e9835d048b81a955ffbdc2",
+  "dial_hz": 14105000,
+  "description": "20 m calling frequency, 2026-10-23: our own CQ W9SSJ-9 at 6.4 s (muted residue); AB4EJ-9 CQ 500 at 17.3 s whose body opens ~163 ms after the header, not 32 ms; W4JBB's advanced beacon (20KEM63EHW4JBB) at 30.6 s",
+  "expected": [
+   [
+    "W9SSJ-9",
+    500
+   ],
+   [
+    "AB4EJ-9",
+    500
+   ],
+   [
+    "beacon",
+    "20KEM63EHW4JBB"
+   ]
+  ]
+ },
+ "kj7wgm-cq500-weak-references": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   89664000,
+   90432000
+  ],
+  "rate": 48000,
+  "sha256": "f31703c376c0c5df9afb2ba6f6ee2c15152983b73e80d923755ce816313b1fda",
+  "flac_sha256": "a99999ff5da963ccfcd8a62499f4003af1a486f293e1ecb3401a6a60380c08a1",
+  "dial_hz": 7105000,
+  "utc": "2026-10-23T04:52:52Z",
+  "description": "40 m calling frequency: KJ7WGM-9 CQ 500 at SN -12.9 whose header scores 28/32 but whose body shows only 16 of 24 reference tones; the 18/24 reference gate rejected it",
+  "expected": [
+   [
+    "KJ7WGM-9",
+    500
+   ]
+  ]
+ },
+ "kj7wgm-cq500-weak-header": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   393984000,
+   394752000
+  ],
+  "rate": 48000,
+  "sha256": "f31703c376c0c5df9afb2ba6f6ee2c15152983b73e80d923755ce816313b1fda",
+  "flac_sha256": "e58283c8e43d70f5ddba7e8fa8340f2b0c2a975868d27f566445b79a99e01939",
+  "dial_hz": 7105000,
+  "utc": "2026-10-23T06:38:32Z",
+  "description": "40 m calling frequency: KJ7WGM-9 CQ 500 at SN -11.9 whose header scores 20/32 with a clean body; the 24/32 header gate rejected it",
+  "expected": [
+   [
+    "KJ7WGM-9",
+    500
+   ]
+  ]
+ },
+ "fm4ti-cq500-sn-minus-22": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   779136000,
+   779904000
+  ],
+  "rate": 48000,
+  "sha256": "f31703c376c0c5df9afb2ba6f6ee2c15152983b73e80d923755ce816313b1fda",
+  "flac_sha256": "d7a25a98f6bb8774798ddec9925b8a279756d4edfd452098bc6e356af9a2eab3",
+  "dial_hz": 7105000,
+  "utc": "2026-10-23T08:52:16Z",
+  "description": "40 m calling frequency: FM4TI-4 CQ 500 at SN -22.8, header 24.6/32 and 16 of 24 reference tones",
+  "expected": [
+   [
+    "FM4TI-4",
+    500
+   ]
+  ]
+ },
+ "kb4ra-cq500-late-480ms": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T042123057106Z/receive.wav",
+  "samples": [
+   1113504000,
+   1114272000
+  ],
+  "rate": 48000,
+  "sha256": "f31703c376c0c5df9afb2ba6f6ee2c15152983b73e80d923755ce816313b1fda",
+  "flac_sha256": "6913b321c43611b2c32a2eb893a4ecef8d4a30233a0d0c8ab5a4e3bd2559d885",
+  "dial_hz": 7105000,
+  "utc": "2026-10-23T10:48:22Z",
+  "description": "40 m calling frequency: KB4RA-9 CQ 500 whose body opens about 480 ms later than nominal, outside the 256 ms window",
+  "expected": [
+   [
+    "KB4RA-9",
+    500
+   ]
+  ]
+ },
+ "kj5cyh-cq500-weak-header": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T155947666857Z/receive.wav",
+  "samples": [
+   104064000,
+   104832000
+  ],
+  "rate": 48000,
+  "sha256": "33a2122146d8566021f32ab294f0f5ed2050c955c3cf5eaf4a768a7b8f0e565c",
+  "flac_sha256": "483627cf78794f547f61005ce49ca84009fcd8c24fdd728ddc503e6f2d75233d",
+  "dial_hz": 14105000,
+  "utc": "2026-10-23T16:36:17Z",
+  "description": "20 m calling frequency: KJ5CYH-1 CQ 500 at SN -12.9, header 20/32; the only time this station was heard",
+  "expected": [
+   [
+    "KJ5CYH-1",
+    500
+   ]
+  ]
+ }
+}

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # The radio the launchers drive, and the three things every one of them does
 # through it: set the dial and read it back, ask whether anyone else is already
 # on the channel, and ask what the receiver is delivering on it. Sourced after
@@ -12,20 +14,22 @@
 # port for as long as it runs, and a second opener of a serial device gets a
 # garbled conversation rather than a refusal; `RPRT 0` says the command was
 tune() {
-  local dial="$1" got tol reply rc=0 daemon=0 package commands width roof
+  local dial="$1" got tol reply rc=0 daemon=0 package commands width roof shift
   if [ "$RIG_NAME" = ftdx10 ]; then
     package="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/packages/hfmodem"
     commands=$(PYTHONPATH="$package${PYTHONPATH:+:$PYTHONPATH}" "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.ftdx10 commands)
-    read -r width roof <<< "$commands"
+    read -r roof width shift <<< "$commands"
+    # The dial goes first: on another band the band stack brings back that band's own
+    # mode and filters. Then the mode, then the filters, which belong to it.
     if nc -z -w 3 127.0.0.1 4532 2>/dev/null; then
       daemon=1
-      reply=$(printf '+\\set_vfo VFOA\n+\\send_cmd MD0C;\n+\\send_cmd FA%09d;\n+\\send_cmd FA;\n+\\set_level AGC 0\n+\\get_level AGC\n+\\set_level PREAMP 0\n+\\get_level PREAMP\n+\\send_cmd %s\n+\\send_cmd SH0;\n+\\send_cmd %s\n+\\send_cmd RF0;\n+\\get_vfo\n+\\send_cmd MD0;\nq\n' "$dial" "$width" "$roof" \
+      reply=$(PYTHONPATH="$package${PYTHONPATH:+:$PYTHONPATH}" "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.ftdx10 batch "$dial" \
               | nc -w 5 127.0.0.1 4532 2>&1 | tr '\000' '\n'; exit "${PIPESTATUS[1]}") || rc=$?
     else
-      reply=$(rigctl -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" -o \
-              V VFOA w 'MD0C;' F VFOA "$dial" f VFOA \
+      reply=$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" -o \
+              V VFOA F VFOA "$dial" f VFOA w 'MD0C;' \
               L VFOA AGC 0 l VFOA AGC L VFOA PREAMP 0 l VFOA PREAMP \
-              w "$width" w 'SH0;' w "$roof" w 'RF0;' v w 'MD0;' 2>&1 \
+              w "$roof" w "$width" w "$shift" v 2>&1 \
               | tr '\000' '\n'; exit "${PIPESTATUS[0]}") || rc=$?
     fi
     got=$(printf '%s\n' "$reply" | PYTHONPATH="$package${PYTHONPATH:+:$PYTHONPATH}" \
@@ -33,11 +37,11 @@ tune() {
   else
     if ! printf '+\\set_freq %d\nq\n' "$dial" \
          | nc -w 3 127.0.0.1 4532 2>/dev/null | grep -q '^RPRT 0'; then
-      rigctl -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" F "$dial" >/dev/null 2>&1 || true
+      claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" F "$dial" >/dev/null 2>&1 || true
     fi
     got=$(printf '+\\get_freq\nq\n' | nc -w 5 127.0.0.1 4532 2>/dev/null \
           | sed -n 's/^Frequency: //p' | head -1)
-    [ -n "$got" ] || got=$(rigctl -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" f 2>/dev/null | head -1)
+    [ -n "$got" ] || got=$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" f 2>/dev/null | head -1)
   fi
   case "$got" in
     ''|*[!0-9]*) die "DIAL UNVERIFIED -- the rig reported no frequency, so the
@@ -53,10 +57,38 @@ tune() {
   if [ "$RIG_NAME" = ftdx10 ]; then
     printf '%s\n' "$reply" | PYTHONPATH="$package${PYTHONPATH:+:$PYTHONPATH}" \
       "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.ftdx10 session-report "$rc" "$daemon"
+    sleep 1
+    rig_readback
   elif [ "$RIG_NAME" = ft891 ]; then
     ipo_off
   fi
   return 0
+}
+
+# MODE, WIDTH, ROOFING AND IF SHIFT AS THE FTDX10 ANSWERS THEM, asked in a connection
+# of their own once `tune` has let them settle. A reply inside the batch that set them
+# answers before the rig has finished changing.
+rig_readback() {
+  local reply rc=0 daemon=0 package
+  package="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/packages/hfmodem"
+  if nc -z -w 3 127.0.0.1 4532 2>/dev/null; then
+    daemon=1
+    reply=$(PYTHONPATH="$package${PYTHONPATH:+:$PYTHONPATH}" "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.ftdx10 readback-batch \
+            | nc -w 5 127.0.0.1 4532 2>&1 | tr '\000' '\n'; exit "${PIPESTATUS[1]}") || rc=$?
+  else
+    reply=$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" \
+            w 'MD0;' w 'SH0;' w 'RF0;' w 'IS0;' 2>&1 | tr '\000' '\n'; exit "${PIPESTATUS[0]}") || rc=$?
+  fi
+  printf '%s\n' "$reply" | PYTHONPATH="$package${PYTHONPATH:+:$PYTHONPATH}" \
+    "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.ftdx10 readback "$rc" "$daemon"
+}
+
+# The passband a hamlib set_mode asks for: no change where the profile owns the width.
+mode_passband() {
+  PYTHONPATH="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/packages/hfmodem${PYTHONPATH:+:$PYTHONPATH}" \
+    "${HFMODEM_PYTHON:-$VENV/python}" -c 'import sys
+from hfmodem.core.rigs import RIGS, mode_passband
+print(mode_passband(RIGS[sys.argv[1]], int(sys.argv[2])))' "${RIG_NAME:-ft891}" "$1"
 }
 
 ipo_off() {
@@ -65,8 +97,10 @@ ipo_off() {
     daemon=1
     reply=$(printf '+\\set_level PREAMP 0\n+\\get_level PREAMP\nq\n' \
             | nc -w 3 127.0.0.1 4532 2>&1) || rc=$?
+    # Up to the get_level's own status: the closing q answers RPRT 0 as well.
+    reply=$(printf '%s\n' "$reply" | awk '{ print } /^RPRT / && ++n == 2 { exit }')
   else
-    reply=$(rigctl -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" \
+    reply=$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" \
             L PREAMP 0 l PREAMP 2>&1) || rc=$?
   fi
   error=$(printf '%s\n' "$reply" | grep -E 'error =|^RPRT -[0-9]+' | head -1) || true
@@ -102,14 +136,14 @@ agc_off() {
   elif [ "$#" -gt 0 ]; then
     reply="$1" rc="${2:-0}"
   else
-    reply=$(rigctl -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" \
+    reply=$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" \
             L AGC 0 l AGC L PREAMP 0 l PREAMP 2>&1) || rc=$?
   fi
   for level in AGC PREAMP; do
     if [ "$daemon" -eq 1 ]; then
       part=$(printf '%s\n' "$reply" | awk -v level="$level" '
-        /^set_level: / { active = ($2 == level) }
-        active { print }
+        /^set_level: / { active = ($2 == level); n = 0 }
+        active { print; if (/^RPRT / && ++n == 2) active = 0 }
       ')
       if ! printf '%s\n' "$reply" | grep -q '^set_level: '; then
         part="$reply"
@@ -230,8 +264,16 @@ _sense_channel() {
   shift
   tune "$dial"
   rm -f "$REPO/logs/sense/host-free"
-  "${HFMODEM_PYTHON:-$VENV/python}" - "$@" <<PY || rc=$?
+  claim_worker "${HFMODEM_PYTHON:-$VENV/python}" - "$@" <<PY || rc=$?
 import json, os, sys, time, wave
+from hfmodem.core import claim
+import atexit
+admission = claim.inherited(9, launch=True)
+def admission_failed():
+    if admission.fd is not None:
+        admission.failed()
+        print("CLAIM NOT ADMITTED capture open failed", flush=True)
+atexit.register(admission_failed)
 from pathlib import Path
 
 import numpy as np, sounddevice as sd
@@ -387,6 +429,7 @@ def refuse(margin, what, s, audio, line, code=1):
 
 print(f"  judging {band[0]:.0f}-{band[1]:.0f} Hz -- what {emission} will occupy")
 with sd.InputStream(samplerate=FS, channels=1, device=dev) as stream:
+    admission.opened()
     if budget is None:
         for n in (1, 2):
             busy, margin, what, a, s = window(stream, WINDOW_S)
@@ -462,8 +505,16 @@ PY
 # band's as much as the chain's, and read before the dial is set it is the last
 # attempt's channel.
 rx_level() {
-  "${HFMODEM_PYTHON:-$VENV/python}" - <<PY
+  claim_worker "${HFMODEM_PYTHON:-$VENV/python}" - <<PY
 import os
+from hfmodem.core import claim
+import atexit
+admission = claim.inherited(9, launch=True)
+def admission_failed():
+    if admission.fd is not None:
+        admission.failed()
+        print("CLAIM NOT ADMITTED capture open failed", flush=True)
+atexit.register(admission_failed)
 import numpy as np, sounddevice as sd
 from hfmodem.core.devices import find_device
 from hfmodem.core.levels import rx_verdict
@@ -475,32 +526,117 @@ except SystemExit as exc:
     # may waive. A station with no capture device at all is a 2.
     print(f"  {exc}")
     raise SystemExit(2) from None
-a = sd.rec(int(2.0 * 48000), samplerate=48000, channels=1, device=dev, blocking=True)
+with sd.InputStream(samplerate=48000, channels=1, device=dev) as stream:
+    admission.opened()
+    a, overflow = stream.read(int(2.0 * 48000))
 state, line = rx_verdict(a, 48000)
 print("  " + line, flush=True)
 raise SystemExit({"live": 0, "silent": 2}.get(state, 1))
 PY
 }
 
-# -- the one thing that must happen no matter what ---------------------------
-#
-# Runs on every exit path including a signal: the line goes down and the answer
-# is printed. `drop_rts` reads BOTH output lines back, because which one keys a
-# given rig is a measurement and not an assumption.
 prove_down() {
-  [ -n "${PTT_PORT:-}" ] || return 0
-  # No line, nothing to lower. Saying NOT CONFIRMED here would raise the
-  # stuck-transmitter alarm every time somebody ran this with the adapter
-  # unplugged, and an alarm that fires on the ordinary case is one an operator
-  # learns to read past — which is the whole reason it is here.
-  if [ ! -c "$PTT_PORT" ]; then
-    printf '   no keying line at %s — nothing was ever keyed through it\n' "$PTT_PORT"
-    return 0
-  fi
-  "${HFMODEM_PYTHON:-$VENV/python}" - "$PTT_PORT" <<'PY'
+  claim_native "${HFMODEM_PYTHON:-$VENV/python}" - "$PTT_PORT" <<'PROVE_DOWN'
 import sys
-from hfmodem.core import ptt
-ok = ptt.drop_rts(sys.argv[1], print)
-print("   PTT VERDICT:", "down" if ok else "*** NOT CONFIRMED DOWN — TELL THE OPERATOR NOW ***")
-PY
+from hfmodem.core import claim
+claim.verify_cleanup(8)
+claim.inherited(9)
+try:
+    claim.line_proof(claim.line_factory(sys.argv[1]))
+except Exception as exc:
+    print(f'NOT CONFIRMED: {exc}', flush=True)
+    raise SystemExit(1)
+PROVE_DOWN
+}
+
+down_exit() {
+  local rc="$1"
+  trap - EXIT
+  trap '' INT TERM HUP
+  if [ "$rc" -ne 0 ]; then printf 'NOT CONFIRMED\n'; fi
+  claim_close || rc=1
+  if [ "$CLAIM_MUTEX" = 1 ]; then
+    claim_checked 'CLAIM MUTEX RELEASED' mutex_release 8 7>&- 9>&- || rc=1
+    exec 8>&-
+  fi
+  exit "$rc"
+}
+
+station_down() {
+  local rc=0 configuration backend host port dial line cat_result proof
+  claim_paths || return
+  if [ -n "${RIG_CLAIMED:-}" ]; then
+    claim_checked 'CLAIM INHERITED' inherited 9 7>&- 8>&- || return
+    CLAIM_ACTIVE=1
+  else
+    exec 9<>"$CLAIM"
+  fi
+  trap 'down_exit $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  exec 8<>"$MUTEX"
+  if claim_checked 'CLAIM MUTEX' mutex 8 7>&- 9>&-; then
+    CLAIM_MUTEX=1
+  else
+    exec 8>&- 9>&-
+    CLAIM_ACTIVE=0
+    return 2
+  fi
+  claim_processes down || return $?
+  configuration=$(claim_processes settings) || return
+  { IFS= read -r backend; IFS= read -r host; IFS= read -r port; } <<< "$configuration"
+  if [ "$CLAIM_ACTIVE" = 0 ]; then
+    claim_checked 'CLAIM ACQUIRED' acquire 9 --kind cleanup --operation down --cleanup 8 \
+        --cat "$backend" --cat-port "$CAT_PORT" --ptt-port "$PTT_PORT" \
+        --capture "$AUDIO_IN" --playback "$AUDIO_OUT" 7>&- || return
+    CLAIM_ACTIVE=1
+    CLAIM_OWNED=1
+  fi
+  proof=$(mktemp) || return
+  prove_down >"$proof" || rc=$?
+  cat "$proof"
+  line=$(sed -n 's/^PTT LINE //p' "$proof")
+  rm -f "$proof"
+  [ "$rc" -eq 0 ] || return "$rc"
+  case "$line" in low|none) ;; *) return 1 ;; esac
+  if [ "$backend" = none ]; then
+    cat_result=none
+  else
+    rc=0
+    if [ "$backend" = rigctld ]; then
+      dial=$(claim_native rigctl -P NONE -m 2 -r "$host:$port" f) || rc=$?
+    else
+      dial=$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" f) || rc=$?
+    fi
+    case "$dial" in ''|*[!0-9]*) rc=1 ;; esac
+    if [ "$rc" -ne 0 ]; then printf 'CAT failed\n'; return 1; fi
+    cat_result=ok
+  fi
+  printf 'CAT %s\n' "$cat_result"
+  claim_processes evidence "$line" "$cat_result" || return
+  printf 'CLEANUP COMPLETE\n'
+}
+
+claim_daemon_start() {
+  local log="$1" result pid started reply deadline
+  if [ -n "${RIGCTLD_PID:-}" ] && claim_processes alive "$RIGCTLD_PID"; then return 0; fi
+  claim_spawn --long-lived --device "$CAT_PORT" -- \
+      rigctld -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" --set-conf=ptt_type=None \
+      >"$log" 2>&1 || return
+  result=$(sed -n 's/^CLAIM NATIVE /CLAIM NATIVE /p' "$log" | tail -1)
+  read -r _ _ pid started <<< "$result"
+  case "$result" in 'CLAIM NATIVE '*) ;; *) return 1 ;; esac
+  printf '%s %s\n' "$pid" "$started" >>"$CLAIM_CHILDREN"
+  RIGCTLD_PID="$pid"
+  deadline=$((SECONDS + 12))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    claim_processes alive "$pid" || break
+    reply=$(printf '\\get_conf ptt_type\nq\n' | nc -w 3 127.0.0.1 4532 2>/dev/null) || reply=
+    case "$reply" in *ptt_type=None*|None) return 0 ;; esac
+    sleep 0.1
+  done
+  claim_processes end "$pid" || return
+  printf 'rigctld did not confirm ptt_type=None within 12 s\n' >&2
+  return 1
 }

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Offline selection and chain isolation for the station profiles."""
 from __future__ import annotations
 
@@ -169,6 +171,9 @@ def test_flight_defaults_use_confirmed_devices_without_station_entries(tmp_path,
     monkeypatch.setenv("HFMODEM_RIG", "ftdx10")
     monkeypatch.delenv("CAT_PORT", raising=False)
     monkeypatch.delenv("PTT_PORT", raising=False)
+    # What is pinned here is the station's own ports as resolved, which every
+    # other test run refuses; nothing below opens them.
+    monkeypatch.setattr(rigs, "refuse_device_in_test", lambda *ports: None)
     for station_path in (None, str(path)):
         if station_path:
             monkeypatch.setenv("HFMODEM_STATION", station_path)

@@ -24,6 +24,8 @@ def test_native_two_frame_level1_survives_live_stream_carry(chunk):
     expected = bytes.fromhex(meta['expected_payload_hex'])
     hs, io = _station()
     hs.caller, hs.called = 'W9SSJ', 'KC9GHZ'
+    hs._peer_over_state, hs._peer_run_500 = (1, 0x99), 6
+    hs._next_500 = 1
     # Lead silence forces the rolling buffer to prune before the long over ends;
     # it must discard only stale silence, retaining the first frame's head.
     lead = RX.FS * 2

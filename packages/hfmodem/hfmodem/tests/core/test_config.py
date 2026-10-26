@@ -235,3 +235,89 @@ def test_config_still_reports_an_unset_port_as_unset(tmp_path, capsys):
     f.write_text(EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
     assert cli.main(["config", str(f)]) == 0
     assert "(unset)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name,backend,identity", [
+    ("ft891", "yaesu", "ft891"), ("ftdx10", "yaesu", "ftdx10"),
+    ("generic", "rigctld", ""),
+])
+def test_station_cat_profile_defaults(name, backend, identity):
+    raw = base()
+    raw["rig"].pop("cat", None)
+    cfg = config.parse(raw, rig_name=name, environ={})
+    assert cfg.station.port == 8737
+    assert cfg.rig.cat == backend
+    assert cfg.rig.model == name
+    assert cfg.rig.identity == identity
+    assert cfg.rig.dial_max_age_s == 30
+
+
+@pytest.mark.parametrize("backend", ["yaesu", "civ", "rigctld", "none"])
+def test_explicit_cat_selection(backend):
+    raw = base()
+    raw["rig"]["cat"] = backend
+    assert config.parse(raw, environ={}).rig.cat == backend
+
+
+def test_generic_keeps_operator_mode_ptt_and_audio():
+    raw = base()
+    raw["rig"] = {"model": "generic", "mode": "LSB", "identity": "My radio",
+                  "max_watts": 75, "ptt": {"port": "fake-line"}}
+    raw["audio"]["chains"] = {"generic": {"input": "fake-input", "output": "fake-output"}}
+    cfg = config.parse(raw, environ={})
+    assert cfg.rig.mode == "LSB" and cfg.rig.identity == "My radio"
+    assert cfg.rig.ptt.port == "fake-line" and cfg.rig.ptt.settle_s == 0.1
+    assert cfg.audio.input == "fake-input" and cfg.audio.output == "fake-output"
+    assert cfg.rig.max_watts == 75
+
+
+@pytest.mark.parametrize("section,key,value", [
+    ("station", "port", 0), ("station", "port", 65536), ("station", "port", True),
+    ("station", "port", "8737"), ("station", "port", 8737.0),
+    ("rig", "cat", "typo"), ("rig", "identity", 123), ("rig", "identity", "bad\nname"),
+    ("rig", "dial_max_age_s", 0), ("rig", "dial_max_age_s", -1),
+    ("rig", "dial_max_age_s", float("nan")), ("rig", "dial_max_age_s", float("inf")),
+    ("rig", "dial_max_age_s", True), ("rig", "dial_max_age_s", "30"),
+    ("rig", "max_watts", -1), ("rig", "max_watts", True),
+])
+def test_invalid_station_rig_fields(section, key, value):
+    raw = base()
+    raw[section][key] = value
+    with pytest.raises(ConfigError, match=key):
+        config.parse(raw, environ={})
+
+
+def test_no_cat_requires_receive_only():
+    raw = base()
+    raw["rig"]["cat"] = "none"
+    raw["station"]["transmit"] = True
+    with pytest.raises(ConfigError, match="transmit = false"):
+        config.parse(raw, environ={})
+
+
+def test_station_port_cannot_collide_with_enabled_host():
+    raw = base()
+    raw["station"]["port"] = 8300
+    raw["protocols"]["sabir"] = {"enabled": True, "host": "hostapi", "port": 8300}
+    with pytest.raises(ConfigError, match=r"already used by \[station\]"):
+        config.parse(raw, environ={})
+
+
+
+def test_default_generic_mode_and_ft891_profile_override():
+    raw = base()
+    raw["rig"] = {"model": "generic"}
+    assert config.parse(raw, environ={}).rig.mode == "USB"
+    cfg = config.parse(raw, rig_name="ft891", environ={})
+    assert cfg.rig.model == "ft891" and cfg.rig.cat == "yaesu"
+
+
+def test_desk_adif_directory_is_optional_and_explicit():
+    assert config.parse(base()).desk.adif_dir == ''
+    assert config.parse(base() | {'desk': {'adif_dir': 'imports'}}).desk.adif_dir == 'imports'
+
+
+@pytest.mark.parametrize('desk', [{'adif_dir': 3}, {'adif_dir': 'bad\x00path'}, {'adiff_dir': 'imports'}])
+def test_invalid_desk_settings_are_rejected(desk):
+    with pytest.raises(ConfigError, match=r'\[desk\]'):
+        config.parse(base() | {'desk': desk})

@@ -117,6 +117,35 @@ class ModemCore(abc.ABC):
         """``ARQ`` or ``FEC``."""
         self._protocolmode = mode
 
+    def set_codec(self, on: bool) -> None:
+        raise NotImplementedError("logical codec control is unavailable on this backend")
+
+    def set_radioctrl(self, on: bool) -> None:
+        if on:
+            raise ValueError("no station-mediated radio-control bridge configured")
+        self._radioctrl = False
+
+    def set_drivelevel(self, level: int) -> None:
+        self._drivelevel = level
+
+    def set_autobreak(self, on: bool) -> None:
+        self._autobreak = on
+
+    def set_arqtimeout(self, seconds: int) -> None:
+        self._timeout_s = seconds
+
+    def set_leader(self, milliseconds: int) -> None:
+        self._leader_ms = milliseconds
+
+    def set_trailer(self, milliseconds: int) -> None:
+        self._trailer_ms = milliseconds
+
+    def set_cwid(self, mode: bool | str) -> None:
+        self._cwid = mode
+
+    def break_link(self) -> None:
+        raise NotImplementedError("manual turnover is unavailable on this backend")
+
     # -- session verbs -----------------------------------------------------
 
     @abc.abstractmethod
@@ -145,7 +174,11 @@ class ModemCore(abc.ABC):
         """Immediate ('dirty') disconnect; discards any queued TX."""
 
     def send_id(self) -> None:
-        """Transmit an ID frame now (host ``SENDID``). Default: no-op."""
+        """Transmit an ID frame now (host ``SENDID``)."""
+        raise NotImplementedError('ID production is unavailable on this backend')
+
+    def two_tone_test(self) -> None:
+        raise NotImplementedError('two-tone production is unavailable on this backend')
 
     @property
     @abc.abstractmethod
@@ -176,6 +209,13 @@ class LoopbackModem(ModemCore):
     OTA_DELAY = 0.02          # simulated per-burst airtime (s)
     HANDSHAKE_DELAY = 0.05    # simulated connect handshake (s)
 
+    def send_id(self):
+        # This presentation has explicitly no waveform or radio.
+        pass
+
+    def two_tone_test(self):
+        pass
+
     def __init__(self, bandwidth: int = 500) -> None:
         self._observer: ModemObserver | None = None
         self._mycall = ""
@@ -185,7 +225,9 @@ class LoopbackModem(ModemCore):
         self._listen = False
         self._protocolmode = "ARQ"
 
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._generation = 0
+        self._pending_call = False
         self._state = P.ArdopState.DISC
         self._remote = ""
         self._buffer = 0
@@ -205,7 +247,9 @@ class LoopbackModem(ModemCore):
         self._to_state(P.ArdopState.DISC)
 
     def stop(self) -> None:
-        self._running = False
+        with self._lock:
+            self._running = False
+            self._generation += 1
         self._tx_q.put(None)
 
     @property
@@ -227,29 +271,41 @@ class LoopbackModem(ModemCore):
     # -- session verbs -----------------------------------------------------
 
     def connect(self, target: str, repeats: int = 5) -> None:
-        threading.Thread(target=self._do_connect, args=(target,),
+        with self._lock:
+            if self._state != P.ArdopState.DISC or self._pending_call:
+                raise ValueError("contact already active")
+            self._generation += 1
+            generation = self._generation
+            self._pending_call = True
+        threading.Thread(target=self._do_connect, args=(target, generation),
                          daemon=True).start()
 
-    def _do_connect(self, target: str) -> None:
+    def _do_connect(self, target: str, generation: int) -> None:
         obs = self._observer
         assert obs is not None
         # Simulated ARQ handshake: key up, send the connect request, key down.
-        obs.modem_ptt(True)
-        time.sleep(self.HANDSHAKE_DELAY)
-        obs.modem_ptt(False)
         with self._lock:
+            if generation != self._generation or not self._running:
+                return
+            obs.modem_ptt(True)
+        time.sleep(self.HANDSHAKE_DELAY)
+        with self._lock:
+            if generation != self._generation or not self._running:
+                return
+            obs.modem_ptt(False)
+            self._pending_call = False
             self._remote = target
             held, self._preconnect = self._preconnect, []
-        # The caller is the Information Sending Station once the link is up.
-        self._to_state(P.ArdopState.ISS)
-        obs.modem_connected(target, self._bandwidth)
-        for blob in held:
-            self._tx_q.put(blob)
+            self._to_state(P.ArdopState.ISS)
+            obs.modem_connected(target, self._bandwidth)
+            for blob in held:
+                self._tx_q.put((generation, blob))
 
     def transmit(self, blob: bytes) -> None:
         if not blob:
             return
         with self._lock:
+            generation = self._generation
             self._buffer += len(blob)
             depth = self._buffer
             preconnect = self._state == P.ArdopState.DISC
@@ -258,7 +314,7 @@ class LoopbackModem(ModemCore):
         assert self._observer is not None
         self._observer.modem_buffer(depth)
         if not preconnect:
-            self._tx_q.put(blob)
+            self._tx_q.put((generation, blob))
 
     def _tx_worker(self) -> None:
         obs = self._observer
@@ -277,30 +333,39 @@ class LoopbackModem(ModemCore):
             except queue.Empty:
                 pass
 
-            obs.modem_ptt(True)
-            time.sleep(self.OTA_DELAY)
             with self._lock:
-                connected = self._state != P.ArdopState.DISC
-            for b in burst:
-                if connected:
-                    obs.modem_data_received("ARQ", b)   # loopback: echo to host
+                if not any(g == self._generation for g, _ in burst):
+                    continue
+                obs.modem_ptt(True)
+            time.sleep(self.OTA_DELAY)
+            for generation, b in burst:
                 with self._lock:
+                    if generation != self._generation or not self._running:
+                        continue
+                    if self._state != P.ArdopState.DISC:
+                        obs.modem_data_received("ARQ", b)
                     self._buffer = max(0, self._buffer - len(b))
                     depth = self._buffer
-                obs.modem_buffer(depth)
-            obs.modem_ptt(False)
+                    obs.modem_buffer(depth)
+            with self._lock:
+                if generation == self._generation and self._running:
+                    obs.modem_ptt(False)
 
     def disconnect(self) -> None:
-        threading.Thread(target=self._do_disconnect, daemon=True).start()
+        with self._lock:
+            generation = self._generation
+        threading.Thread(target=self._do_disconnect, args=(generation,), daemon=True).start()
 
-    def _do_disconnect(self) -> None:
+    def _do_disconnect(self, generation: int) -> None:
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
             with self._lock:
+                if generation != self._generation or not self._running:
+                    return
                 if self._buffer == 0:
                     break
             time.sleep(0.01)
-        self._finish_disconnect()
+        self._finish_disconnect(generation)
 
     def purge_buffer(self) -> None:
         try:
@@ -318,12 +383,17 @@ class LoopbackModem(ModemCore):
         self.purge_buffer()
         self._finish_disconnect()
 
-    def _finish_disconnect(self) -> None:
+    def _finish_disconnect(self, generation=None) -> None:
         obs = self._observer
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return
+            self._generation += 1
+            self._pending_call = False
             self._remote = ""
             self._buffer = 0
             self._preconnect = []
-        if obs is not None:
-            obs.modem_disconnected()
-        self._to_state(P.ArdopState.DISC)
+            if obs is not None:
+                obs.modem_ptt(False)
+                obs.modem_disconnected()
+            self._to_state(P.ArdopState.DISC)

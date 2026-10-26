@@ -12,10 +12,12 @@ Two kinds of check, kept distinct on purpose:
     until a full P2 session capture exists that an independent decoder will
     acquire.
 """
+import json
 import os
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 from hfmodem.shrike import p2rx, spec
@@ -115,12 +117,7 @@ def test_real_audio():
     check("real FEC both carriers DQPSK", orders.count("DQPSK") == 2, str(orders))
 
 
-REFERENCE_SOFTS = bytes.fromhex(
-    "fbc1c1003f00003f02c1fec1fe00fc3fc1c13f0000fcc1053fc1c1fdfb3fc107"
-    "f4c1fec100c1f5c13f063ff700fdfdf4fc07c1f4fa3dc3c107f1f307c1efc13f"
-    "c13fc1e9c403edc100c5e23f3de7c1c2c6f907c83f3f3f3f033e0bd73fd0291e"
-    "ecd4d2fc3117c420c3dc3f3926d7c6cdc1fd3f22fe32c2c1efdcd7d5cfd600d8"
-    "c1da03c5d4ce10c1c7c1fde700c9001e")
+REFERENCE_SOFTS = Path(__file__).parent / "fixtures/sigidwiki/p2-fec/softs.json"
 """Reference channel-order softs for one frame on this recording.
 
 144 int8 values at level 0: 72 symbols on each of two carriers, interleaved
@@ -143,6 +140,8 @@ def test_matches_an_independent_front_end():
     if not os.path.exists(fec):
         print(f"  skip front-end comparison ({fec} absent)")
         return
+    if not REFERENCE_SOFTS.exists():
+        pytest.skip(f"{REFERENCE_SOFTS} is absent")
     audio, fs = p2rx._read_wav_mono(fec)
     f_lo, f_hi = p2rx.measure_carriers(audio, fs)
     streams = {}
@@ -152,7 +151,7 @@ def test_matches_an_independent_front_end():
         d = sym[1:] * np.conj(sym[:-1])
         streams[name] = (d / (np.abs(d) + 1e-30), period, phase)
 
-    softs = np.frombuffer(REFERENCE_SOFTS, dtype=np.int8).astype(float)
+    softs = np.array(json.loads(REFERENCE_SOFTS.read_text()), float)
     rng = np.random.default_rng(512)
 
     def scan(d, s):

@@ -208,7 +208,10 @@ def test_recorded_chirp_reader_is_opt_in_on_a_yielded_long_slot(enabled):
     from hfmodem.shrike.p4receiver import Clock
     from hfmodem.tests.shrike.test_p4chirp import REAL_FIELDS
 
-    with np.load(Path(__file__).parent / "fixtures/p4-chirps/audio.npz") as fixture:
+    path = Path(__file__).parent / "fixtures/sigidwiki/p4-chirps/audio.npz"
+    if not path.exists():
+        pytest.skip(f"{path} is absent")
+    with np.load(path) as fixture:
         fs = int(fixture["fs"])
         for i, row in enumerate(fixture["audio"]):
             audio = np.r_[np.zeros(fs // 3), row, np.zeros(fs // 3)]

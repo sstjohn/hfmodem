@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # Remote responder site: the daemon runs unattended under systemd/launchd and
 # nobody is there to nurse it. Timeouts are generous (a slow protocol must not
 # be cut off mid-transfer), retention is capped (the disk must not fill), and

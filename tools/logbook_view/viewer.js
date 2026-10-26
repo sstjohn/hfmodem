@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 import {setWaveforms,waveformRows,linkState,radioMode,packetAt,packetProgress,symbolVisible,exchangeNote,evidenceClass,evidenceAvailable,directionLabel,playbackSummary,matchesEvent,byteRecords,hexDump,readableBytes,trafficBytes,exchangeRows,packetAnatomy} from '/link_state.mjs';
 const $ = id => document.getElementById(id);
 const arm = new URLSearchParams(location.search).get('arm');
@@ -59,11 +61,11 @@ function details(e){
 }
 function filterEvents(){let visible=0;document.querySelectorAll('#events button').forEach((b,i)=>{b.hidden=!matchesEvent(state.events[i],$('eventDirection').value,$('eventResult').value,$('eventSearch').value.trim());if(!b.hidden)visible++;});$('eventCount').textContent=`${visible} of ${state.events.length} observations · filters affect this list`;}
 function sessionOverview(){
- $('waterfallLocal').textContent=`${manifest.caller||'Local station'} · TX`;
- $('waterfallPeer').textContent=`${manifest.called||manifest.call||'Peer'} · RX`;
+ $('waterfallLocal').textContent=`${(manifest.local_role==='called'?manifest.called:manifest.caller)||'Local station'} · TX`;
+ $('waterfallPeer').textContent=`${(manifest.local_role==='called'?manifest.caller:manifest.called)||manifest.call||'Peer'} · RX`;
  $('sessionOutcome').textContent=manifest.comparison?.original_summary||'Original session outcome not stored in this replay.';
  const session=manifest.session||{};
- $('sessionFacts').textContent=[`${manifest.caller||'Local station'} → ${manifest.called||manifest.call} · local station assumed caller`,session.dial_hz!=null?`${(session.dial_hz/1e6).toFixed(4)} MHz dial`:null,session.tx_w!=null?`${session.tx_w} W configured`:null,manifest.bw_hz?`${manifest.bw_hz} Hz bandwidth`:null,`${manifest.sources?.length||1} recording sources`,`${seconds(manifest.duration_s)} primary recording`,'Mail delivery comes from the original session log; replay CRCs do not establish delivery.'].filter(Boolean).join(' · ');
+ $('sessionFacts').textContent=[`${manifest.caller||'Local station'} → ${manifest.called||manifest.call} · local station ${manifest.local_role||'assumed caller'}`,session.dial_hz!=null?`${(session.dial_hz/1e6).toFixed(4)} MHz dial`:null,session.tx_w!=null?`${session.tx_w} W configured`:null,manifest.bw_hz?`${manifest.bw_hz} Hz bandwidth`:null,`${manifest.sources?.length||1} recording sources`,`${seconds(manifest.duration_s)} primary recording`,'Mail delivery comes from the original session log; replay CRCs do not establish delivery.'].filter(Boolean).join(' · ');
 }
 function timeline(){
 const [c,w,h]=context('timeline'),duration=manifest.duration_s||1,left=82,pw=w-left;
@@ -200,7 +202,7 @@ function showBytes(e){
 function showExchange(){
  const whole=$('exchangeScope').value==='whole';const rows=exchangeRows(state.events,state.time,whole);
  const key=base+'|'+whole+'|'+rows.map(r=>`${r.event.id}:${r.identified}:${r.active}:${r.future}`).join(',');
- $('ladderLocal').textContent=`${manifest.caller||'Local station'} · local`;$('ladderPeer').textContent=`${manifest.called||manifest.call||'Peer'} · called`;
+ $('ladderLocal').textContent=`${(manifest.local_role==='called'?manifest.called:manifest.caller)||'Local station'} · local`;$('ladderPeer').textContent=`${(manifest.local_role==='called'?manifest.caller:manifest.called)||manifest.call||'Peer'} · peer`;
  $('ladderNote').textContent=(whole?'Whole recording · includes future results. ':'Evidence up to the playhead. ')+'Arrows show direction, not confirmed delivery. ACKs stand alone unless a response relationship was recorded.';
  if(key!==state.ladderKey){state.ladderKey=key;
   const host=$('ladder'),oldScroll=host.scrollTop;
@@ -236,7 +238,7 @@ if(manifest.sources?.some(s=>s.kind==='rig tap'&&s.offset_s!==null))$('sourcekin
 $('sourcefile').href=manifest.recording.url;$('sourcefile').textContent=decodeURIComponent(manifest.recording.url.split('/').at(-1));
 const comparison=manifest.comparison;
 $('comparison').textContent=comparison?.logged_rx_overs!=null?`Original session: ${comparison.logged_rx_overs} incoming data overs logged. This replay: ${comparison.replayed_rx_frames} CRC-valid received data frames. Replay may be incomplete; the logbook outcome comes from the original session.`:manifest.protocol==='PACTOR'?'PACTOR replay · packets, control words and signal candidates are distinguished. Combined decodes are labelled; replay does not replace the original session outcome.':'Replay findings are incomplete observations of the recording; they do not replace the original session outcome.';
-$('provenance').textContent=`${manifest.clock} ${manifest.timing||''} Decoder ${manifest.decoder.commit.slice(0,8)}, source ${manifest.decoder.source_sha256.slice(0,12)}. Recording SHA256 ${manifest.recording.sha256}.`;$('limits').replaceChildren(...manifest.limits.map(t=>{const li=document.createElement('li');li.textContent=t;return li;}));$('events').replaceChildren(...state.events.map(e=>{const b=document.createElement('button');b.dataset.id=e.id;b.setAttribute('role','listitem');const t=document.createElement('time');t.textContent=seconds(e.t0);const kind=document.createElement('span');kind.textContent=eventLabel(e);kind.style.color=color(e);const small=document.createElement('small');small.textContent=`${directionLabel(e,manifest)} · ${e.status}`;b.append(t,kind,small);b.onclick=()=>select(e);return b;}));$('signalSource').replaceChildren(new Option('Best available','auto'),...(manifest.sources||[]).map(s=>{const option=new Option(sourceName(s.id)+(s.offset_s===null?' · unaligned':''),s.id);option.disabled=s.offset_s===null;option.title=s.alignment;return option;}));sessionOverview();filterEvents();$('workspace').hidden=false;$('notice').textContent=(manifest.sources||[]).filter(s=>s.offset_s===null).map(s=>`${sourceName(s.id)} is available but could not be aligned. ${s.alignment}`).join('\n');draw();}
+$('provenance').textContent=`${manifest.clock} ${manifest.timing||''} Decoder ${manifest.decoder.commit?.slice(0,8)??'outside a checkout'}, source ${manifest.decoder.source_sha256.slice(0,12)}. Recording SHA256 ${manifest.recording.sha256}.`;$('limits').replaceChildren(...manifest.limits.map(t=>{const li=document.createElement('li');li.textContent=t;return li;}));$('events').replaceChildren(...state.events.map(e=>{const b=document.createElement('button');b.dataset.id=e.id;b.setAttribute('role','listitem');const t=document.createElement('time');t.textContent=seconds(e.t0);const kind=document.createElement('span');kind.textContent=eventLabel(e);kind.style.color=color(e);const small=document.createElement('small');small.textContent=`${directionLabel(e,manifest)} · ${e.status}`;b.append(t,kind,small);b.onclick=()=>select(e);return b;}));$('signalSource').replaceChildren(new Option('Best available','auto'),...(manifest.sources||[]).map(s=>{const option=new Option(sourceName(s.id)+(s.offset_s===null?' · unaligned':''),s.id);option.disabled=s.offset_s===null;option.title=s.alignment;return option;}));sessionOverview();filterEvents();$('workspace').hidden=false;$('notice').textContent=(manifest.sources||[]).filter(s=>s.offset_s===null).map(s=>`${sourceName(s.id)} is available but could not be aligned. ${s.alignment}`).join('\n');draw();}
 for(const id of ['eventDirection','eventResult','eventSearch'])$(id).oninput=filterEvents;
 $('replayFrame').onclick=()=>{if(state.loop){state.loop=null;stop();draw();return;}const e=state.currentPacket;if(!e)return;state.loop=e;setTime(Math.max(0,e.t0-.15));play();};
 $('play').onclick=()=>state.playing?stop():play();$('follow').onclick=play;

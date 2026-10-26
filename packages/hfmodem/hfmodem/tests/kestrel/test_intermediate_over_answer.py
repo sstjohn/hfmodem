@@ -158,7 +158,7 @@ def test_the_record_below_base_is_read_against_its_own_body():
     """A peer that drops a level keys a 48-byte body, and its trailer sits at the
     end of that one. Measured against 90 the same over reads as full and the
     delivery never ends."""
-    body = _phy.vara_body(b"short", MYCALL)[:48]
+    body = _phy.vara_body(b"short", MYCALL, body_len=48)
     assert _phy.over_is_last(body, MYCALL)
 
 

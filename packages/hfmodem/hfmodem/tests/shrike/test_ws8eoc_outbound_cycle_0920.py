@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The 00:46 UTC WS8EOC grant must emit in its first available slot."""
 import numpy as np
 import pytest
@@ -29,6 +31,7 @@ def sender(tmp_path):
     a._next_seq = 2
     a._outbuf.extend(b'X' * 100)
     a._buffer_raw = 105
+    a.payload_ledger.queue(a._inflight.payload + bytes(a._outbuf))
     s.rx._p3_answer_at = 2477538
     g.keyed_slot = 41
     g._p3_keyed_reply = (41, 2492774, 2533241, SHORT)

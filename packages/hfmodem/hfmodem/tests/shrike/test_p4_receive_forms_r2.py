@@ -42,7 +42,7 @@ def test_manifest_and_full_inputs():
         assert tape.contract['opening']['headers'] == ['A','A']
         assert tape.contract['source']['artifacts'] or arm.startswith('0927-')
         assert tape.contract['metadata']['first_stream_sample'] == 0
-    primitive = 'packages/hfmodem/hfmodem/tests/shrike/fixtures/p4-long/audio.npz'
+    primitive = 'packages/hfmodem/hfmodem/tests/shrike/fixtures/sigidwiki/p4-long/audio.npz'
     assert digest(ROOT/primitive) == m['primitives'][primitive] == 'c641415075f315e839691230e186136601c06c74b64d95539cabc2a243858fd7'
     assert m['fixtures']['1001-0336']['options']['p4-answer-offset'] == '0.908'
     assert m['fixtures']['1001-0336']['options']['tx-latency-ms'] == '0.0'
@@ -330,44 +330,106 @@ def test_reader_diagnostic_expansion_only_at_miss_log(monkeypatch, capsys):
     from hfmodem.shrike import onair
     from hfmodem.shrike.p4receiver import P4Receiver
     from hfmodem.shrike.p4turn import P4Turn
-    expand = onair._p4_reader_results
-    finish = P4Receiver.finish_cycle
-    decide = P4Turn.decide
-    allowed = False
-    expansions = misses = decisions = 0
+    import inspect
+    import sys
+    from types import CodeType
 
-    def decided(self, *a, **kw):
-        nonlocal allowed, decisions
-        allowed = False
-        decisions += 1
-        return decide(self, *a, **kw)
+    expand, miss = onair._p4_reader_results, onair._p4_reader_miss
+    run_link = inspect.unwrap(onair._run_p4_link)
+    run_code = run_link.__code__
+    nested = {code.co_name: code for code in run_code.co_consts
+              if isinstance(code, CodeType)}
+    # Exact nested code identities exclude unrelated functions named feed/read.
+    hot_codes = {nested['feed'], nested['read']}
+    lines, first_line = inspect.getsourcelines(run_link)
+    cost_start, = [first_line+i for i, line in enumerate(lines)
+                   if 'before_read = time.perf_counter()' in line]
+    cost_end, = [first_line+i for i, line in enumerate(lines)
+                 if 'read_cost = round((time.perf_counter()-before_read)*FS)' in line]
 
-    def finished(self, *a, **kw):
-        nonlocal allowed, misses
-        silent = finish(self, *a, **kw)
-        allowed = bool(silent)
-        misses += bool(silent)
-        return silent
-
-    def expanded(calls):
-        nonlocal allowed, expansions
-        # No dict/kind-list expansion in read, feed, or read_cost, with
-        # tracing either off or on. Successful cycles never expand at all.
-        assert allowed and decisions
-        allowed = False
-        expansions += 1
-        return expand(calls)
-
-    monkeypatch.setattr(P4Turn, 'decide', decided)
-    monkeypatch.setattr(P4Receiver, 'finish_cycle', finished)
-    monkeypatch.setattr(onair, '_p4_reader_results', expanded)
     for traced in (False, True):
-        expansions = misses = decisions = 0
-        replay.replay('1001-1059', timing_trace=traced)
+        expansions, misses, successful = [], [], []
+        coverage = dict(read_partial=0, read_window=0, decide=0, feed=0, read=0)
+        depth = 0
+        cycle_expansions = 0
+
+        def guarded(name, call):
+            def invoke(*a, **kw):
+                nonlocal depth
+                coverage[name] += 1
+                before = len(expansions)
+                depth += 1
+                try:
+                    return call(*a, **kw)
+                finally:
+                    depth -= 1
+                    assert len(expansions) == before
+            return invoke
+
+        def profiled(frame, event, arg):
+            nonlocal depth, cycle_expansions
+            code = frame.f_code
+            if code in hot_codes:
+                if event == 'call':
+                    coverage[code.co_name] += 1
+                    depth += 1
+                elif event == 'return':
+                    depth -= 1
+            if code is nested['over'] and event == 'call':
+                if frame.f_locals['silent'] == 0:
+                    assert len(expansions) == cycle_expansions
+                    successful.append(frame.f_locals['onset'])
+                cycle_expansions = len(expansions)
+
+        def expanded(calls):
+            assert depth == 0
+            frame = sys._getframe(1)
+            driver = None
+            while frame is not None:
+                assert frame.f_code not in hot_codes
+                if frame.f_code is run_code:
+                    driver = frame
+                    assert not cost_start <= frame.f_lineno <= cost_end
+                frame = frame.f_back
+            assert driver is not None
+            assert len(expansions) == len(misses)
+            rows = expand(calls)
+            expansions.append(rows)
+            return rows
+
+        def missed(onset, silent, expectation, rows, coherence):
+            assert silent > 0 and depth == 0
+            assert len(expansions) == len(misses)+1 and rows is expansions[-1]
+            text = miss(onset, silent, expectation, rows, coherence)
+            misses.append(text)
+            return text
+
+        def finished(self, *a, **kw):
+            before = len(expansions)
+            silent = finish(self, *a, **kw)
+            if not silent:
+                assert len(expansions) == before
+            return silent
+
+        finish = P4Receiver.finish_cycle
+        previous_profile = sys.getprofile()
+        with monkeypatch.context() as local:
+            for name in ('read_partial', 'read_window'):
+                local.setattr(P4Receiver, name, guarded(name, getattr(P4Receiver, name)))
+            local.setattr(P4Turn, 'decide', guarded('decide', P4Turn.decide))
+            local.setattr(P4Receiver, 'finish_cycle', finished)
+            local.setattr(onair, '_p4_reader_results', expanded)
+            local.setattr(onair, '_p4_reader_miss', missed)
+            sys.setprofile(profiled)
+            try:
+                replay.replay('1001-1059', timing_trace=traced)
+            finally:
+                sys.setprofile(previous_profile)
         log = capsys.readouterr().out
-        assert expansions == misses == log.count('[p4 link] no live packet at ')
-        assert expansions > 0
-        assert decisions > expansions  # successful cycles added zero expansion calls
+        printed = [line for line in log.splitlines() if '[p4 link] no live packet at ' in line]
+        assert printed == misses
+        assert len(expansions) == len(misses) > 0
+        assert successful and depth == 0 and all(coverage.values())
 
 
 @pytest.mark.parametrize('arm,begin,end,cfo', [

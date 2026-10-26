@@ -31,7 +31,7 @@ def native():
 
 @pytest.mark.parametrize('requested', [None, 4])
 @pytest.mark.parametrize('chunk', [960, 4096])
-def test_native_query_reply_retires_only_pending_and_repacks_unsent(requested, chunk):
+def test_native_query_reply_retires_only_pending_and_repacks_unsent(requested, chunk, monkeypatch):
     hs, io, payload = sender(requested)
     hs.send(b'later host write')
     old = hs._tx_pending
@@ -50,7 +50,24 @@ def test_native_query_reply_retires_only_pending_and_repacks_unsent(requested, c
     hs.on_rx_audio(x)
     hs._took_intermediate_query_answer()
     assert (hs._tx_pending, hs._txq, len(io.sent)) == before
+    now = [100.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: now[0])
+    kinds = []
+    io.tx_metadata = lambda **metadata: kinds.append(metadata["packet_kind"])
     for _ in range(8):hs._took_control_burst(continue_reply=True)
+    assert kinds == ["data"] * 7 + ["session-turn-release"]
+    assert hs._tx_pending is None and hs.turn == A._TURN_PEER
+    assert hs._txq == [b'later host write'] and hs._ask_owed
+    now[0] += .294
+    hs.idle_keepalive()
+    assert kinds[-1] == "session-turn-release"
+    now[0] += .002
+    hs.idle_keepalive()
+    assert kinds == ["data"] * 7 + ["session-turn-release", "session-turn-request"]
+    assert hs._tx_pending is None and hs.turn == A._TURN_ASKED
+    assert not hs._ask_owed
+    hs._turn_granted((), said="session-drained-responder")
+    assert kinds[-1] == "data"
     assert hs._tx_pending[2] == 103
     assert phy.vara_payload(hs._tx_pending[0],caller=hs.caller) == b'later host write'
 

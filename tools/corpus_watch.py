@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Receive-only PACTOR corpus watch, ranked by completed Winlink sessions."""
 from __future__ import annotations
 
@@ -6,7 +8,6 @@ import argparse
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
-import fcntl
 import hashlib
 import json
 import os
@@ -16,7 +17,6 @@ import re
 import shutil
 import signal
 import socket
-import subprocess
 import time
 import wave
 
@@ -25,8 +25,10 @@ import numpy as np
 from corpuslib import feed, inventory
 from corpuslib.detector import fsk_offset
 from corpuslib.policy import Hold
-from hfmodem.core import config
-from hfcapture import Capture, RATE, portaudio, sound_input
+from hfmodem.core import claim, config
+from hfmodem.core.native import spawn_native
+from hfcapture import (Capture, RATE, portaudio, sound_input, device_claim,
+                       device_opened, stop_native, close_native, drain_native)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -144,32 +146,30 @@ def request(address, command):
 def receiver(args, out):
     if not args.cat_port:
         raise ValueError('--cat-port or CAT_PORT is required for the shared rig claim')
-    lock = Path('/tmp') / f'hfmodem-rig-{Path(args.cat_port).name}.claim'
-    proc = None
-    with lock.open('a') as held:
+    proc, log, readers = None, None, []
+    with device_claim("corpus_watch", devices=claim.Devices(
+            cat_port=args.cat_port, capture=args.device,
+            cat="rigctld" if args.rigctld else "serial")) as held:
         try:
-            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError('The rig is already claimed; collector has not opened CAT/audio.') from None
-        if args.rigctld:
-            host, port = args.rigctld.rsplit(':', 1)
-            address = (host, int(port))
-        else:
-            # A private port: never kill, adopt, or silently connect to another
-            # rigctld. The shared CAT claim precedes opening the serial port.
-            address = ('127.0.0.1', 4537)
-            with socket.socket() as check:
-                check.bind(address)
-            exe = shutil.which('rigctld') or str(Path(os.environ.get(
-                'HAMLIB_BIN', Path.home() / 'src/radio/hamlib/_install/bin')) / 'rigctld')
-            log = (out / 'rigctld.log').open('w')
-            proc = subprocess.Popen([exe, '-m', str(args.model), '-r', args.cat_port,
-                '-s', str(args.baud), '-t', str(address[1]), '-T', address[0],
-                '--set-conf=ptt_type=RIG'], stdout=log, stderr=log, pass_fds=(held.fileno(),))
-            log.close()
-        try:
+            if args.rigctld:
+                host, port = args.rigctld.rsplit(':', 1)
+                address = (host, int(port))
+            else:
+                # A private port: never kill, adopt, or silently connect to another
+                # rigctld. The shared CAT claim precedes opening the serial port.
+                address = ('127.0.0.1', 4537)
+                with socket.socket() as check:
+                    check.bind(address)
+                exe = shutil.which('rigctld') or str(Path(os.environ.get(
+                    'HAMLIB_BIN', Path.home() / 'src/radio/hamlib/_install/bin')) / 'rigctld')
+                log = (out / 'rigctld.log').open('w')
+                proc = spawn_native([exe, '-m', str(args.model), '-r', args.cat_port,
+                    '-s', str(args.baud), '-t', str(address[1]), '-T', address[0],
+                    '--set-conf=ptt_type=None'], claim_fd=held.claim,
+                    long_lived=True, device=args.cat_port)
+                readers = drain_native(proc, log)
             for _ in range(20):
-                if proc is not None and proc.poll() is not None:
+                if proc is not None and not proc.alive():
                     raise RuntimeError('collector rigctld exited; see rigctld.log')
                 try:
                     request(address, 'f')
@@ -178,15 +178,18 @@ def receiver(args, out):
                     time.sleep(.2)
             else:
                 raise RuntimeError('rigctld did not become ready')
+            device_opened()
             yield address
         finally:
             if proc is not None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
+                stop_native(proc)
+                for reader in readers:
+                    reader.join(timeout=2)
+                    if reader.is_alive():
+                        raise claim.ClaimError("collector diagnostic reader did not stop")
+                close_native(proc, stopped=True)
+            if log is not None:
+                log.close()
 
 
 def tune(address, center):
@@ -263,60 +266,62 @@ def visit(args, path, channel, stopped, readback):
             sd = portaudio()
             device, name = sound_input(sd, args.device)
             metadata['device'] = name
-            with sd.RawInputStream(device=device, samplerate=RATE, channels=1,
-                                   dtype='int16', blocksize=4800, callback=callback):
-                while not stopped():
-                    if fatal:
-                        raise RuntimeError(fatal[0])
-                    if not mon.alive:
-                        raise RuntimeError('PACTOR detector exited; channel is unclassified, not quiet')
-                    if mon.dropped_samples:
-                        raise RuntimeError('PACTOR detector fell behind and dropped samples; '
-                                           'capture retained, timing evidence is incomplete')
-                    try:
-                        pcm, adc, status, arrived = incoming.get(timeout=3)
-                    except queue.Empty:
-                        raise RuntimeError('receiver audio stalled') from None
-                    at = capture.frames
-                    if at == 0:
-                        metadata['first_block'] = dict(adc_time=adc, received_unix=arrived,
-                                                       samples=len(pcm)//2)
-                    gap = capture.feed(pcm, adc)
-                    if gap or status:
-                        gaps += 1
-                        emit(dict(event='audio-discontinuity', sample=at, gap_s=gap, status=status))
-                    mon.feed(at, pcm)
-                    tail = np.concatenate((tail, np.frombuffer(pcm, '<i2').astype(float) / 32768))[-RATE:]
-                    if capture.frames >= next_screen:
-                        next_screen += RATE
-                        offset = fsk_offset(tail)
-                        if offset is not None and abs(offset) <= args.max_offset:
-                            action = hold.observe(capture.seconds, 'CENTERED-FSK-CANDIDATE')
-                            if action != 'no-hold-evidence':
-                                emit(dict(event='candidate', t=capture.seconds, offset_hz=offset, action=action))
-                    detections()
-                    stay, why = hold.decision(capture.seconds)
-                    if not stay and capture.seconds < args.max_hold:
-                        # Finish classifying the audio that led to this hop
-                        # before releasing the channel. Continue recording while
-                        # the decoder catches up, rather than waiting with deaf IO.
-                        if pending_hop is None:
-                            pending_hop = capture.seconds
-                        if analyzed_until + .001 < pending_hop:
-                            if capture.seconds - pending_hop > 12:
-                                raise RuntimeError('detector did not classify the hop boundary within 12 seconds')
-                            stay, why = True, 'waiting-for-detector-before-hop'
-                    elif stay:
-                        pending_hop = None
-                    if why != state:
-                        print(f'  {capture.seconds:.1f}s {why}', flush=True)
-                        emit(dict(event='decision', t=capture.seconds, reason=why, stay=stay))
-                        state = why
-                    if not stay:
-                        reason = why
-                        break
-                    if shutil.disk_usage(path).free < args.min_free_gb * 1e9:
-                        raise RuntimeError('minimum free disk space reached')
+            with device_claim("corpus_watch input", devices=claim.Devices(capture=args.device)):
+                with sd.RawInputStream(device=device, samplerate=RATE, channels=1,
+                                       dtype='int16', blocksize=4800, callback=callback):
+                    device_opened()
+                    while not stopped():
+                        if fatal:
+                            raise RuntimeError(fatal[0])
+                        if not mon.alive:
+                            raise RuntimeError('PACTOR detector exited; channel is unclassified, not quiet')
+                        if mon.dropped_samples:
+                            raise RuntimeError('PACTOR detector fell behind and dropped samples; '
+                                               'capture retained, timing evidence is incomplete')
+                        try:
+                            pcm, adc, status, arrived = incoming.get(timeout=3)
+                        except queue.Empty:
+                            raise RuntimeError('receiver audio stalled') from None
+                        at = capture.frames
+                        if at == 0:
+                            metadata['first_block'] = dict(adc_time=adc, received_unix=arrived,
+                                                           samples=len(pcm)//2)
+                        gap = capture.feed(pcm, adc)
+                        if gap or status:
+                            gaps += 1
+                            emit(dict(event='audio-discontinuity', sample=at, gap_s=gap, status=status))
+                        mon.feed(at, pcm)
+                        tail = np.concatenate((tail, np.frombuffer(pcm, '<i2').astype(float) / 32768))[-RATE:]
+                        if capture.frames >= next_screen:
+                            next_screen += RATE
+                            offset = fsk_offset(tail)
+                            if offset is not None and abs(offset) <= args.max_offset:
+                                action = hold.observe(capture.seconds, 'CENTERED-FSK-CANDIDATE')
+                                if action != 'no-hold-evidence':
+                                    emit(dict(event='candidate', t=capture.seconds, offset_hz=offset, action=action))
+                        detections()
+                        stay, why = hold.decision(capture.seconds)
+                        if not stay and capture.seconds < args.max_hold:
+                            # Finish classifying the audio that led to this hop
+                            # before releasing the channel. Continue recording while
+                            # the decoder catches up, rather than waiting with deaf IO.
+                            if pending_hop is None:
+                                pending_hop = capture.seconds
+                            if analyzed_until + .001 < pending_hop:
+                                if capture.seconds - pending_hop > 12:
+                                    raise RuntimeError('detector did not classify the hop boundary within 12 seconds')
+                                stay, why = True, 'waiting-for-detector-before-hop'
+                        elif stay:
+                            pending_hop = None
+                        if why != state:
+                            print(f'  {capture.seconds:.1f}s {why}', flush=True)
+                            emit(dict(event='decision', t=capture.seconds, reason=why, stay=stay))
+                            state = why
+                        if not stay:
+                            reason = why
+                            break
+                        if shutil.disk_usage(path).free < args.min_free_gb * 1e9:
+                            raise RuntimeError('minimum free disk space reached')
         except BaseException as exc:
             reason = f'error: {type(exc).__name__}: {exc}'
             raise

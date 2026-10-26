@@ -118,6 +118,9 @@ def native_pending(row):
         if len(remaining) % cap == 0: hs._txq.append(b'')
     if hold_lower or (row['bw'] == '2300' and p['level'] == 1 and not row.get('retry_count')):
         hs._tx_recovery_levels = [p['level']] * len(hs._txq)
+    admitted = VA._phy.vara_payload(hs._tx_pending[0], caller=hs.caller, body_len=len(hs._tx_pending[0]))
+    for wire in (admitted, *hs._txq):
+        hs.payload_ledger.queue(wire, wire)
     fs, x = wavfile.read(FIXTURES / (row['name'] + '.wav'))
     assert fs == VA.MK.FS
     assert hashlib.sha256((FIXTURES / (row['name'] + '.wav')).read_bytes()).hexdigest() == row['sha256']

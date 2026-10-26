@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # ARDOP Host Interface — Functional Record
 
 This document is the functional record of the ARDOP host interface: the ASCII/TCP

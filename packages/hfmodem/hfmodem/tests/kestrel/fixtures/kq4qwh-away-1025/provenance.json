@@ -1,0 +1,18 @@
+{
+  "source": "operator-data/working/vara-chat/sessions/20261025T222107232700Z/receive.wav",
+  "sample_rate": 48000,
+  "slices": [
+    {
+      "file": "ack.wav",
+      "start_sample": 27404288,
+      "end_sample": 27470848,
+      "sha256": "1e55aca7c561ecff1e6fe3393e450276777b70aa220111ce0031d44a82d586fd"
+    },
+    {
+      "file": "request.wav",
+      "start_sample": 27497472,
+      "end_sample": 27591680,
+      "sha256": "9a701db002b3bb7e9cff50e56d9f36902259103204e8846513a13a650370c59d"
+    }
+  ]
+}

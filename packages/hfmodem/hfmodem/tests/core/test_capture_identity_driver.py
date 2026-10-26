@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Whole native driver identity/lifecycle pins using fake card, rig and codec."""
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ import pytest
 
 from hfmodem.core import capture_identity as ci, wav
 from hfmodem.shrike import onair
+from hfmodem.tests import fakeclaim
 from hfmodem.tests.shrike.test_armdefaults import _parsed
 from hfmodem.tests.shrike.test_grid import _Rig
 from hfmodem.tests.shrike.test_identify import Clock
@@ -17,6 +20,7 @@ from hfmodem.tests.shrike.test_identify import Clock
 
 def _native(tmp_path, monkeypatch, *, fail_read=False, fail_close=False):
     events, cards, rigs = [], [], []
+    fakeclaim.install(monkeypatch)
     monkeypatch.setattr(onair, '_WRITER', None)
     monkeypatch.setattr(onair, '_CAPTURE_ROOTS', {})
     monkeypatch.setattr(onair, '_CAPTURE_RECORDINGS', {})
@@ -165,13 +169,13 @@ def test_actual_native_deferred_work_finishes_only_its_original_capture(tmp_path
                 raise TimeoutError('synthetic-worker-release-missing')
         return original_save(path, *args, **kwargs)
 
-    def bounded_first_drain(timeout=onair.CAPTURE_DRAIN_S):
+    def bounded_first_drain(timeout=onair.CAPTURE_DRAIN_S, *, rig_down=False):
         queue = onair._WRITER
         if queue is not None and any(writer.root == old_root for writer, _ in queue._owned.values()):
             queue.drain(0.0)
             queue.store()
             return queue.report()
-        return original_drain(timeout)
+        return original_drain(timeout, rig_down=rig_down)
 
     def digests(root):
         return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()

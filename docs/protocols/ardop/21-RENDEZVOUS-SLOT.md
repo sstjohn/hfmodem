@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # 21 — ARDOP rendezvous slot (receiver-source reading)
 
 **Method.** This is a pure reading exercise against the open ARDOP receiver — no

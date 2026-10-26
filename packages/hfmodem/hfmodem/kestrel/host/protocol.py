@@ -22,7 +22,7 @@ VERSION_STRING = "VERSION 4.9.0.KestrelOpen"
 BANDWIDTHS = ("500", "2300", "2750")
 
 # Compression modes.
-COMPRESSION_MODES = ("OFF", "TEXT", "FILES")
+COMPRESSION_MODES = ("OFF", "ON", "TEXT", "FILES")
 
 # Responses / async notifications (modem -> host).
 OK = "OK"

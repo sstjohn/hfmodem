@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """WS8EOC granted long SL1 while our sender silently reverted to short."""
 import hashlib
 import json

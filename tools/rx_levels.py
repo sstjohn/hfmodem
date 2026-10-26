@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """What the receive working point actually is: band noise, dynamic range, and the floor.
 
 Every level criterion at this station is a peak criterion. `hfcapture check` asks for
@@ -50,7 +52,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -58,6 +59,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+
+from hfmodem.core import claim
+from hfmodem.core.native import spawn_native
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "packages/hfmodem"))
 from hfmodem.core.busy import DEAF_DBFS, MUTE_DROP_DB, occupancy_db  # noqa: E402
@@ -518,15 +522,30 @@ class DeviceSource(Source):
         import hfcapture
 
         print(f"  recording {seconds:.0f}s -- {why}")
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "cap.wav"
-            subprocess.run([hfcapture.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
-                            *hfcapture.input_spec(self.capture_device()), "-t", str(seconds),
-                            "-ac", "1", "-ar", str(FS), "-c:a", "pcm_s16le", str(path)],
-                           check=False)
-            if not path.exists():
-                sys.exit(f"nothing recorded from device {self.device!r}")
-            return read_wav(path)[0]
+        with hfcapture.device_claim("rx_levels", devices=claim.Devices(capture=self.device)) as held:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "cap.wav"
+                device = self.capture_device()
+                child = spawn_native([hfcapture.ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+                                      *hfcapture.input_spec(device), "-t", str(seconds),
+                                      "-ac", "1", "-ar", str(FS), "-c:a", "pcm_s16le", str(path)],
+                                     claim_fd=held.claim, long_lived=True, device=device)
+                hfcapture.device_opened()
+                with tempfile.TemporaryFile(mode="w+") as log:
+                    readers = hfcapture.drain_native(child, log)
+                    try:
+                        if not child.wait_gone(seconds + 15):
+                            raise RuntimeError("audio capture did not finish")
+                    finally:
+                        hfcapture.stop_native(child)
+                        for reader in readers:
+                            reader.join(timeout=2)
+                            if reader.is_alive():
+                                raise claim.ClaimError("capture diagnostic reader did not stop")
+                        hfcapture.close_native(child, stopped=True)
+                if not path.exists():
+                    sys.exit(f"nothing recorded from device {self.device!r}")
+                return read_wav(path)[0]
 
     def capture_device(self):
         """Resolve a configured name to ffmpeg's index only at live capture."""

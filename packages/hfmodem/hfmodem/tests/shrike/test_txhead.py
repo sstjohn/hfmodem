@@ -208,6 +208,9 @@ OUT_LAT_S = 0.012
 BLK = 128
 
 
+# The four probes using this codec measure real monotonic callback/key lead
+# with millisecond bounds. They belong to the serial nice-0 wall_clock slice;
+# competing worker scheduling would measure host contention as well as transmit timing.
 class _FakeCodec:
     """A duplex `_LiveInput` driven by a thread instead of by a sound card.
 
@@ -296,6 +299,7 @@ def _keyed_leads(hold_back: bool, cycles: int = 4) -> list[float]:
     return sorted(leads)
 
 
+@pytest.mark.wall_clock
 def test_the_gridded_burst_keys_a_holdback_short_of_its_settle() -> None:
     """`take_until` to the wait's own deadline can only ever arrive late.
 
@@ -318,6 +322,7 @@ def test_the_gridded_burst_keys_a_holdback_short_of_its_settle() -> None:
     assert min(leads) > SETTLE_S * 1e3 - hold_ms - 8.0, leads
 
 
+@pytest.mark.wall_clock
 def test_the_holdback_term_is_what_restores_the_whole_settle() -> None:
     """The one term the other three call sites already carry.
 
@@ -328,6 +333,7 @@ def test_the_holdback_term_is_what_restores_the_whole_settle() -> None:
     assert min(_keyed_leads(hold_back=True)) > SETTLE_S * 1e3 - 3.0
 
 
+@pytest.mark.wall_clock
 def test_the_connect_burst_never_goes_through_that_path() -> None:
     """`at=None` schedules off the clock, so the first connect keeps its settle.
 
@@ -403,6 +409,7 @@ def test_every_burst_reaches_the_device_at_its_full_rendered_length(tmp_path) ->
     assert not wrong, wrong
 
 
+@pytest.mark.wall_clock
 def test_the_key_is_held_for_the_settle_and_the_whole_burst() -> None:
     """Intended against emitted, as a distribution over burst length.
 

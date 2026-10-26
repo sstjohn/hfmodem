@@ -14,7 +14,7 @@ seventh, which `p4normal` constructs. Section 10 shapes every chip with the
 `p4short` reads the result back.
 
 Three things the document leaves open, and what the two CRC-valid Dragon frames
-in `tests/shrike/fixtures/p4-short/audio.npz` say about them:
+in `tests/shrike/fixtures/sigidwiki/p4-short/audio.npz` say about them:
 
 THE TAIL. Section 3's dimensions leave 352 systematic bits over a 43-byte
 field's 344 and name no layout for the difference. Both recorded frames spend it
@@ -59,7 +59,7 @@ erases the last fifteen body symbols although the seventh training now stands
 behind them, so fifteen of the 1056 coded bits are read as erasures on the
 return trip rather than as the observations they are.
 
-Source recording and provenance: `tests/shrike/fixtures/p4-short/README.md`.
+Source recording and provenance: `tests/shrike/sigidwiki-p4-short.md`.
 """
 from __future__ import annotations
 

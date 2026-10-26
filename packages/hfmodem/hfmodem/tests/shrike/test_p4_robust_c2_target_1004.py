@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Approved placed-domain orchestration; no recorded target recovery before freeze."""
 from pathlib import Path
 import json
@@ -58,7 +60,7 @@ def test_only_replay_swaps_and_proof_sources_declared_in_package_data():
     data = config['tool']['setuptools']['package-data']
     assert data['hfmodem.shrike'] == ['assets/c2-*.swaps.z']
     assert set(data['hfmodem.shrike.c2proof']) == {
-        'cml_generate.c', 'upstream/srandom.h', 'NOTICE.md', 'COPYING.LESSER'}
+        'cml/cml_generate.c', 'cml/upstream/srandom.h', 'NOTICE.md', 'COPYING.LESSER'}
 
 
 @pytest.mark.parametrize('sl',[True,False,3,1,5,2.0,'2'])

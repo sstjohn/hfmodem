@@ -26,6 +26,7 @@ _PREV = (((_DEST >> 1) & 1) << 2) | ((_DEST & 1) << 1) | _OLD_S3
 _INCOMING_INPUT = ((_DEST >> 2) & 1) ^ (_DEST & 1) ^ _OLD_S3
 _DIRECTIONS = np.arange(2)[:, None, None]
 _NEIGHBORS = np.stack((_PREV, _NEXT))
+_FLAT_NEIGHBORS = _NEIGHBORS + 8 * _DIRECTIONS
 
 
 def _llrs(values, name):
@@ -65,6 +66,9 @@ def component_decode(systematic, parity, apriori=None, *, parity_output=False, e
     n = len(sys)
     # Both recurrences have two branches per state and independent boundaries.
     metrics = np.empty((n + 1, 2, 8))
+    flat_metrics = metrics.reshape(n + 1, 16)
+    workspace = np.empty((2, 8, 2), dtype=np.float64)
+    branch0, branch1 = workspace[:, :, 0], workspace[:, :, 1]
     metrics[0, 0] = -np.log(8.)
     if initial_state is not None:
         if isinstance(initial_state, (bool, np.bool_)) or not isinstance(initial_state, Integral) or not 0 <= initial_state < 8:
@@ -84,11 +88,12 @@ def component_decode(systematic, parity, apriori=None, *, parity_output=False, e
     # retain per-symbol normalization at extreme LLRs to bound arithmetic.
     interval = 32 if n >= 704 and np.max(abs(gamma)) < 1e6 else 1
     for t in range(n):
-        branch = metrics[t, _DIRECTIONS, _NEIGHBORS] + edges[t]
-        row = np.logaddexp(branch[:, :, 0], branch[:, :, 1])
+        flat_metrics[t].take(_FLAT_NEIGHBORS, out=workspace, mode='clip')
+        np.add(workspace, edges[t], out=workspace)
+        row = metrics[t + 1]
+        np.logaddexp(branch0, branch1, out=row)
         if (t + 1) % interval == 0:
             row -= np.logaddexp.reduce(row, axis=1)[:, None]
-        metrics[t + 1] = row
     alpha, beta = metrics[:, 0], metrics[::-1, 1]
     # Certainty is valid; an empty fixed-boundary path set is not.
     if not np.isfinite(np.logaddexp.reduce(alpha[-1] + beta[-1])):

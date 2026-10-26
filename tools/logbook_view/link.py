@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """What an arm's transcript says the link did: how far it got, how wide it ran, how fast.
 
 Speed is counted in each direction only where the other end is shown to have

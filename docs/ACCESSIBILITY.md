@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Accessibility
 
 The hfmodem website targets [WCAG 2.2 Level AA](https://www.w3.org/TR/WCAG22/) and follows [W3C Web Accessibility Initiative guidance](https://www.w3.org/WAI/). The aim is to work with existing assistive technologies, including screen readers, speech input, keyboards and switches used by people with physical or motor disabilities. Audio is optional throughout the recorded examples.

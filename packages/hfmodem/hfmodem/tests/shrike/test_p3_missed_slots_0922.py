@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The handed-back PACTOR-3 slots of 2026-09-19..21, replayed on this station's clocks.
 
 Six mechanisms rank by seconds lost, worst first: the recovery loop's
@@ -8,13 +10,13 @@ with the station's own DAC notice and holdback (0920-1946 log:43) and asks
 whether the key instant is still met.
 """
 import json
-from pathlib import Path
 import time
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import arq, onair, placement, rxfront
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.tests.shrike.test_entry_answer import _Session
 from hfmodem.tests.shrike.test_ws8eoc_outbound_cycle_0920 import sender
 
@@ -134,14 +136,11 @@ def test_an_overrun_the_next_block_carries_past_the_tolerance_is_handed_back(
     assert onair.LATE_KEY not in out and onair.SLOT_UNRENDERED not in out
 
 
-CAPTURES = Path(__file__).parents[5] / 'captures'
-recorded = pytest.mark.skipif(not CAPTURES.is_dir(), reason='needs captures/')
-
-
 def hold(arm, n):
     """A recorded hold window and the stream sample it starts on."""
-    meta = json.loads((CAPTURES / f'onair-{arm}' / f'hold_{n:02d}.json').read_text())
-    pcm = rxfront.load_wav(str(CAPTURES / f'onair-{arm}' / f'hold_{n:02d}.wav'))
+    base = CAPTURES / f'onair-{arm}' / f'hold_{n:02d}'
+    meta = json.loads(require_input(base.with_suffix('.json')).read_text())
+    pcm = rxfront.load_wav(str(require_input(base.with_suffix('.wav'))))
     return pcm, meta['end_stream_sample'] - len(pcm)
 
 
@@ -170,7 +169,6 @@ def long_sl1(rx, row0, delivered=None):
     rx.sync.packet_level = 1
 
 
-@recorded
 def test_the_sending_grids_tracked_read_waits_for_the_next_cycle(tmp_path):
     """0920-2142 hold 23: +15.9 ms with control 5 ms and tracked 12 ms.
 
@@ -208,7 +206,6 @@ def test_the_sending_grids_tracked_read_waits_for_the_next_cycle(tmp_path):
     assert not live.clamp_late(tx.key_instant(g, tx.slot))
 
 
-@recorded
 def test_the_deferred_read_is_the_next_sweeps_tracked_read(tmp_path):
     """0920-2142 hold 23 again, with our own turn confirmed.
 
@@ -253,7 +250,6 @@ def test_the_deferred_read_is_the_next_sweeps_tracked_read(tmp_path):
         onair._scan_frame = scan
 
 
-@recorded
 def test_a_bounded_sl1_miss_opens_no_ladder_on_the_short_cycle(tmp_path):
     """0919-2059 hold 10: 51.6 ms tracked on a window holding no frame.
 
@@ -278,7 +274,6 @@ def test_a_bounded_sl1_miss_opens_no_ladder_on_the_short_cycle(tmp_path):
     assert [round(ms) for ms in s.rx._p3_stage_ms['tracked']] < [40]
 
 
-@recorded
 @pytest.mark.parametrize('arm,n,slot,late_ms,anchor,row0,hz', [
     ('0920-1946', 19, 46, 195.5, 32590, None, 0.0),
     ('0920-1056', 15, 32, 1453.4, 32687, 1613082, -13.0),

@@ -37,6 +37,9 @@ import wave
 import pytest
 
 from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.hermetic import fake_claim_audio_metadata  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_claim_audio_metadata")
 
 hfcapture = corpora.harness("hfcapture")
 
@@ -197,7 +200,7 @@ def test_record_reports_the_loss_in_session_json(tmp_path, monkeypatch,
     hfcapture.cmd_record(types.SimpleNamespace(
         device="USB Audio", outdir=str(tmp_path / "cap"), call="W9SSJ",
         peer="KB5LZK", band="40m", freq="7102.0", bandwidth="500", rig="FT-891",
-        notes="", rig_model=None, rigctld=None, rig_poll=5.0))
+        notes="", rig_model=None, rig_device=None, rigctld=None, rig_poll=5.0))
 
     meta = json.loads((tmp_path / "cap" / "session.json").read_text())
     assert meta["continuous"] is False

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """WS8EOC's entry-3 answer in the final call listen, onair-0929-1913.
 
 It answered the 21st robust call from the hushed slot after it: entry 3

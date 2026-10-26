@@ -48,7 +48,7 @@ the publication gate land on a tree that did not yet satisfy it: the counts belo
 are what is true today, they may only go down, and the failure message says which
 direction moved. `core/levels.py` and `core/band.py` are where each ends up.
 
-**The prose ships too, and it drifts on its own.** `docs/protocols/sabir/ONAIR.md`
+**The prose ships too, and it drifts on its own.** `docs/implementation/sabir/ONAIR.md`
 crosses the publication boundary and told an operator `--gain` "defaults to 0.1,
 deliberately quiet" for eleven days after the drive was unified at 0.6 — a
 procedure that would have put the beacon 15 dB under every other emission from

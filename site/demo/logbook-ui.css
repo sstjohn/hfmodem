@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: CC-BY-4.0 */
+/* SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) */
 /* Final desktop logbook colours and compact layout, with public evidence only. */
 :root{--bg:#f2f1eb;--panel:#fafaf5;--ink:#242b27;--muted:#5c695d;--line:#d3d8cc;--accent:#176e62;--accent-bg:#e3eee5;--hover:#eaece3;--control-line:#7c887b;--sans:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color-scheme:light}
 :root[data-theme=dark]{--bg:#1c221e;--panel:#252d27;--ink:#edf0e6;--muted:#aebcad;--line:#435046;--accent:#70d8bc;--accent-bg:#303b31;--hover:#303b31;--control-line:#879987;color-scheme:dark}

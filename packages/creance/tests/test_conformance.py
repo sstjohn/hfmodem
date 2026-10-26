@@ -579,3 +579,29 @@ def test_render_shape():
     assert "| 'BW500' -> OK" in out
     assert out.endswith("2 probes: 1 PASS, 1 EXTRA")
     assert conf.render([]) == "no findings"
+
+
+def test_pair_known_chat_deficit_requires_exact_other_replies():
+    expected = ("'LISTEN ON' -> OK", "'LISTEN OFF' -> OK",
+                "'CHAT ON' -> WRONG (expected OK)", "'CHAT OFF' -> OK")
+    findings = [Finding(pid, verdict, expected if pid == 'listen_semantics' else ())
+                for pid, verdict in conf.GOLDEN['kestrel-pair'].items()]
+    assert conf.diff_golden('kestrel-pair', findings) == []
+    for evidence in ((), expected + ('unexpected reply',),
+                     *(expected[:i] + (replacement,) + expected[i+1:]
+                       for i, replacement in ((0, "'LISTEN ON' -> WRONG (expected OK)"),
+                                              (1, "'LISTEN OFF' -> WRONG (expected OK)"),
+                                              (2, "'CHAT ON' -> no reply (expected OK)"),
+                                              (2, "'CHAT ON' -> OK"),
+                                              (3, "'CHAT OFF' -> WRONG (expected OK)")))):
+        changed = [Finding(f.probe, f.verdict, evidence)
+                   if f.probe == 'listen_semantics' else f for f in findings]
+        assert conf.diff_golden('kestrel-pair', changed) == [
+            'listen_semantics: evidence differs from the known capability deficit']
+    supported = [Finding(f.probe, PASS) if f.probe == 'listen_semantics' else f
+                 for f in findings]
+    assert conf.diff_golden('kestrel-pair', supported) == [
+        'listen_semantics: expected FAIL, got PASS']
+    custom = {'kestrel-pair': {'listen_semantics': FAIL}}
+    assert conf.diff_golden('kestrel-pair', [Finding('listen_semantics', FAIL)],
+                            tables=custom) == []

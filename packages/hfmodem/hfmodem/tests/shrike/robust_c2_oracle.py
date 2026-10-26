@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Independent, test-only robust full-D codeword model.
 
 No modem encoding/decoding/table-generation imports. Native data is loaded

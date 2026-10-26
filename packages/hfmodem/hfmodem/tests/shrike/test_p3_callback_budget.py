@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """An 8 ms delivery batch is three callbacks, not a larger audio block."""
 from types import SimpleNamespace
 

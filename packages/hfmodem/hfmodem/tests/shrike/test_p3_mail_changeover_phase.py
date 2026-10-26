@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The WS8EOC 2227 receive clock must survive a real outgoing changeover."""
 import pytest
 import numpy as np

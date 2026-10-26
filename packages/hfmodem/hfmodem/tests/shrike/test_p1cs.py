@@ -27,6 +27,7 @@ import sys
 import numpy as np
 import pytest
 
+from hfmodem.core.rigs import RIGS
 from hfmodem.shrike import p1rx, pactor1, rxfront, spec
 from hfmodem.tests import evidence
 
@@ -752,9 +753,11 @@ def test_the_settle_decides_whether_a_peer_can_be_heard_at_all() -> None:
         seen.append((rig, fits))
     assert len(seen) >= 3, seen
     # The table as it stands: the Yaesus can call and hear an answer, the Xiegus
-    # cannot. Stated because it is a fact about this station's hardware and it is
-    # the reason a g90 session has never connected.
-    assert dict(seen) == {"ft891": True, "ftdx10": True, "g90": False, "x6100": False}, seen
+    # cannot, and neither can a generic rig on its unmeasured 0.1 s settle. Stated
+    # because it is a fact about this station's hardware and it is the reason a
+    # g90 session has never connected.
+    assert dict(seen) == {"ft891": True, "ftdx10": True, "g90": False,
+                          "generic": False, "x6100": False}, seen
 
 
 def test_an_empty_acquisition_band_is_said_to_be_empty() -> None:
@@ -780,9 +783,9 @@ def test_an_empty_acquisition_band_is_said_to_be_empty() -> None:
     assert not fits and "NONE of which is long enough to read" in line, line
 
 
-@pytest.mark.parametrize("rig,refuses", [("g90", True), ("x6100", True),
-                                         ("ft891", False)])
-def test_a_schedule_that_does_not_close_refuses_to_key(rig, refuses, tmp_path,
+@pytest.mark.parametrize("settle_of,refuses", [("g90", True), ("x6100", True),
+                                               ("ft891", False)])
+def test_a_schedule_that_does_not_close_refuses_to_key(settle_of, refuses, tmp_path,
                                                        monkeypatch) -> None:
     """The refusal itself, not the verdict behind it.
 
@@ -796,8 +799,13 @@ def test_a_schedule_that_does_not_close_refuses_to_key(rig, refuses, tmp_path,
     Driven through the real argv, and both sides of it: a rig the budget refuses
     must never reach `ota.Rig`, and one it passes must, or the case above would be
     satisfied by a station that never keys for anybody.
+
+    The g90 and x6100 have no keying line and never reach the budget, so their
+    settles are tried on the ft891, which has one.
     """
     from hfmodem.shrike import onair  # noqa: E402
+
+    monkeypatch.setitem(onair.RIGS["ft891"], "settle", onair.RIGS[settle_of]["settle"])
 
     class _ReachedTheRig(Exception):
         pass
@@ -808,10 +816,10 @@ def test_a_schedule_that_does_not_close_refuses_to_key(rig, refuses, tmp_path,
     monkeypatch.setattr(onair.ota, "Rig", _no_rig)
     # --serial names a real character device: the arm gate ahead of `ota.Rig`
     # refuses a path that is not there, and this test is about the BUDGET
-    # refusal, which must be the one that fires for g90/x6100 and must not
-    # for the ft891.
+    # refusal, which must be the one that fires for the g90 and x6100 settles
+    # and must not for the ft891's own.
     monkeypatch.setattr(sys, "argv",
-                        ["onair", "--transmit", "--rig", rig, "--dial", "7101500",
+                        ["onair", "--transmit", "--rig", "ft891", "--dial", "7101500",
                          "--dxcall", "N0DX", "--serial", "/dev/null",
                          "--outdir", str(tmp_path / "capture")])
     if refuses:
@@ -821,6 +829,30 @@ def test_a_schedule_that_does_not_close_refuses_to_key(rig, refuses, tmp_path,
     else:
         with pytest.raises(_ReachedTheRig):
             onair.main()
+
+
+@pytest.mark.parametrize("rig", [name for name, row in RIGS.items()
+                                 if row.get("ptt_iface") is None and name != "generic"])
+def test_a_rig_without_a_keying_line_listens_instead(rig, tmp_path, monkeypatch,
+                                                     capsys) -> None:
+    from hfmodem.shrike import onair  # noqa: E402
+
+    class _Listening(Exception):
+        pass
+
+    def _listen(name, kind, required=False):
+        assert kind == "in"
+        raise _Listening
+
+    monkeypatch.setattr(onair.ota, "Rig", lambda *a, **k: pytest.fail("rig opened"))
+    monkeypatch.setattr(onair, "find_device", _listen)
+    monkeypatch.setattr(sys, "argv",
+                        ["onair", "--transmit", "--rig", rig, "--dial", "7101500",
+                         "--dxcall", "N0DX", "--serial", "/dev/null",
+                         "--outdir", str(tmp_path / "capture")])
+    with pytest.raises(_Listening):
+        onair.main()
+    assert onair.ota.NO_KEYING_LINE in capsys.readouterr().out
 
 
 def _offer(ev, pairs):

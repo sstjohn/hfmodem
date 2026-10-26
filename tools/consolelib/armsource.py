@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """One of this station's own arms, reheard through the monitor, our keyings labelled.
 
 The input is the arm's tap: the rig's speaker feed, continuous and on one clock,

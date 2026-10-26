@@ -239,11 +239,15 @@ def test_a_runner_reported_available_starts(tmp_path, name, bare):
     assert done.returncode == 0, done.stderr.decode()[-2000:]
 
 
-def test_bare_tree_has_the_shipped_runners(tmp_path):
+def test_bare_tree_has_the_shipped_runners(tmp_path, monkeypatch):
     """Kestrel, shrike, besra and lanner ship their decode paths.
 
-    P4 requires the corpus collector from the source tree.
+    P4 requires the corpus collector from the source tree, so a PYTHONPATH that
+    carries tools/ is no longer a bare tree.
     """
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(
+        p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        if p and not (Path(p) / "corpuslib").is_dir()))
     can = {s.name for s in default_specs(tmp_path) if s.available()}
     assert can == {"kestrel", "shrike", "besra", "lanner"}
 
@@ -475,7 +479,7 @@ def _dragon_chirp(index: int, hz: float) -> bytes:
     from hfmodem import tests
     from scipy.signal import hilbert, resample_poly
 
-    with np.load(Path(tests.__file__).parent / "shrike/fixtures/p4-chirps/audio.npz") as z:
+    with np.load(Path(tests.__file__).parent / "shrike/fixtures/sigidwiki/p4-chirps/audio.npz") as z:
         fs, x = int(z["fs"]), z["audio"][index].astype(float)
     x = (hilbert(x) * np.exp(2j * np.pi * (242.4 + hz) * np.arange(x.size) / fs)).real
     x = np.r_[np.zeros(6 * 48000), resample_poly(x, 48000, fs), np.zeros(4800)]
@@ -485,7 +489,7 @@ def _dragon_chirp(index: int, hz: float) -> bytes:
 @_live(P4)
 @pytest.mark.parametrize("index", range(4))
 def test_p4_reads_the_chirp_offset(index):
-    """Lifted by the 242.4 Hz the fixture's README says the recording sits low,
+    """Lifted by the 242.4 Hz the fixture's note says the recording sits low,
     the chirp's truth is 0 Hz, and the dual-lane header search reads it within
     what its 150 ms header resolves, 1 / 0.15 s = 6.7 Hz, plus one step of its
     4 Hz grid. Slid by a known amount, the reading follows the slide to the
@@ -560,13 +564,41 @@ class RawInputStream:
 
 
 def _capture(tmp_path, device):
-    """The capture runner as the driver spawns it, over a PortAudio that is not
-    one — the card is the one thing a test cannot supply."""
+    """Supply the inherited claim and separate status pipe required by U7."""
+    import fcntl
+
     (tmp_path / "sounddevice.py").write_text(_FAKE_SD)
-    env = dict(os.environ, PYTHONPATH=str(tmp_path))
+    (tmp_path / "sitecustomize.py").write_text(
+        "from hfmodem.core import claim\n"
+        "claim.process_started = lambda pid: 'Sat_Oct_17_12:00:00_2026'\n")
+    state = tmp_path / 'state'
+    state.mkdir()
+    (state / 'rig.claim.cleanup').touch()
+    fd = os.open(state / 'rig.claim', os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.pwrite(fd, f'{os.getpid()} Sat_Oct_17_12:00:00_2026 shell test 123 fixture\n'.encode(), 0)
+    os.lseek(fd, 123, os.SEEK_SET)
+    reader, writer = os.pipe()
+    status = fcntl.fcntl(writer, fcntl.F_DUPFD_CLOEXEC, 10)
+    os.close(writer)
+    package = Path(capture.__file__).resolve().parents[4] / 'hfmodem'
+    env = dict(os.environ, PYTHONPATH=f'{tmp_path}:{package}',
+               HFMODEM_COEXIST_HARNESS='u7', HFMODEM_STATE_DIR=str(state),
+               HFMODEM_CAPTURE_ACK_FD=str(status))
     runner = str(Path(capture.__file__))
-    return subprocess.Popen([sys.executable, runner, device], env=env,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    wrapper = ('import os, runpy, sys; os.dup2(int(sys.argv[1]), 9); '
+               'sys.argv=sys.argv[2:]; runpy.run_path(sys.argv[0], run_name="__main__")')
+    try:
+        proc = subprocess.Popen([sys.executable, '-c', wrapper, str(fd), runner, device], env=env,
+                                pass_fds=(fd, status), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    finally:
+        os.close(fd)
+        os.close(status)
+    with os.fdopen(reader, 'rb') as acknowledgement:
+        line = acknowledgement.readline()
+    if device == 'USB Audio':
+        assert line == b'CLAIM ADMITTED\n', proc.stderr.read()
+    return proc
 
 
 def test_the_capture_runner_writes_the_card_straight_through(tmp_path):

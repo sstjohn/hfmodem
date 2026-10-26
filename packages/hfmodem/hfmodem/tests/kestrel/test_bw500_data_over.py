@@ -157,7 +157,9 @@ def test_our_own_over_decodes_from_a_detected_span():
     ours = rx500.decode_stream(buf).data_frames
     assert [f.crc_ok for f in ours] == [True]
     assert ours[0].frame_bytes[:44] == body
-    assert all(-8 * rx500.H < o < -6 * rx500.H for o in ours[0].onset), ours[0].onset
+    absolute = np.asarray(ours[0].onset) + ours[0].start
+    onset = 20000 + OF.ONSET_500
+    np.testing.assert_allclose(absolute, [onset, onset + rx500.H // 2], atol=32, rtol=0)
 
 
 @corpora.requires_multiframe_session

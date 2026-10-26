@@ -25,7 +25,8 @@ CLEAR = (3288500, 3348503, 3468503, 3528503, 3648503,
 FILL_HASH = '412153b93609307dee339415db04279f3579a6aeb1d5f42cb36eebd7da76bc50'
 
 
-def replay(*, queued=False, breakin=True, legacy=False, silent=False, stall_ms=0, clock="actual", revoke_after_partial=False):
+def replay(*, queued=False, breakin=True, legacy=False, silent=False, stall_ms=0, clock="actual", revoke_after_partial=False,
+           empty_partial_work_ms=0, revoke_at_peer_capture=False, peer_capture_lag_ms=0):
     assert clock in ("actual", "declared")
     host_clock = time.perf_counter
     cap = CAPTURES / 'onair-1003-1116'
@@ -109,6 +110,11 @@ def replay(*, queued=False, breakin=True, legacy=False, silent=False, stall_ms=0
         start = stream.pos
         part = take_until(end)
         stream.sample_now()
+        if end == FIRST + 6 * 60000 + round(.810 * FS):
+            if revoke_at_peer_capture:
+                rx._train_generation += 1
+            if peer_capture_lag_ms:
+                stream.wall = stream.sample_now() + round(peer_capture_lag_ms * FS / 1000)
         for left, right in intervals:
             if start < right and stream.pos > left:
                 rx.note_gap(max(left, start), min(right, stream.pos))
@@ -138,13 +144,14 @@ def replay(*, queued=False, breakin=True, legacy=False, silent=False, stall_ms=0
     # the unmodified host-work clock and strict first-answer assertion.
     read_depth = 0
     revoked = False
+    empty_partial_charged = False
     declared_ms = dict(read_partial=20, read_window=8, read_chirp=8,
                        scan_idle=5, refine=35)
     for name in ('read_partial', 'read_window', 'read_chirp', 'scan_idle', 'refine'):
         original = getattr(rx, name)
 
         def timed(*a, _read=original, _name=name, **kw):
-            nonlocal read_depth, revoked
+            nonlocal read_depth, revoked, empty_partial_charged
             start, support = stream.sample_now(), stream.pos
             began = host_clock()
             outer = read_depth == 0
@@ -167,6 +174,13 @@ def replay(*, queued=False, breakin=True, legacy=False, silent=False, stall_ms=0
             if stall_ms and result and any(r.observation.stream_sample == CLEAR[0]
                                           for r in result):
                 stream.wall += round(stall_ms * FS / 1000)
+            host_work_ms = 0
+            if (empty_partial_work_ms and not empty_partial_charged and outer
+                    and _name == 'read_partial' and not result
+                    and support == FIRST + 5 * 60000 + round(.810 * FS)):
+                host_work_ms = empty_partial_work_ms
+                stream.wall += round(host_work_ms * FS / 1000)
+                empty_partial_charged = True
             reads.append(dict(reader=_name, wall_start=start, wall_end=stream.wall,
                               capture_end=support, elapsed_ms=spent * 1000,
                               declared_ms=charge_ms if clock == 'declared' else None,
@@ -174,6 +188,8 @@ def replay(*, queued=False, breakin=True, legacy=False, silent=False, stall_ms=0
                                   kind=r.observation.kind.value,
                                   crc=r.observation.frame is not None)
                                   for r in result] if result else []))
+            if host_work_ms:
+                reads[-1]['host_work_ms'] = host_work_ms
             return result
 
         setattr(rx, name, timed)

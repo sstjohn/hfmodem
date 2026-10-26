@@ -400,6 +400,7 @@ def test_narrowing_the_judged_band_waives_the_7102_carrier():
 @corpora.requires_channel_sense
 @corpora.requires_qrn_80m
 @corpora.requires_monitored_quiet
+@corpora.requires_sense_refused_empty
 @corpora.requires_gateway_session
 def test_each_threshold_sits_between_the_two_populations_that_pin_it(clear):
     """Neither threshold is free to move. Below the first figure the guard starts

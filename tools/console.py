@@ -1,6 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The station console: one tool for every mode this station flies.
 
     console <mode> <verb> [...]        pactor, vara and ardop
+
+    console attach [STATION]          attach to the service without taking the rig
+    console own [STATION] [--receive]  ask the service to own the rig
+    console release [STATION]         release the rig and wait for observing
 
     console pactor peers               the channels this station has worked
     console pactor levels              the per-phase power presets
@@ -14,6 +20,8 @@
 
     console vara fly K0SI-40m-7104000-2300 --bw 2300 --sense --dry-run
     console vara campaign --band 40 --bw 2750 2300 --cycles 3 --sense --dry-run
+    console vara chat --band 20                the VarAC session: heard CQs, /answer N, /cq, /call CALL
+    console vara txcal --band 40 --execute     stepped drives with power and ALC read keyed; --set records one
 
     console ardop peers [--refresh]
     console ardop fly W6IDS-40m-7061500-500 --sense --dry-run
@@ -23,6 +31,8 @@
         --with pactor --level p3-100 \
         --with vara --bw 2300
 
+    console logbook --export DIR              public logbook snapshot
+    console logbook --imap ACCOUNT            confirm mail delivery from the inbox once
     console log --station KB5LZK --band 40     every arm, every mode, one view
     console fingerprints                       what the transcripts measure of each peer
     console sabir prepare OUT --callsign CALL   render a one-way proof offline
@@ -47,6 +57,8 @@
     console pactor monitor                    PACTOR only, on the current dial
     console rtty monitor --freq 14080          tune once (kHz), then listen
     console rtty qso --freq 14080              the RTTY terminal; you key every over
+    console voice test                        speakers/microphone, no rig
+    console voice fly --dial 14.285 --cq --execute   supervised SSB; Enter keys each over
     console vara monitor NS0A --band 40        listen on a saved peer channel
     console stanag4285 monitor --mode 1200L    choose the receive rate/interleaver
     console monitor --list-modes              every single-mode monitor and alias
@@ -72,7 +84,7 @@ from datetime import datetime, timezone
 import json
 import sys
 
-from consolelib import (arm, campaign, fingerprints, logbook, modes, multimode,
+from consolelib import (arm, campaign, claim, fingerprints, logbook, modes, multimode,
                         power, roster, station)
 
 INTERRUPTED = 130
@@ -357,9 +369,11 @@ def dispatch(mode, args):
     if args.action == 'status':
         return arm.status(mode, args.limit)
     if args.action == 'gain':
-        return station.gain_report(args.seconds, args.apply, args.device)
+        with claim.lease(mode):
+            return station.gain_report(args.seconds, args.apply, args.device)
     if args.action == 'rig':
-        return station.rig_report(mode, args.as_json, args.against, args.watch, args.band)
+        with claim.lease(mode):
+            return station.rig_report(mode, args.as_json, args.against, args.watch, args.band)
     if args.execute == args.dry_run:
         raise ValueError('Choose --dry-run or --execute; an arm keys the rig and a dry run '
                          'opens nothing.')
@@ -384,12 +398,31 @@ def run(argv):
         print(__doc__.strip())
         return 0 if argv else 2
     try:
+        if argv[0] == 'logbook':
+            from desk.face import main
+            return main(argv[1:])
+        if argv[0] in ('attach', 'own', 'release'):
+            parser = argparse.ArgumentParser(prog=f'console {argv[0]}')
+            parser.add_argument('station', nargs='?')
+            if argv[0] == 'own':
+                parser.add_argument('--receive', action='store_true')
+            args = parser.parse_args(argv[1:])
+            if argv[0] == 'own':
+                result = claim.own(args.station, receive=args.receive)
+            else:
+                client = getattr(claim, argv[0])(args.station)
+                result = client.state() if client is not None else {'state': 'not running'}
+            print(json.dumps(result, indent=2))
+            return 0
         if argv[0] == 'setup':
             from consolelib import onboarding
             return onboarding.setup(argv[1:])
         if argv[0] == 'winlink':
             from consolelib import onboarding
             return onboarding.winlink(argv[1:])
+        if argv[0] == 'voice':
+            from consolelib import voice
+            return voice.run(argv[1:])
         if len(argv) >= 2 and argv[1] == 'monitor':
             from consolelib import monitor, monitor_modes
             mode = monitor_modes.canonical(argv[0])
@@ -402,6 +435,12 @@ def run(argv):
         if argv[:2] == ['rtty', 'qso']:
             from consolelib import rtty
             return rtty.run(argv[2:])
+        if argv[:2] == ['vara', 'chat']:
+            from consolelib import varac
+            return varac.run(argv[2:])
+        if argv[:2] == ['vara', 'txcal']:
+            from consolelib import txcal
+            return txcal.run(argv[2:])
         if argv[:2] == ['pactor', 'collect']:
             import corpus_watch
             return corpus_watch.main(argv[2:])
@@ -435,16 +474,16 @@ def run(argv):
                                  'dry run opens nothing.')
             return multimode.run(chosen, datetime.now(timezone.utc))
         mode = modes.resolve(argv[0])
-    except (ValueError, RuntimeError, OSError, KeyError) as error:
+    except (claim.station_client.ClientError, ValueError, RuntimeError, OSError, KeyError) as error:
         print(f'REFUSED: {error}', file=sys.stderr)
-        return 2
+        return claim.exit_code(error)
     args = parser_for(mode).parse_args(argv[1:])
     args.console_argv = argv
     try:
         return dispatch(mode, args)
-    except (ValueError, RuntimeError, OSError, KeyError) as error:
+    except (claim.station_client.ClientError, ValueError, RuntimeError, OSError, KeyError) as error:
         print(f'REFUSED: {error}', file=sys.stderr)
-        return 2
+        return claim.exit_code(error)
 
 
 def main(argv=None):

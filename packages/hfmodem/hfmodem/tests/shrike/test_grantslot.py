@@ -219,7 +219,8 @@ def the_repeat_is_not_silence(tmp: Path) -> None:
     check("...so the session does not report those cycles as silent",
           "nothing decoded in" not in log, verdict)
     check("...it reports that we heard the peer, in the line that falls back",
-          "it answered" in verdict and "zero bit errors" in verdict, verdict)
+          "it answered" in verdict and "14 complete grants and 0 partial repeat matches" in verdict
+          and "remote entry reception and mode compatibility remain unknown" in verdict, verdict)
     check("and the entry retry budget still bounds the attempt",
           "entry retry budget exhausted" in log and "falls back to PACTOR-1" in log)
     if i is not None:

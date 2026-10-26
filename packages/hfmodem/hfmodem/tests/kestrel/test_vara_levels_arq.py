@@ -16,7 +16,7 @@ from hfmodem.kestrel.coding.crc import crc16_genibus
 from hfmodem.kestrel.rx import varahf2300 as RX
 from hfmodem.kestrel.tx import varahf2300_tx as TX
 from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as MK
-from hfmodem.kestrel.vara.vara_arq import _fall, _finish_level, _irs_frame
+from hfmodem.kestrel.vara.vara_arq import _resend_level, _finish_level, _irs_frame
 from hfmodem.tests import evidence
 from .test_data_over_gate import _connected, _on_air
 
@@ -119,21 +119,13 @@ def test_a_speed_limited_link_keeps_its_validated_continue_floors():
         0: 1.5, 4: 2.0, 5: 1.5, 6: 2.0, 7: 2.0, 8: 2.0}
 
 
-@pytest.mark.parametrize('level,last_good,jumped,unanswered,to', [
-    (10, 9, False, False, 9),     # one step up, one down
-    (13, 9, True, False, 9),      # a jump falls back to what delivered
-    (10, 9, False, True, 8),      # an unanswered poll, two down
-    (9, 9, False, False, 8),      # a second failure in a row, one more
-    (4, 4, False, True, 4),       # never below 4
-    (4, 4, False, False, 4)])
-def test_the_fall_table(level, last_good, jumped, unanswered, to):
-    assert _fall(level, last_good, jumped, unanswered) == to
-
-
-@pytest.mark.parametrize('level,unanswered,to', [(4, False, 3), (4, True, 2), (2, True, 1)])
-def test_the_fall_goes_under_4_to_its_floor(level, unanswered, to):
-    # K9KDJ 05:12Z re-sent 5 -> 3, 4 -> 2, 4 -> 1 and 3 -> 1 behind our NAKs
-    assert _fall(level, 4, False, unanswered, floor=1) == to
+@pytest.mark.parametrize('bw,level,missing,to', [
+    ('500', 13, True, 9), ('500', 13, False, 9),
+    ('2300', 16, True, 13), ('2750', 17, False, 14),
+    ('500', 4, True, 1), ('2300', 4, True, 2),
+    ('2300', 2, True, 1), ('500', 4, False, 3)])
+def test_the_resend_table(bw, level, missing, to):
+    assert _resend_level(bw, level, (missing,)) == to
 
 
 def _nak(hs):
@@ -149,18 +141,121 @@ def test_a_nak_falls_by_the_table(bw, ceilings, overs):
     hs, _ = sending(bw)
     delivered(hs, 6)                     # 4 -> 5, a single step
     assert delivered(hs, 8) == 9         # 5 -> 9, a jump
-    assert _nak(hs) == 5                 # back to the level that last delivered
-    assert _nak(hs) == 4                 # a second failure: one more
+    assert _nak(hs) == (7 if bw == '500' else 6)
+    assert _nak(hs) == (6 if bw == '500' else 5)
 
 
 @pytest.mark.parametrize('bw', ['500', '2300'])
-def test_a_jumped_level_that_has_delivered_falls_one(bw, ceilings, overs):
+def test_a_delivered_level_starts_a_fresh_resend_chain(bw, ceilings, overs):
     ceilings(tx=phy.TOP[bw])
     hs, _ = sending(bw)
     delivered(hs, 6)                     # 4 -> 5
     assert delivered(hs, 8) == 9         # 5 -> 9, a jump
     assert delivered(hs, 0) == 9         # 9 delivered
-    assert _nak(hs) == 8
+    assert _nak(hs) == (7 if bw == '500' else 6)
+
+
+def test_multiwrite_close_selection_keeps_the_raw_named_level(ceilings, overs):
+    ceilings(tx=13)
+    hs, _ = _connected(bw='500')
+    hs._link_high_speed = True
+    close = lambda level: phy.vara_body(b'peer', hs.caller, level=level,
+                                      body_len=phy.body_size('500', 4))
+    hs._note_close_level([close(2)])
+    hs.turn = VA._TURN_PEER
+    hs.send(bytes(99))
+    hs._took_turn_grant()
+    assert hs._tx_pending[2] == 1
+    assert delivered(hs, 7) == 5
+    hs._took_control_burst()
+    hs.turn = VA._TURN_OURS
+    hs.send(bytes(6))
+    assert hs._tx_pending[2] == 5
+    hs._took_control_burst()
+    hs._note_close_level([close(15)])
+    hs.turn = VA._TURN_PEER
+    hs.send(bytes(526))
+    hs._took_turn_grant()
+    assert hs._tx_pending[2] == 13
+    hs._retry_data_over()
+    hs._took_responder_nak()
+    assert hs._tx_pending[2] == 13
+    assert hs._tx_resend == (15, (True,))
+    payload = phy.vara_payload(hs._tx_pending[0], caller=hs.caller,
+                              body_len=len(hs._tx_pending[0]))
+    assert payload + b''.join(hs._txq) == bytes(526)
+    hs._retry_data_over()
+    hs._took_responder_nak()
+    assert hs._tx_pending[2] == 11
+
+
+@pytest.mark.parametrize('named', [11, 8, 7, 5, 2, 1])
+def test_a_close_replaces_the_previous_level_move(named, ceilings, overs):
+    ceilings(tx=13)
+    hs, _ = sending('500')
+    delivered(hs, 7)
+    close = phy.vara_body(b'peer', hs.caller, level=named,
+                          body_len=phy.body_size('500', 4))
+    hs._note_close_level([close])
+    assert phy.host_level('500', hs._rec500) == named
+    assert hs._tx_requested == named
+
+
+@pytest.mark.parametrize('bw', ['500', '2300', '2750'])
+def test_a_close_ack_confirms_a_jumped_level(bw, ceilings, overs):
+    ceilings(tx=13)
+    hs, _ = sending(bw, bytes(90))
+    assert delivered(hs, 7) == 7
+    assert hs._tx_resend == (7, ())
+    hs._took_control_burst()
+    assert hs._tx_pending is None
+    assert hs._tx_requested == 7
+
+
+@pytest.mark.parametrize('sent', [False, True])
+def test_a_solicited_final_ack_confirms_the_level_even_if_handover_is_refused(sent, overs):
+    hs, io = sending('2750', bytes(90))
+    delivered(hs, 7)
+    pending = hs._tx_pending
+    hs._final_ack_confirmed = pending
+    io.tx_went_out = lambda: sent
+    assert hs._finish_final_answer() == sent
+    assert hs._tx_requested == phy.host_level(hs.bw, pending[2])
+    assert hs._tx_pending == (None if sent else pending)
+
+
+def test_the_drained_handover_arms_the_reader_for_the_peers_next_over(overs):
+    """It unkeys with the turn still ours, as the grant and the release do."""
+    hs, io = sending('2750', bytes(90))
+    delivered(hs, 7)
+    hs._final_ack_confirmed, hs._expect_level = hs._tx_pending, 6
+    assert hs._finish_final_answer()
+    assert hs.turn == VA._TURN_PEER and hs._lv_armed
+
+
+@pytest.mark.parametrize('sent', [False, True])
+def test_a_final_ack_turn_request_confirms_the_level_before_release(sent, overs, monkeypatch):
+    hs, io = sending('500', bytes(90))
+    delivered(hs, 7)
+    pending = hs._tx_pending
+    monkeypatch.setattr(hs, '_final_over_was_read', lambda: True)
+    io.tx_went_out = lambda: sent
+    assert hs._took_turn_request(raw=True) == sent
+    assert hs._tx_requested == phy.host_level(hs.bw, pending[2])
+    assert hs._tx_pending == (None if sent else pending)
+
+
+def test_a_refused_nak_retry_preserves_the_unconfirmed_jump(ceilings, overs):
+    ceilings(tx=13)
+    hs, io = sending('500')
+    delivered(hs, 7)
+    pending, chain = hs._tx_pending, hs._tx_resend
+    io.tx_went_out = lambda: False
+    _nak(hs)
+    assert hs._tx_pending == pending and hs._tx_resend == chain
+    io.tx_went_out = lambda: True
+    assert _nak(hs) == 6
+    assert hs._tx_resend == (7, (False,))
 
 
 def test_a_naked_over_a_single_step_reached_falls_one(ceilings, overs):
@@ -298,7 +393,8 @@ def test_the_caller_confirm_names_the_callee_start(heard, rx, start, ceilings):
     hs._tx_session_confirm()
     assert _keyed_tones(io, hs.called, VA._CONFIRM_START) == next(
         k for k, lv in VA._CONFIRM_START.items() if lv == start)
-    assert [k.preadv for k in VA._CONFIRM_START] == [91, 121, 151]
+    assert {k.preadv: lv for k, lv in VA._CONFIRM_START.items()} == {
+        1 + 30 * f: f + 1 for f in range(6)}
 
 
 def test_a_speed_limited_confirm_is_frame_three():
@@ -694,7 +790,7 @@ def _listening(bw, expect, last, run=0):
     ``expect`` behind one read clean at ``last``, with ``run`` singles before it."""
     hs, io = _connected(bw=bw)
     hs._link_high_speed, hs._expect_level, hs._rx_read = True, expect, (last, 30.0)
-    hs._lv_owed = hs._lv_prompt = True
+    hs._lv_owed = hs._lv_prompt = hs._delivery_read = True
     hs._peer_run_500 = run
     answered = []
     hs._answer_data_over = lambda x, hold=False: answered.append(
@@ -760,7 +856,7 @@ def test_a_double_whose_first_frame_fails_draws_a_nak_and_nothing_is_delivered(c
     hs, io, answered = _listening('2300', 16, 16, run=VA._SINGLES_BEFORE_PAIR)
     _hear(hs, x)
     assert answered == [] and _nak_keyed(hs, io)
-    assert hs._expect_level == 15 and hs._lv_armed
+    assert hs._expect_level == 13 and hs._lv_armed
 
 
 def _single(bw, host, crc=True, seed=0):
@@ -775,38 +871,35 @@ def _single(bw, host, crc=True, seed=0):
 
 
 def test_an_over_that_will_not_read_draws_a_nak_and_its_retry_is_read(clock):
-    _, bad = _single('2300', 12, crc=False)
-    hs, io, answered = _listening('2300', 12, 11)
+    _, bad = _single('2300', 16, crc=False)
+    hs, io, answered = _listening('2300', 16, 15)
     _hear(hs, bad)
     assert answered == [] and _nak_keyed(hs, io)
-    assert hs._expect_level == 11 and hs._lv_armed
-    body, retry = _single('2300', 11, seed=1)
+    assert hs._expect_level == 13 and hs._lv_armed
+    body, retry = _single('2300', 13, seed=1)
     _hear(hs, retry)
     assert answered == [[body]]
 
 
 def test_a_resend_that_will_not_read_either_draws_the_16_symbol_data_nak(clock):
-    # the 2026-09-26 bench, W9SSJ -> WI9YZA at BW2300, twice: a failed over
-    # draws the 8-symbol NAK, the resend fails and draws 61/31 0.12 s behind
-    # its unkey, and the resend one level under that reads
-    _, bad = _single('2300', 12, crc=False)
-    hs, io, answered = _listening('2300', 12, 11)
+    _, bad = _single('2300', 16, crc=False)
+    hs, io, answered = _listening('2300', 16, 15)
     _hear(hs, bad)
-    assert _nak_keyed(hs, io) and hs._expect_level == 11
-    _, bad_again = _single('2300', 11, crc=False, seed=1)
+    assert _nak_keyed(hs, io) and hs._expect_level == 13
+    _, bad_again = _single('2300', 13, crc=False, seed=1)
     _hear(hs, bad_again)
     assert _burst_named(io, hs.called, VF.SESSION_DATA_NAK_CALLER_SHORT), io.msgs[-2:]
-    assert hs._expect_level == 10 and hs._lv_armed and answered == []
-    body, retry = _single('2300', 10, seed=2)
+    assert hs._expect_level == 12 and hs._lv_armed and answered == []
+    body, retry = _single('2300', 12, seed=2)
     _hear(hs, retry)
     assert answered == [[body]]
 
 
-def test_a_window_that_holds_nothing_stays_armed_where_the_retry_falls(clock):
+def test_silence_keeps_the_expected_level_until_a_nak(clock):
     hs, io, answered = _listening('2300', 12, 12)
     _hear(hs, np.zeros(0), tail=VA._EXPECT_WINDOW['2300'] / MK.FS + 0.5)
-    assert hs._lv_armed and hs._expect_level == 10 and not io.sent
-    body, retry = _single('2300', 10, seed=2)
+    assert hs._lv_armed and hs._expect_level == 12 and not io.sent
+    body, retry = _single('2300', 12, seed=2)
     _hear(hs, retry, lead=2.0)
     assert answered == [[body]]
 
@@ -926,6 +1019,8 @@ def test_a_level_1_resend_29_hz_off_behind_our_over_nak_is_read(clock):
     body = b' 90119783\x8d'
     x = _single_at('2300', 1, body)
     hs, io = _behind_our_over_nak(-29.0)
+    while hs._expect_level > 1:
+        assert hs._nak_owed_over()
     keyed, said = _streamed(hs, io, _moved(x, -29.0))
     assert any(b'90119783' in p for p in io.host), said
     assert len(keyed) == 1 and not any('NAK' in m for m in said), said
@@ -967,7 +1062,6 @@ def test_a_resend_under_four_behind_our_nak_is_read_whatever_was_asked(expect, h
     hs._link_high_speed, hs.turn = True, VA._TURN_PEER
     hs._rx_read, hs._expect_level, hs._rx_failed = (expect + 1, 20.0), expect, True
     hs._lv_owed = hs._lv_prompt = True
-    hs._lv_above = (expect, expect + 1)
     hs._key(False)
     keyed, said = _streamed(hs, io, x)
     assert any(body[:-1] in p for p in io.host), said
@@ -1089,6 +1183,14 @@ def _band_noise(n, rms, seed, lo=0.0, hi=2900.0):
     return x * rms / np.sqrt(np.mean(x * x))
 
 
+def _under_interferer(x, lead=0.1, tail=3.0):
+    """``x`` as :func:`_hear` keys it, under a 2156-2461 Hz interferer 15 dB
+    over it that sits on the band around the over too: over digital silence
+    any burst stands clear  [see arq.phy._tone_burst]."""
+    audio = np.concatenate([np.zeros(int(lead * MK.FS)), x, np.zeros(int(tail * MK.FS))])
+    return audio + _band_noise(len(audio), 10 ** (15 / 20) * np.sqrt(np.mean(x * x)), 3, 2156, 2461)
+
+
 def test_a_high_speed_capable_peer_idling_over_an_unread_over_draws_the_nak_not_the_ack(clock):
     # KB8AY 22:07Z, 2026-09-26: its level-5 close sat under a 2156-2461 Hz
     # interferer; behind its 683 idle we re-keyed the frame that had answered
@@ -1098,10 +1200,9 @@ def test_a_high_speed_capable_peer_idling_over_an_unread_over_draws_the_nak_not_
     step = VA._STEP_FRAME[hs._expect_level - 4]
     assert _burst_named(io, hs.called, replace(VF.SESSION_OVER_RESPONSE, preadv=1 + 62 * step))
     assert hs._expect_level > 4 and hs._answer_owed == VA._OWED_OVER
-    x = _peer_over(hs, bytes(range(40)), hs._expect_level, 0x82, close=6)
-    buried = x + _band_noise(len(x), 10 ** (15 / 20) * np.sqrt(np.mean(x * x)), 3, 2156, 2461)
-    assert phy.decode_level(np.concatenate([np.zeros(4800), buried]), '2300', 5) is None
-    assert _hear(hs, buried) is None
+    buried = _under_interferer(_peer_over(hs, bytes(range(40)), hs._expect_level, 0x82, close=6))
+    assert phy.decode_level(buried, '2300', 5) is None
+    assert _hear(hs, buried, lead=0, tail=0) is None
     assert io.host == [bytes(range(89))]
     hs.on_rx_audio(MK.synth_burst(hs.called, VF.SESSION_RESPONDER_IDLE))
     assert _burst_named(io, hs.called, VF.SESSION_OVER_NAK_SHORT), io.msgs[-3:]
@@ -1118,9 +1219,8 @@ def test_a_high_speed_capable_peers_poll_behind_an_unread_over_draws_the_short_o
     hs, io = _high_speed_caller()
     hs._answer_data_over(_on_air(_peer_over(hs, bytes(range(89)), 4, 0x41)))
     assert hs._expect_level > 4 and hs._answer_owed == VA._OWED_OVER
-    x = _peer_over(hs, bytes(range(40)), hs._expect_level, 0x82, close=6)
-    buried = x + _band_noise(len(x), 10 ** (15 / 20) * np.sqrt(np.mean(x * x)), 3, 2156, 2461)
-    assert _hear(hs, buried) is None
+    buried = _under_interferer(_peer_over(hs, bytes(range(40)), hs._expect_level, 0x82, close=6))
+    assert _hear(hs, buried, lead=0, tail=0) is None
     level, sent = hs._expect_level, len(io.sent)
     poll = MK.synth_tone_pairs(VF.over_continue_frames(hs.called, '2300', (12,))[12][1])
     x = np.concatenate([np.zeros(MK.FS // 2), poll, np.zeros(2 * MK.FS)])
@@ -1434,6 +1534,8 @@ def test_an_over_our_nak_draws_again_repacked_reaches_the_host_once(resend, host
     # new bytes, and a delivery closing inside the replay, all reach it
     hs, io = _record2_delivery()
     _k9kdj_banner(hs)
+    if resend[0][1] == 2:
+        hs._expect_level = 4
     clock.t = hs._unkeyed_at + VA._EXPECT_WINDOW['2300'] / MK.FS + 0.1
     hs.idle_keepalive()
     assert _burst_named(io, hs.called, VF.SESSION_OVER_NAK_SHORT), io.msgs[-2:]
@@ -1501,9 +1603,7 @@ def _over_idle(hs, clock):
     return hs.io.sent[sent:]
 
 
-def test_a_greeting_resent_at_the_level_our_nak_refused_is_read(clock):
-    # KC9GHZ 05:32Z: its level-6 greeting drew our NAK, the level-5 resend
-    # our 61/31, and the greeting then came clean at 5 where we looked at 4
+def test_a_greeting_resent_above_the_ladder_is_ignored(clock):
     hs, io = _released_greeting()
     _hear(hs, _fsk_qrm(1))
     assert _nak_keyed(hs, io) and hs._expect_level == 5
@@ -1511,7 +1611,7 @@ def test_a_greeting_resent_at_the_level_our_nak_refused_is_read(clock):
     assert _burst_named(io, hs.called, VF.SESSION_DATA_NAK_CALLER_SHORT)
     assert hs._expect_level == 4
     _hear(hs, _peer_over(hs, bytes(range(40)), 5, 0x82, close=6))
-    assert io.host == [bytes(range(40))]
+    assert io.host == [] and hs._expect_level == 4
 
 
 @pytest.mark.parametrize('naks', [1, 2])
@@ -1528,7 +1628,7 @@ def test_a_high_speed_peer_idling_over_an_over_we_could_not_read_draws_the_over_
     assert len(sent) == 1 and _burst_named(io, hs.called, VF.SESSION_OVER_NAK_SHORT), io.msgs[-2:]
 
 
-def test_a_queried_over_naked_three_times_goes_again_a_level_lower_each_time(ceilings, overs):
+def test_a_heard_nak_then_two_missing_naks_follow_the_mixed_ladder(ceilings, overs):
     # K9KDJ 06:10Z: its close named 4, and our 89-byte over there drew 288/63
     # behind our first query and its NAK behind the next two; every retry
     # went out at 4 until the budget closed the link
@@ -1542,7 +1642,7 @@ def test_a_queried_over_naked_three_times_goes_again_a_level_lower_each_time(cei
     for _ in range(2):
         hs._retry_data_over()
         hs._took_responder_nak()
-    assert [lv for lv, _ in overs[1:]] == [3, 2, 1], io.msgs[-6:]
+    assert [lv for lv, _ in overs[1:]] == [3, 1, 1], io.msgs[-6:]
 
 
 def _idles(hs, clock, kind, n, gap, before=()):
@@ -1613,7 +1713,8 @@ def test_a_high_speed_peer_that_cannot_read_our_continue_hears_it_up_a_ladder(cl
     assert [len(s) for s in drew] == [1] * 5, io.msgs[-6:]
     assert np.array_equal(drew[0][0], continued), io.msgs[-8:]
     assert _is(drew[1], hs, replace(VF.SESSION_OVER_RESPONSE, preadv=373)), io.msgs[-6:]
-    assert all(_is(s, hs, VF.SESSION_OVER_NAK) for s in drew[2:]), io.msgs[-4:]
+    # behind the two overs read, stock's caller keys 61/541
+    assert all(_is(s, hs, VF.SESSION_OVER_NAK_SHORT) for s in drew[2:]), io.msgs[-4:]
 
 
 @pytest.mark.parametrize('host, payload', [(1, 9), (2, 22)])
@@ -1648,3 +1749,31 @@ def test_aa5af_level_1_greeting_expected_at_5_is_read_whole_not_naked_arriving(c
     hs._rx_failed = True
     _live(hs, (x[:, 0] if x.ndim > 1 else x)[4121280:4464000])
     assert answered and hs._level_read is None and not io.sent, io.msgs
+
+
+@pytest.mark.parametrize('host, noise, seed', [(5, 2.6, 1), (5, 2.6, 2), (6, 2.0, 2), (6, 2.0, 3)])
+def test_an_over_lost_under_noise_is_naked_before_stocks_idle_behind_it(host, noise, seed,
+                                                                        clock):
+    # bench 2, 2026-10-20, noise 0.5-0.7 RMS: stock's level-5 and -6 overs did
+    # not read, their end never latched, and our NAK waited out the longest base
+    # over, keying 1.9-2.4 s behind them into the 0.684 s idle stock keys
+    # 1.37-1.74 s behind an unanswered over, nine times. Keyed into is the
+    # ladder's measure: an onset more than 0.03 s inside the idle.
+    hs, io = _released_greeting('500')
+    hs._expect_level = host
+    x = _peer_over(hs, bytes(range(40)), host, 0x82, close=6)
+    idle = MK.synth_burst(hs.called, VF.for_bw(VF.SESSION_RESPONDER_IDLE, '500'))
+    lead, gap = 0.1, 1.37
+    a = np.concatenate([np.zeros(int(lead * MK.FS)), x, np.zeros(int(gap * MK.FS)), idle,
+                        np.zeros(MK.FS)])
+    a = a + _band_noise(len(a), noise * np.sqrt(np.mean(x * x)), seed)
+    keyed = []
+    for i in range(0, len(a), 960):
+        clock.t += 960 / MK.FS
+        sent = len(io.sent)
+        hs.on_rx_stream(a[i:i + 960])
+        if len(io.sent) > sent:
+            keyed.append(((i + 960) / MK.FS - lead - len(x) / MK.FS, len(io.sent[-1]) / MK.FS))
+    assert len(keyed) == 1, (keyed, io.msgs[-3:])
+    assert _is(io.sent[-1:], hs, VF.SESSION_DATA_NAK_CALLER_SHORT), io.msgs[-3:]
+    assert keyed[0][0] < gap + 0.03, keyed

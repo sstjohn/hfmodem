@@ -25,8 +25,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ...core.cwid import MORSE
 from ..coding.crc import crc16_genibus
 from ..rx import varahf500 as _rx500
+from ..rx import beacon as _beacon
 from ..rx import varahf2300 as _rx2300
 from ..rx import varaofdm as _ofdm
 from ..rx import varatone as _tone
@@ -358,6 +360,13 @@ def vara_payload(body: bytes, length: int | None = None,
         return b if i < 0 else b[:i]
     full = bytes(body).ljust(body_len, b"\0")
     key = crc16_genibus(caller.upper().encode()) >> 8
+    # A coded, nonfinal short frame has low field bits 00. Atomic TEXT symbols
+    # can leave just one byte for its trailer: 14 without the caller CRC byte.
+    # Measured with two caller suffixes and exact stock host-delivery counts.
+    # Full binary 01 fields
+    # keep a literal final 14, and terminal 10/11 fields retain their own layout.
+    if full[-1] & 0x23 == 0x20 and b and b[-1] == _VARA_TRAILER:
+        return b[:-1]
     # Full fields end in binary 01. For callers such as W9SSJ (key=f6),
     # neither the canonical short end 82 nor an overlapping short CRC can
     # have that form. A binary payload ending 14 f6 is still full DATA.
@@ -383,23 +392,16 @@ def vara_payload(body: bytes, length: int | None = None,
 
 
 def over_is_last(body: bytes, caller: str) -> bool:
-    """Does this DATA over end the delivery, or is another one behind it?
+    """Whether the DATA field kind closes the delivery.
 
-    The over says so itself, in the same trailer :func:`vara_body` writes and
-    :func:`vara_payload` reads: a body filled to capacity carries no trailer and
-    another over follows it, and a short body carries the trailer that closes the
-    delivery. A sender with an exact multiple of a body to move keys one more over
-    carrying no payload at all rather than ending on a full one — measured at the
-    bench, where a station handed exactly one over's worth keyed two overs, the
-    second delivering nothing to its peer's host.
-
-    Which is why this is the over's own property and not the receiver's: at that
-    second over's predecessor the receiving station already held every byte of the
-    message and still answered *keep sending*  [see
-    ``VaraStationHandshake._answer_data_over``].
+    A short close whose trailer ran into the field keeps the overlapping-CRC
+    reading: a kind-00 field that is the caller's CRC byte behind 0x14.
     """
-    return len(vara_payload(body, caller=caller,
-                            body_len=len(body))) < len(body) - 1
+    if not body:
+        return False
+    key = crc16_genibus(caller.upper().encode()) >> 8
+    return bool(body[-1] & 0x02) or (
+        body[-1] & 0x03 == 0 and body[-2:] == bytes([_VARA_TRAILER, key]))
 
 
 #: Where :func:`overs_after` saturates. A sender with more than this still to
@@ -469,6 +471,7 @@ class LevelRead:
     frames: tuple[bytes, ...]
     quality: float | None = None
     located: int = 0
+    broadcast: bool = False  # Internal base classification; never emitted by decode_level.
 
     @property
     def control(self) -> int:
@@ -489,9 +492,41 @@ class LevelRead:
 _LOCATED_SNR = 3.0
 
 
+_HOST_SN = {
+    (500, 5): ((34.635,), (26.15,)),
+    (500, 6): ((39.5185,), (26.35,)),
+    (500, 7): ((63.01,), (30.7,)),
+    (500, 8): ((63.01,), (30.67,)),
+    (500, 9): ((63.01,), (29.7,)),
+    (500, 10): ((63.01,), (28.75,)),
+    (500, 11): ((63.01,), (28.3755,)),
+    (500, 12): ((58.21,), (28.7,)),
+    (500, 13): ((55.62833357349082, 59.54667484852187), (27.7, 27.7)),
+}
+
+
+def host_sn(bw, level: int, quality: float) -> float:
+    calibration = _HOST_SN.get((int(bw), level))
+    if calibration is None:
+        return quality
+    raw, stock = (np.asarray(values) for values in calibration)
+    if (int(bw), level) == (500, 13) and quality >= raw[-1]:
+        return float(stock[-1])
+    return float(quality + np.interp(quality, raw, stock - raw))
+
+
+HOST_BPS = {
+    "500": (18, 41, 61, 88, 177, 270, 441, 588, 705, 884, 1060, 1286, 1543),
+    "2300": (24, 41, 82, 175, 270, 363, 549, 735, 922, 2011, 2682, 3219,
+             4025, 4830, 5872, 7050),
+    "2750": (24, 41, 82, 175, 270, 363, 549, 735, 922, 1203, 2423, 3230,
+             3877, 4848, 5817, 7074, 8489),
+}
+
+
 def decode_level(audio: np.ndarray, bw, expected_level: int,
                  fresh: int | None = None, under: int | None = None,
-                 hz: float = 0.0) -> LevelRead | None:
+                 hz: float = 0.0, *, expect_pair=None) -> LevelRead | None:
     """The DATA burst in ``audio`` read at the host level the ARQ asked the peer
     to key it at, or None when no burst is found in it.
 
@@ -518,7 +553,10 @@ def decode_level(audio: np.ndarray, bw, expected_level: int,
     x = np.asarray(audio, float)
     if expected_level <= 4:
         x = _retune(x, bw, hz)
-        return _decode_base(x, bw) or _read_below(x, bw)
+        base = _decode_base(x, bw, expect_pair=expect_pair)
+        if base is not None:
+            return None if base.broadcast else base
+        return _read_below(x, bw)
     family = _family(bw, expected_level)
     if family is None:
         raise LookupError(f"no BW{bw} receiver for level {expected_level}")
@@ -527,12 +565,12 @@ def decode_level(audio: np.ndarray, bw, expected_level: int,
         return None
     res = rx.decode_burst(_behind(x, _LONGEST_ROW[rx, int(bw)], fresh), int(bw), expected_level)
     frames = tuple(f[:-2] for f in res.frames)
-    found = bool(frames) or (_tone_burst(x, bw, res.level) if rx is _tone
+    found = bool(frames) or (ident(x) is None and _tone_burst(x, bw, res.level) if rx is _tone
                              else res.quality.snr_db >= _LOCATED_SNR)
     if not frames and (found or under != 0 and expected_level <= 6):
         wide = _retune(_behind(x, LONGEST_BASE[str(bw)], under or fresh), bw, hz)
-        if base := _decode_base(wide, bw, _BASE_TRIED):
-            return base
+        if base := _decode_base(wide, bw, _BASE_TRIED, expect_pair=expect_pair):
+            return None if base.broadcast else base
         if _wideband(bw) and (below := _base_below(wide, bw)):
             return below if isinstance(below, LevelRead) else None
     if not found:
@@ -580,12 +618,91 @@ def _tone_burst(x: np.ndarray, bw, host: int) -> bool:
     around = np.concatenate([p[:at], p[at + span:]])
     floor = around.mean()
     dev = 1 / np.sqrt(band.sum())             # one symbol's power, relative
-    quarters = np.array([q.mean() for q in np.array_split(p[at:at + span], 4)]) / floor - 1
-    # the floor is measured too, and behind a short lead only on a few symbols
-    return (quarters.mean() > 8 * dev * np.sqrt(1 / span + 1 / len(around))
-            and quarters.min() > max(3 * dev * np.sqrt(4 / span + 1 / len(around)),
-                                     _TONE_SPAN_FLOOR)
-            and after.mean() / floor - 1 < 3 * dev / np.sqrt(tail))
+    quarters = np.array([q.mean() for q in np.array_split(p[at:at + span], 4)])
+    # Ratios to the floor, as products: over a cable's digital silence the
+    # floor is 0 and a burst stands clear of it by any margin. The floor is
+    # measured too, and behind a short lead only on a few symbols.
+    return (quarters.mean() > floor * (1 + 8 * dev * np.sqrt(1 / span + 1 / len(around)))
+            and quarters.min() > floor * (1 + max(3 * dev * np.sqrt(4 / span + 1 / len(around)),
+                                                  _TONE_SPAN_FLOOR))
+            and after.mean() <= floor * (1 + 3 * dev / np.sqrt(tail)))
+
+
+#: Stock's closing CW ident: Morse keyed by shifting one carrier between a
+#: mark at 1500 Hz and a space at 750 Hz, 28 WPM, on the bench and off air.
+#: WI9YZA's, bench 2 2026-10-21, is 3.25 s behind its close: a level-6 span.
+_IDENT_BLOCK = 384                      # 8 ms, in 125 Hz bins: a bin for each tone
+_IDENT_MARK, _IDENT_SPACE = 1500 // 125, 750 // 125
+#: The share of the band's power on the two tones, over 64 ms, held 0.5 s.
+#: Our bursts on a bench cable, MFSK to 8-DPSK, hold 0.5 for 0.16 s at most.
+_IDENT_PURE, _IDENT_SPAN = 0.7, 8
+_IDENT_LEAST = int(0.5 * _tone.FS) // _IDENT_BLOCK
+_IDENT_DIT = (4, 15)                    # blocks: 10 to 40 WPM
+_MORSE = {code: ch for ch, code in MORSE.items()}
+
+
+def ident(x: np.ndarray) -> str | None:
+    """The callsign of a stock CW ident in ``x``, or None. Found by the two
+    tones carrying the band and the keying reading as Morse, which no VARA
+    burst does: a tone row spreads over every carrier of its row."""
+    n = len(x) // _IDENT_BLOCK
+    if n < _IDENT_LEAST:
+        return None
+    p = np.abs(np.fft.rfft(np.asarray(x[:n * _IDENT_BLOCK], float).reshape(n, _IDENT_BLOCK),
+                           axis=1)) ** 2
+    mark, space, band = p[:, _IDENT_MARK], p[:, _IDENT_SPACE], p[:, 3:22].sum(1)
+    # a shift splashes the block it falls in; the tones hold the band around it
+    near = np.ones(_IDENT_SPAN)
+    pure = ((np.convolve(mark + space, near, "same") > _IDENT_PURE * np.convolve(band, near, "same"))
+            & (band > 1e-6 * band.max(initial=0.0)))
+    edge = np.diff(pure.view(np.int8), prepend=np.int8(0), append=np.int8(0))
+    for a, b in zip(np.flatnonzero(edge > 0), np.flatnonzero(edge < 0)):
+        if b - a < _IDENT_LEAST:
+            continue
+        key = mark[a:b] > space[a:b]
+        cut = np.flatnonzero(np.diff(key.view(np.int8))) + 1
+        runs = [(bool(k[0]), len(k)) for k in np.split(key, cut)]
+        runs = runs[not runs[0][0]:len(runs) - (not runs[-1][0])]
+        marks = [r for on, r in runs if on]
+        if len(marks) < 4:
+            continue
+        # a dah is three dits; a mark the window cut short is neither
+        dit = np.median([r for r in marks if r < max(marks) / 2] or [max(marks)])
+        if not _IDENT_DIT[0] <= dit <= _IDENT_DIT[1]:
+            continue
+        text, code = "", ""
+        for on, r in runs + [(False, 7 * dit)]:
+            if on:
+                code += "." if r < 2 * dit else "-"
+            elif r >= 2 * dit:
+                if code not in _MORSE:
+                    break
+                text, code = text + _MORSE[code], ""
+        else:
+            if len(text) >= 3:
+                return text
+    return None
+
+
+def emission_ended(x: np.ndarray, bw, host: int) -> bool:
+    """Whether the whole BW500 channel is back at its floor in the last twenty
+    symbols of ``x``, the floor read outside its loudest burst-long span: an
+    over still arriving keeps it lit at any level, where the row's own band
+    test can pass on a base over that has not ended. Four symbols more than
+    that test's sixteen, so a tone burst's verdict is in once this holds
+    [see _tone_burst]."""
+    tail = 20
+    n, span = len(x) // _tone.H, -(-burst_samples(bw, host) // _tone.H)
+    if n < span + tail + 1:
+        return False
+    freq = np.fft.rfftfreq(_tone.H, 1 / _tone.FS)
+    band = (freq >= _rx500.BURST_BAND[0]) & (freq <= _rx500.BURST_BAND[1])
+    p = (np.abs(np.fft.rfft(x[:n * _tone.H].reshape(n, _tone.H), axis=1)[:, band]) ** 2).sum(1)
+    c = np.concatenate([[0.0], np.cumsum(p)])
+    at = int(np.argmax(c[span:] - c[:-span]))
+    around = np.concatenate([p[:at], p[at + span:]])
+    dev = 1 / np.sqrt(band.sum())
+    return bool(p[-tail:].mean() <= around.mean() * (1 + 3 * dev / np.sqrt(tail)))
 
 
 def second_frame(audio: np.ndarray, bw, host: int) -> bool | None:
@@ -659,16 +776,25 @@ def _retune(x: np.ndarray, bw, hz: float) -> np.ndarray:
     return _rx2300.retune(x, hz) if _wideband(bw) else x
 
 
-def _decode_base(x: np.ndarray, bw, least: int = 0) -> LevelRead | None:
+def _decode_base(x: np.ndarray, bw, least: int = 0, *, expect_pair=None) -> LevelRead | None:
     quality, level = None, 4
     if _wideband(bw):
         fr = _rx2300.decode_over(x, 0, len(x), level=base_level(bw), least=least)
         bodies = (bytes(fr.payload),) if fr.crc_ok else ()
         quality = fr.quality
     else:
-        clean = [f for f in _rx500.decode_stream(x).frames if f.crc_ok]
+        result = _rx500.decode_stream(x, expect_pair=expect_pair)
+        if any(_beacon.is_broadcast_frame(frame) for frame in result.frames):
+            # A recognized broadcast must also veto the high-speed false-locator
+            # fallback; plain None would let decode_level return a lost DATA read.
+            return LevelRead(_beacon.LEVEL, (), broadcast=True)
+        if (not result.observation_complete or result.frames_skipped
+                or not all(f.crc_ok for f in result.frames)):
+            return None
+        clean = result.frames
         bodies = tuple(bytes(f.payload) + bytes([f.marker]) for f in clean)
         level = clean[0].level if clean else level
+        quality = clean[-1].quality if clean else None
     if not bodies:
         return None
     return LevelRead(level, bodies, quality, located=len(bodies))

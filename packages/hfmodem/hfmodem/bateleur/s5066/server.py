@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 
 from hfmodem.core import hostio
 
@@ -33,6 +34,7 @@ class SisServer:
         self._srv: socket.socket | None = None
         self._conns: set[socket.socket] = set()
         self._workers: set[threading.Thread] = set()
+        self._connections: list[hostio.Connection] = []
         self._lock = threading.Lock()
         self._running = False
         self._thread: threading.Thread | None = None
@@ -44,19 +46,25 @@ class SisServer:
         self._thread = threading.Thread(target=self._accept, daemon=True, name="s5066-sis")
         self._thread.start()
 
-    def stop(self) -> None:
-        self._running = False
+    def _cancel(self):
+        with self._lock:
+            self._running = False
+            connections = list(self._connections)
         if self._srv is not None:
             self._srv.close()
+        for conn in connections:
+            conn.cancel()
+
+    def stop(self, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        self._cancel()
         with self._lock:
-            for c in list(self._conns):
-                c.close()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-        with self._lock:
-            workers = list(self._workers)
-        for worker in workers:
-            worker.join()
+            workers = [self._thread, *self._workers]
+            connections = list(self._connections)
+        ended = hostio.join_threads(workers, deadline)
+        for conn in connections:
+            ended = conn.join(max(0.0, deadline - time.monotonic())) and ended
+        return ended
 
     def _accept(self) -> None:
         while self._running:
@@ -66,25 +74,21 @@ class SisServer:
                 continue
             except OSError:
                 return
-            if len(self._conns) >= 16 or not self._running:
-                conn.close()
-                continue
-            conn = hostio.Connection(conn)
-            worker = threading.Thread(target=self._client, args=(conn,), daemon=True)
             with self._lock:
-                if not self._running:
+                if len(self._conns) >= 16 or not self._running:
                     conn.close()
                     continue
+                self._workers = {t for t in self._workers if t.is_alive()}
+                self._connections[:] = [c for c in self._connections if not c.join(0)]
+                conn = hostio.Connection(conn)
+                worker = threading.Thread(target=self._client, args=(conn,), daemon=True)
+                self._connections.append(conn)
                 self._conns.add(conn)
                 self._workers.add(worker)
                 worker.start()
 
     def _client(self, conn):
-        try:
-            self._serve(conn)
-        finally:
-            with self._lock:
-                self._workers.discard(threading.current_thread())
+        self._serve(conn)
 
     def _serve(self, conn: socket.socket) -> None:
         def send(p: P.Primitive) -> None:
@@ -157,6 +161,10 @@ class NodeService:
         self.sis.start_background()
         self.onair.start()
 
-    def stop(self) -> None:
-        self.onair.stop()
-        self.sis.stop()
+    def stop(self, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        self.sis._cancel()
+        self.onair._running = False
+        sis_ended = self.sis.stop(max(0.0, deadline - time.monotonic()))
+        onair_ended = self.onair.stop(max(0.0, deadline - time.monotonic()))
+        return sis_ended and onair_ended

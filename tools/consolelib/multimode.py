@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """ONE CAMPAIGN OVER A BAND, calling every station in the mode that is right for it.
 
 "80 is open, run a campaign with everyone in the correct mode for them" is one

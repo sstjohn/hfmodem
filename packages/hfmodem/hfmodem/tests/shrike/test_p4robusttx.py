@@ -17,26 +17,38 @@ ORIGIN = SILENCE * p4rx.SAMPLE_RATE // 48000
 SPREAD_ENERGY = float(np.vdot(p4sig.SPREAD16, p4sig.SPREAD16).real)
 
 TAPE = CORPUS / "sigidwiki/PACTORIVaudio1.mp3"
-#: Where `SHORT_DIBITS` was lifted from, and how much of the tape to load.
+#: Where B4 was lifted from, and how much of the tape to load.
 BURST_ONSET_S = 4.863
 BURST_SPAN_S = 0.95
 
-DIBITS = Path(__file__).parent / "fixtures/p4-robust/dibits.npz"
+FIXTURES = Path(__file__).parent / "fixtures"
+TAPE_DIBITS = FIXTURES / "sigidwiki/p4-robust/dibits.npz"
+DIBITS = (TAPE_DIBITS, FIXTURES / "p4-robust-taunus/dibits.npz")
 
-#: Every robust short packet on file, by the value and header it carries. B4 is
-#: `SHORT_DIBITS`; the other six are the fixture's, from the same tape and from
-#: a second station. Provenance: the fixture's own README.
+#: Every robust short packet on file, by the value and header it carries: the
+#: tape's three caller bursts and a second station's four. Provenance: each
+#: fixture's note beside these tests.
 KNOWN = (("B4", 6, "A"), ("B5", 9, "A"), ("B6", 8, "A"),
          ("T0", 13, "A"), ("T1", 13, "B"), ("T2", 49, "A"), ("T3", 49, "B"))
 
 
+def load_dibits(path):
+    if not path.exists():
+        pytest.skip(f"{path} is absent")
+    with np.load(path) as f:
+        return {name: np.asarray(f[name], int) for name in f}
+
+
 @pytest.fixture(scope="module")
 def recorded_dibits():
-    """The six recorded packets that are not module literals."""
-    if not DIBITS.exists():
-        pytest.skip(f"{DIBITS} is absent")
-    with np.load(DIBITS) as f:
-        return {name: np.asarray(f[name], int) for name in f}
+    """The seven recorded packets, by name."""
+    return {name: row for path in DIBITS for name, row in load_dibits(path).items()}
+
+
+@pytest.fixture(scope="module")
+def tape_dibits():
+    """B4, the tape's first caller burst, despread and hard-decided."""
+    return load_dibits(TAPE_DIBITS)["B4"]
 
 
 def despread(baseband, start, count, cfo_hz=0.0):
@@ -79,7 +91,7 @@ def occupied_bw(audio, floor_db=-25.0, fs=48000):
 
 @pytest.fixture(scope="module")
 def recorded_burst():
-    """B4 as 48 kHz mono, straight off the tape. The literals never need this."""
+    """B4 as 48 kHz mono, straight off the tape. The dibits never need this."""
     if not TAPE.exists():
         pytest.skip(f"{TAPE} is absent")
     if shutil.which("ffmpeg") is None:
@@ -93,20 +105,24 @@ def recorded_burst():
                  int((BURST_ONSET_S + BURST_SPAN_S) * 48000)], lead
 
 
-def test_the_clone_is_one_robust_short_packet():
+def test_the_clone_is_one_robust_short_packet(tape_dibits):
     assert p4robusttx.SHORT_SYMBOLS == p4robusttx.HEADER_SYMBOLS + 1 + 64
-    assert len(p4robusttx.SHORT_DIBITS) == p4robusttx.SHORT_SYMBOLS - 1
+    assert tape_dibits.size == p4robusttx.SHORT_SYMBOLS - 1
     audio = p4robusttx.robust_short(6, "A")
     assert audio.size / 48000 == pytest.approx(p4robusttx.EMISSION_S, abs=1e-4)
     assert audio.size / 48000 * 1e3 == pytest.approx(760.0, abs=1.0)
     assert occupied_bw(audio) == pytest.approx(2400.0, abs=100.0)
 
 
-def test_the_model_reads_as_the_tape_but_for_its_dropped_first_step():
-    """`SHORT_DIBITS` is a measurement; value 6 under header A is the model."""
+def test_the_model_reads_as_the_tape_but_for_its_dropped_first_step(tape_dibits):
+    """B4 is a measurement; value 6 under header A is the model.
+
+    That identity is the whole claim the mask and the Walsh reading make about
+    this packet -- the other six close it independently.
+    """
     model = p4robusttx.short_dibits(6, "A")
-    assert model[1:] == p4robusttx.SHORT_DIBITS[1:]
-    assert (model[0], p4robusttx.SHORT_DIBITS[0]) == (0, 2)
+    assert model[1:] == tuple(tape_dibits[1:].tolist())
+    assert (model[0], int(tape_dibits[0])) == (0, 2)
 
 
 def test_the_header_is_keyed_at_its_measured_phases():
@@ -120,10 +136,10 @@ def test_the_header_is_keyed_at_its_measured_phases():
         assert (keyed - measured + 180) % 360 - 180 == pytest.approx(0, abs=2)
 
 
-def test_the_datablock_is_differential_bpsk():
+def test_the_datablock_is_differential_bpsk(tape_dibits):
     """§6.2 calls the robust payload DQPSK; this packet's 64 symbols are not."""
-    header = np.array(p4robusttx.SHORT_DIBITS[:p4robusttx.HEADER_SYMBOLS - 1])
-    body = np.array(p4robusttx.SHORT_DIBITS[p4robusttx.HEADER_SYMBOLS - 1:])
+    header = tape_dibits[:p4robusttx.HEADER_SYMBOLS - 1]
+    body = tape_dibits[p4robusttx.HEADER_SYMBOLS - 1:]
     assert set(header.tolist()) == {0, 1, 2, 3}
     assert body.size == 65 and not (body % 2).any()
 
@@ -199,10 +215,9 @@ def test_every_recorded_packet_is_a_codeword_under_one_mask(recorded_dibits):
     alone, and each of the other six leaves zero residual against it -- one in
     2**58 apiece if the code were not there.
     """
-    literals = {"B4": np.array(p4robusttx.SHORT_DIBITS)} | recorded_dibits
     read = []
     for name, value, header in KNOWN:
-        steps = literals[name]
+        steps = recorded_dibits[name]
         assert steps.size == p4robusttx.SHORT_SYMBOLS - 1
         block = steps[p4robusttx.HEADER_SYMBOLS:]
         assert not (block % 2).any(), f"{name} is not differential BPSK"
@@ -218,16 +233,15 @@ def test_the_two_headers_are_the_only_ones_recorded(recorded_dibits):
     weak second and third bursts and each miss a step -- which is what the
     knee, and not equality, is for.
     """
-    literals = {"B4": np.array(p4robusttx.SHORT_DIBITS)} | recorded_dibits
     word = p4robusttx.HEADER_WORD
     missed = {}
     for name, _, header in KNOWN:
         want = np.array(p4robusttx.HEADER_DIBITS[header])[word]
-        missed[name] = int(np.count_nonzero(literals[name][word] != want))
+        missed[name] = int(np.count_nonzero(recorded_dibits[name][word] != want))
     assert missed == dict(B4=0, B5=2, B6=1, T0=0, T1=0, T2=0, T3=0)
     # The one step the two recordings disagree on at the same header, which is
     # why `HEADER_WORD` starts at one.
-    assert {int(literals[n][0]) for n, _, h in KNOWN if h == "A"} == {0, 2}
+    assert {int(recorded_dibits[n][0]) for n, _, h in KNOWN if h == "A"} == {0, 2}
 
 
 @pytest.mark.parametrize("header", sorted(p4robusttx.HEADER_DIBITS))

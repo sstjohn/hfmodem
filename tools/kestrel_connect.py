@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Attempt a kestrel -> VARA connect over a real audio path (or the Wine loopback).
 
 Drives the VARA connect handshake (kestrel/vara/vara_arq.VaraStationHandshake):
 CR -> connect-response -> link-setup -> connected-ack -> CONNECTED, over a
-half-duplex audio transport with optional CAT PTT. Run it at the rig once the
+half-duplex audio transport keyed on the PTT line. Run it at the rig once the
 antenna is tuned; it reports whether the gateway answered and where it stalled.
 
 Every attempt records what it heard, to a timestamped WAV under ``logs/onair``
@@ -49,7 +51,9 @@ from hfmodem.core.busy import (DEAF_DBFS, MUTE_DROP_DB, POUNCE_WINDOW_S, level_r
 from hfmodem.core.busy import is_busy as _is_busy
 from hfmodem.core.occupied import FILTER_HZ, clipped, occupied_hz
 from hfmodem.core.ptt import arming_refusal
-from hfmodem.core.wav import store
+from hfmodem.core.rigs import RIGS, mode_passband, resolve_rig
+from hfmodem.core.wav import store_later
+from hfmodem.kestrel.host.busy_gate import BandGate
 from hfmodem.kestrel.vara.vara_arq import (
     _I_CR_SENT,
     _I_LINKSETUP_SENT,
@@ -718,6 +722,7 @@ class Recorder:
 
     def __init__(self, path: Path):
         self.path = path
+        self.store_log = path.with_suffix(".store.log")
         self.samples = 0
         path.parent.mkdir(parents=True, exist_ok=True)
         self._wav = wave.open(str(path), "wb")
@@ -725,18 +730,48 @@ class Recorder:
         self._wav.setsampwidth(2)
         self._wav.setframerate(FS)
         self._q: queue.SimpleQueue = queue.SimpleQueue()
+        self._enqueue_lock = threading.Lock()
+        self._queued_samples = 0
         self._closed = False
         self._thread = threading.Thread(target=self._drain, daemon=True)
         self._thread.start()
 
     def write(self, frame: np.ndarray) -> None:
-        self._q.put(frame)
+        with self._enqueue_lock:
+            self._q.put(frame)
+            self._queued_samples += len(frame)
+
+    @property
+    def position(self):
+        with self._enqueue_lock:
+            return self._queued_samples
 
     def _drain(self) -> None:
         while (frame := self._q.get()) is not None:
+            if callable(frame):
+                # A contact cutout runs behind all already queued PCM. Flush the
+                # WAV header and bytes before its reader opens the ongoing file.
+                self._wav._file.flush()
+                frame()
+                continue
             pcm = np.clip(np.asarray(frame, np.float32), -1.0, 1.0) * 32767.0
             self._wav.writeframes(pcm.astype("<i2").tobytes())
             self.samples += len(frame)
+
+    def after_pending(self, action):
+        """Schedule file work off the radio/audio threads; failures reach the caller."""
+        from concurrent.futures import Future
+        result = Future()
+        def run():
+            try:
+                result.set_result(action())
+            except Exception as error:
+                result.set_exception(error)
+        with self._enqueue_lock:
+            if self._closed:
+                raise RuntimeError('Recorder is closed')
+            self._q.put(run)
+        return result
 
     def close(self) -> None:
         if self._closed:
@@ -745,7 +780,7 @@ class Recorder:
         self._q.put(None)
         self._thread.join(timeout=10)
         self._wav.close()
-        store(self.path)
+        store_later(self.path, self.store_log)
 
 
 def recording_path(directory: Path, mycall: str, gateway: str) -> Path:
@@ -879,13 +914,17 @@ class AudioVaraIO(_MailSeam, VaraIO):
     ``record`` is a WAV path that every received sample is written to, ours
     included — the rig monitors its own transmit into the receive codec, so the
     file holds both sides of the attempt.
+
+    ``offset_hz`` is how far the rig's dial sits from the dial the modem works: the
+    modem hears its channel moved back to 1500 Hz and keys it where the channel
+    sits. The recording and every ``taps`` callable get the audio as received.
     """
 
     def __init__(self, tx_device: str, rx_device: str,
                  amplitude: float = levels.TX_DRIVE,
                  rig: Rig | None = None, record: Path | None = None,
                  tx_tail: float = TX_IDLE_HOLD_S, warm: bool = False,
-                 trace_timing: bool = False):
+                 trace_timing: bool = False, offset_hz: int = 0):
         import sounddevice as sd
         self.tx_device = tx_device
         self.rx_device = rx_device
@@ -917,6 +956,7 @@ class AudioVaraIO(_MailSeam, VaraIO):
         self._rx_generation = 0           # advances when TX invalidates pending RX
         self._lock = threading.Lock()      # _buf is shared with the recorder thread
         self._seg = _BracketSegmenter()    # scanned audio -> keyed bursts
+        self._band = BandGate()            # scanned audio -> BUSY at BW500
         self._rx_inflight = False          # a region the gate holds open, declared
         self._bursts: list[np.ndarray] = []            # closed, not yet handed over
         self._gap: np.ndarray | None = None            # audio under measurement
@@ -943,6 +983,11 @@ class AudioVaraIO(_MailSeam, VaraIO):
         self._blk = 128
         self.rec = Recorder(record) if record is not None else None
         self.connected_info = None
+        self.taps = []
+        self.offset_hz = offset_hz
+        if offset_hz:
+            from hfmodem.contact.slots import AudioShift
+            self._heard_shift = AudioShift(offset_hz)
 
     def _on_rx(self, indata, frames, t, status):
         n0 = self.samples
@@ -961,6 +1006,10 @@ class AudioVaraIO(_MailSeam, VaraIO):
             frame = indata[:, 0].copy()
             if self.rec is not None:
                 self.rec.write(frame)
+            for tap in self.taps:
+                tap(frame)
+            if self.offset_hz:
+                frame = self._heard_shift(frame)
             with self._lock:
                 self._buf.append(frame)
 
@@ -1063,6 +1112,8 @@ class AudioVaraIO(_MailSeam, VaraIO):
             self.rec.close()
             print(f"  recorded {self.rec.samples / FS:.0f}s of receive audio to "
                   f"{self.rec.path}", flush=True)
+            print(f"  receive audio is being stored in the background (log: {self.rec.store_log})",
+                  flush=True)
         if self.warm_lost:
             print(f"  transmit warm-up: {self.warm_lost} samples "
                   f"({self.warm_lost / FS * 1e3:.0f} ms) of capture, the price of "
@@ -1096,6 +1147,15 @@ class AudioVaraIO(_MailSeam, VaraIO):
         if lines:
             print("\n".join(lines), flush=True)
 
+    def _diagnostic(self, kind, **details):
+        """Optional nonblocking observer; diagnostics must never interrupt radio IO."""
+        callback = getattr(self, 'diagnostic', None)
+        if callback is not None:
+            try:
+                callback(kind, **details)
+            except Exception:
+                pass
+
     def tx_metadata(self, **metadata):
         self._tx_metadata = metadata
 
@@ -1109,7 +1169,28 @@ class AudioVaraIO(_MailSeam, VaraIO):
             if lines:
                 print("\n".join(lines), flush=True)
 
+    def unkey_confirmed(self):
+        """Explicit completion fence for unlinked sends; never infer from audio end."""
+        if self._timing_key_active:
+            return False
+        return (self.rig is None or (not self.rig.retired and not self.rig.keyed
+                                     and self.rig.line_state() is False))
+
     # -- VaraIO ----------------------------------------------------------------
+    def retuned(self):
+        """Owner-only receive boundary after CAT; keep recording and ARQ debt."""
+        with self._lock:
+            self._buf.clear()
+            self._consumed = 0
+            self._rx_generation += 1
+            self._seg.restart()
+            self._band.restart()
+            self._bursts.clear()
+            self._gap = self._gap_from = None
+            self._gap_lead = 0
+            self._rx_inflight = False
+        self.progress.inflight_done('rx')
+
     def key(self, on: bool) -> None:
         unwinding = sys.exc_info()[1]
         if getattr(self, "_trace_timing_enabled", False) and on:
@@ -1172,6 +1253,9 @@ class AudioVaraIO(_MailSeam, VaraIO):
                 self.log("NOT TRANSMITTING — the transmitter has been taken down")
                 return
             peak = self.amp if drive is None else drive
+            if getattr(self, "offset_hz", 0):
+                from hfmodem.contact.slots import shift_burst
+                samples = shift_burst(samples, -self.offset_hz)
             s = levels.at_drive(samples, peak)
             waveform_samples = len(s)
             block = np.zeros((len(s), self.tx_channels), dtype=np.float32)
@@ -1185,6 +1269,8 @@ class AudioVaraIO(_MailSeam, VaraIO):
                                     capture_samples=getattr(self, "samples", None),
                                     buffer_samples=playing_from, cursor=getattr(self, "_consumed", None))
             self.progress.inflight("tx", len(s) / FS + self.tx_tail)
+            self._diagnostic('tx_start', identification=identification,
+                             keyed=bool(getattr(self, '_tx_key_confirmed', False)), **metadata)
             _bounded(len(block) / FS + STOP_BUDGET_S,
                      lambda: play_drained(block, FS, self.tx_device))
             audio_end = getattr(self, "samples", None)
@@ -1224,6 +1310,7 @@ class AudioVaraIO(_MailSeam, VaraIO):
                 self._consumed = end + int(guard * FS)
                 self._rx_generation += 1
                 self._seg.restart()            # what it has half-bracketed is our own burst
+                self._band.restart()
                 self._bursts.clear()
                 self._gap = np.zeros(0)        # measure how long the input stays dead
                 self._gap_from = (_tx_last_sample(audio, end) if end < len(audio)
@@ -1268,11 +1355,12 @@ class AudioVaraIO(_MailSeam, VaraIO):
         finally:
             self.progress.inflight_done("tx")
             journal = getattr(self, "_tx_events", None)
+            result = ("refused" if outcome in ("key_refused", "retired") else
+                      "error" if outcome == "error" else
+                      "dry_run" if self.rig is None or not self.rig.armed else
+                      "sent" if getattr(self, "_tx_key_confirmed", False) else "unconfirmed")
+            self._diagnostic('tx_end', outcome=result, identification=identification, **metadata)
             if journal is not None:
-                result = ("refused" if outcome in ("key_refused", "retired") else
-                          "error" if outcome == "error" else
-                          "dry_run" if self.rig is None or not self.rig.armed else
-                          "sent" if getattr(self, "_tx_key_confirmed", False) else "unconfirmed")
                 recorder = getattr(self, "rec", None)
                 journal.record("completed", self._tx_event_seq, outcome=result,
                     recording=str(recorder.path) if recorder is not None else None,
@@ -1381,6 +1469,11 @@ class AudioVaraIO(_MailSeam, VaraIO):
         print("  (responder PENDING)")
 
     def log(self, msg: str) -> None:
+        if msg.startswith('link-recovery '):
+            state, _, text = msg[len('link-recovery '):].partition(': ')
+            self._diagnostic('link_recovery', state=state, text=text)
+        if msg.startswith('rx '):
+            self._diagnostic('rx_protocol', text=msg[3:])
         # The traffic classifier labels every burst; a bracket the handshake could
         # not read is not a finding on a live band. The second clause here used to
         # name the disconnect-request specifically, because a 17-symbol noise
@@ -1393,8 +1486,12 @@ class AudioVaraIO(_MailSeam, VaraIO):
         # 6.016 s bracket; all three arrived here and all three were dropped, so
         # the log the operator read showed unbroken silence while the gateway was
         # transmitting. A miss on the turn is worth a line even when it is noise.
-        if ("not an MFSK handshake burst" in msg
-                and (self.hs is None or self.hs.turn != _TURN_ASKED)):
+        # So is one while a caller's link setup is due: on 10-23 at 11:13Z a weak
+        # station's setup went unread and the log said nothing between PENDING and
+        # CANCELPENDING.
+        if ("not an MFSK handshake burst" in msg and not (
+                self.hs is not None and (self.hs.turn == _TURN_ASKED or (
+                    self.hs.role == "responder" and self.hs.state is VaraState.CONNECTING)))):
             return
         print(f"  {msg}", flush=True)
 
@@ -1451,6 +1548,7 @@ class AudioVaraIO(_MailSeam, VaraIO):
         if len(fresh):
             self._consumed += len(fresh)
             self._seg.push(fresh)      # brackets discarded: nothing is expected yet
+            self._band.push(fresh)
             self._bursts.clear()
             self._compact()
 
@@ -1489,6 +1587,23 @@ class AudioVaraIO(_MailSeam, VaraIO):
                 return False
             frame = np.concatenate(tail[::-1])[-SEG_FRAME:]
         return float(np.sqrt((frame ** 2).mean())) > self._seg.nf * self._seg.enter
+
+    def channel_active(self, bw: str) -> bool:
+        """What BUSY reports: the BW500 passband gate at 500 (`busy_gate`), the
+        bracket gate at the wider bandwidths, whose stock BUSY is not measured."""
+        return self._band.active if str(bw) == "500" else self.receiving
+
+    def busy_detail(self) -> str:
+        """What the gate read at a BUSY edge, so a live session's BUSY can be replayed."""
+        seg = self._seg
+        db = lambda v: f"{20 * np.log10(max(v, 1e-12)):.1f}" if v else "none"
+        with self._lock:
+            tail = np.concatenate(self._buf)[-SEG_FRAME:] if self._buf else np.zeros(0)
+        frame = float(np.sqrt((tail ** 2).mean())) if len(tail) else None
+        held = f"{float(np.median(seg.iheld)):.2f}" if seg.iheld else "none"
+        return (f"floor {db(seg.nf)} dBFS, frame {db(frame)} dBFS, held {held}, "
+                f"open {bool(seg.inb)}, {self._band.detail()}, epoch {self._rx_generation}, "
+                f"sample {self.samples}")
 
     def next_rx_burst(self, timeout: float, hs=None):
         """Wait for the responder's next keyed burst after the last TX, or None.
@@ -1536,6 +1651,7 @@ class AudioVaraIO(_MailSeam, VaraIO):
                     self._compact()
                     return None
                 self._bursts += [b for _, b in self._seg.push(fresh)]
+                self._band.push(fresh)
                 self._compact()
                 # A region the gate still holds open is a peer keying now, and
                 # SEG_MAX_S is the longest one it can be  [_BracketSegmenter].
@@ -1831,7 +1947,7 @@ def connect(gateway: str, mycall: str, bw: str, io: AudioVaraIO,
             max_cr: int = 8, calls: list = None, listen_first: float = 8.0,
             force: bool = False, ls_interval: float = 8.0,
             hs: VaraStationHandshake | None = None,
-            pounce_wait: float = 0.0) -> bool:
+            pounce_wait: float = 0.0, admission=None) -> bool:
     """Originate a connect, re-sending the CR until the window or the budget ends.
 
     A single connect-request is easily missed (QSB, timing, a briefly-busy
@@ -1859,6 +1975,8 @@ def connect(gateway: str, mycall: str, bw: str, io: AudioVaraIO,
     watch = getattr(io, "progress", NO_PROGRESS)
     io.hs = hs
     io.start()
+    if admission is not None:
+        admission.opened()
     time.sleep(0.3)
     mon_calls = list(dict.fromkeys([gateway.upper(), mycall.upper()] + (calls or [])))
     session = Session()
@@ -2011,17 +2129,13 @@ def main() -> int:
                          "theirs")
     ap.add_argument("--tx-device", default="BlackHole 16ch")
     ap.add_argument("--rx-device", default="BlackHole 64ch")
-    ap.add_argument("--rigctld", help="host:port for CAT PTT (omit for BlackHole)")
+    ap.add_argument("--rigctld", help="host:port of the rigctld that tunes the "
+                                      "radio; it never keys (omit for BlackHole)")
     ap.add_argument("--ptt-device", metavar="DEV",
-                    help="serial line whose RTS is the PTT. Used only as the "
-                         "last resort in an unkey rigctld has stopped "
-                         "answering: RF into the adapter can take the daemon "
-                         "out while the transmitter is up, and clearing RTS "
-                         "is an ioctl needing no daemon and no reply")
+                    help="required with --arm: the serial line whose RTS is the PTT")
     ap.add_argument("--line-ptt", action="store_true",
-                    help="key by driving that line directly instead of asking "
-                         "rigctld to. rigctld still tunes the radio, which it "
-                         "does before there is any RF about")
+                    help="required with --arm: key by driving that line. rigctld "
+                         "only tunes, which it does before there is any RF about")
     ap.add_argument("--freq", type=float,
                     help="dial frequency in kHz to tune before connecting, e.g. 7107.0 "
                          f"(asks for PKTUSB / {FILTER_HZ} Hz too, and refuses a "
@@ -2088,7 +2202,7 @@ def main() -> int:
     ap.add_argument("--compression", choices=("OFF", "TEXT", "FILES"), default="OFF",
                     help="link compression preference (default OFF); TEXT calls remain "
                          "OFF until its receive tables and interop checks are complete")
-    ap.add_argument("--speed-limited", action="store_true",
+    ap.add_argument("--winlink-cartel-mode", action="store_true",
                     help="key the free link-setup (body[7] 0x80, ask 4) and stay at "
                          "level 4 instead of the default high speed capable "
                          "gear-shift: levels 4 to the bandwidth's top, stepped by "
@@ -2200,6 +2314,9 @@ def main() -> int:
     if args.arm and (refusal := arming_refusal(args.ptt_device)):
         print(refusal)
         return 2
+    if args.arm and not args.line_ptt:
+        print("--arm requires --line-ptt: hamlib may tune but may not key")
+        return 2
 
     # Everything that can be checked without hardware is checked before the rig
     # is touched, so a bad flag costs seconds and not a rig slot: a mail file
@@ -2234,6 +2351,21 @@ def main() -> int:
     # atexit/SIGINT unkey that a `finally` cannot provide when the process is
     # interrupted mid-over. The transmitting tool opted out of all of it in a
     # one-line comment; that is how a stuck transmitter happens.
+    from hfmodem.core.claim import ClaimError, inherited
+
+    try:
+        admission = inherited(9, launch=True) if not args.dry_run else None
+    except ClaimError as exc:
+        print(f"CLAIM NOT ADMITTED: {exc}", flush=True)
+        return 2
+    try:
+        return _run(args, identity, admission=admission)
+    finally:
+        if admission is not None:
+            admission.failed()
+
+
+def _run(args, identity, *, admission=None) -> int:
     rig = None
     if args.rigctld and not args.dry_run:
         host, _, port = args.rigctld.partition(":")
@@ -2266,7 +2398,7 @@ def main() -> int:
             want = int(args.freq * 1000)
             try:
                 rig.set_freq(want)
-                rig.set_mode("PKTUSB", FILTER_HZ)
+                rig.set_mode("PKTUSB", mode_passband(RIGS[resolve_rig()], FILTER_HZ))
                 st = rig.state()
             except OSError as e:
                 print(f"TUNE FAILED: rigctld at {args.rigctld} went away while "
@@ -2323,7 +2455,7 @@ def main() -> int:
                               allow_data_retries=not args.no_data_retries,
                               probe_intermediate_query=True,
                               tx_level=args.tx_level,
-                              high_speed=not args.speed_limited,
+                              high_speed=not args.winlink_cartel_mode,
                               compression=args.compression)
     identified = False
     id_owed = (identity.closing_required("vara", optional=args.cwid_optional) and not args.dry_run
@@ -2334,7 +2466,8 @@ def main() -> int:
             ok = connect(args.gateway, args.mycall, args.bw, io, args.timeout,
                          calls=calls, cr_interval=args.cr_interval,
                          max_cr=args.max_cr, listen_first=args.listen_first,
-                         force=args.force, hs=hs, pounce_wait=args.pounce_wait)
+                         force=args.force, hs=hs, pounce_wait=args.pounce_wait,
+                         admission=admission)
             if ok and mail is not None:
                 print(f"  mail: {args.mycall.upper()} -> {args.gateway.upper()} over "
                       "the held link", flush=True)

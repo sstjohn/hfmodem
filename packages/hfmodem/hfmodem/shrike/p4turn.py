@@ -8,6 +8,7 @@ an outgoing step; a full accepted ack or associated data reply settles bytes.
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from itertools import count
 from time import monotonic
 from .p4observation import Kind, Registered, RegisteredObservation, RESPONSE_S, WORD_HORIZON_S
 from .p4host import P4LateFrame, P4StreamFailure
@@ -25,6 +26,7 @@ PEER_ACK = {**{value: word for value, word in ACK.items() if value != 38},
 LADDER_LONG = (13, 60)
 LADDER_CHIRP = (13, 49, 53)
 HANDBACK_REOFFER_SECONDS = 20.
+_peer_watch_generations = count(1)
 
 
 def counter_ack(counter):
@@ -74,6 +76,7 @@ class Proposal:
     accepted_target: int | None = None
     current_slot: int | None = None
     current_slot_accepted: bool = True
+    peer_watch_generation: int | None = None
 
 
 @dataclass(frozen=True)
@@ -86,12 +89,32 @@ class HeldAnswer:
 
 
 @dataclass(frozen=True)
+class GrantReceiveOrigin:
+    """History of an actual empty-grant receive exchange, not read authority."""
+    context: object
+    actual: Proposal
+    receiver_generation: int
+    turn_generation: int
+    receive_epoch: int
+
+
+@dataclass(frozen=True)
 class PeerPhase:
     onset: int
     kind: Kind
     cycle: int
     generation: int
     identity: tuple
+
+
+@dataclass(frozen=True)
+class PeerWatch:
+    onset: int
+    cycle: int
+    cfo_hz: float
+    generation: int
+    attempts: int = 0
+    last_attempt: int | None = None
 
 
 @dataclass(frozen=True)
@@ -231,6 +254,7 @@ class P4Turn:
         self.breakins = 0
         self._peer_cycle = 1.25
         self.peer_phase = None
+        self.peer_watch = None
         self._peer_generation = 0
         self._peer_consumed = None
         self.unread = 0
@@ -272,6 +296,7 @@ class P4Turn:
         self._peer_word_at = -1
         self._close_held_v27 = False
         self.close_context = None
+        self._grant_receive_origin = None
         self._wall_clock = wall_clock
         self.session_end = session_end
         self.session_wall_end = session_wall_end
@@ -549,6 +574,8 @@ class P4Turn:
         self.outbox.requeue()
 
     def _body_ack(self, reg):
+        if reg.peer_watch_generation is not None:
+            return False
         if not self._current_response(reg):
             return False
         target = self._emissions.get(reg.responds_to)
@@ -588,7 +615,9 @@ class P4Turn:
 
     def _grant_ack(self, reg):
         target = self._emissions.get(reg.responds_to)
-        return target is not None and target is self.last and self.offers_turn()
+        return (target is not None and target is self.last and self.offers_turn()
+                and not (self.close_context is not None
+                         and target.stream_sample < self.close_context.started))
 
     def _bytes_waiting(self):
         return bool(self.outbox.inflight) or self.outbox.queued and self.allow_breakin
@@ -623,8 +652,58 @@ class P4Turn:
         return self._handback_attempted and (self.managed_application or self._hold_until is not None)
 
     def _clear_offer(self):
-        self._offer_at = self.next_offer_at = None
+        self._offer_at = None
+        if self.peer_watch is None:
+            self.next_offer_at = None
         self._handback_pending = None
+
+    def revoke_peer_watch(self):
+        if self.peer_watch is not None:
+            self.peer_watch = None
+            self.next_offer_at = None
+
+    def _long_peer_open(self):
+        return self.peer_phase is not None and self.peer_phase.kind in (Kind.LONG, Kind.CHIRP)
+
+    def peer_span_fits(self, proposal, length, allowance):
+        phase = self.peer_phase
+        if phase is None or phase.kind not in (Kind.LONG, Kind.CHIRP):
+            return True
+        following = phase.onset + ((proposal.stream_sample-phase.onset)//phase.cycle+1)*phase.cycle
+        return proposal.stream_sample + length + allowance <= following
+
+    def watch_acquisition(self, proposal):
+        return (proposal is self._next and self.peer_watch is not None
+                and self._long_peer_open() and self.peer_phase.generation == self._peer_generation
+                and not proposal.payload and proposal.accepted_target is None
+                and (proposal.kind == Kind.WORD and proposal.word == 'Y27'
+                     or proposal.kind == Kind.BODY and proposal.status == 0x40)
+                and proposal.state in (State.ISS_GRANT, State.IRS_BREAKIN)
+                and proposal.peer_watch_generation in (None, self.peer_watch.generation))
+
+    def _watch_qualifies(self, reg):
+        watch, obs = self.peer_watch, reg.observation
+        return (watch is not None and reg.peer_watch_generation == watch.generation
+                and reg.outcome in (Registered.NEW, Registered.CONFIRMED, Registered.ENRICHED)
+                and obs.kind in (Kind.LONG, Kind.CHIRP) and obs.frame is not None
+                and not obs.weak and not obs.provisional and not obs.unexpected
+                and obs.stream_sample >= watch.onset
+                and abs(obs.stream_sample-watch.onset
+                        - round((obs.stream_sample-watch.onset)/watch.cycle)*watch.cycle)
+                <= round(.035*self.fs))
+
+    def _recover_peer_turn(self, due=None):
+        watch = self.peer_watch
+        self.state = State.IRS_ANSWER
+        if self._next is not None and self._next.accepted_target is None:
+            self._next = None
+        self._clear_ack_wait()
+        self._handback_pending = None
+        self._offer_at = None
+        if watch.last_attempt is not None:
+            self.next_offer_at = watch.last_attempt + round(HANDBACK_REOFFER_SECONDS*self.fs)
+        if due is not None and self._next is None:
+            self._next = self._held_proposal(due)
 
     def _handback_exit(self, at):
         self._clear_ack_wait()
@@ -654,10 +733,12 @@ class P4Turn:
         return result
 
     def finish_application(self, now, failure=None):
+        self._grant_receive_origin = None
         if self.app_done and (failure is None or self._closing_failure):
             return
         self._cancel_credit('application finished')
         self._clear_opening_credit()
+        self.revoke_peer_watch()
         self.app_done = True
         if failure:
             self.application_failure = self.reason = failure
@@ -711,6 +792,8 @@ class P4Turn:
 
     def _body(self, at, status, state, payload=b""):
         if state == State.ISS_CLOSE:
+            self._grant_receive_origin = None
+            self.revoke_peer_watch()
             self._clear_offer()
         if state == State.ISS_CLOSE and status == 0x20 and self.close_context is None:
             self.close_context = CloseContext(
@@ -730,6 +813,10 @@ class P4Turn:
 
     def _begin_data_turn(self, at, state=State.ISS_DATA, *, word_yield=False,
                          counted_continuation=False):
+        if self.peer_watch is not None or self.peer_phase is not None and self.peer_phase.kind in (Kind.LONG, Kind.CHIRP):
+            self.revoke_peer_watch()
+            self.peer_phase = None
+            self._peer_consumed = None
         if self._closing_failure:
             self._requeue()
             self._body(at, 0x20, State.ISS_CLOSE)
@@ -945,7 +1032,8 @@ class P4Turn:
         )
 
     def next_raster(self, now):
-        if (self._breaking_in() and self.peer_phase is not None
+        if ((self._breaking_in() or self.peer_watch is not None)
+                and self.peer_phase is not None
                 and self.peer_phase.generation == self._peer_generation):
             return self.breakin_due(now)
         if self.last is None:
@@ -980,10 +1068,13 @@ class P4Turn:
                 and self.last.state == State.IRS_BREAKIN)
 
     def reschedule_breakin(self, now, *, lead=None):
+        candidate = self.breakin_due(now, lead=lead) if self.peer_phase is not None else None
         if (self._next is None and self.state == State.IRS_ANSWER
-                and self._wants_turn() and self.peer_phase is not None
-                and not self.pending and self._deferred is None):
-            self._break_in(self.breakin_due(now, lead=lead))
+                and self._wants_turn(candidate) and self.peer_phase is not None
+                and (not self.pending or self.peer_phase.kind in (Kind.LONG, Kind.CHIRP)
+                     and all(s in self._decided for s in self.pending))
+                and self._deferred is None):
+            self._break_in(candidate)
         if (self._next is not None and self._next.state == State.IRS_BREAKIN
                 and self.peer_phase is not None):
             due = self.breakin_due(now, lead=lead)
@@ -1015,10 +1106,20 @@ class P4Turn:
             if (obs.stream_sample < self.peer_phase.onset and not replacing
                     or identity == self.peer_phase.identity):
                 return
+        self._grant_receive_origin = None
         self.peer_phase = PeerPhase(obs.stream_sample, obs.kind,
                                     round(CYCLE[obs.kind] * self.fs), self._peer_generation,
                                     identity)
         self._peer_cycle = CYCLE[obs.kind]
+        if obs.kind in (Kind.LONG, Kind.CHIRP) and not self.app_done:
+            old = self.peer_watch
+            self.peer_watch = PeerWatch(obs.stream_sample, self.peer_phase.cycle, obs.cfo_hz,
+                next(_peer_watch_generations), old.attempts if old else 0,
+                old.last_attempt if old else None)
+            if old is None:
+                self._offer_at = self.next_offer_at = None
+        elif obs.kind not in (Kind.LONG, Kind.CHIRP):
+            self.revoke_peer_watch()
         if self._next is not None and self._next.state == State.IRS_BREAKIN:
             self._next = replace(self._next,
                                  stream_sample=self.breakin_due(max(obs.stream_sample, now)))
@@ -1085,6 +1186,56 @@ class P4Turn:
 
     def observe(self, reg, *, now=None):
         obs = reg.observation
+        watched = reg.peer_watch_generation is not None
+        qualified = watched and self._watch_qualifies(reg)
+        phase = self.peer_phase
+        ordinary_phase = (self.state in (State.IRS_ANSWER, State.IRS_YIELD, State.IRS_CLOSE)
+                   and (self._receive_active or self._receive_epoch == 0)
+                   and phase is not None and phase.generation == self._peer_generation
+                   and phase.kind in (Kind.LONG, Kind.CHIRP)
+                   and obs.stream_sample >= phase.onset
+                   and abs(obs.stream_sample-phase.onset
+                           -round((obs.stream_sample-phase.onset)/phase.cycle)*phase.cycle)
+                   <= round(.035*self.fs))
+        primary = (ordinary_phase and reg.primary_packet_due is not None
+                   and abs(obs.stream_sample-reg.primary_packet_due) <= round(.035*self.fs))
+        journal = self.adapter._delivery_journal
+        completing_source = (ordinary_phase and self.app_done and not self._closing_failure
+                             and journal is not None and journal['done'] and obs.frame is not None
+                             and obs.kind in (Kind.LONG, Kind.CHIRP)
+                             and reg.outcome in (Registered.NEW, Registered.CONFIRMED, Registered.ENRICHED)
+                             and journal['token'] == ('accept', obs.frame.status.byte, obs.frame.data)
+                             and not obs.provisional and not obs.weak and not obs.unexpected)
+        if watched and not qualified and not primary and not completing_source:
+            return
+        saved = None
+        self._watch_recovery = False
+        if qualified and not primary:
+            # Stage IRS only around existing source admission. The adapter owns
+            # external callback journaling; never restore or replace that journal.
+            # Snapshot turn-owned values, never the host/outbox or callback journal.
+            # Containers restore in place so accepted context/proposal identities survive.
+            saved = {name: value for name, value in vars(self).items()
+                     if name not in ('adapter', 'outbox')}
+            containers = {}
+            def retain(value):
+                if isinstance(value, (dict, set, list)) and id(value) not in containers:
+                    containers[id(value)] = value, value.copy()
+                    for item in (value.values() if isinstance(value, dict) else value):
+                        retain(item)
+                elif isinstance(value, tuple):
+                    for item in value:
+                        retain(item)
+                elif isinstance(value, HeldAnswer):
+                    retain(value.context)
+            for value in saved.values():
+                retain(value)
+            close = self.close_context
+            close_values = vars(close).copy() if close is not None else None
+            self._watch_admitted = False
+            self._watch_recovery = (self.state in (State.ISS_GRANT, State.IRS_BREAKIN)
+                or self._next is not None and self._next.state in (State.ISS_GRANT, State.IRS_BREAKIN))
+            self._recover_peer_turn()
         admit = ((lambda: self.sf8_eligible(obs))
                  if obs.sf8 and self.sf8_eligible is not None else None)
         try:
@@ -1092,6 +1243,28 @@ class P4Turn:
                 return self._observe(reg, now=now)
         except P4LateFrame:
             return
+        finally:
+            if (saved is not None and not self._watch_admitted and not self._closing_failure
+                    and self.state != State.DOWN):
+                completed = self.app_done and not saved['app_done']
+                for value, original in containers.values():
+                    if isinstance(value, list):
+                        value[:] = original
+                    else:
+                        value.clear()
+                        value.update(original)
+                for name, value in saved.items():
+                    setattr(self, name, value)
+                if close is not None:
+                    vars(close).update(close_values)
+                if completed:
+                    # Completion happened in staged IRS. Keep the exact source
+                    # inputs under the existing journal, retire restored retry
+                    # work, and never run finish_application twice against it.
+                    self._recover_peer_turn()
+                    self.app_done = True
+                    self.revoke_peer_watch()
+            self._watch_recovery = False
 
     def _observe(self, reg, *, now=None):
         obs = reg.observation
@@ -1102,7 +1275,12 @@ class P4Turn:
             return
         if self._train_expired(now, decision=False):
             return
-        if not self._current_response(reg):
+        if reg.peer_watch_generation is None and not self._current_response(reg):
+            return
+        if (self._long_peer_open() and obs.kind == Kind.BODY and obs.frame is not None
+                and obs.frame.status.protocol == 2 and not spec.field_payload(obs.frame.data)
+                and (obs.provisional or obs.weak or obs.unexpected
+                     or reg.outcome not in (Registered.NEW, Registered.CONFIRMED, Registered.ENRICHED))):
             return
         if (self.state == State.IRS_ANSWER
                 and obs.kind in (Kind.NORMAL, Kind.BODY, Kind.LONG, Kind.CHIRP)
@@ -1178,7 +1356,8 @@ class P4Turn:
                 and not obs.provisional and not obs.weak and not obs.unexpected
                 and reg.outcome not in (Registered.EXPIRED, Registered.DUPLICATE)):
             self._train_active = False
-        self._record_peer_phase(reg, now)
+        if obs.frame is None or obs.kind not in (Kind.BODY, Kind.NORMAL, Kind.LONG, Kind.CHIRP):
+            self._record_peer_phase(reg, now)
         self.events.append(reg)
         silent = self._silent_receive(reg)
         if silent and self._irs_silent_done:
@@ -1281,6 +1460,17 @@ class P4Turn:
                     and self._past(now, sample+round(self.t[incoming.kind]*self.fs))):
                 self._defer(sample, pending, sample+round(self.t[incoming.kind]*self.fs))
         if self._repeat_of_deferred(reg):
+            if obs.frame is not None:
+                # Its held answer already owns this committed source. Do not
+                # re-enter parsing or replace the accepted SourceResult.
+                eligible = not obs.sf8 or self.sf8_eligible is None or self.sf8_eligible(obs)
+                if reg.peer_watch_generation is not None:
+                    if (self.adapter._delivery_journal is not None
+                            or self.adapter._admit is not None and not self.adapter._admit()):
+                        raise P4LateFrame
+                if eligible:
+                    self._watch_admitted = True
+                    self._record_peer_phase(reg, now)
             for sample in (obs.stream_sample, reg.replaced and reg.replaced.stream_sample):
                 if sample is not None:
                     self._decided.add(sample)
@@ -1585,7 +1775,7 @@ class P4Turn:
                     receipt_context=ReceiptContext(receipt, obs.kind),
                     admit=(lambda: self.sf8_eligible(obs)) if obs.sf8 and self.sf8_eligible else None))
             except P4LateFrame:
-                return
+                raise
             except P4StreamFailure as exc:
                 self._cancel_credit('unsupported source')
                 self._clear_opening_credit()
@@ -1595,6 +1785,7 @@ class P4Turn:
                 self.reason = str(exc)
                 self._requeue()
                 self.app_done = True
+                self.revoke_peer_watch()
                 self._next = None
                 self.state = (
                     State.IRS_CLOSE
@@ -1607,6 +1798,8 @@ class P4Turn:
                         at += round(1.25 * self.fs)
                     self._body(at, 0x20, State.ISS_CLOSE)
                 return
+            self._watch_admitted = True
+            self._record_peer_phase(reg, now)
             if (obs.kind in (Kind.BODY, Kind.NORMAL, Kind.LONG) and obs.frame.status.protocol in (0, 2)
                     and spec.field_payload(obs.frame.data)):
                 self._hold_until = None
@@ -1676,6 +1869,7 @@ class P4Turn:
                 self.link_events.append(dict(event='source-extension', at=obs.stream_sample,
                     status=obs.frame.status.byte, prefix=obs.frame.data[:3].hex()))
             if obs.frame.status.protocol == 1:
+                self.revoke_peer_watch()
                 self._close_receive_epoch('peer close', terminal=True)
             due = obs.stream_sample + round(self.t[obs.kind]*self.fs)
             if (obs.stream_sample in self._decided
@@ -1688,7 +1882,8 @@ class P4Turn:
             pending.update(accepted=True, text=bool(text), body=obs,
                            responds_to=reg.responds_to, data_reply=data_reply,
                            receive_epoch=self._receive_epoch,
-                           source_root=root if obs.kind in (Kind.BODY, Kind.CHIRP) else None)
+                           source_root=root if obs.kind in (Kind.BODY, Kind.CHIRP) else None,
+                           watch_recovery=self._watch_recovery)
             answer = self._accepted_answer(obs, pending)
             if answer is not None and not obs.provisional and not obs.weak:
                 pending['answer'] = self._hold_answer(obs, answer, pending)
@@ -1812,6 +2007,10 @@ class P4Turn:
                 self._data(self.next_raster(now))
             return
         if obs.word == "V27" and self._grant_ack(reg):
+            if (self._long_peer_open() and (obs.weak or obs.unexpected
+                    or reg.outcome not in (Registered.NEW, Registered.CONFIRMED, Registered.ENRICHED)
+                    or obs.extent_s is None or obs.extent_s < .240)):
+                return
             if obs.provisional:
                 self._wait_for_ack(obs)
                 return
@@ -1824,7 +2023,12 @@ class P4Turn:
             return
         if self.state == State.IRS_BREAKIN:
             if (obs.word == "V27" and not obs.provisional and not obs.weak
-                    and self._requesting() and reg.responds_to == self.last.stream_sample):
+                    and self._requesting() and reg.responds_to == self.last.stream_sample
+                    and (not self._long_peer_open() or not obs.unexpected
+                         and reg.outcome in (Registered.NEW, Registered.CONFIRMED, Registered.ENRICHED)
+                         and obs.extent_s is not None and obs.extent_s >= .240)):
+                self.link_events.append(dict(event='turn', at=obs.stream_sample,
+                                             word=obs.word, responds_to=reg.responds_to))
                 if self.sends_data:
                     self._begin_data_turn(self.next_raster(now), word_yield=True)
                 else:
@@ -1909,19 +2113,44 @@ class P4Turn:
             elif not obs.provisional and not self._train_active:
                 self._repeat(now)
 
-    def _wants_turn(self):
+    def _wants_turn(self, candidate=None):
+        if self.peer_watch is not None:
+            if self.next_offer_at is not None:
+                if not self.managed_application or self.app_done:
+                    return self.app_done
+                if candidate is not None and candidate < self.next_offer_at:
+                    return False
+            if self._deferred is not None or self._accepted_proposal is not None:
+                return False
         if self.close_context is not None and self.state == State.IRS_ANSWER:
             return False
         if self.close_context is not None and self.close_context.grants:
             return self.state == State.IRS_CLOSE
-        return ((self.outbox.queued and self.allow_breakin) or self.app_done
+        eligible = (self.sends_data and self._bytes_waiting() if self._long_peer_open()
+                    else self.outbox.queued and self.allow_breakin)
+        return (eligible or self.app_done
                 or self.state == State.IRS_CLOSE)
 
     def _break_in(self, due):
         if self.peer_phase is not None:
             due = self.breakin_due(due - self.lead)
-        if self.breakins >= 4:
+        if self.peer_watch is not None:
+            if not self._wants_turn(due):
+                self._recover_peer_turn(due)
+                return
+            if self.next_offer_at is not None or self.peer_watch.attempts >= 4:
+                if (self.managed_application and not self.app_done
+                        and self.next_offer_at is not None and due >= self.next_offer_at):
+                    pass  # Only an admitted actual key starts the renewed group.
+                else:
+                    self._recover_peer_turn(due)
+                    return
+            self._next = Proposal(Kind.WORD, due, word='Y27', state=State.IRS_BREAKIN,
+                                  peer_watch_generation=self.peer_watch.generation)
+        elif self.breakins >= 4:
             self.link_down("break-in unanswered")
+        elif self.peer_phase is not None and self.peer_phase.kind in (Kind.LONG, Kind.CHIRP):
+            self._next = Proposal(Kind.WORD, due, word='Y27', state=State.IRS_BREAKIN)
         elif self.breakin == "y27":
             self._next = Proposal(Kind.WORD, due, word="Y27", state=State.IRS_BREAKIN)
         else:
@@ -2009,11 +2238,11 @@ class P4Turn:
         reason = None
         if status.protocol == 1:
             return None
-        if obs.kind == Kind.CHIRP and status.protocol in (0, 3):
+        if obs.kind == Kind.CHIRP and status.protocol in (0, 2, 3):
             word = self._chirp_word(identity)
         elif obs.kind == Kind.NORMAL and status.protocol in (0, 3):
             word, reason = self._normal_ack(identity, cached)
-        elif obs.kind == Kind.LONG and status.protocol in (0, 3):
+        elif obs.kind == Kind.LONG and status.protocol in (0, 2, 3):
             word, reason = self._long_ack(identity)
         elif obs.kind == Kind.BODY and status.protocol == 3:
             word = 'U27'
@@ -2166,6 +2395,7 @@ class P4Turn:
         if self._deferred is not None:
             entries.append(self._deferred)
         for sample, pending in entries:
+            selected_repeat_answer = False
             deferred = pending.get('due')
             if sample in self._decided and deferred is None:
                 continue
@@ -2265,9 +2495,15 @@ class P4Turn:
                     self._peer_continuing_counter = None
                 if status.protocol == 3 or status.extended:
                     self._peer_continuing_counter = status.counter
-            queued_turn = (self.state == State.IRS_ANSWER and self.outbox.queued
-                           and self.allow_breakin and self.close_context is None
-                           and not pending.get('data_reply'))
+            queued_turn = (
+                self.state == State.IRS_ANSWER
+                and (self.sends_data and self._bytes_waiting()
+                     if self._long_peer_open()
+                     else self.outbox.queued and self.allow_breakin)
+                and self._wants_turn(due)
+                and self.close_context is None
+                and not pending.get('data_reply')
+            )
             field = incoming.frame.data if status is not None else b''
             link_idle = (field == spec.field_fill(len(field))
                          or field == bytes([spec.IDLE])*len(field))
@@ -2281,7 +2517,15 @@ class P4Turn:
                                and self._last_ack[1].state == State.IRS_ANSWER
                                and self.acked_counter == status.counter
                                and self._peer_continuing_counter != status.counter)
-            if queued_turn and (idle or invitation or answered_repeat):
+            long_invitation = (accepted and incoming.kind in (Kind.LONG, Kind.CHIRP)
+                               and status.protocol == 2 and pending.get('answer') is not None)
+            if long_invitation:
+                if (queued_turn and not pending.get('watch_recovery')
+                        and (self.next_offer_at is None or due >= self.next_offer_at)):
+                    self._break_in(due)
+                else:
+                    self._next = replace(pending['answer'], stream_sample=due)
+            elif queued_turn and (idle or invitation or answered_repeat):
                 self._break_in(due)
             elif (self.state == State.IRS_BREAKIN and idle
                   and self.outbox.queued and self.allow_breakin):
@@ -2303,7 +2547,8 @@ class P4Turn:
                 self._body(due, 0x40, State.ISS_GRANT)
             elif (accepted and self.state == State.IRS_BREAKIN and invitation
                   and incoming.kind == Kind.BODY and self.last is not None
-                  and pending.get('responds_to') == self.last.stream_sample):
+                  and pending.get('responds_to') == self.last.stream_sample
+                  and not incoming.provisional and not incoming.weak):
                 self._begin_data_turn(due, State.ISS_DATA_ACK)
             elif (identity is not None and self._last_ack is not None
                     and identity == self._last_ack[0]
@@ -2334,6 +2579,7 @@ class P4Turn:
                              and incoming.kind == Kind.NORMAL
                              and incoming.frame.status.protocol == 0 else self.state)
                     self._next = replace(response, stream_sample=due, state=state)
+                    selected_repeat_answer = accepted
                 elif response.payload:
                     if (self._data_packet is not None and self.outbox.inflight == response.payload
                             and self._data_packet.payload == response.payload):
@@ -2347,11 +2593,14 @@ class P4Turn:
                 else:
                     self._next = replace(response, stream_sample=due)
             elif (accepted and incoming.frame.status.protocol == 2
-                    and (incoming.kind != Kind.BODY or not spec.field_payload(incoming.frame.data)) and (
-                    self.state == State.IRS_BREAKIN or
+                    and (incoming.kind == Kind.NORMAL and self.state == State.IRS_BREAKIN
+                    and not self._long_peer_open() and self.peer_watch is None or
+                    incoming.kind == Kind.BODY and not spec.field_payload(incoming.frame.data) and (
+                    self.state == State.IRS_BREAKIN and (not self._long_peer_open()
+                    or self.last is not None and pending.get('responds_to') == self.last.stream_sample) or
                     self.state == State.ISS_GRANT and self.last is not None
                     and self.last.state == State.ISS_GRANT
-                    and pending.get('responds_to') == self.last.stream_sample)):
+                    and pending.get('responds_to') == self.last.stream_sample))):
                 self._begin_data_turn(due, State.ISS_DATA_ACK)
             elif accepted and pending.get('answer') is not None:
                 self._next = replace(pending['answer'], stream_sample=due)
@@ -2360,16 +2609,20 @@ class P4Turn:
                                       ack_identity=identity)
             elif bare or accepted and incoming.frame.status.protocol == 2:
                 self._grant(due, incoming)
-            if (self._next is not None and accepted and identity is not None
+            answering_current = (self._next is not None
+                                 and (self._next.accepted_target in (None, sample)
+                                      or selected_repeat_answer))
+            if (answering_current and accepted and identity is not None
                     and self._next.kind == Kind.WORD):
                 self._next = replace(self._next, receive_epoch=pending.get('receive_epoch'),
                                      source_root=pending.get('source_root'))
-            if (self._next is not None and accepted and self._next.kind == Kind.WORD
+            if (answering_current and accepted and self._next.kind == Kind.WORD
                     and (status.protocol in (0, 3) or status.protocol == 2
-                         and incoming.kind == Kind.BODY and spec.field_payload(field))):
+                         and (incoming.kind in (Kind.LONG, Kind.CHIRP)
+                              or incoming.kind == Kind.BODY and spec.field_payload(field)))):
                 self._answer_kinds[self._next.stream_sample] = (
                     incoming.kind, identity, self._next.receive_epoch, self._peer_generation)
-            if self._next is not None and identity is not None and self._next.kind != Kind.SHORT:
+            if answering_current and identity is not None and self._next.kind != Kind.SHORT:
                 self._next = replace(self._next, ack_identity=identity)
                 if self._next.ack_reason is not None:
                     long_answer = incoming.kind == Kind.LONG
@@ -2384,7 +2637,7 @@ class P4Turn:
                     self.link_events.append(dict(event='normal-answer', at=sample,
                         protocol=int(incoming.frame.status.protocol),
                         ack_policy='protocol-3 short' if incoming.frame.status.protocol == 3 else 'status'))
-            if (self._next is not None and accepted and self._next.kind == Kind.WORD
+            if (answering_current and accepted and self._next.kind == Kind.WORD
                     and self._next.state == State.IRS_ANSWER):
                 slot = pending.get('current_slot', due-round(self.t[incoming.kind]*self.fs))
                 self._next = replace(self._next, accepted_target=sample, current_slot=slot,
@@ -2491,6 +2744,13 @@ class P4Turn:
     def _grant(self, due, incoming):
         if self.close_context is not None and self.close_context.grants:
             return
+        if self._long_peer_open():
+            due = self.breakin_due(due-self.lead)
+            if self._wants_turn(due):
+                self._break_in(due)
+            elif self.peer_watch is not None:
+                self._recover_peer_turn(due)
+            return
         # Once we hold the turn, a peer's empty protocol-2 body is its grant
         # whatever it followed; as IRS the same body can be its invitation.
         if self.breakin == 'y27' and self.state == State.IRS_ANSWER and self._wants_turn():
@@ -2513,6 +2773,17 @@ class P4Turn:
             return False
         if self.managed_application and proposal is not self._next:
             return False
+        if proposal.peer_watch_generation is not None:
+            current = self._next
+            if (current is None or replace(proposal, stream_sample=current.stream_sample) != current
+                    or self.peer_watch is None
+                    or proposal.peer_watch_generation != self.peer_watch.generation):
+                return False
+            if self.next_offer_at is not None and proposal.stream_sample < self.next_offer_at:
+                return False
+            if not self._wants_turn(proposal.stream_sample):
+                self._recover_peer_turn(self.breakin_due(proposal.stream_sample-self.lead))
+                return False
         obs = self.sf8_source(proposal)
         return obs is None or self.sf8_eligible is None or self.sf8_eligible(obs)
 
@@ -2520,6 +2791,14 @@ class P4Turn:
         proposal = self._next
         if proposal is None:
             raise RuntimeError("no proposal to key")
+        origin = getattr(self, '_grant_receive_origin', None)
+        if not (origin is not None and self.last is origin.actual
+                and proposal.repeat and proposal.kind == self.last.kind == Kind.BODY
+                and proposal.state == self.last.state == State.ISS_GRANT
+                and proposal.status == self.last.status == 0x40
+                and not proposal.payload and not self.last.payload
+                and proposal.purpose is None and self.close_context is None):
+            self._grant_receive_origin = None
         if proposal.receive_epoch is not None and proposal.receive_epoch != self._receive_epoch:
             self._next = None
             raise RuntimeError('stale receive answer')
@@ -2553,12 +2832,28 @@ class P4Turn:
         self._next = None
         waiting_emission = (proposal.state == State.ISS_HOLD and not proposal.payload
                             and proposal.kind == Kind.NORMAL)
+        unresolved = (self._long_peer_open() and not proposal.payload
+                      and proposal.state in (State.ISS_GRANT, State.IRS_BREAKIN)
+                      and self.peer_phase is not None
+                      and abs(proposal.stream_sample-self.peer_phase.onset-round(self.t[self.peer_phase.kind]*self.fs)
+                              - round((proposal.stream_sample-self.peer_phase.onset
+                                       -round(self.t[self.peer_phase.kind]*self.fs))/self.peer_phase.cycle)
+                              * self.peer_phase.cycle) <= round(.035*self.fs))
+        if unresolved and self.peer_watch is not None:
+            renewing = self.next_offer_at is not None and proposal.stream_sample >= self.next_offer_at
+            self.peer_watch = replace(self.peer_watch, attempts=1 if renewing else self.peer_watch.attempts+1,
+                                      last_attempt=proposal.stream_sample)
+            if renewing:
+                self.next_offer_at = None
+        elif (not unresolved and (proposal.payload or proposal.state in ISS_TURN
+              or proposal.state in (State.ISS_CLOSE, State.IRS_CLOSE))):
+            self.revoke_peer_watch()
         acquisition = ((proposal.state in ISS_TURN and not waiting_emission)
                        or proposal.state == State.IRS_BREAKIN)
         if self.peer_phase is not None and proposal.kind in (Kind.WORD, Kind.BODY):
             if proposal.state in (State.IRS_ANSWER, State.IRS_BREAKIN, State.IRS_CLOSE):
                 self._peer_consumed = proposal.stream_sample
-        if (proposal.state in ISS_TURN and not waiting_emission
+        if (proposal.state in ISS_TURN and not waiting_emission and not unresolved
                 or proposal.state in (State.ISS_CLOSE, State.IRS_CLOSE)):
             self.peer_phase = None
             self._peer_consumed = None
@@ -2573,7 +2868,7 @@ class P4Turn:
                 self._close_candidates.clear()
         elif proposal.purpose == 'close-grant':
             self._open_receive_epoch(proposal.stream_sample)
-        elif acquisition:
+        elif acquisition and not unresolved:
             self._close_receive_epoch('local acquisition')
             self._receive_boundary = proposal.stream_sample
             if (proposal.kind == Kind.BODY and proposal.state in
@@ -2762,7 +3057,8 @@ class P4Turn:
         elif self._next.kind == Kind.WORD:
             self._next = None
         else:
-            at = self._next.stream_sample + round(CYCLE[self._next.kind] * self.fs)
+            at = self._next.stream_sample + (self.peer_watch.cycle if self.peer_watch is not None
+                                            else round(CYCLE[self._next.kind] * self.fs))
             self._next = replace(
                 self._next,
                 stream_sample=at,
@@ -2822,6 +3118,13 @@ class P4Turn:
         return repeats, budget
 
     def _repeat(self, now=None):
+        if self.peer_watch is not None and self.state in (State.ISS_GRANT, State.IRS_BREAKIN):
+            at = self.next_raster(now if now is not None else self.last.stream_sample)
+            if self.peer_watch.attempts >= 4 or not self._wants_turn(at):
+                self._recover_peer_turn(at)
+            else:
+                self._break_in(at)
+            return
         if not self.last or self.last.kind == Kind.WORD:
             return
         at = (self.last.stream_sample + round(CYCLE[self.last.kind] * self.fs)
@@ -2843,7 +3146,14 @@ class P4Turn:
                 self._data_packet = None
                 self.data_repeats = 0
                 self._short(at, 0)
-            # Without a ladder an exhausted grant falls silent: a late yield still starts our data.
+            elif self.state == State.ISS_GRANT and not self.ladder:
+                origin = getattr(self, '_grant_receive_origin', None)
+                if not (origin is not None and self.last is origin.actual
+                        and origin.turn_generation == self._peer_generation
+                        and origin.receive_epoch == self._receive_epoch
+                        and self.close_context is None and not self.app_done
+                        and not self._closing_failure):
+                    self._handback_exit(at)
             elif (self.state in (State.ISS_DATA, State.ISS_DATA_ACK)
                   and self._data_packet is not None
                   and self._data_packet.kind in (Kind.BODY, Kind.NORMAL, Kind.CHIRP)):
@@ -2911,6 +3221,9 @@ class P4Turn:
             return
         if self._next is not None:
             return
+        if self.peer_watch is not None and self.state in (State.ISS_GRANT, State.IRS_BREAKIN):
+            self._repeat(at)
+            return
         if self.state == State.IRS_CLOSE:
             self.link_down("peer closed")
         elif self.state == State.ISS_CLOSE and self.last:
@@ -2936,7 +3249,12 @@ class P4Turn:
             due = answer_due if answer_due is not None else self.next_raster(at)
             if self._long_owns_answer(due):
                 return
-            self._next = self._held_proposal(due)
+            if (self.peer_watch is not None and self.next_offer_at is not None
+                    and due >= self.next_offer_at and self.managed_application
+                    and not self.app_done and self.sends_data and self._bytes_waiting()):
+                self._break_in(due)
+            else:
+                self._next = self._held_proposal(due)
         elif self.state not in (State.ISS_HOLD, State.IRS_YIELD, State.DOWN):
             self._repeat(at)
         if expired is not None and self._next is not None:
@@ -2949,6 +3267,8 @@ class P4Turn:
                 )
 
     def link_down(self, reason):
+        self._grant_receive_origin = None
+        self.revoke_peer_watch()
         self._clear_offer()
         self._clear_held_word_yield()
         self._retire_data_episode()

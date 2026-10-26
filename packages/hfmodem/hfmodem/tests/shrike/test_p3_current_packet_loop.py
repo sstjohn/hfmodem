@@ -73,9 +73,8 @@ def _run_captured_turn(monkeypatch, tmp_path, captured_turn, batch_phase, nframe
     tape, rows = captured_turn
     tape = tape[:4800+(nframes-1)*CYCLE+45000]
 
-    from hfmodem.shrike import arq
     from hfmodem.tests.shrike.test_p3_timing_unbounded import (
-        _trace_p3_lifetime, _assert_p3_lifetime,
+        _trace_p3_lifetime, _assert_p3_lifetime, _lifetime_and_closing_id,
     )
     peers = []
     lifetime = _trace_p3_lifetime(monkeypatch, lambda: peers[0] if peers else None)
@@ -109,7 +108,7 @@ def _run_captured_turn(monkeypatch, tmp_path, captured_turn, batch_phase, nframe
             # 44,252 samples; entry_at is the trimmed DAC start (pulse +666).
             self.p3_phase = entry_at+666+44252
             at = self.p3_phase-4800
-            needed = at + len(tape) + (arq.P3_CRC_WAIT_TICKS + 2) * CYCLE
+            needed = at + len(tape) + _lifetime_and_closing_id()
             if needed > self.limit:
                 self.audio = np.pad(self.audio, (0, needed - self.limit))
                 self.limit = len(self.audio)

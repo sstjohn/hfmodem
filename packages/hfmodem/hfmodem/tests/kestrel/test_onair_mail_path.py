@@ -34,18 +34,23 @@ import numpy as np
 import pytest
 
 from . import corpora
+from .fake_line_keyer import LINE_ENV, LineRecord, line_shim, pty_line
 from .fake_rigctld import serving
 from .test_station_id import _decode
-from hfmodem.core import cwid, levels
+from hfmodem.core import claim, cwid, levels
 from hfmodem.core.occupied import FILTER_HZ, occupied_hz
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
+from hfmodem.tests.hermetic import fake_claim_audio_metadata  # noqa: F401
 
 _TOOLS = corpora.TOOLS
 _FAKE_AUDIO = Path(__file__).resolve().parent / "fakeaudio"
 
-pytestmark = pytest.mark.skipif(not (_TOOLS / "kestrel_connect.py").exists(),
-                                reason="tools/ not present (installed-wheel run)")
+pytestmark = [
+    pytest.mark.skipif(not (_TOOLS / "kestrel_connect.py").exists(),
+                       reason="tools/ not present (installed-wheel run)"),
+    pytest.mark.usefixtures("fake_claim_audio_metadata"),
+]
 
 
 @pytest.fixture
@@ -58,16 +63,22 @@ _GATEWAYS = ("Callsign,Frequency,Mode\n"
              'K5DAT-13,"14,108.000 KHz",VARA\n')
 
 
-#: The keying line these runs name. ``--arm`` refuses to start without one, because
-#: the last-resort unkey has nothing to pull down otherwise; the gate stats the path
-#: and never opens it, so a character device nothing is holding is what a radioless
-#: rehearsal wants. The launcher keys through this line as well (``--line-ptt``) and
-#: these runs key through the daemon: /dev/null takes the ioctl and moves no pin, and
-#: what is rehearsed here is the mail path rather than the keying path.
-PTT_LINE = "/dev/null"
+ptt_line = pytest.fixture(scope="module")(pty_line)
 
 
-def _mail_argv(tmp_path: Path, port: int, freq: str = "14106.5") -> list[str]:
+@pytest.fixture
+def line(tmp_path):
+    rec = LineRecord(tmp_path / "line.jsonl")
+    rec.configure()
+    return rec
+
+
+@pytest.fixture
+def mail_argv(tmp_path, ptt_line):
+    return lambda port, freq="14106.5": _mail_argv(tmp_path, port, freq, ptt_line)
+
+
+def _mail_argv(tmp_path: Path, port: int, freq: str, ptt_line: str) -> list[str]:
     body = tmp_path / "body.txt"
     body.write_text("mail for the far end\n")
     gw = tmp_path / "gateways.csv"
@@ -76,7 +87,7 @@ def _mail_argv(tmp_path: Path, port: int, freq: str = "14106.5") -> list[str]:
             "--gateway", "K5DAT-13", "--mycall", "W9SSJ", "--bw", "2300",
             "--tx-device", "fake", "--rx-device", "fake",
             "--rigctld", f"127.0.0.1:{port}", "--freq", freq,
-            "--arm", "--expect-model", "FT-891", "--ptt-device", PTT_LINE,
+            "--arm", "--expect-model", "FT-891", "--ptt-device", ptt_line, "--line-ptt",
             "--gateways", str(gw),
             "--mail-send", str(body), "--mail-to", "SMTP:test@example.net",
             "--mail-fetch", "--mail-out", str(tmp_path / "mail"),
@@ -84,12 +95,24 @@ def _mail_argv(tmp_path: Path, port: int, freq: str = "14106.5") -> list[str]:
 
 
 def _run(argv: list[str], tmp_path: Path) -> subprocess.CompletedProcess:
+    """Run the tool as ``claim_run`` does: holding the station claim on fd 9."""
     env = {**os.environ,
-           "PYTHONPATH": os.pathsep.join([str(_FAKE_AUDIO), str(corpora.PKG_ROOT)]),
+           "PYTHONPATH": os.pathsep.join(
+               [str(line_shim(tmp_path)), str(_FAKE_AUDIO), str(corpora.PKG_ROOT)]),
            "KESTREL_FAKE_AUDIO":
-               json.dumps({"log": str(tmp_path / "audio-events.jsonl")})}
-    return subprocess.run(argv, capture_output=True, text=True, timeout=180,
-                          env=env, cwd=str(tmp_path))
+               json.dumps({"log": str(tmp_path / "audio-events.jsonl")}),
+           LINE_ENV: str(tmp_path / "line.jsonl")}
+    held = claim.acquire("tool", "mail-rehearsal")
+    try:
+        return subprocess.run([sys.executable, "-c", _ON_FD_9, str(held.fd), *argv],
+                              pass_fds=(held.fd,), capture_output=True, text=True,
+                              timeout=180, env=env, cwd=str(tmp_path))
+    finally:
+        claim.release(held)
+
+
+_ON_FD_9 = ("import os,sys; fd=int(sys.argv[1]); os.dup2(fd,9); os.set_inheritable(9,True); "
+            "os.close(fd) if fd != 9 else None; os.execv(sys.argv[2],sys.argv[2:])")
 
 
 #: Below this, a play carried nothing: `fakeaudio` scores a block of zeros at
@@ -143,7 +166,7 @@ def test_the_launcher_and_these_tests_drive_the_same_argv():
     block = body.split("\nvara-mail)")[1].split("\n  ;;")[0]
     for flag in ("kestrel_connect.py", "--gateway", "--mycall", "--bw",
                  "--tx-device", "--rx-device", "--rigctld", "--freq", "--arm",
-                 "--expect-model", "--ptt-device", "--gateways"):
+                 "--expect-model", "--ptt-device", "--line-ptt", "--gateways"):
         assert flag in block, f"onair.sh vara-mail no longer passes {flag}"
     # The mail flags travel by way of the gate, which sorts --force out of them
     # and hands the rest back as KEY_ARGS. Where they start is the argument after
@@ -153,16 +176,16 @@ def test_the_launcher_and_these_tests_drive_the_same_argv():
 
 
 def test_the_onair_mail_argv_runs_every_stage_to_an_honest_no_connect(
-        rigctld, tmp_path):
+        rigctld, tmp_path, mail_argv, line):
     """The healthy path, radiolessly: identify, arm, tune with the QSY read
-    back, key the connect-request through the daemon, and end with PTT down,
+    back, key the connect-request through the line, and end with PTT down,
     an honest NOT connected, and a mail summary that names its stage.
 
     What went out under the key is demodulated back, because a run that keys and
-    transmits nothing looks identical from the daemon's side.
+    transmits nothing looks identical from the line's side.
     """
     srv = rigctld()
-    r = _run(_mail_argv(tmp_path, srv.port), tmp_path)
+    r = _run(mail_argv(srv.port), tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
     assert r.returncode == 1, r.stdout + r.stderr
     out = r.stdout
@@ -171,7 +194,8 @@ def test_the_onair_mail_argv_runs_every_stage_to_an_honest_no_connect(
     assert "tuned 14106.5 kHz dial" in out
     assert srv.freq == 14106500 and srv.mode == "PKTUSB"
     assert "originating: W9SSJ -> K5DAT-13" in out
-    assert srv.seen("T 1") >= 1, "the connect-request never keyed"
+    assert line.raised(), "the connect-request never keyed"
+    assert not srv.seen("T 1"), "rigctld was asked to key"
 
     bursts = _emitted(tmp_path)
     assert len(bursts) >= 2, "the connect-request and closing ID did not both reach the card"
@@ -204,12 +228,13 @@ def test_the_onair_mail_argv_runs_every_stage_to_an_honest_no_connect(
             f"the burst reads {m}/{nn} payload tones for {call} — it is not a "
             f"connect-request to the station the argv named")
 
-    assert srv.ptt == 0, "PTT was left up"
+    assert not line.high, "PTT was left up"
     assert "NOT connected" in out
     assert "mail: nothing moved" in out
 
 
-def test_the_warm_up_the_armed_session_writes_carries_nothing(rigctld, tmp_path):
+def test_the_warm_up_the_armed_session_writes_carries_nothing(
+        rigctld, tmp_path, mail_argv, line):
     """What :func:`_emitted` leaves out, checked rather than assumed.
 
     An armed session writes one block of silence to the transmit device before it
@@ -217,19 +242,19 @@ def test_the_warm_up_the_armed_session_writes_carries_nothing(rigctld, tmp_path)
     window [`AudioVaraIO._warm_transmit_path`]. It is the one thing that reaches
     the card and is not a transmission, and the whole of what makes that true is
     that it carries nothing and lands before the first key-up. Both are read off
-    the device's own log and the daemon's own clock, so a warm-up that grew
+    the device's own log and the line's own edges, so a warm-up that grew
     modulation or drifted inside the keyed region fails here rather than going
     quietly out over the air.
     """
     srv = rigctld()
-    _run(_mail_argv(tmp_path, srv.port), tmp_path)
+    _run(mail_argv(srv.port), tmp_path)
 
     silent = [e for e in _plays(tmp_path) if e["dbfs"] <= SILENT_DBFS]
     assert len(silent) == 1, (
         f"{len(silent)} silent write(s) reached the transmit device — the warm-up "
         f"is one block, and anything else silent on the card is a burst that lost "
         f"its modulation on the way out")
-    keyed = srv.stamped("T 1")
+    keyed = line.raised()
     assert keyed, "the run never keyed, so there is no first key-up to be ahead of"
     assert silent[0]["t"] < keyed[0], (
         f"the warm-up was written {silent[0]['t'] - keyed[0]:.3f} s after the "
@@ -237,44 +262,46 @@ def test_the_warm_up_the_armed_session_writes_carries_nothing(rigctld, tmp_path)
         f"of why it is allowed to reach the card at all")
 
 
-def test_a_radio_that_stops_answering_cat_is_a_named_refusal(rigctld, tmp_path):
+def test_a_radio_that_stops_answering_cat_is_a_named_refusal(
+        rigctld, tmp_path, mail_argv, line):
     """The 2026-08-03 failure: the daemon completes every connection, takes
     every command, and answers none of them. That must read as the rig stage
     refusing by name — not as an IndexError out of the frequency parse."""
     srv = rigctld(answer=False)
-    r = _run(_mail_argv(tmp_path, srv.port), tmp_path)
+    r = _run(mail_argv(srv.port), tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
     assert r.returncode == 7, r.stdout + r.stderr
     assert "RIG NOT ANSWERING" in r.stdout
     assert "not answering CAT" in r.stdout
-    assert srv.seen("T 1") == 0 and srv.ptt == 0
+    assert not line.raised() and not line.high
 
 
-def test_no_daemon_at_all_is_a_named_refusal(tmp_path):
+def test_no_daemon_at_all_is_a_named_refusal(tmp_path, mail_argv):
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
-    r = _run(_mail_argv(tmp_path, port), tmp_path)
+    r = _run(mail_argv(port), tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
     assert r.returncode == 7, r.stdout + r.stderr
     assert "CANNOT REACH rigctld" in r.stdout
 
 
-def test_a_qsy_the_rig_did_not_take_is_never_keyed_over(rigctld, tmp_path):
+def test_a_qsy_the_rig_did_not_take_is_never_keyed_over(
+        rigctld, tmp_path, mail_argv, line):
     """``F`` refused in band leaves the rig on the old frequency; the readback
     must catch it, because a call on the wrong dial is silent in both
     directions and burns the slot just as thoroughly as a crash."""
     srv = rigctld(refuse=("F",))
-    r = _run(_mail_argv(tmp_path, srv.port), tmp_path)
+    r = _run(mail_argv(srv.port), tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
     assert r.returncode == 7, r.stdout + r.stderr
     assert "TUNE DID NOT TAKE" in r.stdout
-    assert srv.seen("T 1") == 0
+    assert not line.raised()
 
 
 def test_a_filter_too_narrow_for_the_emission_is_never_keyed_through(
-        rigctld, tmp_path):
+        rigctld, tmp_path, mail_argv, line):
     """The half of the readback nothing did. A rig whose widest filter is 500 Hz
     answers a 3000 Hz request with 500 and reports PKTUSB on the right dial, so
     every check this tool made passed while BW2300 — 610-2405 Hz, 1810 Hz about a
@@ -282,29 +309,30 @@ def test_a_filter_too_narrow_for_the_emission_is_never_keyed_through(
     evidence about the width, and the width is what carries the signal.
     """
     srv = rigctld(passbands=(500,))
-    r = _run(_mail_argv(tmp_path, srv.port), tmp_path)
+    r = _run(mail_argv(srv.port), tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
     assert r.returncode == 7, r.stdout + r.stderr
     assert "TUNE DID NOT TAKE" in r.stdout
     assert "filter is 500 Hz" in r.stdout and "1810 Hz" in r.stdout, r.stdout
-    assert srv.seen("T 1") == 0
+    assert not line.raised()
 
 
-def test_the_tuned_line_states_the_filter_the_rig_selected(rigctld, tmp_path):
+def test_the_tuned_line_states_the_filter_the_rig_selected(
+        rigctld, tmp_path, mail_argv):
     """Not the one we asked for. A rig picks off a ladder — the FT-891's widest
     PKTUSB filter is 2.4 kHz — so 2400 is the correct answer to a 3000 Hz request
     and wide enough for BW2300's 1640. The line used to read "2700 Hz", a number
     nothing had asked for and nothing had confirmed."""
     srv = rigctld()
-    r = _run(_mail_argv(tmp_path, srv.port), tmp_path)
+    r = _run(mail_argv(srv.port), tmp_path)
     assert f"M PKTUSB {FILTER_HZ}" in srv.commands, srv.commands
     assert "tuned 14106.5 kHz dial, PKTUSB / 2400 Hz" in r.stdout, r.stdout
 
 
 def test_a_mail_file_that_cannot_load_is_refused_before_the_rig_is_touched(
-        rigctld, tmp_path):
+        rigctld, tmp_path, mail_argv):
     srv = rigctld()
-    argv = _mail_argv(tmp_path, srv.port)
+    argv = mail_argv(srv.port)
     argv[argv.index("--mail-send") + 1] = str(tmp_path / "absent.txt")
     r = _run(argv, tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
@@ -313,9 +341,10 @@ def test_a_mail_file_that_cannot_load_is_refused_before_the_rig_is_touched(
     assert srv.commands == [], "the rig was touched for a run that could never send"
 
 
-def test_a_body_file_with_nowhere_to_go_is_refused_the_same_way(rigctld, tmp_path):
+def test_a_body_file_with_nowhere_to_go_is_refused_the_same_way(
+        rigctld, tmp_path, mail_argv):
     srv = rigctld()
-    argv = _mail_argv(tmp_path, srv.port)
+    argv = mail_argv(srv.port)
     i = argv.index("--mail-to")
     del argv[i:i + 2]
     r = _run(argv, tmp_path)
@@ -326,7 +355,7 @@ def test_a_body_file_with_nowhere_to_go_is_refused_the_same_way(rigctld, tmp_pat
 
 
 def test_arming_without_a_keying_line_is_refused_before_the_rig_is_touched(
-        rigctld, tmp_path):
+        rigctld, tmp_path, mail_argv, line):
     """This exact argv, armed, is what ran on 2026-08-10 with no line named behind
     it: rigctld took the unkey and never answered, the last-resort RTS drop had
     nothing to pull down, and the transmitter stayed up with no modulation until the
@@ -338,7 +367,7 @@ def test_arming_without_a_keying_line_is_refused_before_the_rig_is_touched(
     armed run that cannot unkey must not get as far as identifying a rig.
     """
     srv = rigctld()
-    argv = _mail_argv(tmp_path, srv.port)
+    argv = mail_argv(srv.port)
     i = argv.index("--ptt-device")
     del argv[i:i + 2]
     r = _run(argv, tmp_path)
@@ -346,29 +375,29 @@ def test_arming_without_a_keying_line_is_refused_before_the_rig_is_touched(
     assert r.returncode == 2, r.stdout + r.stderr
     assert "--arm requires --ptt-device" in r.stdout, r.stdout
     assert srv.commands == [], f"the rig was touched anyway: {srv.commands}"
-    assert srv.seen("T 1") == 0 and srv.ptt == 0
+    assert not line.raised() and not line.high
 
 
 def test_a_keying_line_with_no_device_behind_it_is_refused_the_same_way(
-        rigctld, tmp_path):
+        rigctld, tmp_path, mail_argv, line):
     """Named is not the same as there. A path that exists and is not a character
     device is the case an existence check waves through, and the fallback needs a
     line rather than a file: ``drop_rts`` on one fails as an ioctl, in the seconds
     after rigctld has stopped answering."""
     srv = rigctld()
-    argv = _mail_argv(tmp_path, srv.port)
-    line = tmp_path / "usbserial-XXXXB1"
-    line.write_text("")
-    argv[argv.index("--ptt-device") + 1] = str(line)
+    argv = mail_argv(srv.port)
+    plain = tmp_path / "usbserial-XXXXB1"
+    plain.write_text("")
+    argv[argv.index("--ptt-device") + 1] = str(plain)
     r = _run(argv, tmp_path)
     assert "Traceback" not in r.stderr, r.stderr
     assert r.returncode == 2, r.stdout + r.stderr
-    assert "REFUSING TO ARM" in r.stdout and str(line) in r.stdout, r.stdout
+    assert "REFUSING TO ARM" in r.stdout and str(plain) in r.stdout, r.stdout
     assert srv.commands == [], f"the rig was touched anyway: {srv.commands}"
-    assert srv.ptt == 0
+    assert not line.high
 
 
-def test_the_channel_actually_called_decides_reachability(rigctld, tmp_path):
+def test_the_channel_actually_called_decides_reachability(rigctld, tmp_path, mail_argv):
     """The exact call from 2026-08-03: K5DAT-13 on the 40 m channel it lists
     as VARA 500 only. The per-station check saw the 20 m plain-VARA listing
     and said nothing, and the attempt would have spent its whole window on a
@@ -381,18 +410,19 @@ def test_the_channel_actually_called_decides_reachability(rigctld, tmp_path):
     bandwidths share theirs, so calling here would key BW2300 audio at it. See
     ``test_tools_cli.test_the_connect_tool_offers_only_the_bandwidth_it_speaks``."""
     srv = rigctld()
-    r = _run(_mail_argv(tmp_path, srv.port, freq="7103.2"), tmp_path)
+    r = _run(mail_argv(srv.port, freq="7103.2"), tmp_path)
     assert r.returncode == 7, r.stdout + r.stderr
     assert "only as VARA 500" in r.stdout
     assert "NOT calling a channel that cannot answer" in r.stdout
     assert srv.commands == [], "refused after the rig was already touched"
 
 
-def test_force_overrides_the_gateway_list_but_still_says_so(rigctld, tmp_path):
+def test_force_overrides_the_gateway_list_but_still_says_so(
+        rigctld, tmp_path, mail_argv):
     """The list can be stale and the operator outranks it — but the refusal's
     reason is still said out loud before the first key-up."""
     srv = rigctld()
-    r = _run(_mail_argv(tmp_path, srv.port, freq="7103.2") + ["--force"],
+    r = _run(mail_argv(srv.port, freq="7103.2") + ["--force"],
              tmp_path)
     assert "only as VARA 500" in r.stdout
     assert "originating: W9SSJ -> K5DAT-13" in r.stdout

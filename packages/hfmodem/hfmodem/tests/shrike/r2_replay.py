@@ -62,6 +62,10 @@ def canonical(value):
             row.pop('response_generation', None)
         if row.get('response_slot') is None:
             row.pop('response_slot', None)
+        if row.get('peer_watch_generation') is None:
+            row.pop('peer_watch_generation', None)
+        if row.get('primary_packet_due') is None:
+            row.pop('primary_packet_due', None)
         return canonical(row)
     if isinstance(value, dict):
         return {str(k): canonical(v) for k, v in sorted(value.items(), key=lambda x: str(x[0]))}

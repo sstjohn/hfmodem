@@ -1,0 +1,21 @@
+{
+  "source": "operator-data/working/vara-chat/sessions/20261025T195004202082Z/receive.wav",
+  "sample_rate": 48000,
+  "caller": "W5JAB",
+  "called": "W9SSJ",
+  "slices": [
+    {
+      "file": "query.wav",
+      "start_sample": 71130000,
+      "end_sample": 71215000,
+      "sha256": "9ba90dcb49d1e4469d7cb03b22511a78647a2a6b44c2e590b89e2c0d2de9a90b"
+    },
+    {
+      "file": "post-grant.wav",
+      "start_sample": 70500352,
+      "end_sample": 70800000,
+      "sha256": "97ba1d005847e1ac7a1b3fa6d26541dadfc6090fcda17151c5579d8f98588f31"
+    }
+  ],
+  "notes": "The post-grant window includes a complete query. The live modem logged a later undecodable burst; no received user payload was validated. Recovery must also work when DATA is entirely erased."
+}

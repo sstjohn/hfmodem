@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+#
+# A file takes the licence of where it sits, and every file that can carry a
+# comment states that licence in its first lines. The later of two matching
+# entries takes precedence.
+version = 1
+
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
+path = ["docs/protocols/**", "docs/viz/**", "evidence/**", "site/**"]
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+# The code that builds the guides and the site, and the scripts the site serves.
+[[annotations]]
+path = ["docs/viz/tools/**", "site/js/**", "site/tools/**"]
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# Recordings of on-air transmissions, any station's, and data decoded from them.
+# The project claims no copyright in and assigns no licence to these files.
+[[annotations]]
+path = ["captures/**", "packages/**/fixtures/**", "evidence/*/audio/**", "site/recordings/audio/**",
+        "site/examples/*/audio/**", "site/examples/*/data/**"]
+SPDX-License-Identifier = "NOASSERTION"
+
+# The code and notes we write beside that data are ours.
+[[annotations]]
+path = ["packages/**/fixtures/**.py", "packages/**/fixtures/**README.md"]
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
+path = "packages/**/fixtures/sigidwiki/**"
+SPDX-FileCopyrightText = "Signal Identification Wiki contributors"
+SPDX-License-Identifier = "CC-BY-SA-3.0"
+
+[[annotations]]
+path = "packages/hfmodem/hfmodem/shrike/c2proof/cml/**"
+SPDX-FileCopyrightText = "2005-2006 Matthew C. Valenti and Yufei Wu"
+SPDX-License-Identifier = "LGPL-2.1-or-later"

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Expired mail retains physical RX attribution, never its retired TX field."""
 from types import SimpleNamespace
 
@@ -244,5 +246,7 @@ def test_application_expiry_cannot_extend_physical_lifetime(initial, role, tmp_p
     assert a.state == arq.State.LISTENING and a._p3_crc_wait_ticks == 96
     a.finish_receive_opportunity(token)
     assert _offline_key_cycle(session, tmp_path) == ([], 0, False)
-    assert a.transfer_unconfirmed == retained and not a.p3_peer_receive_owned
+    assert a.transfer_unconfirmed == retained | dict(
+        host_accepted=0, host_confirmed=0, host_unconfirmed=b'', contact_generation=1)
+    assert not a.p3_peer_receive_owned
     assert not a.p3_tx_allowed() and not a._qrt_pending

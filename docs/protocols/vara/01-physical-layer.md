@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # 01 — Physical layer
 
 This section specifies the transmitted waveform: symbol geometry, carrier layout,

@@ -20,6 +20,7 @@ import numpy as np
 
 from hfmodem.core import band, config, cwid, regulatory
 from hfmodem.core.busy import FULL_BAND, is_busy, level_range, receiver_fault
+from hfmodem.core.claim import ADMISSION_TIMEOUT
 from hfmodem.core.devices import find_device, list_devices
 from hfmodem.core.ptt import PttError, arming_refusal
 from hfmodem.core.rigs import RIGS
@@ -40,6 +41,11 @@ _ID_SPAN_HZ = (1500.0 - cwid.BANDWIDTH_HZ / 2, 1500.0 + cwid.BANDWIDTH_HZ / 2)
 #: Default listen window. The pactor verb's 8 s, which is twice `MIN_LIVE_S` and
 #: the window `core.busy` set `shape` and `tone` — the two that decide — against.
 LISTEN_S = 8.0
+
+#: The launcher waits `claim.ADMISSION_TIMEOUT` for `CLAIM ADMITTED`, and the
+#: channel sense runs inside that window, after the CAT reads and before the
+#: line's arm; ten seconds of it are left to those.
+MAX_LISTEN_S = ADMISSION_TIMEOUT - 10.0
 
 #: `--transmit` says an operator is on frequency, and this path makes one
 #: bounded transmission and exits -- it answers nothing and waits for nothing, so
@@ -246,6 +252,10 @@ def _refusals(args) -> str | None:
     if args.regulatory == "part97" and not args.licence:
         return ("NOT KEYING: --regulatory part97 needs --licence to select the "
                 "profile's data segments and power ceilings")
+    if args.listen > MAX_LISTEN_S:
+        return (f"NOT KEYING: --listen {args.listen:g} s does not fit the launch "
+                f"admission's {ADMISSION_TIMEOUT:g} s window for the device opens; "
+                f"listen at most {MAX_LISTEN_S:g} s")
     return None
 
 
@@ -273,6 +283,19 @@ def run(args) -> int:
         print(f"NOT KEYING: {exc}")
         return 2
 
+    from hfmodem.core.claim import ClaimError, inherited
+    try:
+        admission = inherited(9, launch=True)
+    except ClaimError as exc:
+        print(f"CLAIM NOT ADMITTED: {exc}", flush=True)
+        return 2
+    try:
+        return _keyed(args, burst, dial, rules, admission)
+    finally:
+        admission.failed()
+
+
+def _keyed(args, burst: Burst, dial: int, rules: regulatory.Profile, admission) -> int:
     # `required=True` because this run transmits and listens. An unset device is
     # the system default, which is the laptop's own speakers and microphone --
     # a beacon into the room, and a channel sense that judged the room.
@@ -328,6 +351,9 @@ def run(args) -> int:
         return 2
     _install_signals(rig)
     try:
+        from hfmodem.core.audio import warm_output
+        warm_output(tx_device)
+        admission.opened()
         sent = radio.transmit(rig, burst.audio, burst.emission(got, args.power),
                               device=tx_device, gain=args.gain,
                               max_key_s=args.max_key, note=burst.waveform)

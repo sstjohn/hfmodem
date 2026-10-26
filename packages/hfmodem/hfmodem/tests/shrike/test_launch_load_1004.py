@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Injected startup advisory controls; no actual load query or launcher."""
 import ast
 import io
@@ -233,7 +235,7 @@ def test_view_visibility_and_actual_pump_sink_order(monkeypatch,tools):
 def test_callsite_is_single_and_before_unchanged_rig_boundary():
     from hfmodem.shrike import onair
     tree = ast.parse(Path(onair.__file__).read_text())
-    run = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run")
+    run = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_run")
     calls = [n for n in ast.walk(run) if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Name) and n.func.id == "emit_load_advisory"]
     rig = next(n for n in run.body if isinstance(n, ast.Assign)

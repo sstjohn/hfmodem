@@ -19,9 +19,21 @@ from hfmodem.shrike import arq, onair
 
 @contextmanager
 def observe_entry_policy():
-    evidence = dict(listens={}, refused=set(), planned={})
+    evidence = dict(listens={}, refused=set(), planned={}, partials={})
     read, regrid = onair._read_held_window, onair._regrid
     collect = onair._SessionRx.control_collect_until
+    repeat = onair._SessionRx._entry_repeat_read
+
+    def partial(self, seg, origin, raster, extent, at):
+        result = repeat(self, seg, origin, raster, extent, at)
+        proof = self._entry_repeat_result
+        if proof['match'] is not None and not proof['complete']:
+            assert proof['credited'] and self.host.arq._entry_window_truncated
+            assert not self.host.arq._entry_p1_current
+            assert proof['match'].observed_bits >= 9
+            evidence['partials'][self.host.peer.slot] = (
+                raster._p3_keyed_reply, extent, proof['match'])
+        return result
 
     def collection(self, until, now, raster):
         extent = self._entry_p1_reply_extent(raster)
@@ -54,7 +66,8 @@ def observe_entry_policy():
 
     with (patch.object(onair, '_read_held_window', held),
           patch.object(onair, '_regrid', grid),
-          patch.object(onair._SessionRx, 'control_collect_until', collection)):
+          patch.object(onair._SessionRx, 'control_collect_until', collection),
+          patch.object(onair._SessionRx, '_entry_repeat_read', partial)):
         yield evidence
 
 

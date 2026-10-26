@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # BW2750 raster by speed level, off the high speed capable bench tapes
 
 This is a measurement record of the source and recordings examined for that

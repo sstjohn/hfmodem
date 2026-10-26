@@ -24,6 +24,7 @@ import pytest
 
 from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_frames as VF
+from hfmodem.tests import fakeclaim
 from hfmodem.tests.kestrel import corpora
 from hfmodem.tests.evidence import require_input
 
@@ -33,7 +34,7 @@ _TOOLS = _ROOT / "tools"
 pytestmark = pytest.mark.skipif(not _TOOLS.is_dir(),
                                 reason="tools/ not present (installed-wheel run)")
 
-_SKIP = {"channel_busy.py"}          # a module, not a CLI
+_SKIP = {"channel_busy.py", "conftest.py"}   # modules, not CLIs
 
 
 def _clis() -> list[Path]:
@@ -186,7 +187,7 @@ def test_the_eligibility_guard_answers_the_same_on_the_dial_the_launcher_builds(
     """The published list, every row, asked both ways.
 
     ``unspeakable`` matches a listed centre against ``dial + 1500 Hz``, and the dial
-    it is given comes from ``onair.sh``, which builds it with ``bc`` — and ``bc``
+    it is given comes from ``onair.sh``, which once built it with ``bc`` — and ``bc``
     truncates at whatever scale the launcher asks for. At ``scale=1`` a centre of
     7102.850 kHz is asked about as a dial of 7101.3 and the row it belongs to sits
     50 Hz away; against a window of 50 Hz that matched nothing and the guard fell
@@ -194,9 +195,10 @@ def test_the_eligibility_guard_answers_the_same_on_the_dial_the_launcher_builds(
     is listed VARA 500 only and refused on its true dial, and called on the
     launcher's.
 
-    The scale is READ FROM THE LAUNCHER rather than restated, because that is the
-    number that moves: it was 1 when this was written and is 3 now, and a copy of it
-    here would have gone on describing a rounding the launcher had stopped doing.
+    The kHz digits are READ FROM THE LAUNCHER rather than restated, because that is
+    the number that moves: bc's scale was 1 when this was written, and the printf
+    that replaced it carries 3, and a copy of it here would have gone on describing a
+    rounding the launcher had stopped doing.
     So the guard is asked about all 1144 published channels twice — on the exact dial
     and on the one the launcher would build — and the two verdicts have to agree. It
     is a real list rather than a fixture because the failure is a collision between a
@@ -211,10 +213,12 @@ def test_the_eligibility_guard_answers_the_same_on_the_dial_the_launcher_builds(
         pytest.skip("onair.sh not present")
     kc = _kestrel_connect()
 
-    scale = re.search(r'echo "scale=(\d+); \(\$centre - 1500\)/1000" \| bc',
-                      launcher.read_text())
-    assert scale, "onair.sh no longer builds --freq with bc"
-    step = 10 ** max(0, 3 - int(scale.group(1)))      # Hz the launcher truncates to
+    digits = re.search(r"--freq \"\$\(printf '%d\.%0(\d)d' "
+                       r'"\$\(\(\(centre - 1500\) / 1000\)\)" '
+                       r'"\$\(\(\(centre - 1500\) % 1000\)\)"\)"',
+                       launcher.read_text())
+    assert digits, "onair.sh no longer builds --freq as printf of whole kHz and Hz"
+    step = 10 ** max(0, 3 - int(digits.group(1)))     # Hz the launcher truncates to
 
     rows = list(csv.DictReader(gateways.open(newline="")))
     assert len(rows) > 500, f"only {len(rows)} channels — the list has been truncated"
@@ -333,6 +337,7 @@ def test_the_late_busy_status_reaches_the_shell(monkeypatch):
     def refused(*_a, **_kw):
         raise kc.ChannelBusy
 
+    fakeclaim.install(monkeypatch)
     monkeypatch.setattr(kc, "Rig", Rig)
     monkeypatch.setattr(kc, "AudioVaraIO", Io)
     monkeypatch.setattr(kc, "VaraStationHandshake", lambda *a, **kw: object())

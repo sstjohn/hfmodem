@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Post-capture analysis of a fixed P4 setup/counter challenge.
 
 Observations never drive acknowledgements. Header scores are hypotheses, not

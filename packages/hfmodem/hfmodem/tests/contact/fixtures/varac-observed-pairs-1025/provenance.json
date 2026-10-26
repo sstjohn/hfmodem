@@ -1,0 +1,18 @@
+{
+  "source_session": "20261025T165919329450Z",
+  "source_sha256": "e45b544468229c308a2c10f2701825887ac88e219efabf499fa6c92ca822c410",
+  "start_sample": 1056000,
+  "end_sample": 2064000,
+  "sample_rate": 48000,
+  "flac_sha256": "6d9833022346695e2537341b164f9dac0e19bbb1ca0eea1a525e769971d1426b",
+  "expected_levels": [
+    2,
+    3,
+    2
+  ],
+  "expected_text": [
+    "88 I see that you are away but had",
+    "n't talked to you in quite a while.  Hope all is ok.  7",
+    "3!"
+  ]
+}

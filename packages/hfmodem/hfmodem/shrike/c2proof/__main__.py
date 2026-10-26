@@ -96,7 +96,7 @@ def verify_one(binary, n, args):
     row = {"n": n, "seed": seed, "calls": calls, "method": args.method,
            "max_proposals_per_stage": args.max_proposals, "stages": records,
            "seconds": seconds, "reference_kind": origin, "reference_sha256": sha256(reference).hexdigest(),
-           "source_sha256": sha256((HERE / "cml_generate.c").read_bytes()).hexdigest(),
+           "source_sha256": sha256((HERE / "cml" / "cml_generate.c").read_bytes()).hexdigest(),
            "binary_sha256": sha256(binary.read_bytes()).hexdigest()}
     if result.returncode:
         row.update(status="incomplete_cap" if result.returncode == 3 else "generator_error", cml_proof=False)
@@ -125,7 +125,7 @@ def verify_one(binary, n, args):
 def self_test(binary, cc, directory):
     # Independent literal upstream algorithm; only explicit seed and budget are
     # substituted in this temporary control. Fail if the expected text drifts.
-    upstream = (HERE / "upstream" / "srandom.h").read_text()
+    upstream = (HERE / "cml" / "upstream" / "srandom.h").read_text()
     seed_line = "idum = -(tmptr->tm_mon + tmptr->tm_mday + tmptr->tm_hour + tmptr->tm_min + tmptr->tm_sec);"
     budget_line = "max_swaps= 10*N;"
     if upstream.count(seed_line) != 1 or upstream.count(budget_line) != 1:
@@ -231,7 +231,7 @@ def main(argv=None):
         with tempfile.TemporaryDirectory(prefix="c2proof-") as temporary:
             directory = Path(temporary)
             binary = directory / "cml_generate"
-            compile_c(args.cc, HERE / "cml_generate.c", binary)
+            compile_c(args.cc, HERE / "cml" / "cml_generate.c", binary)
             if args.command == "self-test":
                 self_test(binary, args.cc, directory)
                 return 0

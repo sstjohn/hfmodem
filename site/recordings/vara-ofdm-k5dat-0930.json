@@ -8,7 +8,7 @@
   "called": "K5DAT-13",
   "direction": "tx",
   "source_kind": "local rig transmit monitor",
-  "audio": "vara-ofdm-k5dat-0930.flac",
+  "audio": "audio/vara-ofdm-k5dat-0930.flac",
   "sample_rate": 48000,
   "channels": 1,
   "sample_width_bytes": 2,

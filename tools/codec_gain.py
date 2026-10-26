@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Read/set the input gain of a named CoreAudio device (the rig codec).
 
 AppleScript's ``set volume input volume`` only touches the *default* input, which

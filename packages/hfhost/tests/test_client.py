@@ -7,6 +7,7 @@ desired-state replay, epoch fencing, cancellation, staleness."""
 import queue
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -92,7 +93,60 @@ def test_attach_replays_desired_state(fake, client):
     assert client.attached
     assert fake.wait_attached()
     assert fake.session_log[0] == [
-        "MYCALL N0CAL", "BW2300", "COMPRESSION OFF", "LISTEN ON"]
+        "VERSION", "MYCALL N0CAL", "BW2300", "COMPRESSION OFF", "LISTEN ON"]
+
+
+def test_empty_replay_retries_a_refused_attachment(fake, client):
+    """A connected TCP pair can be refused while a probe is retiring."""
+    def refuse_first(cmd):
+        if fake.attach_count == 1:
+            fake.drop()
+            return []
+        return None
+
+    fake.on_command = refuse_first
+    client.attach()
+    assert fake.attach_count == 2
+    assert client.attached
+    assert fake.session_log == [["VERSION"], ["VERSION"]]
+
+
+def test_attach_requires_acknowledgement_within_its_budget(fake, tr):
+    fake.on_command = lambda cmd: []
+    c = make_client(fake, tr, attach_timeout_s=.2)
+    try:
+        with pytest.raises(AttachError, match="not acknowledged"):
+            c.attach()
+        assert not c.attached
+        assert c._cmd_sock is None and c._data_sock is None
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize("reply", ["OK", "WRONG"])
+def test_attach_acknowledgement_does_not_grade_version_grammar(fake, client, reply):
+    fake.on_command = lambda cmd: reply
+    client.attach()
+    assert client.attached
+    assert fake.session_log[0] == ["VERSION"]
+
+
+def test_attach_replay_spends_one_deadline(monkeypatch):
+    clock = [0.0]
+    seen = []
+
+    def command(text, timeout):
+        seen.append((text, timeout))
+        clock[0] += .6
+        return SimpleNamespace(kind=wire.REPLY_OK)
+
+    client = SimpleNamespace(name="deadline", _REPLAY_ORDER=("a", "b", "c"),
+                             _desired={"a": "A", "b": "B", "c": "C"},
+                             command=command)
+    monkeypatch.setattr("hfhost.client.time.monotonic", lambda: clock[0])
+    with pytest.raises(TimeoutError, match="deadline exhausted"):
+        ModemClient.replay(client, _deadline=1.0)
+    assert seen == [("A", 1.0), ("B", .4)]
 
 
 def test_attach_failure_leaves_no_half_attach(tr):
@@ -354,7 +408,7 @@ def test_concurrent_attach_waits_for_replay(fake, tr):
         gate.set()
         first.join(3.0)
         later.join(3.0)
-        assert seen["log"] == ["MYCALL N0CAL", "BW2300", "LISTEN ON"]
+        assert seen["log"] == ["VERSION", "MYCALL N0CAL", "BW2300", "LISTEN ON"]
     finally:
         gate.set()
         c.close()

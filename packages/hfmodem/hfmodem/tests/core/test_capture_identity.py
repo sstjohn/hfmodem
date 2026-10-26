@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Fresh-filesystem ownership tests; no launcher, device or recording inputs."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone

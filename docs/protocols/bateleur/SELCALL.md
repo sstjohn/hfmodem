@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # HF selcall (CCIR 493-4 land mobile, the UN open 6-digit selcall)
 
 `hfmodem.bateleur.selcall` sends and receives the selective calling that HF
@@ -108,7 +110,7 @@ the last 40 Hz off with its clock 1% fast.
     emergency   = false
     invert      = false
 
-Host connections use the [normal host opening](HOST-API.md#host-connections).
+Host connections use the [normal host opening](../../implementation/bateleur/HOST-API.md#host-connections).
 `EMERGENCY` is refused unless `emergency = true` is configured.
 
 The lane listens on whatever channel the radio is on and never moves it. A

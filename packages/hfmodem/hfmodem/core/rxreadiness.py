@@ -7,15 +7,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
-import fcntl
 import hashlib
 import math
-import os
 from pathlib import Path
-import stat
 import time
 
 from .occupied import FILTER_HZ, occupied_hz
+from . import claim
 
 # Manufacturer FT-891 CAT reference p17, DATA/RTTY/PSK width settings.
 from .rigs import RIGS
@@ -88,15 +86,10 @@ def session_readback_path(output_dir: Path, stamp: str) -> Path:
 
 
 def verify_inherited_claim(serial, fd):
-    """Validate the station's existing inherited flock, not an environment claim."""
-    if type(fd) is not int or fd < 3:
-        raise ReceiverReadbackError("missing inherited station claim descriptor")
-    path = Path("/tmp") / ("hfmodem-rig-" + Path(serial).name + ".claim")
-    owned, named = os.fstat(fd), path.stat()
-    if (not stat.S_ISREG(owned.st_mode) or owned.st_uid != os.getuid()
-            or (owned.st_dev, owned.st_ino) != (named.st_dev, named.st_ino)):
-        raise ReceiverReadbackError("station claim descriptor does not name this CAT claim")
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        owned = claim.inherited(fd, launch=False).fstat()
+    except (claim.ClaimError, OSError) as exc:
+        raise ReceiverReadbackError(str(exc)) from exc
     return {"device": owned.st_dev, "inode": owned.st_ino, "cat": serial}
 
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The bridge hears a peer still holding its FSK answer, faded or clipped.
 
 09-28 80 m, inverted callsign marker: WS8EOC and KB5LZK repeated robust answer

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Long receive frames must reach their ACK without the general search ladder."""
 import numpy as np
 import pytest

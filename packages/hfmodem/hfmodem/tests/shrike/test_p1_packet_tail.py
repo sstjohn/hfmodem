@@ -61,6 +61,7 @@ def test_1213_tx6_to_tx8_duplex_tail_crc_polarity_and_peer_raster(tmp_path, monk
                              cs_n=5760, d_max_n=6240)
     tx = duplex(grid, tmp_path, seconds=16)
     tx.host.protocol = spec.Protocol.PACTOR1
+    tx.host.p1_announcement_bits = lambda fallback: fallback
     tx.p1_status_bits45 = 2
     tx.p1_status_from = 1
     waves = []

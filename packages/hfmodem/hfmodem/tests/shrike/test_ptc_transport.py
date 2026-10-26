@@ -68,8 +68,8 @@ def main() -> int:
     # -- mode re-entry ----------------------------------------------------
     m.cmd(0, "JHOST0")
     check("JHOST0 leaves hostmode", not host.hostmode)
-    check("terminal mode answers again", "PTC-IIIusb" in m.terminal("VERsion"))
-    m.terminal("JHOST4")
+    check("terminal mode answers again", "PTC-IIIusb" in m.terminal("\x1bVERsion"))
+    m.terminal("\x1bJHOST4")
     check("JHOST4 re-enters hostmode", host.hostmode)
     check("hostmode still serves the extended poll", isinstance(m.poll_channels(), list))
 

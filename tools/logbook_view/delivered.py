@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Which arm delivered each message the station sent over Winlink, as the recipient's inbox shows it.
 
     .venv/bin/python tools/logbook_view/delivered.py --imap ACCOUNT [MBOX ...] [--root PATH]
@@ -20,12 +22,12 @@ import imaplib
 import json
 import mailbox
 import re
-import tomllib
 from datetime import datetime
 from pathlib import Path
 
 from legacy import Converter
-from serve import default_root, stamp
+
+from desk.face import Logbook, default_root, stamp
 
 MID = re.compile(r'<(\w{12})@winlink\.org>', re.I)
 # A B2F proposal; a PACTOR TX payload's bytes repr puts a literal \r right before it.
@@ -111,7 +113,9 @@ def main():
 
 def refresh(root: Path, mboxes=(), imap: str | None = None, say=print):
     """Match every message found to the arm that delivered it, and write the matches."""
-    call = tomllib.loads((root / 'station.toml').read_text())['station']['mycall']
+    call = Logbook(root).station['call']
+    if not call:
+        raise ValueError('station.mycall is required for inbox confirmation')
     address = f'{call}@winlink.org'
     boxes = [mailbox.mbox(box) for box in mboxes] + ([headers(imap, address)] if imap else [])
     messages = sorted({m['mid']: m for box in boxes for m in sent(box, address)}.values(), key=lambda m: m['sent_utc'])
@@ -129,6 +133,7 @@ def refresh(root: Path, mboxes=(), imap: str | None = None, say=print):
         others = ', '.join(f"{a['arm']} ({HOW[a['how']]})" for a in arms if a is not arm)
         say(f"{msg['mid']}  {msg['sent_utc']}  {arm['arm']}  {HOW[arm['how']]}" + (f'; also in {others}' if others else ''))
     out = root / 'working' / 'winlink-delivered.json'
+    out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_suffix('.part')
     part.write_text(json.dumps(delivered, indent=1) + '\n')
     part.replace(out)  # the viewer may be reading it

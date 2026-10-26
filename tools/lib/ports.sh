@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # The station's serial ports, sourced by every launcher in tools/.
 #
 # It lives in one file because the four scripts share one environment contract,
@@ -183,95 +185,507 @@ $list
 EOF
 }
 
-# ONE OWNER OF THE TRANSMITTER AT A TIME, AND THE CLAIM DIES WITH ITS HOLDERS.
-#
-# On 2026-08-28 an arm was judged not to have started and launched a second time
-# while the first was still running. Two modems keyed one rig for eight seconds,
-# and the gateway's connect-response and three preamble alignments fell inside
-# that window -- the arm cannot be scored in either direction. The surviving run
-# did detect it, from a 53 dB collapse in its own receiver, but that reading only
-# arrives once both are already transmitting. This is the same refusal, taken
-# before either one is capable of keying.
-#
-# An flock on a descriptor, not a pidfile: the kernel closes descriptors however
-# a process ends -- SIGKILL, a pulled cable, a panic -- so the claim cannot
-# outlive the processes holding it. It is inherited, which is the second half of
-# the property: an arm killed at the shell but still running a modem has not
-# released the transmitter, and is still refused. A file left behind by a crash,
-# refusing every launch after it, would be a worse fault at a rig than the one
-# this is here to stop.
-#
-# /tmp and not $TMPDIR: on macOS $TMPDIR is per-login-session, so two shells that
-# disagree about it would each claim a different file and neither would see the
-# other. Named for the CAT port, so a second radio on this machine is a second
-# claim rather than a queue behind the first.
 RIG_LOCK_FD=9
-claim_rig() {
-  require_cat
-  # `pounce`, rigtest.sh and autopilot's own `onair.sh check` reach the rig by
-  # re-invoking a launcher, and this is what tells the child the claim is already
-  # its own tree's. The child must not take it again: it inherits the descriptor,
-  # but a second OPEN of the same file is a second holder and would refuse.
-  [ -n "${RIG_CLAIMED:-}" ] && return 0
-  local lock="/tmp/hfmodem-rig-$(basename "$CAT_PORT").claim"
-  # Appended, never truncated, on the way in: a launcher that is about to be
-  # refused opens this file too, and it must not erase the description of the run
-  # it is about to be told about.
-  eval "exec $RIG_LOCK_FD>>'$lock'"
-  if ! "${HFMODEM_PYTHON:-$VENV/python}" - "$RIG_LOCK_FD" <<'LOCK'
-import fcntl, sys
-try:
-    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
-except OSError:
-    raise SystemExit(1)
-LOCK
-  then
-    # Ours goes before we ask who else has it open, so the answer is the holders
-    # and not this process standing in its own light.
-    eval "exec $RIG_LOCK_FD>&-"
-    die "THE RIG IS ALREADY CLAIMED, and nothing here has keyed or opened a port.
+CLAIM_OWNED=0
+CLAIM_ACTIVE=0
+CLAIM_ADMITTED=0
+CLAIM_FAILED=0
+CLAIM_MUTEX=0
+CLAIM_CHILDREN=
+CLAIM_LAUNCH=0
+CLAIM_PARENT=0
+CLAIM_ATTEMPTED=0
+CLAIM_AFTER_DOWN=
+CLAIM_AFTER_DOWN_S=15
 
-   Two modems on one transmitter is how 2026-08-28's arm 2 was lost: eight
-   seconds of overlap swallowed the gateway's answer, and the arm could not be
-   scored in either direction.
-
-   Claimed $(sed -n 1p "$lock" 2>/dev/null) by
-
-     $(sed -n 2p "$lock" 2>/dev/null)
-
-   Still holding the rig now:
-
-$(claim_holders "$lock")
-
-   Let it finish, or stop it and call again:
-
-     tools/onair.sh down"
-  fi
-  : > "$lock"
-  printf 'at %s, pid %s\n%s\n' "$(date -u +%H:%M:%SZ)" "$$" \
-      "$(ps -o command= -p $$ 2>/dev/null | redact_secrets)" >> "$lock"
-  RIG_CLAIMED="$lock"; export RIG_CLAIMED
+claim_twin() {
+  "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.claim "$@"
 }
 
-# WHAT IS STILL ON THE RIG, WHICH IS NOT THE SAME QUESTION AS WHAT STARTED IT.
-#
-# The claim is a descriptor and a descriptor is inherited, so a launcher's modem,
-# its recorder and its witness all carry it and the claim lasts exactly as long
-# as one of them could still key. That is the property wanted -- a SIGKILLed
-# launcher whose modem is still transmitting has not released the transmitter --
-# and it is why the pid in the lock file is not the answer: on that path it names
-# the one process that is gone. So the refusal reads the descriptor back and
-# names every process still holding it, which is also the list `onair.sh down`
-# has to clear.
-claim_holders() {
-  local pid found=
-  for pid in $(lsof -t "$1" 2>/dev/null); do
-    found=1
-    printf '     %s\n' "$(ps -o command= -p "$pid" 2>/dev/null | redact_secrets)"
+claim_paths() {
+  CLAIM=$(claim_twin path) || return
+  MUTEX=$(claim_twin path --mutex) || return
+}
+
+claim_checked() {
+  local expected="$1" result rc=0
+  shift
+  result=$(mktemp) || return
+  claim_twin "$@" >"$result" || rc=$?
+  cat "$result"
+  if [ "$rc" -eq 0 ] && ! grep -qx "$expected" "$result"; then rc=1; fi
+  rm -f "$result"
+  return "$rc"
+}
+
+claim_rig() {
+  [ "$CLAIM_ACTIVE" = 0 ] || return 0
+  claim_paths || return
+  if [ -n "${RIG_CLAIMED:-}" ]; then
+    claim_checked 'CLAIM INHERITED' inherited 9 7>&- 8>&- || return
+  else
+    exec 9<>"$CLAIM"
+    # No --prove-line: I4 holds through P1's LineKeyer.arm reading the line low before its first assert.
+    if claim_checked 'CLAIM ACQUIRED' acquire 9 --kind shell --operation "${1:-launch}" \
+        --cat-port "$CAT_PORT" --ptt-port "$PTT_PORT" --capture "$AUDIO_IN" --playback "$AUDIO_OUT" 7>&- 8>&-; then
+      CLAIM_OWNED=1
+    else
+      exec 9>&-
+      return 1
+    fi
+  fi
+  CLAIM_ACTIVE=1
+  CLAIM_FAILED=0
+  case "${1:-launch}" in campaign|autopilot|rigtest|pounce) CLAIM_PARENT=1 ;; esac
+  RIG_CLAIMED="$CLAIM"; export RIG_CLAIMED
+  trap 'claim_exit $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  CLAIM_CHILDREN=$(mktemp) || return
+  claim_launch_hold
+}
+
+claim_launch_hold() {
+  [ "$CLAIM_LAUNCH" = 0 ] || return 0
+  exec 7<>"$MUTEX"
+  claim_checked 'CLAIM INHERITED' inherited 9 --launch 7 8>&- || { exec 7>&-; return 1; }
+  CLAIM_LAUNCH=1
+}
+
+claim_admit() {
+  exec 7>&-
+  CLAIM_LAUNCH=0
+  CLAIM_ADMITTED=1
+  printf 'CLAIM ADMITTED\n'
+}
+
+claim_close() {
+  local rc=0
+  if [ "$CLAIM_ACTIVE" = 1 ]; then
+    if [ "$CLAIM_OWNED" = 1 ] && [ "$CLAIM_FAILED" = 0 ]; then
+      claim_checked 'CLAIM RELEASED' release 9 7>&- 8>&- || rc=$?
+    else
+      claim_checked 'CLAIM CLOSED' close 9 7>&- 8>&- || rc=$?
+    fi
+    exec 9>&-
+    CLAIM_ACTIVE=0
+  fi
+  return "$rc"
+}
+
+claim_spawn() {
+  if [ "$CLAIM_MUTEX" = 1 ]; then
+    claim_twin spawn --fd 9 --cleanup 8 "$@" 7>&-
+  else
+    claim_twin spawn --fd 9 "$@" 7>&- 8>&-
+  fi
+}
+
+claim_native() { claim_spawn --timeout 10 -- "$@"; }
+
+claim_record() {
+  claim_processes record "$1" >>"$CLAIM_CHILDREN"
+}
+
+claim_start() {
+  local fifo line deadline child_rc=0
+  claim_launch_hold || return
+  fifo=$(mktemp -d) || return
+  mkfifo "$fifo/output" || { rm -rf "$fifo"; return 1; }
+  "$@" <&0 7>&- 8>&- >"$fifo/output" &
+  CLAIM_PID=$!
+  CLAIM_ATTEMPTED=1
+  claim_record "$CLAIM_PID" || return
+  exec 6<"$fifo/output"
+  rm -rf "$fifo"
+  deadline=$((SECONDS + 30))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if IFS= read -r -t 1 line <&6; then
+      if [ "$line" = 'CLAIM ADMITTED' ]; then
+        if [ "${CLAIM_INTERNAL:-0}" = 0 ]; then claim_admit; fi
+        cat <&6 6>&- 7>&- 8>&- 9>&- &
+        CLAIM_RELAY=$!
+        exec 6>&-
+        return 0
+      fi
+      printf '%s\n' "$line"
+      case "$line" in 'CLAIM NOT ADMITTED'*) break ;; esac
+    elif ! claim_processes alive "$CLAIM_PID"; then
+      break
+    fi
   done
-  # Between another launcher's `exec 9>>` and its own `flock`, briefly, and after
-  # a holder exits before this reads the list. Neither is a state to guess in.
-  [ -n "$found" ] || printf '     (nothing has it open now -- ask again in a moment)\n'
+  claim_processes end "$CLAIM_PID" || { CLAIM_FAILED=1; return 1; }
+  wait "$CLAIM_PID" 2>/dev/null || child_rc=$?
+  exec 6>&-
+  # An unacknowledged inherited launcher must unwind without down; its parent
+  # still holds admission. An owning parent can prove after its child is gone.
+  exec 7>&-
+  CLAIM_LAUNCH=0
+  printf 'CLAIM NOT ADMITTED child exited or acknowledgement timed out\n'
+  [ "$child_rc" -ne 0 ] || child_rc=1
+  return "$child_rc"
+}
+
+claim_wait() {
+  local rc=0
+  wait "$CLAIM_PID" || rc=$?
+  wait "$CLAIM_RELAY" || rc=1
+  return "$rc"
+}
+
+claim_run() { claim_start "$@" && claim_wait; }
+
+# Setup captures acknowledge their own opens, never the launcher's readiness.
+claim_worker() { local CLAIM_INTERNAL=1; claim_run "$@"; }
+
+claim_down() { "$REPO/tools/onair.sh" down 7>&- 8>&-; }
+
+# Readouts after the line has read low, while the claim is still held. A subshell,
+# so nothing it does reaches the release; bounded, because every signal is
+# ignored by now and a hung readout would hold the claim with no way to stop it.
+# The session's last lines come first, within the same bound: a descendant still
+# holding its output would otherwise hold the claim as long as it lives.
+claim_after_down() {
+  local hook mark child started deadline=$((SECONDS + CLAIM_AFTER_DOWN_S))
+  while [ -n "${CLAIM_RELAY:-}" ] && kill -0 "$CLAIM_RELAY" 2>/dev/null && \
+      [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 0.1
+  done
+  deadline=$((SECONDS + CLAIM_AFTER_DOWN_S))
+  mark=$(wc -l <"$CLAIM_CHILDREN")
+  ( "$CLAIM_AFTER_DOWN" ) &
+  hook=$!
+  while kill -0 "$hook" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      printf '  readout abandoned after %ss\n' "$CLAIM_AFTER_DOWN_S"
+      kill -KILL "$hook" 2>/dev/null || true
+      while read -r child started; do
+        claim_processes end "$child" || CLAIM_FAILED=1
+      done < <(tail -n "+$((mark + 1))" "$CLAIM_CHILDREN")
+      break
+    fi
+    sleep 0.1
+  done
+  wait "$hook" 2>/dev/null || true
+}
+
+claim_exit() {
+  local rc="${1:-0}" cleanup_rc=0
+  trap - EXIT
+  trap '' INT TERM HUP
+  if [ "$CLAIM_ACTIVE" = 1 ]; then
+    claim_processes owner || cleanup_rc=$?
+    exec 7>&-
+    CLAIM_LAUNCH=0
+    if [ "$cleanup_rc" -eq 0 ] && [ "$CLAIM_FAILED" = 0 ] && \
+        { [ "$CLAIM_ADMITTED" = 1 ] || \
+          { [ "$CLAIM_OWNED" = 1 ] && [ "$CLAIM_PARENT" = 1 ] && [ "$CLAIM_ATTEMPTED" = 1 ]; }; }; then
+      claim_down || cleanup_rc=$?
+      if [ "$cleanup_rc" -eq 0 ] && [ -n "$CLAIM_AFTER_DOWN" ]; then claim_after_down; fi
+    else
+      printf 'CLAIM NOT ADMITTED launcher initialization or termination failed\n'
+      CLAIM_FAILED=1
+      [ "$rc" -ne 0 ] || rc=1
+    fi
+    if [ "$cleanup_rc" -ne 0 ]; then CLAIM_FAILED=1; rc=1; fi
+    claim_close || rc=1
+  fi
+  # Reap recorded direct children, leaving unrelated shell jobs alone.
+  if [ -n "$CLAIM_CHILDREN" ] && [ "$CLAIM_FAILED" = 0 ]; then
+    while read -r child started; do wait "$child" 2>/dev/null || true; done <"$CLAIM_CHILDREN"
+    [ -z "${CLAIM_RELAY:-}" ] || wait "$CLAIM_RELAY" 2>/dev/null || true
+  fi
+  [ -z "$CLAIM_CHILDREN" ] || rm -f "$CLAIM_CHILDREN"
+  if declare -F capture_exit >/dev/null; then capture_exit "$rc" || rc=$?; fi
+  exit "$rc"
+}
+
+claim_processes() {
+  "${HFMODEM_PYTHON:-$VENV/python}" - "$@" "$$" "$REPO" "$CAT_PORT" "$PTT_PORT" \
+      "$MODEL" "$AUDIO_IN" "$AUDIO_OUT" "$CLAIM_CHILDREN" <<'CLAIM_PROCESSES'
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import time
+import tomllib
+from hfmodem.core import claim
+from hfmodem.core.rigs import CAT_BACKENDS, profile_cat
+from hfmodem.core.native import NativeChild, REAP_GRACE_S
+from hfmodem.station import client
+
+mode, *args = sys.argv[1:]
+root, repo, cat_port, ptt_port, model, capture, playback, records = args[-8:]
+root = int(root)
+args = args[:-8]
+# pid -> (identity, parent, parent identity) as first seen; ancestry is lost on reparenting.
+lineage = {}
+ended = {}
+
+
+def table():
+    result = subprocess.run(['ps', '-axo', 'pid=,ppid=,uid=,lstart=,command='],
+                            capture_output=True, text=True, timeout=5, check=True)
+    rows = {}
+    for line in result.stdout.splitlines():
+        pid, parent, uid, *fields = line.strip().split(None, 8)
+        if len(fields) != 6:
+            raise claim.ClaimError("partial process metadata")
+        rows[int(pid)] = (int(parent), int(uid), fields[-1], "_".join(fields[:5]))
+    if root not in rows:
+        raise claim.ClaimError('process inventory unavailable')
+    for pid, (parent, _, _, started) in rows.items():
+        lineage.setdefault(pid, (started, parent, rows[parent][3] if parent in rows else None))
+    return rows
+
+
+def inheritor(pid, matched, identities):
+    started, parent, parent_started = lineage.get(pid, (None, None, None))
+    return (pid in matched and started == identities[pid] and parent in ended
+            and parent_started in (None, ended[parent]))
+
+
+def within(pid, ancestor, rows):
+    seen = set()
+    while pid in rows and pid not in seen:
+        if pid == ancestor:
+            return True
+        seen.add(pid)
+        pid = rows[pid][0]
+    return False
+
+
+def station(command):
+    return bool(re.search(r'(?:^|[/\s])hfmodem(?:\.cli)?\s+station(?:\s|$)', command))
+
+
+def legacy_target(pid, rows, matched, delegated):
+    parent, uid, command, started = rows[pid]
+    if uid != os.getuid() or pid in delegated:
+        return False
+    words = command.split()
+    daemon = any(Path(w).name == 'rigctld' for w in words) and any(
+        w == '-m' and i + 1 < len(words) and words[i + 1] == model
+        for i, w in enumerate(words))
+    # A repository path and PPID 1 prove neither radio ownership nor a legacy
+    # modem identity. Detached corpus/analysis workers can have both. Unknown
+    # actual device holders remain fail-closed in inventory(), never signalled.
+    return (pid in matched or daemon or bool(re.search(
+        r'(?:hfmodem\.)?(?:besra\.host\.run_server|shrike\.onair|lanner\.qso|sabir\.onair)|'
+        r'(?:^|[/\s])(?:run_server|kestrel_connect|kiwi_witness)(?:\.py)?(?:\s|$)|creance\.cli', command)))
+
+
+def listeners(port):
+    result = subprocess.run(['lsof', '-t', '-nP', f'-iTCP:{port}', '-sTCP:LISTEN'],
+                            capture_output=True, text=True, timeout=5)
+    if result.returncode not in (0, 1) or result.stderr.strip():
+        raise claim.ClaimError('listener inventory unavailable: ' + result.stderr.strip())
+    return {int(pid) for pid in result.stdout.split()}
+
+
+def settings():
+    path = os.environ.get('HFMODEM_STATION')
+    body = tomllib.loads(Path(path).read_text()) if path else {}
+    rig = body.get('rig', {})
+    cat = rig['cat'] if 'cat' in rig else profile_cat(legacy_model=rig.get('model') or None)
+    if cat not in CAT_BACKENDS:
+        raise claim.ClaimError('unknown CAT backend: ' + str(cat))
+    backend = CAT_BACKENDS[cat]
+    return path, body.get('station', {}).get('port', 8737), backend, rig.get('host', '127.0.0.1'), rig.get('port', 4532)
+
+
+def recorded():
+    if not records:
+        return {}
+    return {int(pid): started for pid, started in
+            (line.split() for line in Path(records).read_text().splitlines())}
+
+
+def end(children):
+    for child in children:
+        if child.alive():
+            print(f'pid {child.pid} -- SIGTERM', flush=True)
+            child.terminate()
+    deadline = time.monotonic() + REAP_GRACE_S
+    for child in children:
+        child.wait_gone(max(0, deadline - time.monotonic()))
+    cleanup = {r.pid for r in claim.holders(8, cleanup=True)} if mode == 'down' else set()
+    if mode != 'down':
+        fd = os.open(claim.mutex_path(), os.O_RDONLY)
+        try:
+            # Empty is the normal unpublished mutex. A present but unreadable
+            # publication or failed holder discovery cannot authorize SIGKILL.
+            if os.fstat(fd).st_size:
+                cleanup = {r.pid for r in claim.holders(fd, cleanup=True)}
+        finally:
+            os.close(fd)
+    rows = table()
+    for child in children:
+        if child.alive():
+            if any(within(pid, child.pid, rows) for pid in cleanup):
+                raise claim.ClaimError(f'cleanup in progress (pid {child.pid}); no escalation')
+            print(f'pid {child.pid} -- SIGKILL', flush=True)
+            child.kill()
+    for child in children:
+        if not child.wait_gone(5):
+            raise claim.ClaimError(f'termination unresolved for pid {child.pid}')
+        ended[child.pid] = child.started
+
+
+def inventory():
+    if mode == 'down':
+        claim.verify_cleanup(8)
+    else:
+        claim.inherited(9)
+    path, station_port, backend, host, port = settings()
+    devices = claim.Devices(cat_port, ptt_port, capture, playback, backend)
+    nodes = []
+    for endpoint in (devices.cat_port if backend == 'serial' else None, devices.ptt_port):
+        nodes.extend(claim.serial_nodes(endpoint))
+    audio = []
+    for endpoint, direction in ((capture, 'capture'), (playback, 'playback')):
+        try:
+            audio.extend(claim.audio_nodes(endpoint, direction))
+        except Exception:
+            pass
+    issued = None
+    released = False
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        rows = table()
+        identities = {pid: row[3] for pid, row in rows.items()}
+        if issued is None:
+            issued = identities
+        ancestors = {pid for pid in rows if within(root, pid, rows)} | {os.getpid()}
+        delegates = listeners(port) if backend == 'rigctld' else set()
+        for pid in delegates:
+            if pid not in rows or 'rigctld' not in rows[pid][2]:
+                raise claim.ClaimError(f'delegated CAT listener unidentified: pid {pid}')
+            print(f'delegated rigctld pid {pid} on {host}:{port}', flush=True)
+        stations = {pid for pid, row in rows.items() if station(row[2])} | listeners(station_port)
+        protected = {pid for pid in rows if any(within(pid, s, rows) for s in stations)}
+        device_rows = claim.openers(nodes) if nodes else []
+        audio_rows = claim.openers(audio) if audio else []
+        device_rows += [r for r in audio_rows if Path(r.command).name not in
+                        {'pipewire', 'pulseaudio', 'coreaudiod', 'wireplumber', 'jackd'}]
+        device_pids = {r.pid for r in device_rows} - delegates
+        descriptor = claim.ClaimDescriptor(9)
+        inherited = bool(os.environ.get('RIG_CLAIMED')) or mode != 'down'
+        held = True
+        if not inherited:
+            probe = os.open(claim.claim_path(), os.O_RDWR)
+            try:
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    held = False
+                except BlockingIOError:
+                    pass
+            finally:
+                os.close(probe)
+        published = claim.holder(descriptor) if held else None
+        matched = {r.pid for r in claim.holders(descriptor)} if held else set()
+        candidates = device_pids | matched | stations | (set(recorded()) & rows.keys()) | {
+            pid for pid in rows if legacy_target(pid, rows, set(), delegates)}
+        if not candidates <= rows.keys():
+            raise claim.ClaimError('process metadata missing; retry cleanup')
+        if mode == 'down' and stations:
+            if not path:
+                raise claim.ClaimError('station found without a station file; release it explicitly')
+            service = client.Client(path, port=station_port)
+            try:
+                snapshot = service.state(timeout=min(2, max(.001, deadline - time.monotonic())))
+                if snapshot['service']['state'] != 'observing' or matched & protected and not released:
+                    try:
+                        service.release(timeout=max(.001, deadline - time.monotonic()))
+                        released = True
+                    except client.CommandFailed as exc:
+                        if exc.result.get('reason') != 'transitioning':
+                            raise
+                    time.sleep(.05)
+                    continue
+            except Exception as exc:
+                raise claim.ClaimError('station not released, held by pid '
+                                       + ', '.join(map(str, sorted(stations))) + f': {exc}') from exc
+            if (device_pids | matched) & protected:
+                raise claim.ClaimError('observing station still holds a device or claim')
+        if mode == 'down' and not inherited and published and published.pid in rows:
+            if identities[published.pid] != published.started:
+                raise claim.ClaimError('claim publisher pid reused; refusing cleanup')
+            print(f'pid {published.pid} ({published.command}) holds the claim; interrupt it and run down again', flush=True)
+            raise SystemExit(7)
+        targets, unknown = [], []
+        own = recorded()
+        for pid in sorted(candidates - delegates - protected):
+            if pid in ancestors:
+                if pid in device_pids:
+                    unknown.append(pid)
+                continue
+            if mode != 'down':
+                if not within(pid, root, rows) and own.get(pid) != identities[pid]:
+                    continue
+                if mode == 'daemon' and 'rigctld' not in rows[pid][2]:
+                    continue
+            if issued.get(pid) != identities[pid] and not inheritor(pid, matched, identities):
+                raise claim.ClaimError(f'pid {pid} started after this down was issued')
+            if legacy_target(pid, rows, matched, delegates) or mode != 'down' and own.get(pid) == identities[pid]:
+                targets.append(NativeChild(pid, identities[pid], None, None, None))
+            else:
+                unknown.append(pid)
+        if unknown:
+            raise claim.ClaimError('unidentified device/claim holder(s): ' + ', '.join(map(str, unknown)))
+        if not targets:
+            if mode == 'down':
+                claim.check_devices(devices)
+            return
+        end(targets)
+    raise claim.ClaimError('cleanup inventory did not settle within 45 s')
+
+
+try:
+    if mode == 'record':
+        pid = int(args[0])
+        print(pid, claim.process_started(pid), flush=True)
+    elif mode in ('alive', 'end'):
+        pid = int(args[0])
+        started = recorded().get(pid)
+        if not started:
+            raise claim.ClaimError(f'child identity missing: pid {pid}')
+        child = NativeChild(pid, started, None, None, None)
+        if mode == 'alive':
+            raise SystemExit(0 if child.alive() else 1)
+        # Snapshot inheritors before terminating their parent; ancestry is lost
+        # on reparenting, so a later owner inventory cannot recover this scope.
+        rows = table()
+        matched = {r.pid for r in claim.holders(claim.ClaimDescriptor(9))}
+        descendants = [NativeChild(p, rows[p][3], None, None, None)
+                       for p in matched if p != pid and within(p, pid, rows)]
+        end([child, *descendants])
+    elif mode == 'settings':
+        print('\n'.join(map(str, settings()[2:])))
+    elif mode == 'evidence':
+        claim.verify_cleanup(8)
+        claim.inherited(9)
+        target = claim.state_dir() / 'cleanup.json'
+        temporary = target.with_name(f'cleanup-{root}.tmp')
+        try:
+            with temporary.open('w') as stream:
+                json.dump(dict(pid=root, at=time.time(), line=args[0], cat=args[1]), stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    else:
+        inventory()
+except Exception as exc:
+    print(f'NOT CONFIRMED: {exc}', file=sys.stderr, flush=True)
+    raise SystemExit(1)
+CLAIM_PROCESSES
 }
 
 # One rule for the CAT-to-PTT relationship, and it is the station's own:

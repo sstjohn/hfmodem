@@ -148,6 +148,29 @@ def test_core_imports_no_protocol():
     assert not offences, "\n  ".join(offences)
 
 
+def _operator_resource(rel, value):
+    return (rel == 'hfmodem/operator/bootstrap.py'
+            and value in ('tools', 'tools/console.py', 'tools/desk/face.py'))
+
+
+@pytest.mark.parametrize('value, accepted', [
+    ('tools', True), ('tools/console.py', True), ('tools/desk/face.py', True),
+    ('tools/desk/other.py', False), ('tools/private.py', False),
+])
+def test_bootstrap_resource_allowance_is_exact(value, accepted, tmp_path, monkeypatch):
+    source = tmp_path / 'hfmodem/hfmodem/operator/bootstrap.py'
+    source.parent.mkdir(parents=True)
+    source.write_text(f'path = {value!r}\n')
+    from hfmodem.tests.gates import test_import_direction as gate
+    monkeypatch.setattr(gate, 'PACKAGES', tmp_path)
+    monkeypatch.setattr(gate, 'REPO', tmp_path)
+    if accepted:
+        test_shipping_code_never_reaches_outside_its_distribution('hfmodem')
+    else:
+        with pytest.raises(AssertionError, match='names'):
+            test_shipping_code_never_reaches_outside_its_distribution('hfmodem')
+
+
 def _capture_output_component(rel, node, parents):
     if rel != 'hfmodem/core/capture_identity.py' or node.value != 'working':
         return False
@@ -196,8 +219,7 @@ def test_shipping_code_never_reaches_outside_its_distribution(dist):
                 parts = node.value.replace("\\", "/").split("/")
                 # The installed console includes these exact reviewed resources;
                 # packaging gates compare every bundled path and byte to its source.
-                operator_resource = (rel == 'hfmodem/operator/bootstrap.py'
-                                     and node.value in ('tools', 'tools/console.py'))
+                operator_resource = _operator_resource(rel, node.value)
                 if ("working" in parts or "tools" in parts) and not operator_resource and not _capture_output_component(rel, node, parents):
                     offences.append(f"{f.relative_to(REPO)} names {node.value!r}")
             # And a bare import of either, which needs no sys.path line at all.
@@ -295,3 +317,10 @@ def test_brubru_does_not_import_station():
                 continue
             assert not any(t == 'hfmodem.station' or t.startswith('hfmodem.station.')
                            for t in targets), str(path)
+
+
+def test_station_client_imports_only_stdlib_and_wire():
+    from hfmodem.tests.gates.test_station_client_stdlib import STATION, import_offences
+
+    assert not [offence for name in ('client.py', 'wire.py')
+                for offence in import_offences(STATION / name)]

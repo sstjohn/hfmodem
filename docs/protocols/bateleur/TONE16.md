@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # The 16-tone DPSK mode (MIL-STD-188-110 appendix A)
 
 `hfmodem.bateleur.tone16` sends and receives the 16-tone differential

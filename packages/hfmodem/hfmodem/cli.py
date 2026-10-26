@@ -19,12 +19,14 @@ Every verb that can key a transmitter refuses unless the station file says
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from hfhost.config import ConfigError
 
 from hfmodem import __version__
+from hfmodem.core.config import STATION_ENV
 
 
 def _config(path: str):
@@ -80,8 +82,8 @@ def cmd_config(args) -> int:
 
 
 def cmd_rig(args) -> int:
-    from hfmodem.core import ptt as pttmod
-    from hfmodem.core.rig import Cat, Rig, RigError, unkey_on_signal
+    from hfmodem.core import claim
+    from hfmodem.core.rigs import CAT_BACKENDS
 
     cfg = _config(args.file)
     if (args.arm or args.preflight) and not cfg.station.transmit:
@@ -96,11 +98,35 @@ def cmd_rig(args) -> int:
         print("[rig.ptt] port is unset; nothing to key.", file=sys.stderr)
         return 2
 
+    if os.environ.get("RIG_CLAIMED"):
+        # A launcher's claim_run (onair.sh preflight): the claim is its, on fd 9.
+        claim.inherited(9, launch=True).opened()
+        return _claimed_rig(args, cfg)
+
+    descriptor = claim.acquire("tool", "rig-preflight" if args.preflight else "rig",
+        devices=claim.Devices(cat_port=cfg.resolved_profile.get("cat_port"),
+            ptt_port=cfg.rig.ptt.port, capture=cfg.audio.input if args.preflight else None,
+            playback=cfg.audio.output if args.preflight else None, cat=CAT_BACKENDS[cfg.rig.cat]))
+    try:
+        result = _claimed_rig(args, cfg)
+    except BaseException:
+        claim.close(descriptor)
+        raise
+    else:
+        claim.release(descriptor)
+        return result
+
+
+def _claimed_rig(args, cfg) -> int:
+    from hfmodem.core import ptt as pttmod
+    from hfmodem.core.rig import Rig, RigError, unkey_on_signal
+    from hfmodem.station.process import cat_driver
+
     if args.preflight:
         from hfmodem.station import preflight
         return preflight.run(cfg)
 
-    cat = Cat(cfg.rig.host, cfg.rig.port)
+    cat = cat_driver(cfg)
     line = pttmod.RtsPtt(cfg.rig.ptt.port)
 
     rig = Rig(model=cfg.rig.model, cat=cat, ptt=line, profile=cfg.profile,
@@ -120,13 +146,50 @@ def cmd_rig(args) -> int:
 
 def cmd_station(args) -> int:
     from hfmodem.station.process import Station
+    from hfmodem.station.service import BindConflict, Service
+    from hfmodem.station import wire
+    from hfmodem.core.rig import RigError
+    from hfmodem.core.audio import AudioError
 
-    cfg = _config(args.file)
-    station = Station(cfg)
+    if str(args.file) == "stop":
+        from hfmodem.station.client import ClientError, connect
+        path = args.target or os.environ.get(STATION_ENV, "station.toml")
+        try:
+            client = connect(path)
+            client.command("shutdown", wait=True, timeout=45)
+            return 0
+        except ClientError as exc:
+            print(str(exc), file=sys.stderr)
+            return exc.exit_code
+    if args.target is not None:
+        raise ConfigError("station accepts one file; use station stop [FILE]")
     try:
-        return station.run()
-    except KeyboardInterrupt:
-        return 0
+        service = Service(args.file)
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{args.file}: {exc}") from exc
+    try:
+        service.bind()
+    except BindConflict as exc:
+        print(str(exc), file=sys.stderr)
+        return exc.exit_code
+    try:
+        cfg = _config(service.station_file)
+        from hfmodem.operator.bootstrap import face
+        desk = face()
+        if desk is not None:
+            desk.mount(service, desk.data_root, cfg)
+        station = Station(cfg, station_file=service.station_file)
+        station.service = service
+        service.station = station
+        return station.run(detach=args.detach, preflight=args.preflight)
+    except (RigError, AudioError) as exc:
+        print(f"the radio is not usable: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return wire.EXIT_LAUNCH_FAILED
+    finally:
+        service.close()
 
 
 def cmd_mail(args) -> int:
@@ -226,7 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.set_defaults(fn=cmd_rig)
 
     s = sub.add_parser("station", help="run the station")
-    s.add_argument("file", type=Path)
+    s.add_argument("file", type=Path, nargs="?",
+                   default=Path(os.environ.get(STATION_ENV, "station.toml")))
+    s.add_argument("target", type=Path, nargs="?")
+    mode = s.add_mutually_exclusive_group()
+    mode.add_argument("--detach", action="store_true", help="serve in observing mode")
+    mode.add_argument("--preflight", action="store_true", help="own, measure and release the station")
     s.set_defaults(fn=cmd_station)
 
     m = sub.add_parser(
@@ -297,6 +365,8 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] in ('console', 'winlink'):
         from hfmodem.operator import bootstrap
         return getattr(bootstrap, argv[0])(argv[1:])
+    from hfmodem.core.claim import ClaimBusy, ClaimError
+
     args = build_parser().parse_args(argv)
     try:
         return args.fn(args)
@@ -306,6 +376,10 @@ def main(argv: list[str] | None = None) -> int:
         # broke rather than the file.
         print(exc, file=sys.stderr)
         return 2
+    except ClaimError as exc:
+        from hfmodem.station.wire import EXIT_CLAIMED
+        print(f"hfmodem {argv[0]}: {exc}", file=sys.stderr)
+        return EXIT_CLAIMED if isinstance(exc, ClaimBusy) else 1
 
 
 if __name__ == "__main__":

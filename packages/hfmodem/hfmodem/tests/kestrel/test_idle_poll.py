@@ -141,7 +141,7 @@ def _hold(hs, io, seconds: float, answer: np.ndarray | None = None) -> None:
     deadline, the keepalive 10 s after the link last moved."""
     seen, next_ka = (hs.progress, hs.idle_keyed), _Clock.t + _KEEPALIVE_S
     end, queued = _Clock.t + seconds, np.zeros(0)
-    while _Clock.t < end and hs.state is VA.VaraState.CONNECTED:
+    while _Clock.t < end and hs.state in (VA.VaraState.CONNECTED, VA.VaraState.DISCONNECTING):
         block, queued = (queued[:_BLOCK], queued[_BLOCK:]) if len(queued) else (
             _noise(_BLOCK / FS), queued)
         _feed(hs, block)

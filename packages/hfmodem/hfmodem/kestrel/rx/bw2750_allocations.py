@@ -10,7 +10,7 @@ inverted from a known37-byte closing frame then validated on distinct47-byte
 frames and an empty close. No closed-form allocation law is claimed.
 
 Native evidence and sample/hash provenance:
-    tests/kestrel/fixtures/bw2750-low-levels/{README.md,provenance.json}
+    tests/kestrel/fixtures/bw2750-low-levels/provenance.json
 Record0 has124 columns over bins24..103; its independent two-payload
 provenance is in fixtures/bw2750-floor/. These tables support native receive
 and waveform generation; selectable TX interoperability needs separate ARQ

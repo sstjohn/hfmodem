@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Recorded skipped sends and repeated changeovers, on an elapsed sample clock."""
 import hashlib
 import json
@@ -34,6 +36,7 @@ def sender(tmp_path, row):
     a._inflight = arq._Packet(status=status, payload=b'X' * size, sl=a.speed_level)
     a._next_seq, a._buffer_raw = (status + 1) % 4, 1000 + size
     a._outbuf.extend(b'A' * 1000)
+    a.payload_ledger.queue(a._inflight.payload + bytes(a._outbuf))
     g = onair._MasterGrid(0, 60000, 0, packet_n=38880, cs_n=10080, d_max_n=6240)
     g.protocol, g.sending = spec.Protocol.PACTOR3, True
     g.regear(a.cycle_long)

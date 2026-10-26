@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """A real WS8EOC CS2 retains its unacknowledged CS3's emitted pulse raster."""
 from dataclasses import replace
 import json

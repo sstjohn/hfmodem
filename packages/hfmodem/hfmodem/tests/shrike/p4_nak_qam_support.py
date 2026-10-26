@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Capture actual neutral keys while asserting history and byte neutrality."""
 from contextlib import contextmanager
 from unittest.mock import patch

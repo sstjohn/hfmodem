@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Evidence, not energy, controls how long a channel owns the receiver."""
 from dataclasses import dataclass
 import math

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 from hfmodem.core.tx_events import TxEvents
 from tx_timing import intervals, merge
 

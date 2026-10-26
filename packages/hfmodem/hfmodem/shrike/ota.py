@@ -11,7 +11,7 @@ produces the connect-answer, the control signals in live context, ACK/NAK and th
 cycle timing of a link that has us on the other end.
 
 Rig-agnostic: pass --rig {ft891,g90,x6100} plus the serial/audio devices. Runs
-Hamlib rigctl for frequency/mode/PTT and sounddevice for TX playback / RX capture.
+Hamlib rigctl tunes, LineKeyer keys, and sounddevice plays and captures audio.
 A PTT watchdog force-unkeys after --max-key seconds so a hung playback can't cook
 the finals.
 
@@ -25,10 +25,12 @@ rig, so the whole flow is verifiable with no hardware attached.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import select
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -38,12 +40,14 @@ from pathlib import Path
 
 from . import session, spec
 from ..core.audio import play_drained, warm_output
+from ..core.claim import ClaimError
 from ..core.devices import find_device, list_devices
 from ..core.occupied import FILTER_HZ
 from ..core.rxreadiness import RadioMode, parse_mode_readback, parse_frequency_readback, ReceiverReadbackError
-from ..core.ptt import (Keyer, OneShotRigctl, PttError, derive_ptt_port,
+from ..core.ptt import (LineKeyer, PttError, derive_ptt_port,
                         require_char_device)
-from ..core.rigs import RIGS, flight_defaults
+from ..core.rig import arm_deadman
+from ..core.rigs import RIGS, flight_defaults, mode_passband
 
 FS = spec.SAMPLE_RATE
 
@@ -53,6 +57,29 @@ FS = spec.SAMPLE_RATE
 # still time to do something about it.
 WRITE_TIMEOUT_S = 0.25
 
+# How long `_close` waits for rigctl to quit when asked, to end when terminated,
+# then to die when killed.
+QUIT_WAIT_S = 3.0
+TERM_WAIT_S = 2.0
+KILL_WAIT_S = 2.0
+
+# What the unwind gets before the interpreter is taken down under it. Every other
+# deadman in this tree arms with the key ALREADY DOWN -- `Rig.panic` unkeys first
+# -- and can afford `PANIC_BUDGET_S`. Here the key is still up when a stop signal
+# arms it, and `Rig.stop` then walks its whole ladder: the keying line dropped and
+# handed back, ioctls on a port this process already holds, then rigctl taken off
+# the serial port -- the quit written to its pipe, and the waits for it to quit,
+# to end and to die. Firing before that ladder finishes would leave the CAT child
+# to the reaper and the line to the close of a dying process, rather than to the
+# ladder that reads it back.
+#
+# Bounded above by what reaps this modem: `tools/onair.sh` ends its children
+# through the claim, which gives each `REAP_GRACE_S` to unkey itself and then
+# sends SIGKILL, ending the handler and the deadman with it.
+LADDER_WORST_S = WRITE_TIMEOUT_S + QUIT_WAIT_S + TERM_WAIT_S + KILL_WAIT_S
+DEADMAN_MARGIN_S = 0.25
+DEADMAN_BUDGET_S = LADDER_WORST_S + DEADMAN_MARGIN_S
+
 # PACTOR-3 is centred at spec.CENTER_FREQ_HZ (1500 Hz) in the audio passband, so on
 # USB the emitted RF centre = dial + 1500 Hz. Winlink's RMSChannels list quotes the
 # CHANNEL CENTRE; the operator tunes dial = centre - 1500. Keep that offset explicit
@@ -60,36 +87,13 @@ WRITE_TIMEOUT_S = 0.25
 def center_to_dial(center_hz: float) -> int:
     return int(round(center_hz - spec.CENTER_FREQ_HZ))
 
-# One cost of keying on `RIGS[...]["ptt_type"] == "RTS"`, to watch on the air:
-# hamlib closes the PTT port after configuring it and reopens it on the session's
-# FIRST key-down, so the first burst -- the connect, the one burst a called station
-# has to lock onto -- pays a serial open that no later burst does. `--preflight`
-# measures it, as PTT actuation against the rig's settle.
-def ptt_device(rig: str, serial: str) -> str:
-    """The port whose RTS keys `rig`, derived from the CAT port it shares a chip
-    with -- the two device names differ only in the trailing interface index
-    (...B0 Enhanced/CAT, ...B1 Standard/PTT). Derived rather than listed so
-    --serial stays the single source of truth for both. Rigs that key over CAT
-    have no second port and answer with the one they already have.
+NO_KEYING_LINE = "transmit unavailable: no keying line in this profile"
 
-    The derivation is `core.ptt.derive_ptt_port`'s, deliberately narrow: a
-    loose "advance the last digit" turns /dev/ttyUSB0 into /dev/ttyUSB1, and on
-    Linux those are two different adapters -- quite possibly another radio's
-    CAT port -- so a name that carries a trailing digit outside the CP210x
-    convention is refused rather than guessed at. A name with no interface
-    index at all (a bench port, a symlink) has nothing to advance and is used
-    as it stands.
 
-    Either way, a path that is not a character device is REFUSED here, naming
-    what was derived and from what. A stat and never an open: opening a keying
-    line asserts RTS on a port something else may be driving. See
-    `core.ptt.require_char_device` for the 2026-08-10 placeholder-device
-    session this check exists for.
-    """
+def ptt_device(rig: str, serial: str) -> str | None:
     iface = RIGS[rig].get("ptt_iface")
     if iface is None:
-        require_char_device(serial)
-        return serial
+        return None
     if re.search(r"\d$", serial):
         try:
             derived = derive_ptt_port(serial)
@@ -153,25 +157,11 @@ def find_rigctl(rigctl_dir=None) -> Path:
     return Path(found)
 
 
-def drain(proc: subprocess.Popen, errors: deque | None = None) -> None:
-    """Empty rigctl's stdout so a long session cannot fill the pipe.
-
-    A pipe nobody reads holds about 64 KiB, and rigctl blocks writing once it is
-    full -- at which point it stops reading its stdin, and every command we send
-    it, unkey included, goes into a pipe that never drains. A session is
-    thousands of commands and prints something for many of them, so this is a
-    route to a permanently keyed transmitter with no error anywhere.
-
-    Not all of it is noise: rigctl reports a refused command in-band
-    (``set_ptt: error = ...``), and a channel that discards those passes every
-    liveness check while nothing reaches the radio -- a rig powered off behind a
-    still-enumerated adapter keys nothing and says so on every command, to a
-    reader that did not exist. Lines carrying an error go into `errors` for
-    `Rig.key_failure` to read back; the rest is dropped as before.
-    """
+def drain(stream, errors: deque | None = None) -> None:
     def pump():
         try:
-            for line in iter(proc.stdout.readline, ""):
+            for raw in iter(stream.readline, b""):
+                line = raw.decode(errors="replace")
                 if errors is not None and "error" in line.lower():
                     errors.append(line.strip())
         except (ValueError, OSError):
@@ -179,124 +169,72 @@ def drain(proc: subprocess.Popen, errors: deque | None = None) -> None:
     threading.Thread(target=pump, daemon=True).start()
 
 
-def mode_passband(profile) -> int:
-    """hamlib's RIG_PASSBAND_NOCHANGE where the profile names its own width:
-    `tune` set it by raw CAT, and any hamlib passband rewrites the FTDX10's
-    width and roofing filter both."""
-    return -1 if "rx_width_hz" in profile else FILTER_HZ
+def cat_once(argv, timeout, *, own_session=False):
+    """One rigctl invocation under the launch admission, answered as
+    `subprocess.run(..., capture_output=True, text=True)` answers."""
+    from ..core.native import spawn_native
+
+    child = spawn_native(argv, claim_fd=9, own_session=own_session)
+    try:
+        out, err = child._process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        child._process.kill()
+        child._process.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, child._process.returncode,
+                                       out.decode(errors="replace"), err.decode(errors="replace"))
 
 
 class Rig:
-    """Hamlib control via direct one-shot rigctl commands.
-
-    Talks to the rig directly (``rigctl -m <model> -r <serial>``) rather than
-    through a persistent rigctld daemon: the daemon path silently dropped PTT on
-    the FT-891 at 38400 (a startup/timing race), whereas direct rigctl keys it
-    reliably. A CAT PTT command persists at the rig after the process exits, so
-    T 1 / play / T 0 across separate calls holds the key for the whole burst.
-    Verified on-air on the FT-891 (W9SSJ, 2026-07-23).
-
-    WHICH PATH FOR WHICH OPERATION -- the two rules that look contradictory are
-    about different directions, and both hold:
-
-      * SET/latching operations (T 1, T 0, F, M) -- USE ONE-SHOT rigctl. They
-        latch at the rig, so nothing is lost when the process exits, and the
-        daemon's startup race is what dropped PTT.
-      * READ-back operations (f, m) -- also fine one-shot. An earlier note here
-        claimed they race the CAT and return "", but that was retested on this rig
-        (2026-07-24): five consecutive one-shot reads returned 7100000 identically.
-        The contradicting evidence was contention with a concurrently running
-        rigctld plus a shell quoting bug, not a CAT race. `get_freq` still tolerates
-        "" because contention remains possible if something else opens the port.
-
-    Exclusive CAT is required either way: this bypasses rigctld and opens the
-    serial port directly, so any corpus-collector rigctld (and the scanner) must
-    be stopped before an on-air run. Do not start a rigctld to compensate.
-
-    KEYING IS NOT A CAT OPERATION on a rig that offers a PTT line (`ptt_type`).
-    That changes one thing above: RTS is held by the open port rather than
-    latched at the rig, so where a CAT PTT certainly survives the process, RTS
-    *can* fall with it. It is not known to. Deassert-on-last-close is unmeasured
-    on this adapter (`core.ptt`), and the port here is opened by hamlib, which
-    clears `HUPCL` outright -- so of all the ways this station holds the keying
-    line, this is the one least likely to drop it. On 2026-08-04 a session keying
-    RTS through this class was killed mid-over and kept transmitting on 10.1 MHz
-    until the operator powered the radio down. So `stop` kills a wedged rigctl
-    before its one-shot rather than leaving it holding the port: the one-shot
-    needs the port, and nothing waits on the close to lower anything.
-    """
-
-    def __init__(self, model, serial, baud, *, ptt_type="RIG", ptt_port=None,
+    def __init__(self, model, serial, baud, *, ptt_type="LINE", ptt_port=None,
                  rigctl_dir=None):
+        if ptt_type != "LINE":
+            raise ValueError("ptt_type must be LINE")
         self.rigctl = find_rigctl(rigctl_dir)
         self.model, self.serial, self.baud = model, serial, baud
         self.ptt_type = ptt_type
-        self.ptt_port = ptt_port or serial
+        self.ptt_port = ptt_port
         self._proc = None
         self._sick = False
-        self._keyer = None       # the rigctl that took the last key-down
-        self._errs: deque = deque(maxlen=8)   # rigctl's own in-band refusals
-        self._down = threading.Event()        # a stop() has begun; see stop()
-        self.retired = False                  # the unkey ladder ran out; see retire()
+        self._errs: deque = deque(maxlen=8)
+        self._down = threading.Event()
+        self.retired = False
+        self._keyer = (LineKeyer(ptt_port, lambda line: print(line, flush=True),
+                                alarm=lambda line: print(f"!! {line}", flush=True),
+                                abort=self._down.is_set, on_retire=self.retire)
+                       if ptt_port else None)
 
     def _argv(self, *extra):
-        """Every invocation, long-lived or one-shot, carries the SAME keying
-        configuration. A one-shot that fell back to CAT PTT would send `TX0;`
-        while RTS was still asserted, and the rig would stay keyed -- which is
-        exactly the failure the one-shot in `stop` exists to prevent."""
-        argv = [str(self.rigctl), "-m", str(self.model), "-r", self.serial,
-                "-s", str(self.baud), "-P", self.ptt_type]
-        if self.ptt_port != self.serial:
-            argv += ["-p", self.ptt_port]
-        return argv + list(extra)
+        return [str(self.rigctl), "-m", str(self.model), "-r", self.serial,
+                "-s", str(self.baud), "-P", "NONE", *extra]
 
     def _open(self):
-        """One long-lived rigctl in interactive mode, commands over its stdin.
+        from ..core.native import spawn_native
 
-        A one-shot `rigctl` costs about 900 ms here -- process start plus opening
-        and configuring the CAT port -- and that lands on the UNKEY, so the rig
-        stays keyed for the best part of a second after the audio stops. That is
-        precisely the slot a PACTOR peer answers in (~0.29 s into the 1.25 s
-        cycle), so every reply was being transmitted over. Measured on the FT-891,
-        2026-07-25. Holding the process open makes a PTT change a pipe write.
-
-        Once `stop()` has begun (`_down`), a dead child is never replaced:
-        None instead. The refusal lives HERE, at the spawn, because a caller
-        that checked before calling could pass while the child was alive and
-        arrive after the watchdog's stop() had killed it -- and a fresh rigctl
-        spawned then re-opens the CAT port stop just released and blocks its
-        one-shot unkey on it for seconds, with the rig possibly keyed. A live
-        child is still returned; nothing respawns.
-
-        Check-and-spawn is still not atomic, and stop() deliberately takes no
-        lock -- no unkey path may ever wait on another thread. So a stop()
-        landing while `Popen` is in flight is caught on the way out: the gate
-        is read again once the spawn returns, and a child born into a stopped
-        channel is killed here rather than handed to anyone -- stop()'s
-        `_close` ran before this child existed and would never have seen it.
-        """
-        if self._proc is None or self._proc.poll() is not None:
-            if self._down.is_set():
-                return None
-            # stderr folds into stdout so the drain sees rigctl's refusals
-            # whichever stream carries them; nothing parses this pipe for data.
-            proc = subprocess.Popen(
-                self._argv(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, text=True, bufsize=1)
-            if self._down.is_set():
-                proc.kill()
-                try:
-                    proc.wait(timeout=2)
-                except Exception:
-                    pass
-                return None
-            self._proc = proc
-            # Writes go out through `_put` on this fd, never through the buffered
-            # wrapper, so that a child which has stopped reading costs a deadline
-            # rather than a caller that never returns.
-            os.set_blocking(proc.stdin.fileno(), False)
-            drain(proc, self._errs)
-            self._sick = False
+        try:
+            if self._proc is None or not self._proc.alive():
+                if self._proc is not None:
+                    self._close()        # reap and close the dead child before any replacement
+                if self._down.is_set():
+                    return None
+                proc = self._proc = spawn_native(self._argv(), claim_fd=9, long_lived=True,
+                                                 device=self.serial)
+                if self._down.is_set():
+                    self._close()
+                    return None
+                # Writes go out through `_put` on this fd, never through the buffered
+                # wrapper, so that a child which has stopped reading costs a deadline
+                # rather than a caller that never returns.
+                os.set_blocking(proc.stdin.fileno(), False)
+                drain(proc.stdout, self._errs)
+                drain(proc.stderr, self._errs)
+                self._sick = False
+        except ClaimError as exc:
+            if getattr(exc, "child", None) is not None:
+                self._proc = exc.child   # kept, so that `_close` can still end it
+            self._errs.append(str(exc))
+            self._sick = True
+            return None
         return self._proc
 
     def _put(self, line: str) -> bool:
@@ -322,33 +260,18 @@ class Rig:
         return True
 
     def _cmd(self, *a) -> bool:
-        """Write one command to the long-lived rigctl. True if it went.
-
-        Bounded, and it does not retry into a pipe that did not take it. `rigctl`
-        stops reading its stdin whenever it is busy -- a CAT transaction the rig
-        is slow to answer, its own stdout backing up -- and a blocking write into
-        that pipe never returns and never raises, which defeats every unkey in
-        the program at once. So a write that misses its deadline marks the
-        channel dead and says so; the caller stops, and `stop`'s one-shot, which
-        shares neither the pipe nor the process, is what unkeys.
-
-        A write that FAILS is different from one that is not taken: the child has
-        exited, so one fresh one is worth trying before giving up.
-        """
         if self._sick:
             return False
         line = " ".join(a) + "\n"
         for _ in range(2):
             if self._open() is None:
-                # stop() has begun its ladder and the child is gone; `_open`
-                # is what refuses to replace it, so the gate and the spawn
-                # cannot be interleaved by a watchdog stop() between them.
                 return False
             try:
                 if self._put(line):
                     return True
             except OSError:
-                self._proc = None
+                # The handle stays: a broken pipe does not prove the child is
+                # gone, and only `_close` may decide it is.
                 continue
             break
         self._sick = True
@@ -359,105 +282,74 @@ class Rig:
         return self._cmd("M", m, str(int(passband)))
     def set_power(self, level): return self._cmd("L", "RFPOWER", f"{level:.2f}")
 
+    def _once(self, *cmd):
+        """One invocation of its own, after the interactive child hands the port back."""
+        self._close()
+        return cat_once(self._argv(*cmd), 8)
+
     def set_power_once(self, level) -> bool:
         """RFPOWER through a one-shot, for after `stop` has closed the channel.
 
-        `stop` latches `_down`, so the live path is gone for good by the time a
-        session restores the level it borrowed -- and that is the right order:
-        nothing may hold the CAT port while the unkey ladder may still need it.
+        In its own session, so the operator's Ctrl-C does not reach it, and over
+        before an armed deadman, so a rig that does not answer is a restore
+        reported as failed and not a process killed.
         """
-        self._close()
-        return subprocess.run(self._argv("L", "RFPOWER", f"{level:.2f}"),
-                              capture_output=True, text=True,
-                              timeout=8).returncode == 0
+        try:
+            self._close()
+            timeout = within_deadman(8)
+            if timeout <= 0:
+                return False
+            return cat_once(self._argv("L", "RFPOWER", f"{level:.2f}"), timeout,
+                            own_session=True).returncode == 0
+        except (ClaimError, subprocess.TimeoutExpired):
+            return False
 
     def get_power(self):
-        """RFPOWER read-back, via a one-shot, on `get_freq`'s rule and for its
-        reason: the long-lived process owns the port, so a read closes it first
-        and the next PTT change opens a new one."""
-        self._close()
-        r = subprocess.run(self._argv("l", "RFPOWER"), capture_output=True,
-                           text=True, timeout=8)
-        return r.stdout.strip()
+        try:
+            return self._once("l", "RFPOWER").stdout.strip()
+        except ClaimError:
+            return ""
 
-    def _devices_present(self) -> None:
-        """Raise `PttError` unless the keying path's devices are still there.
-
-        A stat and never an open -- opening a keying line asserts RTS. Both
-        ports, because the command travels the CAT port and the RTS travels the
-        other, and either can be the one that was never plugged in.
-        """
-        require_char_device(self.serial)
-        if self.ptt_port != self.serial:
-            require_char_device(self.ptt_port)
+    def arm(self) -> None:
+        if self._keyer is None:
+            raise PttError(NO_KEYING_LINE)
+        if self._down.is_set() or self.retired:
+            raise PttError("the rig has been taken down")
+        try:
+            self._keyer.arm()
+        except BaseException:
+            self.stop()
+            raise
 
     def ptt(self, on):
-        """Key or unkey. A key-down REFUSES, by `PttError`, a device that is
-        not there -- the check nothing made before the 2026-08-10 placeholder
-        session (`core.ptt.require_char_device`) -- and refuses, by returning
-        False, a rig that `stop` has already taken down. The unkey checks
-        nothing: it must stay possible in every state the channel can be in.
-        """
-        if not on:
-            return self._cmd("T", "0")
-        if self._down.is_set() or self.retired:
-            # The watchdog's stop() can land while the main thread is still in
-            # its loop; a key-down after it would put a fresh rigctl on the CAT
-            # port the stop just released. And a rig whose unkey ladder ran out
-            # is one nobody has confirmed is down -- not one to key again.
-            return False
-        self._devices_present()
-        self._errs.clear()       # what key_failure reads must postdate this key
-        took = self._cmd("T", "1")
-        self._keyer = self._proc if took else None
-        return took
+        if self._keyer is None:
+            return not on
+        if on:
+            if self._down.is_set() or self.retired:
+                return False
+            # WHY: stop can land after this check; arm then raises PttError
+            # instead of returning False. Both refuse the key safely, so let
+            # the exception propagate to the caller's transmit-abort path.
+            self.arm()
+        return self._keyer.key(on)
 
     def retire(self) -> None:
-        """Nothing may key through this rig again; unkeys stay allowed.
-
-        The last rung of `core.ptt.Keyer.unkey`, reached when every path down
-        has been tried and none answered. `_down` is not the same state: that
-        one says a stop is in progress, and a rig that stopped cleanly may be
-        keyed by a later session. This one says the transmitter's state is
-        unknown, which no session may build on.
-        """
         self.retired = True
 
     def key_failure(self):
-        """Why the last key-down cannot have reached the rig, or None.
-
-        Asked AFTER the burst, because that is the only time the question can
-        be answered: the write that keys is a pipe write, and a pipe write
-        succeeds into a child that is already dying on a serial port it could
-        not open. That is how the 2026-08-10 session came to count carrier
-        against a device that did not exist. What remains checkable once the
-        burst is over: the rigctl that took the command is still standing, the
-        channel is not sick, and the keying devices are still there.
-
-        Evidence, not proof -- a live rigctl on a live port says nothing about
-        a pin having moved (see `core.ptt` on what a readback proves). But
-        every one of these failing is a burst that CANNOT have keyed, which is
-        exactly the claim a carrier count must be grounded in.
-        """
-        if self._sick:
-            return "the rigctl channel went dead -- a command write timed out"
         if self._keyer is None:
-            return "no key-down was ever taken by a rigctl"
-        if self._keyer.poll() is not None:
-            return (f"the rigctl that took the key-down exited (status "
-                    f"{self._keyer.returncode}) -- the command went into a "
-                    f"pipe nothing was reading")
-        if self._errs:
-            # A rigctl that stays alive and refuses every command in-band --
-            # radio off, CAT cable out, adapter still enumerated -- passes all
-            # the liveness checks above. Its own words are the evidence.
-            return "rigctl reported errors after the key-down: " + \
-                   "; ".join(self._errs)
-        try:
-            self._devices_present()
-        except PttError as exc:
-            return str(exc)
+            return NO_KEYING_LINE
+        key = self._keyer.last_key
+        if key is None or key.verdict != "confirmed" or not key.state_read or key.state is not True:
+            return "no key-down was confirmed on the keying line"
+        if self._down.is_set() or self.retired or self._keyer.must_retire:
+            return "the keying line has been stopped or retired"
+        drive = self._keyer.last_drive
+        if (drive is None or drive.verdict != "confirmed" or not drive.state_read
+                or drive.state is not self._keyer.last_on):
+            return "the last keying line drive was not confirmed by readback"
         return None
+
     def get_mode(self):
         """Read mode/width after releasing our interactive CAT owner, before RF.
 
@@ -465,24 +357,17 @@ class Rig:
         pipe write, its process status and actual response are required.
         The established get_freq close/read behavior is otherwise unchanged.
         """
-        self._close()
-        argv = [str(self.rigctl), "-m", str(self.model), "-r", self.serial,
-                "-s", str(self.baud), "-P", "NONE", "m"]
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=8)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            result = self._once("m")
+        except (OSError, ClaimError, subprocess.TimeoutExpired) as exc:
             raise ReceiverReadbackError("mode readback transport failed or timed out") from exc
         return parse_mode_readback(result.stdout, result.returncode, result.stderr)
 
     def get_receiver_filters(self):
         from ..core.ftdx10 import read_filters
-        self._close()
-        argv = [str(self.rigctl), "-m", str(self.model), "-r", self.serial,
-                "-s", str(self.baud), "-P", "NONE",
-                "w", "VS;", "w", "MD0;", "w", "MD1;", "w", "SH0;", "w", "RF0;"]
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=8)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            result = self._once("w", "VS;", "w", "MD0;", "w", "MD1;", "w", "SH0;", "w", "RF0;")
+        except (OSError, ClaimError, subprocess.TimeoutExpired) as exc:
             raise ReceiverReadbackError("raw receiver readback transport failed or timed out") from exc
         if (result.returncode or "error =" in result.stdout or "error =" in result.stderr
                 or "RPRT -" in result.stdout or "RPRT -" in result.stderr):
@@ -498,89 +383,136 @@ class Rig:
 
     def get_frequency_readback(self):
         """Strict CAT-only getter for an already assessed non-retuning child."""
-        self._close()
-        argv = [str(self.rigctl), "-m", str(self.model), "-r", self.serial,
-                "-s", str(self.baud), "-P", "NONE", "f"]
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=8)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            result = self._once("f")
+        except (OSError, ClaimError, subprocess.TimeoutExpired) as exc:
             raise ReceiverReadbackError("frequency readback transport failed or timed out") from exc
         return parse_frequency_readback(result.stdout, result.returncode, result.stderr)
 
     def get_freq(self):
-        """Frequency read-back, via a one-shot.
-
-        The long-lived process owns the serial port exclusively, so a concurrent
-        one-shot BLOCKS on it -- which hangs rather than errors, with the rig
-        possibly keyed. Reads are never latency-critical, so the interactive
-        process is closed first and reopened by the next PTT change.
-        """
-        self._close()
-        r = subprocess.run(self._argv("f"), capture_output=True, text=True,
-                           timeout=8)
-        return r.stdout.strip()
+        try:
+            return self._once("f").stdout.strip()
+        except ClaimError:
+            return ""
 
     def _close(self):
-        """Give the process the chance to quit, then take it away.
-
-        A dead channel is not asked politely: it is the case where the child is
-        not reading, and it is holding the serial port that the one-shot unkey
-        needs next.
-        """
-        if self._proc is None:
+        proc = self._proc
+        if proc is None:
             return
         try:
             if not self._sick:
                 self._put("q\n")
-                self._proc.wait(timeout=3)
+                proc.wait_gone(QUIT_WAIT_S)
         except Exception:
             pass
-        if self._proc.poll() is None:
-            self._proc.kill()
-            try: self._proc.wait(timeout=2)
-            except Exception: pass
+        if proc.alive():
+            proc.terminate()
+            if not proc.wait_gone(TERM_WAIT_S):
+                proc.kill()
+                if not proc.wait_gone(KILL_WAIT_S):
+                    self._sick = True
+                    raise ClaimError(f"native CAT termination unresolved for pid {proc.pid}")
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
         self._proc = None
 
     def stop(self):
-        """Unkey and release the port -- by every path there is, in order of
-        directness, because a rig left transmitting is the one failure that
-        must not happen: once down the live pipe, then the one ladder
-        (`core.ptt.Keyer.unkey`) -- a one-shot `T 0` judged by its exit
-        status, the keying line taken down with our own ioctl when the
-        one-shot cannot answer, the alarm, and a rig that stays down.
+        with signals_held():
+            self._down.set()
+            try:
+                if self._keyer is not None:
+                    self._keyer.unkey()
+            finally:
+                try:
+                    if self._keyer is not None:
+                        self._keyer.hand_back()
+                finally:
+                    try:
+                        self._close()
+                    except Exception as exc:
+                        print(f"!! CAT child not ended at stop: {exc}", flush=True)
 
-        The one-shot runs whatever the pipe write did. It shares nothing with
-        it -- not the pipe, not the process, and not the serial port, which
-        `_close` has just released -- so it is the unkey that holds when the
-        live path is the thing that went wrong. That is also why `_close` runs
-        before the ladder and not after: the live process owns the port
-        exclusively, and a one-shot racing it would wait on the port instead
-        of keying it down. Only a rig keyed by a serial line gives the ladder
-        a line to fall to; CAT PTT has no line to drop, and for it repeated
-        one-shots are the last word, then the alarm.
 
-        `stop` runs on the watchdog's thread as well as the main one, and the
-        first thing it does is close the door behind itself: `_down` stops any
-        other thread's `ptt` from spawning a fresh rigctl onto the CAT port
-        this ladder is about to need. Without that, the main thread's routine
-        unkey could land between `_close` and the one-shot and hold the port
-        against it -- the unkey that must always work, blocked by the unkey
-        that was merely polite. The ladder itself takes no lock, so nothing
-        here can ever wait on another thread with the transmitter keyed;
-        running it twice costs a duplicate `T 0`, which costs nothing.
-        """
-        self._down.set()
-        try: self.ptt(False)
-        except Exception: pass
-        try: self._close()
-        except Exception: pass
-        # Every invocation carries the SAME keying configuration (`_argv`), so
-        # the one-shot cannot fall back to CAT PTT while RTS is still asserted.
-        Keyer(OneShotRigctl(self._argv("T", "0")),
-              lambda line: print(line, flush=True),
-              alarm=lambda line: print(f"!! {line}", flush=True),
-              ptt_device=self.ptt_port if self.ptt_type != "RIG" else None,
-              on_retire=self.retire).unkey()
+def within_deadman(timeout: float) -> float:
+    """`timeout`, cut to end a margin before an armed deadman would fire."""
+    left = signal.getitimer(signal.ITIMER_REAL)[0]
+    return timeout if left == 0 else min(timeout, left - DEADMAN_MARGIN_S)
+
+
+def arm_unwind_deadman() -> None:
+    """Arm the unwind's deadman, unless one is already counting: a later signal
+    must not move an armed deadman later."""
+    if signal.getitimer(signal.ITIMER_REAL)[0] == 0:
+        arm_deadman(DEADMAN_BUDGET_S)
+
+
+_depth = 0                          # `signals_held` blocks running on the main thread
+_pending: list[int] | None = None   # stop signals held; None while each is answered
+
+
+def hold_signal(signum: int) -> bool:
+    """Whether a stop signal waits for the end of a hold rather than being
+    answered now. The handler asks, so holding never swaps a handler.
+
+    The first stop signal of an unwind is answered, and every one after it is
+    held until the teardown's hold has ended: a second Ctrl-C landing between a
+    `finally:` and the hold it opens would otherwise skip `Rig.stop` entirely.
+    """
+    global _pending
+    if _pending is not None:
+        _pending.append(signum)
+        return True
+    _pending = []
+    return False
+
+
+@contextlib.contextmanager
+def signals_held(after_s: float | None = None):
+    """Let the unkey ladder finish before a stop signal is answered.
+
+    A Ctrl-C landing inside `Rig.stop` could cut its ladder short between the
+    keying line's unkey, its hand-back with the readback, and the CAT child's
+    close, each of which a stopped session still owes the rig. A signal
+    the hold takes still arms the deadman, so a wedged ladder stays bounded, and
+    is delivered when the outermost hold ends, so a caller can keep the rig's
+    own restore inside it. That end gives an armed deadman `after_s` for the
+    rest of the caller's unwind, or disarms it when there is none.
+
+    Whether stops are held is the one global `_pending`, which the stop handler
+    reads and each end of a hold changes in a single store. A signal sent to the
+    process may be taken by any thread and answered on the main one at whatever
+    bytecode it has reached; there is no swap of handlers for it to land in.
+    """
+    global _depth, _pending
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    if _pending is None:
+        _pending = []
+    _depth += 1
+    try:
+        yield
+    finally:
+        _depth -= 1
+        if not _depth:
+            _release(after_s)
+
+
+def _release(after_s: float | None) -> None:
+    """End the outermost hold: the deadman handed over while stops are still
+    held, then one store that answers every later stop at once, then the first
+    held stop delivered. One landing while that is delivered is dropped, since
+    the unwind already has its stop."""
+    global _pending
+    if signal.getitimer(signal.ITIMER_REAL)[0] > 0:
+        signal.setitimer(signal.ITIMER_REAL, after_s or 0)
+    taken, _pending = _pending, None
+    try:
+        for sig in taken[:1]:
+            signal.raise_signal(sig)
+    finally:
+        _pending = None
 
 
 def _warm_output(device) -> None:
@@ -626,12 +558,6 @@ def _play(audio_f32, device, max_key, rig, settle=0.10, *, admit=None):
 
     def watchdog():
         if not stop.wait(limit + settle):
-            # The full ladder, not just a write into the pipe: a playback that
-            # hangs and a rigctl that stops answering are one failure seen from
-            # two sides, so the force-unkey must not depend on the channel that
-            # is suspect. `stop` ends at `drop_rts` -- the local ioctl that
-            # needs no daemon and no reply, and it takes the transmitter off the
-            # air whether or not the playback below ever comes back.
             try:
                 if rig: rig.stop()
             except Exception: pass
@@ -646,8 +572,7 @@ def _play(audio_f32, device, max_key, rig, settle=0.10, *, admit=None):
         if admit is not None:
             admit()
         if rig and rig.ptt(True) is False:
-            raise PttError(f"the key-down was not taken -- rigctl on "
-                           f"{rig.serial} has stopped answering")
+            raise PttError("the key-down was not confirmed on the keying line")
         if rig and settle:
             time.sleep(settle)
         # Per-burst open/close does stall the input occasionally (6% of blocks);
@@ -702,6 +627,11 @@ def _decode(wav_path, run_sh=None):
 
 def run(args):
     outdir = Path(args.outdir).expanduser(); outdir.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run and RIGS[args.rig].get("ptt_iface") is None:
+        print(NO_KEYING_LINE, flush=True)
+        in_dev = find_device(args.audio_in, "in")
+        _record(args.listen, in_dev, str(outdir / "listen.wav"))
+        return
     dx = args.dxcall.upper()
     if args.dial:                                    # operator gives the dial directly
         dial = args.dial
@@ -743,9 +673,9 @@ def run(args):
     except PttError as exc:
         raise SystemExit(f"NOT KEYING: {exc}") from None
     rig = Rig(r["model"], args.serial, args.baud or r["baud"],
-              ptt_type=r.get("ptt_type", "RIG"), ptt_port=ptt_port)
+              ptt_type="LINE", ptt_port=ptt_port)
     try:
-        if not (rig.set_mode(r["mode"], mode_passband(r)) and rig.set_freq(dial)):
+        if not (rig.set_mode(r["mode"], mode_passband(r, FILTER_HZ)) and rig.set_freq(dial)):
             raise SystemExit(f"NOT KEYING: rigctl on {args.serial} did not take "
                              f"the mode/frequency commands -- the CAT channel "
                              f"is not standing")
@@ -763,6 +693,7 @@ def run(args):
         print(f"rig dial {readback} Hz (signal centre ~{readback + int(spec.CENTER_FREQ_HZ)} Hz).")
         # A beat between tuning and the first key. No channel check runs here:
         # whether to transmit on a shared band is the operator's judgement.
+        rig.arm()
         time.sleep(3)
         for attempt in range(1, args.attempts + 1):
             print(f"--- attempt {attempt}/{args.attempts}: keying {dur:.1f}s ---")
@@ -829,7 +760,11 @@ def main():
 
 if __name__ == "__main__":
     # A signal must unwind, not just kill: every unkey here hangs off a
-    # `finally`. See onair._unkey_on_signal for what this cost once.
+    # `finally`. See onair._unkey_on_signal for what this cost once. Run as
+    # `-m`, this file is a second copy beside the `hfmodem.shrike.ota` that
+    # onair imports, so the session runs from that one, whose hold the stop
+    # handler reads.
+    from hfmodem.shrike import ota
     from hfmodem.shrike.onair import _unkey_on_signal
     _unkey_on_signal()
-    main()
+    ota.main()

@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from hfmodem.tests import fakeclaim
+
 from . import corpora
 
 _LAUNCHER = Path(__file__).resolve().parents[5] / "tools/onair.sh"
@@ -177,6 +179,7 @@ def test_invalid_pounce_budget_is_refused_before_hardware(monkeypatch, budget):
 def test_exhausted_wait_reaches_shell_and_closes_audio(monkeypatch):
     import sys
     kc = corpora.harness("kestrel_connect")
+    fakeclaim.install(monkeypatch)
     stopped = []
     monkeypatch.setattr(kc, "AudioVaraIO", lambda *a, **kw: SimpleNamespace(
         bursts_sent=0, burst_level=None, stop=lambda: stopped.append(True)))

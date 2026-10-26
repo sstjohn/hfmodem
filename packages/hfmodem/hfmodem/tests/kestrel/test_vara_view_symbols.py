@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Decision-point telemetry must preserve decoding and recording-clock placement."""
 import numpy as np
 

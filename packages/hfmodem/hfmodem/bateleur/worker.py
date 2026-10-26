@@ -5,6 +5,9 @@
 from collections import deque
 import queue
 import threading
+import time
+
+from hfmodem.core.hostio import join_threads
 
 
 class ModemWorker:
@@ -75,42 +78,49 @@ class ModemWorker:
         self._thread = threading.Thread(target=self._loop, name=self.worker_name, daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
         with self._work:
             self._running = False
             self._work.notify()
-        if self._thread:
-            self._thread.join()
-            self._thread = None
-        self._clean()
+            if (self._thread is None or not self._thread.is_alive()) and not self._cleanup.empty():
+                self._thread = threading.Thread(target=self._clean, name=self.worker_name, daemon=True)
+                self._thread.start()
+            thread = self._thread
+        ended = join_threads((thread,), deadline)
+        with self._work:
+            return ended and self._cleanup.empty()
 
     def _after_work(self):
         pass
 
     def _loop(self):
-        while self._running:
+        try:
+            while self._running:
+                self._clean()
+                with self._work:
+                    self._work.wait_for(lambda: not self._running or not self._q.empty()
+                                        or self._audio_buffer or not self._cleanup.empty())
+                    if not self._running:
+                        break
+                    if not self._q.empty():
+                        kind, item = self._q.get_nowait()
+                    elif self._audio_buffer:
+                        kind = "audio"
+                        item = self._audio_buffer.popleft()
+                        self._audio_samples -= len(item[1][-1])
+                    else:
+                        continue
+                try:
+                    if kind == "audio":
+                        gap, args = item
+                        if gap:
+                            self.reset_receive()
+                        self._audio(*args)
+                    else:
+                        item()
+                except Exception as exc:
+                    self._log(f"{self.worker_name}: {kind} failed ({type(exc).__name__}: {exc})")
+                self._after_work()
+        finally:
             self._clean()
-            with self._work:
-                self._work.wait_for(lambda: not self._running or not self._q.empty()
-                                    or self._audio_buffer or not self._cleanup.empty())
-                if not self._running:
-                    break
-                if not self._q.empty():
-                    kind, item = self._q.get_nowait()
-                elif self._audio_buffer:
-                    kind = "audio"
-                    item = self._audio_buffer.popleft()
-                    self._audio_samples -= len(item[1][-1])
-                else:
-                    continue
-            try:
-                if kind == "audio":
-                    gap, args = item
-                    if gap:
-                        self.reset_receive()
-                    self._audio(*args)
-                else:
-                    item()
-            except Exception as exc:
-                self._log(f"{self.worker_name}: {kind} failed ({type(exc).__name__}: {exc})")
-            self._after_work()

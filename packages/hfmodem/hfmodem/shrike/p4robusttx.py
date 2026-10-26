@@ -117,19 +117,6 @@ the reference is the high bit. Weight 26, algebraic degree 5, and matching
 nothing generated: see the module note.
 """
 
-SHORT_DIBITS = (
-    2, 1, 3, 2, 3, 0, 2, 1, 2, 3, 2, 1, 2, 0, 3, 2, 3, 1, 0, 0, 0, 0,
-    2, 2, 2, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 2, 2, 0,
-    2, 0, 0, 2, 0, 2, 0, 0, 0, 0, 2, 2, 0, 0, 2, 0, 2, 0, 2, 2, 0, 2,
-    2, 0, 2, 2, 2, 0, 2, 2, 0, 2, 0, 0, 0, 2, 2, 0, 0, 0,
-)
-"""The tape's first caller burst, despread and hard-decided: 84 phase steps.
-
-Kept as the measurement it is. `short_dibits(6, 'A')` rebuilds it but for
-the dropped first step, and that identity is the whole claim the mask and the
-Walsh reading make about this packet -- the other six close it independently.
-"""
-
 CS_DIBITS = (
     (1, 3, 3, 0, 1, 3, 0, 0, 1, 0, 3, 0, 3, 3, 2, 3, 0, 2, 3, 2, 0, 3, 3, 0, 1, 0),
     (3, 1, 2, 3, 3, 2, 3, 3, 2, 2, 2, 2, 1, 1, 2, 1, 0, 2, 2, 1, 0, 1, 0, 3, 2, 2),

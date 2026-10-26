@@ -52,7 +52,7 @@ class Burst:
         """Scheduled lead from total TXDELAY in milliseconds and converted onset."""
         if txdelay < 0 or settle_s < 0:
             raise ValueError("negative transmit delay")
-        return max(settle_s, txdelay / 1000 - onset_s(self.limiter))
+        return lead_s(txdelay, settle_s, self.limiter)
 
     def keyed_s(self, txdelay: float = 100, settle_s: float = 0.04) -> float:
         return self.lead_s(txdelay, settle_s) + len(self.audio) / waveform.RATE + 0.1
@@ -66,6 +66,10 @@ def onset_s(limiter: bool) -> float:
     return int(np.flatnonzero(np.abs(converted) >= 0.5 / 32767)[0]) / CARD_RATE_HZ
 
 
+def lead_s(txdelay: float, settle_s: float, limiter: bool) -> float:
+    return max(settle_s, txdelay / 1000 - onset_s(limiter))
+
+
 def transmit(frames: list[bytes], level: int = 0, *, suggestion: int = 0,
              limiter: bool = True, max_key_s: float | None = None,
              txdelay: float = 100, settle_s: float = 0.04) -> list[Burst]:
@@ -75,7 +79,7 @@ def transmit(frames: list[bytes], level: int = 0, *, suggestion: int = 0,
     if max_key_s is not None:
         if not np.isfinite(max_key_s) or max_key_s <= 0:
             raise ValueError("invalid maximum keyed interval")
-        lead = max(settle_s, txdelay / 1000 - onset_s(limiter))
+        lead = lead_s(txdelay, settle_s, limiter)
         capacities = []
         for cls, ext in [(c, 0) for c in range(15)] + [(15, e) for e in range(17)]:
             duration = (frame.symbol_count(cls, ext, level) + waveform.RAMP_SYMBOLS + 1) * waveform.SPS / waveform.RATE

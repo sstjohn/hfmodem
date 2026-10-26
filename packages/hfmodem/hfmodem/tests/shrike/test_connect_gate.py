@@ -504,6 +504,7 @@ class _StubHost:
 
     protocol = onair.Protocol.PACTOR1
     sent_total = 0
+    wire_sent_total = 0
     rcvd_total = 0
     peer = None
 

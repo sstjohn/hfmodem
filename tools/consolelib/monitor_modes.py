@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Receive-only console profiles, independent of the modes that can fly arms."""
 from dataclasses import replace
 import math

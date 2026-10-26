@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Literal FT-891 consumer and sample-clock baselines; no hardware is opened."""
 from dataclasses import asdict
 import socket
@@ -84,7 +86,9 @@ def test_profile_and_flight_consumers():
                            'E': 'PSK', 'F': 'DATA-FM-N'}},
         data_widths=(50, 100, 150, 200, 250, 300, 350, 400, 450,
                      500, 800, 1200, 1400, 1700, 2000, 2400, 3000),
-        rf_gain_raw_max=30, physical_data_passband_verified=False)
+        rf_gain_raw_max=30, physical_data_passband_verified=False,
+        cat='yaesu', id='0650', name='Yaesu FT-891', cat_rts=False, cat_dtr=False,
+        min_watts=5, max_watts=100, width_prefix='1', width_modes=('8', 'C'))
     args = rigs.flight_defaults(SimpleNamespace(
         rig=None, serial=None, ptt_port=None, audio_in=None, audio_out=None))
     assert vars(args) == dict(rig='ft891', serial=None, ptt_port=None,

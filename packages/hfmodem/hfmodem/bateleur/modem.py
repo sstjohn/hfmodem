@@ -231,9 +231,9 @@ class BateleurModem(ModemWorker):
         """Card-rate samples, every one once, in order."""
         self._feed((np.asarray(audio, dtype=np.float32),))
 
-    def stop(self):
+    def stop(self, timeout: float = 5.0) -> bool:
         self.abort()
-        super().stop()
+        return super().stop(timeout)
 
     # -- on the modem's thread ---------------------------------------------
 

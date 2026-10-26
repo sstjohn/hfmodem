@@ -189,8 +189,8 @@ def the_cycle_the_greeting_arrived_in() -> None:
         zip(fixed["deadlines"], (HOLD, *fixed["deadlines"])), 1) if a != b]
     check("two cycles moved payload, and the first is ours: the announcement "
           "confirmed in cycle 4, the greeting in cycle 13",
-          moved_in == [4, GREETING] and fixed["host"].sent_total == 7,
-          f"cycles {moved_in}, {fixed['host'].sent_total}B sent")
+          moved_in == [4, GREETING] and fixed["host"].wire_sent_total == 7,
+          f"cycles {moved_in}, {fixed['host'].wire_sent_total}B sent")
 
 
 def the_channel_the_gateway_took() -> None:
@@ -320,9 +320,9 @@ def a_peer_that_answers_every_cycle() -> None:
     check("...and the hold ends `--hold` cycles after the last of them, with "
           "every byte acknowledged",
           moving["goodbye"] == last + HOLD + 1
-          and moving["host"].sent_total == ANNOUNCE + TALKING * len(LINE),
+          and moving["host"].wire_sent_total == ANNOUNCE + TALKING * len(LINE),
           f"goodbye {moving['goodbye']}, deadline {last + HOLD}, "
-          f"{moving['host'].sent_total}B sent over "
+          f"{moving['host'].wire_sent_total}B sent over "
           f"{len(moving_acks)} acknowledgements")
 
 

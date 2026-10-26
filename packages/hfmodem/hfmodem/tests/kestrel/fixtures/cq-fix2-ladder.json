@@ -1,0 +1,332 @@
+{
+  "source": "working/varac-p3/bench/b3-ladder/audio/20261020-224721-chat-b3-ladder-erase-a2b/a2b_rx_input.wav",
+  "sha256": "6b939b7c0e63445ebe111caf168a0721b98169dcf7024c39fac4b4310a69c134",
+  "rows": [
+    {
+      "sender": "K",
+      "noise_rms": 0.05,
+      "start_sample": 805871,
+      "stop_sample": 1101859,
+      "stock_sn": 5.5,
+      "quality": 16.91461356870133,
+      "noise_pos": 2,
+      "stock_sn_line": 96
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.05,
+      "start_sample": 1239014,
+      "stop_sample": 1535223,
+      "stock_sn": 3.9,
+      "quality": 14.632786676977203,
+      "noise_pos": 432196,
+      "stock_sn_line": 116
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.05,
+      "start_sample": 1671142,
+      "stop_sample": 1967607,
+      "stock_sn": 4.8,
+      "quality": 14.626974830213372,
+      "noise_pos": 864415,
+      "stock_sn_line": 138
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.05,
+      "start_sample": 2105327,
+      "stop_sample": 2401315,
+      "stock_sn": 4.3,
+      "quality": 16.935334588654044,
+      "noise_pos": 1296617,
+      "stock_sn_line": 156
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.1,
+      "start_sample": 2584047,
+      "stop_sample": 2880035,
+      "stock_sn": 2.6,
+      "quality": 10.989758792827175,
+      "noise_pos": 289026,
+      "stock_sn_line": 181
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.1,
+      "start_sample": 3015654,
+      "stop_sample": 3311607,
+      "stock_sn": 1.8,
+      "quality": 8.641100512529645,
+      "noise_pos": 721235,
+      "stock_sn_line": 202
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.1,
+      "start_sample": 3448038,
+      "stop_sample": 3743479,
+      "stock_sn": 0.6,
+      "quality": 8.690443593957355,
+      "noise_pos": 1153461,
+      "stock_sn_line": 222
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.1,
+      "start_sample": 3881967,
+      "stop_sample": 4177955,
+      "stock_sn": 2.0,
+      "quality": 10.891764237950795,
+      "noise_pos": 1585513,
+      "stock_sn_line": 240
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.2,
+      "start_sample": 4361199,
+      "stop_sample": 4657187,
+      "stock_sn": -2.4,
+      "quality": 5.029991199605368,
+      "noise_pos": 577538,
+      "stock_sn_line": 267
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.2,
+      "start_sample": 4792294,
+      "stop_sample": 5088503,
+      "stock_sn": -3.0,
+      "quality": 2.5678390452712714,
+      "noise_pos": 1009638,
+      "stock_sn_line": 289
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.2,
+      "start_sample": 5224934,
+      "stop_sample": 5520887,
+      "stock_sn": -3.9,
+      "quality": 2.5555675238720137,
+      "noise_pos": 1441879,
+      "stock_sn_line": 309
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.2,
+      "start_sample": 5657583,
+      "stop_sample": 5953571,
+      "stock_sn": -2.1,
+      "quality": 4.946156467640578,
+      "noise_pos": 1873940,
+      "stock_sn_line": 328
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.3,
+      "start_sample": 6136815,
+      "stop_sample": 6432803,
+      "stock_sn": -5.6,
+      "quality": 1.412407085586893,
+      "noise_pos": 866050,
+      "stock_sn_line": 353
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.3,
+      "start_sample": 6568934,
+      "stop_sample": 6864887,
+      "stock_sn": -6.5,
+      "quality": -0.9505716254232879,
+      "noise_pos": 1298116,
+      "stock_sn_line": 373
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.3,
+      "start_sample": 7001830,
+      "stop_sample": 7297527,
+      "stock_sn": -6.6,
+      "quality": -0.7968850049459513,
+      "noise_pos": 1730362,
+      "stock_sn_line": 393
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.3,
+      "start_sample": 7433711,
+      "stop_sample": 7729699,
+      "stock_sn": -4.6,
+      "quality": 1.4998738283852662,
+      "noise_pos": 2162375,
+      "stock_sn_line": 413
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.45,
+      "start_sample": 7913455,
+      "stop_sample": 8209443,
+      "stock_sn": -8.1,
+      "quality": -1.7076592032391957,
+      "noise_pos": 1154562,
+      "stock_sn_line": 440
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.45,
+      "start_sample": 8345830,
+      "stop_sample": 8641527,
+      "stock_sn": -10.2,
+      "quality": -4.7273186442491175,
+      "noise_pos": 1586624,
+      "stock_sn_line": 460
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.45,
+      "start_sample": 8777702,
+      "stop_sample": 9073399,
+      "stock_sn": -10.5,
+      "quality": -4.115619873628239,
+      "noise_pos": 2018687,
+      "stock_sn_line": 483
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.45,
+      "start_sample": 9211375,
+      "stop_sample": 9507363,
+      "stock_sn": -7.5,
+      "quality": -1.919558593164075,
+      "noise_pos": 2450928,
+      "stock_sn_line": 501
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.6,
+      "start_sample": 9691631,
+      "stop_sample": 9987619,
+      "stock_sn": -9.6,
+      "quality": -3.9875187625224613,
+      "noise_pos": 3076,
+      "stock_sn_line": 526
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.6,
+      "start_sample": 10122726,
+      "stop_sample": 10418935,
+      "stock_sn": -12.1,
+      "quality": -6.194972442890194,
+      "noise_pos": 435083,
+      "stock_sn_line": 546
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.6,
+      "start_sample": 10554342,
+      "stop_sample": 10850551,
+      "stock_sn": -11.7,
+      "quality": -5.89449506389502,
+      "noise_pos": 867147,
+      "stock_sn_line": 570
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.6,
+      "start_sample": 10987503,
+      "stop_sample": 11283491,
+      "stock_sn": -9.6,
+      "quality": -3.811757453809936,
+      "noise_pos": 1299324,
+      "stock_sn_line": 588
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.8,
+      "start_sample": 11466735,
+      "stop_sample": 11762723,
+      "stock_sn": -11.7,
+      "quality": -4.916399314828435,
+      "noise_pos": 291586,
+      "stock_sn_line": 614
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.8,
+      "start_sample": 11899366,
+      "stop_sample": 12195319,
+      "stock_sn": -12.8,
+      "quality": -7.505544494363152,
+      "noise_pos": 723792,
+      "stock_sn_line": 634
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.8,
+      "start_sample": 12331238,
+      "stop_sample": 12627447,
+      "stock_sn": -14.1,
+      "quality": -7.138481467436456,
+      "noise_pos": 1156032,
+      "stock_sn_line": 654
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.8,
+      "start_sample": 12764143,
+      "stop_sample": 13060131,
+      "stock_sn": -11.0,
+      "quality": -5.230157923947294,
+      "noise_pos": 1588078,
+      "stock_sn_line": 672
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.98,
+      "start_sample": 13243375,
+      "stop_sample": 13539363,
+      "stock_sn": -13.4,
+      "quality": -5.536375389617673,
+      "noise_pos": 580099,
+      "stock_sn_line": 701
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.98,
+      "start_sample": 13675750,
+      "stop_sample": 13971447,
+      "stock_sn": -14.8,
+      "quality": -8.139794565825516,
+      "noise_pos": 1012111,
+      "stock_sn_line": 721
+    },
+    {
+      "sender": "A",
+      "noise_rms": 0.98,
+      "start_sample": 14108134,
+      "stop_sample": 14404343,
+      "stock_sn": -14.7,
+      "quality": -8.6759602691988,
+      "noise_pos": 1444278,
+      "stock_sn_line": 741
+    },
+    {
+      "sender": "K",
+      "noise_rms": 0.98,
+      "start_sample": 14542319,
+      "stop_sample": 14838307,
+      "stock_sn": -12.7,
+      "quality": -5.714118681807674,
+      "noise_pos": 1876460,
+      "stock_sn_line": 760
+    }
+  ],
+  "transcript": "working/varac-p3/bench/b3-ladder/20261020-224721-chat.jsonl",
+  "transcript_sha256": "3147d7019701e15216f77f0f8f211a39ce25e8cd11e02910752d8eb481b3d509",
+  "noise_seed": 20260821,
+  "noise_cutoff_hz": 2900,
+  "noise_clip": 0.98,
+  "note": "Relay input is unmixed. Seeded noise reconstructed offline; exact mixer phase was not captured. noise_pos estimates phase from host timestamps."
+}

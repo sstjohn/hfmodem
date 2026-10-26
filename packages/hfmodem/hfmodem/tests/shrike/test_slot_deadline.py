@@ -22,12 +22,13 @@ import time
 import wave
 from functools import cache
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 from scipy.signal import hilbert, oaconvolve, resample_poly
 
-from hfmodem.shrike import arq, live, onair, p3acquire, placement, rx, spec
+from hfmodem.shrike import arq, live, onair, p3acquire, pactor1, placement, rx, spec
 from hfmodem.tests.shrike.recorded_pcm import recorded_pcm
 from hfmodem.tests.evidence import SWEEP_FLOOR
 from hfmodem.tests.shrike.test_granted_entry_retry import granted
@@ -252,10 +253,42 @@ class Replay:
         extent = sessrx._entry_p1_reply_extent(grid)
         owned = getattr(grid, '_p3_keyed_reply', None)
         acquisitions = len(self.cost['cs-acquire'])
-        _, _, whole, seg_start = onair._read_held_window(
-            bench, grid, tx, sessrx, slot, whole, seg_start, tx.boundary)
+        read_trace = []
+        reply_key = (host.arq._link_generation, owned)
+
+        def proof():
+            row = sessrx._entry_reply_results.get(reply_key, {})
+            return dict(complete=bool(row.get('complete')), grant=bool(row.get('grant')),
+                        current=host.arq._entry_p1_current)
+
+        supported_at_entry = bool(extent is not None and seg_start <= extent[0]
+                                  and seg_start + whole.size >= extent[1])
+        initial_origin, initial_end = seg_start, seg_start + whole.size
+        p1_at_entry = grid.rx_due_in(initial_origin, initial_end)
+        initial_reply = proof()
+        acquire, deliver = p3acquire.control_signal, sessrx._on
+
+        def traced_acquire(*args, **kwargs):
+            read_trace.append(dict(event='cold-acquire', **proof()))
+            return acquire(*args, **kwargs)
+
+        def traced_delivery(ev, **kwargs):
+            result = deliver(ev, **kwargs)
+            if (ev.protocol == onair.Protocol.PACTOR1 and ev.kind == 'unassigned'
+                    and ev.spare == pactor1.CS_59A):
+                read_trace.append(dict(event='full-p1-grant', at=round(ev.t*onair.FS),
+                                       **proof()))
+            return result
+
+        with patch.object(p3acquire, 'control_signal', traced_acquire), \
+                patch.object(sessrx, '_on', traced_delivery):
+            heard, _, whole, seg_start = onair._read_held_window(
+                bench, grid, tx, sessrx, slot, whole, seg_start, tx.boundary)
         reader_acquisitions = len(self.cost['cs-acquire']) - acquisitions
+        # Preserve both the retry credit and its current, complete P1 proof.
+        p1_candidate = host.arq._upgrade_asked
         p1_grant = host.arq._upgrade_asked
+        p1_current = host.arq._entry_p1_current
         listen = getattr(tx, '_p3_entry_listen_slot', None) == slot
         if listen:
             assert extent is not None and owned[0] == grid.keyed_slot
@@ -287,8 +320,19 @@ class Replay:
                                 window_s=whole.size / onair.FS,
                                 off_grid_ms=off * 1e3,
                                 keyed=len(bench.emissions) > keyed,
+                                emissions=bench.emissions[keyed:],
+                                emission_slots=tx.slots_used[keyed:],
+                                key_late_ms=[(self.settle_n / onair.FS - lead) * 1e3
+                                             for lead in bench.leads[keyed:]],
                                 listen=listen, owned=owned, extent=extent,
                                 p1_grant=p1_grant,
+                                p1_candidate=p1_candidate,
+                                p1_current=p1_current, heard=heard,
+                                initial_reply=initial_reply,
+                                supported_at_entry=supported_at_entry,
+                                initial_origin=initial_origin, initial_end=initial_end,
+                                p1_at_entry=p1_at_entry,
+                                read_trace=read_trace,
                                 reader_acquisitions=reader_acquisitions,
                                 grants=host.arq._upgrade_requests,
                                 intent=not listen and not spent and (
@@ -353,8 +397,9 @@ class Replay:
 
     @property
     def off_grid_ms(self):
-        """The margin on the cycles that actually took the slot they aimed at.
+        """Pre-regrid margins, including aims abandoned for a later slot.
 
+        Actual emission admission is measured separately by ``key_late_ms``.
         A cycle the ARQ had nothing for keys nothing and moves no clock, so its
         window opens wherever the last one left off and its margin measures the
         gap rather than the work.
@@ -392,7 +437,11 @@ def assert_replay_policy(run):
     keyed = [c for c in run.cycles if c['keyed']]
     assert keyed
     assert all(not c['listen'] for c in keyed)
-    assert all(c['off_grid_ms'] < run.grace_ms for c in keyed if c['intent'])
+    # The pre-regrid aim may have been abandoned. Every actual key still
+    # owes the same minimum notice, including keys emitted during collection.
+    assert all(c['key_late_ms'] and
+               all(late < run.grace_ms for late in c['key_late_ms'])
+               for c in keyed)
     for c in run.cycles:
         if c['listen']:
             assert not c['keyed'] and c['owned'] is not None
@@ -714,3 +763,19 @@ def test_p1_alternation_and_p3_ownership_survive_the_campaign(tmp_path):
         if n + 1 < arq.ENTRY_GRANT_CYCLES:
             assert host.protocol is spec.Protocol.PACTOR3 and host.arq.entry_pending
     assert host.protocol is spec.Protocol.PACTOR1 and not host.arq.entry_pending
+
+
+def test_postponed_aim_keeps_actual_key_admission(tmp_path):
+    run = Replay('r06', tmp_path, stall_at=2, stall_s=1.5).run()
+    assert_replay_policy(run)
+    moved = [c for c in run.cycles if c['aimed'] == run.stall_slot
+             and c['slot'] > c['aimed'] and c['keyed']]
+    assert len(moved) == 1
+    cycle = moved[0]
+    assert cycle['off_grid_ms'] > run.grace_ms  # The old aim really was lost.
+    assert cycle['key_late_ms'] and max(cycle['key_late_ms']) < run.grace_ms
+    assert cycle['slot'] in cycle['emission_slots']
+    assert len(cycle['emissions']) == len(cycle['emission_slots'])
+    for (first, _), slot in zip(cycle['emissions'], cycle['emission_slots']):
+        assert first // run.grid.slot_n == slot
+        assert first - run.grid.boundary(slot) < run.settle_n

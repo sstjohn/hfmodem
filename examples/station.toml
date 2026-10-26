@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # hfmodem station configuration. One file, the whole station.
 #
 # Select this file with HFMODEM_STATION, then switch rigs with HFMODEM_RIG.
@@ -121,7 +123,7 @@ listen  = true
 
 [protocols.ale]
 enabled    = false              # 2G ALE: scans, calls, links; retunes the rig
-host       = "ale"              # docs/protocols/bateleur/ALE-HOST.md
+host       = "ale"              # docs/implementation/bateleur/ALE-HOST.md
 port       = 8330
 addresses  = ["N0CALL"]         # this station's ALE address(es)
 channels   = [7102000, 10145500, 14109000]   # dial frequencies, Hz
@@ -134,12 +136,12 @@ lp_key     = ""                 # 14 hex digits when lp_level is set
 
 [protocols.bateleur]
 enabled   = false               # the bateleur modem: 188-110, 4285, 4539, 39- and 16-tone
-host      = "bateleur"          # docs/protocols/bateleur/HOST-API.md
+host      = "bateleur"          # docs/implementation/bateleur/HOST-API.md
 cmd_port  = 8310
 data_port = 8311
 bandwidth = "3000"              # rig's top TX audio edge; "3200" sends the untrimmed pulse
 # host = "s5066" runs a STANAG 5066 node on the modem instead, its clients on
-# `port` (docs/protocols/bateleur/S5066.md):
+# `port` (docs/implementation/bateleur/S5066.md):
 #   addresses = ["0.0.0.1"]     # the node's own
 #   mode      = "110 1200L"     # where it starts
 #   port      = 5066
@@ -185,6 +187,10 @@ output = "USB AUDIO  CODEC"
 # p1_drive = 0.6
 # p3_drive = 0.6
 # p4_drive = 0.6
+# The macOS output volume tx_drive was measured at, written with it by
+# `console vara txcal --set`; unset, the rig profile's applies. Every arm warns
+# when the codec reads otherwise. The console never sets the volume.
+# codec_output = 0.098
 # tx_latency_ms = 7.0
 # input_gain is hardware-volume intent/metadata, never software sample scaling.
 # No independent witness input is selected automatically for this rig.

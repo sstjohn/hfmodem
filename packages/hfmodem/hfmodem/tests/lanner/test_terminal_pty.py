@@ -33,16 +33,18 @@ pytestmark = [pytest.mark.skipif(not (LAUNCHER.is_file() and shutil.which('bash'
 
 ARM = r'''
 set -euo pipefail
-MYCALL=W9SSJ; AUDIO_IN=codec; AUDIO_OUT=codec; PTT_PORT=/dev/null; RIG_NAME=ftdx10
-RIG_MODE=PKTUSB; VENV="$STUB"; REPO="$STUB"
+MYCALL=W9SSJ; AUDIO_IN=codec; AUDIO_OUT=codec; PTT_PORT="$STUB/ptt"; RIG_NAME=ftdx10
+RIG_MODE=PKTUSB; MODEL=1; VENV="$STUB"; REPO="$STUB"
 die()              { printf '!! %s\n' "$*" >&2; exit 1; }
 say()              { :; }
 require_cat()      { :; }
 eval "$(awk '/^redact_secrets\(\)/ {f = 1} f {print} f && /^}/ {exit}' "$PORTS")"
-eval "$(awk '/^RIG_LOCK_FD=/ {f = 1} f {print} f && /^}/ {exit}' "$PORTS")"
-require_hardware() { claim_rig; }
+eval "$(awk '/^RIG_LOCK_FD=/ {f = 1} /^derive_ptt\(\)/ {exit} f' "$PORTS")"
+claim_down()       { printf 'claim down\n'; }
+require_hardware() { claim_rig || exit $?; }
 rigctld_start()    { trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP; }
-rig_power()        { :; }
+rig_power()        { printf 'power %s\n' "$1"; }
+prove_unkeyed()    { printf 'receiver rms 0.05 -> LIVE\n'; }
 tune()             { :; }
 nc()               { case "$(cat)" in *get_mode*) echo 'Mode: PKTUSB' ;; esac; }
 unkey_and_exit()   { printf 'verdict %s %s\n' "$1" "$2"; exit "$1"; }
@@ -55,21 +57,24 @@ eval "case rtty in $(awk 'index($0, "rtty)") == 1 {f = 1} f && /^  ;;/ {exit} f'
 class Terminal:
     def __init__(self, tmp_path, owner=None):
         (tmp_path / 'python').write_text(
-            f'#!/bin/bash\n[ "$1" = -m ] || exec {sys.executable} "$@"\n'
+            f'#!/bin/bash\n[ "$1 $2" = "-m hfmodem.lanner.qso" ] || exec {sys.executable} "$@"\n'
             f'shift 2\nexec {sys.executable} {HERE / "qso_on_fakes.py"} "$@"\n')
         (tmp_path / 'python').chmod(0o755)
         (tmp_path / 'arm.sh').write_text(ARM)
         self.log = tmp_path / 'fake.log'
         self.log.touch()
-        self.claim = Path(f'/tmp/hfmodem-rig-hfmodem-pty-test-{os.getpid()}.claim')
+        for device in ('cat', 'ptt'):
+            (tmp_path / device).touch()
+        self.claim = tmp_path / 'state' / 'rig.claim'
         env = dict(os.environ, STUB=str(tmp_path), LAUNCHER=str(LAUNCHER), TERM='xterm',
                    PORTS=str(LAUNCHER.parent / 'lib' / 'ports.sh'),
-                   CAT_PORT=f'/dev/hfmodem-pty-test-{os.getpid()}',
-                   FAKE_LOG=str(self.log), PYTHONPATH=os.pathsep.join(sys.path))
+                   CAT_PORT=str(tmp_path / 'cat'), PTT_PORT=str(tmp_path / 'ptt'),
+                   FAKE_LOG=str(self.log), PYTHONPATH=os.pathsep.join(sys.path),
+                   HFMODEM_COEXIST_HARNESS='1', HFMODEM_STATE_DIR=str(tmp_path / 'state'))
         # Inherited fixed dimensions override ncurses resizing. This child owns
         # a real pty; ncurses must follow its ioctl dimensions across resizes.
         for name in ('LINES', 'COLUMNS', 'HFMODEM_STATION', 'HFMODEM_OWNER_FD',
-                     'HFMODEM_RIG', 'RIG_CLAIMED'):
+                     'HFMODEM_RIG', 'HFMODEM_PYTHON', 'RIG_CLAIMED', 'HFMODEM_COEXIST_LOG', 'HFMODEM_COEXIST_BARRIERS'):
             env.pop(name, None)
         if owner is not None:
             os.set_inheritable(owner, True)
@@ -108,8 +113,10 @@ class Terminal:
         return False
 
     def alive(self):
-        if self.status is None and os.waitpid(self.pid, os.WNOHANG) != (0, 0):
-            self.status = 'exited'
+        if self.status is None:
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid:
+                self.status = os.waitstatus_to_exitcode(status)
         return self.status is None
 
     def close(self):
@@ -117,7 +124,10 @@ class Terminal:
             os.killpg(self.pid, signal.SIGKILL)
             os.waitpid(self.pid, 0)
         os.close(self.fd)
-        self.claim.unlink(missing_ok=True)
+
+
+SIGNALS = {'group-int': signal.SIGINT, 'launcher-int': signal.SIGINT,
+           'launcher-term': signal.SIGTERM, 'launcher-hup': signal.SIGHUP}
 
 
 @pytest.fixture
@@ -127,7 +137,8 @@ def terminal(tmp_path):
     made.close()
 
 
-@pytest.mark.parametrize('stop', ['ctrl-c', 'ctrl-q', 'group-int', 'launcher-int'])
+@pytest.mark.parametrize('stop', ['ctrl-c', 'ctrl-q', 'group-int', 'launcher-int',
+                                  'launcher-term', 'launcher-hup'])
 def test_the_backgrounded_terminal_takes_keys_resizes_and_unkeys_before_exit(terminal, stop):
     assert terminal.until('size 24x100', 30), terminal.screen[-400:]
     assert b'RX' in terminal.screen
@@ -149,15 +160,21 @@ def test_the_backgrounded_terminal_takes_keys_resizes_and_unkeys_before_exit(ter
     elif stop == 'group-int':
         os.killpg(os.tcgetpgrp(terminal.fd), signal.SIGINT)
     else:
-        os.kill(terminal.pid, signal.SIGINT)
+        os.kill(terminal.pid, SIGNALS[stop])
     assert terminal.until('key down', after=keyed)
     end = time.monotonic() + 15
     while terminal.alive() and time.monotonic() < end:
         terminal.pump(0.2)
     terminal.pump()
     assert not terminal.alive()
-    code = 130 if stop.endswith('int') else 0
-    assert f'verdict {code} 7080000'.encode() in terminal.screen
+    if stop.startswith(('group', 'launcher')):
+        assert terminal.status == 128 + SIGNALS[stop]
+        tail = (b'claim down\r\npower 7080000\r\nreceiver rms 0.05 -> LIVE\r\n'
+                b'CLAIM RELEASED\r\n')
+    else:
+        assert terminal.status == 0 and b'verdict 0 7080000' in terminal.screen
+        tail = b'claim down\r\nCLAIM RELEASED\r\n'
+    assert terminal.screen.endswith(tail), terminal.screen[-400:]
     assert 'hand back' in terminal.said()
 
 

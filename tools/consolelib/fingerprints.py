@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Three measurements that ride free on every arm, and one reader that takes them.
 
 An arm's transcript already holds them: where on the raster the peer answered,

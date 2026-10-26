@@ -38,6 +38,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 import math
+import re
+import sys
 
 # `rigctl -m 1036 --dump-caps`. Everything here shapes or reports the receive
 # chain: PREAMP is IPO, IF is the shift, STRENGTH and RAWSTR are the S-meter.
@@ -153,6 +155,8 @@ RAW_READS = (
     ('SH0;', 'WIDTH', {'021': '4000 Hz in PSK/DATA (CAT Table 3)',
                        '023': 'SSB-only index; unverified in DATA'}),
     ('RF0;', 'R. FIL', {'6': '12 kHz', '7': '3 kHz', '9': '500 Hz', 'A': '300 Hz'}),
+    ('IS0;', 'IF SHIFT', lambda value: (f'{int(value[1:]):+d} Hz'
+        if re.fullmatch(r'0[+-]\d{4}', value) else None)),
     ('NA0;', 'NARROW', {'0': 'off', '1': 'ON'}),
     ('GT0;', 'AGC', {'0': 'OFF', '1': 'FAST', '2': 'MID', '3': 'SLOW',
                      '4': 'AUTO-FAST', '5': 'AUTO-MID', '6': 'AUTO-SLOW'}),
@@ -172,7 +176,14 @@ _FTDX10_READBACK = {**_FT891_READBACK,
     'raw_reads': RAW_READS,
 }
 
+#: Each `[rig] cat` value and the way its CAT is reached. Hamlib drives Icom
+#: CI-V, so `civ` goes through the rigctld started with the profile's model.
+CAT_BACKENDS = {"yaesu": "serial", "civ": "rigctld", "rigctld": "rigctld", "none": "none"}
+
 RIGS = {
+    "generic": {"cat": "rigctld", "model": 0, "mode": "USB", "settle": 0.1,
+                "tx_latency_ms": 0.0, "tx_latency_status": "UNMEASURED",
+                "audio_chain": "generic"},
     "ft891": {"model": 1036, "baud": 38400, "mode": "PKTUSB", "settle": 0.04,
               "tx_latency_ms": 20.0, "tx_latency_status": "INFERRED",
               "ptt_type": "RTS", "ptt_iface": 1, "tr_switch_s": 0.055,
@@ -180,7 +191,11 @@ RIGS = {
               "cat_port": "/dev/cu.usbserial-00A6C71B0",
               "ptt_port": "/dev/cu.usbserial-00A6C71B1",
               "note": "Yaesu FT-891; set CAT rate to 38400 (menu 05-06); external soundcard on DATA jack"},
-    "ftdx10": {"rx_width_hz": 4000, "roofing_hz": 12000, "model": 1042, "baud": 38400, "mode": "PKTUSB", "settle": 0.04,
+    # IF SHIFT +500 is the operator's, 10-23: measured in the receive audio at WIDTH
+    # 4000, -3 dB 117-2531 Hz, -6 dB 94-3023, -10 dB 82-3562, against IF 0's
+    # 199-2273, 94-2754, 82-3211. The bottom is the codec's cliff near 90 Hz either
+    # way, so the shift is 300-500 Hz more at the top.
+    "ftdx10": {"rx_width_hz": 4000, "roofing_hz": 12000, "if_shift_hz": 500, "model": 1042, "baud": 38400, "mode": "PKTUSB", "settle": 0.04,
                "tx_latency_ms": 7.0, "tx_latency_status": "MEASURED",
                "ptt_type": "RTS", "ptt_iface": 1, "tr_switch_s": 0.070,
                "tr_recovery_slack_s": 0.015, "audio_chain": "ftdx10_usb",
@@ -189,6 +204,9 @@ RIGS = {
                "endpoint_status": "CONFIRMED",
                "endpoint_evidence": "2026-10-02 operator confirmation on air: CAT and RTS PTT on these ports keyed the FTDX10 cleanly in two PTT-tail runs, and the levels readback named USB AUDIO  CODEC",
                "cat_port": "/dev/cu.usbserial-01D13C960",
+               # macOS output volume on the codec: the operator lowered it from 1.0
+               # on 10-23 to stop ALC compression. Not yet calibrated; see `vara txcal`.
+               "codec_output": 0.098,
                "note": "Yaesu FTDX10; REAR SELECT=USB, RPTT=RTS; settle 40 ms and TR 70 ms provisional, UNMEASURED"},
     "g90":   {"model": 3088, "baud": 19200, "mode": "PKTUSB", "settle": 0.10, "tr_switch_s": 0.055, "tr_recovery_slack_s": 0.015,
               "tx_latency_ms": 0.0, "tx_latency_status": "UNMEASURED", "audio_chain": "g90_external",
@@ -222,11 +240,47 @@ for _name, _readback, _widths, _maximum in (
         ('ftdx10', _FTDX10_READBACK, FTDX10_DATA_WIDTHS[1:], 255)):
     RIGS[_name].update(readback=_readback, data_widths=_widths,
                       rf_gain_raw_max=_maximum, physical_data_passband_verified=False)
+for _name, _id, _label, _width_prefix in (
+        ('ft891', '0650', 'Yaesu FT-891', '1'),
+        ('ftdx10', '0761', 'Yaesu FTDX10', '0')):
+    RIGS[_name].update(cat='yaesu', id=_id, name=_label,
+                      cat_rts=False, cat_dtr=False, min_watts=5, max_watts=100,
+                      width_prefix=_width_prefix, width_modes=('8', 'C'))
+RIGS['ftdx10']['roofing_codes'] = {
+    code: int(value.split()[0]) * (1000 if value.endswith('kHz') else 1)
+    for command, _, meanings in _FTDX10_READBACK['raw_reads'] if command == 'RF0;'
+    for code, value in meanings.items()}
+RIGS['ftdx10']['width_modes'] = ('8', 'C', 'E')
 # Empty rows are intentional: no Yaesu decoders or widths for unqualified rigs.
-for _name in ('g90', 'x6100'):
+for _name in ('g90', 'x6100', 'generic'):
     RIGS[_name].update(readback={key: (() if key in ('rig_levels', 'rig_funcs',
         'unreported_levels', 'meters', 'menu_items', 'raw_reads') else {})
         for key in _FT891_READBACK if key != 'menu_group'}, data_widths=())
+
+
+def mode_passband(profile, passband):
+    """The passband for a hamlib set_mode: RIG_PASSBAND_NOCHANGE where the profile owns
+    the width. Given any width, newcat writes it to the FTDX10 and sets the roofing
+    filter to the narrowest that holds it (3000 Hz: WIDTH 018, R. FIL 3 kHz), and 0
+    asks for the mode's normal width; `tune` sets both by raw CAT."""
+    return -1 if 'rx_width_hz' in profile else passband
+
+
+#: The device nodes a test may be handed: nothing, and a terminal of its own.
+TEST_DEVICES = re.compile(r"/dev/(null|ttys\d+|pts/\d+)")
+
+
+def refuse_device_in_test(*ports):
+    """In a test run, a resolved port that is any other device node is a radio's,
+    quite possibly the station's own, and is refused before anything opens it."""
+    from . import coexist
+    if not coexist.test_run():
+        return
+    for port in filter(None, ports):
+        real = os.path.realpath(port)
+        if real.startswith("/dev/") and not TEST_DEVICES.fullmatch(real):
+            sys.exit(f"!! a test launch resolved the device {port}; "
+                     "give it test-local CAT_PORT and PTT_PORT")
 
 
 def resolve_rig(name=None, *, environ=None, legacy_model=None):
@@ -237,8 +291,14 @@ def resolve_rig(name=None, *, environ=None, legacy_model=None):
     return selected
 
 
+def profile_cat(name=None, *, environ=None, legacy_model=None):
+    """The `[rig] cat` of a station file that leaves it unset: its rig profile's own."""
+    return RIGS[resolve_rig(name, environ=environ, legacy_model=legacy_model)].get("cat", "rigctld")
+
+
 PROFILE_OVERRIDES = frozenset({"cat_port", "ptt_port", "settle", "tr_switch_s",
                                "tr_recovery_slack_s", "tx_latency_ms",
+                               "cat_rts", "cat_dtr",
                                "calibration_status", "calibration_evidence"})
 
 
@@ -263,6 +323,8 @@ def resolve_profile(name=None, *, environ=None, legacy_model=None, profiles=None
                      and math.isfinite(value) and value >= 0
                      and (key not in ("settle", "tr_switch_s") or value > 0)
                      and (key != "tx_latency_ms" or value <= 60))
+        elif key in ("cat_rts", "cat_dtr"):
+            valid = isinstance(value, bool)
         elif key == "calibration_status":
             valid = value in ("UNMEASURED", "PROVISIONAL", "INFERRED", "MEASURED")
         else:
@@ -390,6 +452,7 @@ def launcher_defaults(args, *, rig_attr="rig", audio_fields=None,
         if name != "ft891" and getattr(args, field, None) is None:
             value = os.environ.get("CAT_PORT" if endpoint == "cat_port" else "PTT_PORT")
             setattr(args, field, value or profile.get(endpoint))
+            refuse_device_in_test(getattr(args, field))
     for field in drive_fields:
         if getattr(args, field, None) is None and name != "ft891":
             setattr(args, field, cfg.audio.drive_for() if cfg else config.ChainAudio().drive_for())
@@ -420,11 +483,14 @@ def flight_defaults(args):
     else:
         args.rig = resolve_rig(args.rig)
     profile = station_cfg.resolved_profile if station_cfg else RIGS[args.rig]
-    args.serial = args.serial or os.environ.get("CAT_PORT") or (
-        profile.get("cat_port") if station_cfg or args.rig == "ftdx10" else None)
-    if hasattr(args, "ptt_port"):
-        args.ptt_port = args.ptt_port or os.environ.get("PTT_PORT") or (
+    if not args.serial:
+        args.serial = os.environ.get("CAT_PORT") or (
+            profile.get("cat_port") if station_cfg or args.rig == "ftdx10" else None)
+        refuse_device_in_test(args.serial)
+    if hasattr(args, "ptt_port") and not args.ptt_port:
+        args.ptt_port = os.environ.get("PTT_PORT") or (
             profile.get("ptt_port") if station_cfg or args.rig == "ftdx10" else None)
+        refuse_device_in_test(args.ptt_port)
     if args.rig in ("ftdx10", "ft891"):
         args.audio_in = args.audio_in or (station_cfg.audio.input if station_cfg else None) or profile.get("audio_device")
         args.audio_out = args.audio_out or (station_cfg.audio.output if station_cfg else None) or profile.get("audio_device")
@@ -439,12 +505,14 @@ if __name__ == "__main__":
         name, profile = station_cfg.selected_rig, station_cfg.resolved_profile
     else:
         name, profile = resolve_rig(), RIGS[resolve_rig()]
+    ports = [profile.get(field, "") if name != "ft891" or (path and
+             station_cfg.resolution_sources.get(field) != "rig-profile") else ""
+             for field in ("cat_port", "ptt_port")]
+    refuse_device_in_test(*(os.environ.get(key) or port
+                            for key, port in zip(("CAT_PORT", "PTT_PORT"), ports)))
     print(name)
     for field in ("model", "baud", "mode"):
         print(profile.get(field, ""))
     print(station_cfg.audio.input if path else profile.get("audio_device", ""))
-    for field in ("cat_port", "ptt_port"):
-        value = profile.get(field, "") if name != "ft891" or (path and
-                station_cfg.resolution_sources.get(field) != "rig-profile") else ""
-        print(value)
+    print(*ports, sep="\n")
     print(station_cfg.audio.output if path else profile.get("audio_device", ""))

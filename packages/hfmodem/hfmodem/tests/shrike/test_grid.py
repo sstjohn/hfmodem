@@ -431,6 +431,9 @@ class _Rig:
     def _close(self):
         self.closed = True
 
+    def arm(self):
+        pass
+
     def ptt(self, on):
         self.edges.append(bool(on))
         return True
@@ -2753,6 +2756,11 @@ def main() -> int:
 
 def test_grid() -> None:
     assert main() == 0
+
+
+def test_a_live_session_is_admitted_once_its_input_is_open(admitted) -> None:
+    _session(cycles=12, hold=0, charge=0, peer=False)
+    assert admitted == ["inherited", "opened", "failed"]
 
 
 def test_the_decode_does_not_choose_the_window() -> None:

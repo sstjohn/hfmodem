@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Receive-only VARA HF channel monitor — who is calling whom, and which gateways
 are busy or idle.
 
@@ -49,7 +51,10 @@ no PTT, no rigctld, no audio output.
 from __future__ import annotations
 
 import argparse
-import subprocess
+import tempfile
+from hfmodem.core import claim
+from hfmodem.core.native import spawn_native
+from hfcapture import device_claim, device_opened, close_native, stop_native, drain_native
 import sys
 from collections import deque
 from dataclasses import dataclass, field
@@ -291,23 +296,32 @@ def wav_source(path: str):
 def device_source(device: str):
     """Read live audio from an INPUT device via ffmpeg (s16le mono @48k). This
     opens a capture only — it never keys PTT or plays audio."""
-    proc = subprocess.Popen(
-        [ffmpeg(), "-hide_banner", "-loglevel", "error",
-         *input_spec(device), "-ac", "1", "-ar", str(FS),
-         "-f", "s16le", "-"],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    print(f"Listening on {device!r} (receive-only). Ctrl-C to stop.\n", flush=True)
-    consumed = 0
-    try:
-        while True:
-            raw = proc.stdout.read(CHUNK * 2)
-            if not raw:
-                break
-            a = np.frombuffer(raw, "<i2").astype(float) / 32768.0
-            yield consumed, a
-            consumed += len(a)
-    finally:
-        proc.terminate()
+    with device_claim("vara_monitor", devices=claim.Devices(capture=device)) as held:
+        proc = spawn_native(
+            [ffmpeg(), "-hide_banner", "-loglevel", "error",
+             *input_spec(device), "-ac", "1", "-ar", str(FS),
+             "-f", "s16le", "-"],
+            claim_fd=held.claim, long_lived=True, device=device)
+        device_opened()
+        with tempfile.TemporaryFile(mode="w+") as diagnostics:
+            readers = drain_native(proc, diagnostics, stdout=False)
+            print(f"Listening on {device!r} (receive-only). Ctrl-C to stop.\n", flush=True)
+            consumed = 0
+            try:
+                while True:
+                    raw = proc.stdout.read(CHUNK * 2)
+                    if not raw:
+                        break
+                    a = np.frombuffer(raw, "<i2").astype(float) / 32768.0
+                    yield consumed, a
+                    consumed += len(a)
+            finally:
+                stop_native(proc)
+                for reader in readers:
+                    reader.join(timeout=2)
+                    if reader.is_alive():
+                        raise claim.ClaimError("capture diagnostic reader did not stop")
+                close_native(proc, stopped=True)
 
 
 def main() -> int:
@@ -343,6 +357,8 @@ def main() -> int:
         run(source, calls, decode_wideband=not args.no_wideband)
     except KeyboardInterrupt:
         print("\nstopped.", file=sys.stderr)
+    finally:
+        source.close()
     return 0
 
 

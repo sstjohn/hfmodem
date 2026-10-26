@@ -21,7 +21,7 @@ from hfmodem.core.rig import StuckTransmitter
 from hfmodem.core.operations import OperationGate, LeaseTimeout
 
 mode, entry = sys.argv[1:]
-st = process.Station(SimpleNamespace())
+st = process.Station(SimpleNamespace(protocols={}))
 st._install_signals()
 original = process.arm_deadman
 def arm(*args, **kwargs):
@@ -66,7 +66,8 @@ assert sys.stdin.buffer.read(1) == b'x'
 if entry == 'worker':
     threading.Thread(target=enter).start()
     while True:
-        time.sleep(0.1)
+        st._handle_signals()
+        time.sleep(0.01)
 else:
     enter()
 '''
@@ -125,7 +126,7 @@ def test_worker_arms_kernel_timer_before_signal_handoff(monkeypatch):
         raise Handoff
     monkeypatch.setattr(process.signal, 'setitimer', lambda *args: calls.append(('timer', *args)))
     monkeypatch.setattr(process.os, 'kill', kill)
-    st = process.Station(SimpleNamespace())
+    st = process.Station(SimpleNamespace(protocols={}))
     def worker():
         try:
             st.fatal_shutdown('worker failure')
@@ -164,7 +165,7 @@ import signal
 import threading
 from types import SimpleNamespace
 from hfmodem.station import process
-st = process.Station(SimpleNamespace())
+st = process.Station(SimpleNamespace(protocols={}))
 st._install_signals()
 # Simulate a main-thread handoff that never takes place.
 signal.signal(signal.SIGTERM, signal.SIG_IGN)

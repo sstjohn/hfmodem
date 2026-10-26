@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # HF telegraphy reference tables: ITA2, CCIR 476 / SITOR, NAVTEX
 
 Sources (primary, fetched and extracted with `pdftotext -layout` for exact

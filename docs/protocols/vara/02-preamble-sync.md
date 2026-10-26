@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # 02 — Preamble, synchronization & acquisition
 
 Transmission is **burst / PTT-keyed**: every over is one keyup→keydown burst.

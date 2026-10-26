@@ -1,0 +1,15 @@
+{
+  "session": "20261025T040021460489Z",
+  "source_samples": [
+    24140000,
+    24200000
+  ],
+  "audio_center_hz": 2250,
+  "local_dial_hz": 7104250,
+  "calling_dial_hz": 7105000,
+  "addressed_to": "W9SSJ",
+  "kind": "BW500 responder two-tone control frame 1",
+  "exact_pairs": 11,
+  "wave_sha256": "d3470a59bccbc14daa3e83d60d7d922cd48bd57f2a57ae181cb8548a7876da15",
+  "limit": "The call key identifies the addressee, not a transmitter or remote application acceptance."
+}

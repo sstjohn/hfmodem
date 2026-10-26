@@ -1,0 +1,44 @@
+[
+  {
+    "file": "idle.wav",
+    "source": "working/n5yyf-turn-1025/stock-drop-requests/B.wav",
+    "start_sample": 1224015,
+    "end_sample": 1305615,
+    "sha256": "a0c7af09bc18990fc6aa6579ce0f05a83011cf5c625824555cba7b59a862ce92"
+  },
+  {
+    "file": "confirmed-long.wav",
+    "source": "working/n5yyf-turn-1025/stock-drop-requests/B.wav",
+    "start_sample": 2356815,
+    "end_sample": 2438415,
+    "sha256": "44098060436beeaf03caa871d8c55f49d6dc7793a2a4b85c856b68d85c0dba24"
+  },
+  {
+    "file": "grant.wav",
+    "source": "working/n5yyf-turn-1025/stock-drop-requests/B.wav",
+    "start_sample": 2515215,
+    "end_sample": 2596815,
+    "sha256": "b6b8b9273d36753911bca8e12d5b48b971a3d764d9a881d1166ddf335542d055"
+  },
+  {
+    "file": "confirmed-control.wav",
+    "source": "working/n5yyf-turn-1025/stock-drop-ack/B.wav",
+    "start_sample": 1073957,
+    "end_sample": 1114757,
+    "sha256": "3f6c9124c86a268cf84a6d5c1611993ca11756a57e22b565a8cf7279ddef0faf"
+  },
+  {
+    "file": "grant-short.wav",
+    "source": "working/n5yyf-turn-1025/stock-drop-ack/B.wav",
+    "start_sample": 1184357,
+    "end_sample": 1227557,
+    "sha256": "481088a8ca1d95e89f1a94cd65b5afe75797a3a3cc7204f2817d0c4414f36a4c"
+  },
+  {
+    "file": "confirmed-idle-short.wav",
+    "source": "working/n5yyf-turn-1025/native-initial/B.wav",
+    "start_sample": 1564258,
+    "end_sample": 1626658,
+    "sha256": "b2673515d5d3ebd1b7482a9080896970fc9df63fb34c3e4e86eca947dc1cf6b3"
+  }
+]

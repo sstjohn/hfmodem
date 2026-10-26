@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Map VARA host PTT events onto the exact receiver recording they counted.
 
 Capture samples are counted at the same callback which queues the rig RX WAV.
@@ -73,16 +75,17 @@ def intervals(text, recording, kind, duration, fs=48000):
            'No complete successful PTT pairs with nearby capture counters in this recording.')
 
 
-def attribute(events, tx, *, qso=False):
+def attribute(events, tx, *, qso=False, local_role='caller', bounded=False):
     """Known protocol roles first; otherwise use the recorded local key schedule."""
-    first = min((e['t0'] for e in tx), default=float('inf'))
+    first = 0 if bounded else min((e['t0'] for e in tx), default=float('inf'))
+    peer_role = 'called' if local_role == 'caller' else 'caller'
     for e in events:
         if e.get('evidence_type') == 'ptt' or e.get('tx_confirmed') or e.get('transmit_label'):
-            e.update(direction='tx', role='caller', tx_confirmed=True)
+            e.update(direction='tx', role=local_role, tx_confirmed=True)
             e.setdefault('attribution', 'original local transmit log')
             continue
         if e.get('role') in ('caller','called'):
-            e['direction'] = 'tx' if e['role'] == 'caller' else 'rx'
+            e['direction'] = 'tx' if e['role'] == local_role else 'rx'
             e['attribution'] = ('QSO sender identified by protocol role' if qso else
                                 'handshake role; local station assumed caller')
             continue
@@ -99,16 +102,16 @@ def attribute(events, tx, *, qso=False):
             overlap = sum(max(0, min(hi,t['t1'])-max(lo,t['t0'])) for t in tx)
             local = (overlap > (hi-lo)/2 if hi>lo else
                      any(t['t0'] <= mid < t['t1'] for t in tx))
-            e.update(direction='tx' if local else 'rx', role='caller' if local else 'called',
+            e.update(direction='tx' if local else 'rx', role=local_role if local else peer_role,
                      attribution=('Local transmission on the QSO transmit schedule' if local else
                                   'Peer transmission between local QSO transmissions'))
             continue
         if any(t['t0']+EDGE_MARGIN <= mid <= t['t1']-EDGE_MARGIN and
                (hi-lo < .001 or max(0,min(hi,t['t1'])-max(lo,t['t0']))/(hi-lo) >= .8) for t in tx):
-            e.update(direction='tx', role='caller', attribution='overlaps logged local transmit interval')
+            e.update(direction='tx', role=local_role, attribution='overlaps logged local transmit interval')
         elif (tx and lo >= first
               and not any(t['t0']-EDGE_MARGIN <= mid <= t['t1']+EDGE_MARGIN for t in tx)
               and sum(max(0,min(hi,t['t1'])-max(lo,t['t0'])) for t in tx) <= .2 * max(.001,hi-lo)):
-            e.update(direction='rx', role='called', attribution='outside local TX; called station assumed for this QSO')
+            e.update(direction='rx', role=peer_role, attribution='outside local TX; peer station assumed for this QSO')
         else:
             e.update(direction='observed', role='unknown', attribution='unmapped recording or transmit boundary')

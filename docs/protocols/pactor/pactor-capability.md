@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # How a PACTOR station learns what the other end can demodulate
 
 Every PACTOR link opens in FSK PACTOR-1 before any switch to a faster generation.

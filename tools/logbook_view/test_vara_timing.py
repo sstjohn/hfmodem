@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 from vara_timing import intervals, attribute
 
 LOG = '''recording receive audio to /recordings/session.wav
@@ -88,6 +90,7 @@ def test_connected_replay_assigns_boundary_frame_to_the_peer(tmp_path, monkeypat
     monkeypatch.setattr(view, 'signal_view', lambda *a: None)
     monkeypatch.setattr(view, 'source_fingerprint', lambda: ('synthetic-source', {}))
     monkeypatch.setattr(view.vara_timing, 'intervals', lambda *a: (tx, 'synthetic clock'))
+    monkeypatch.setenv('GIT_DIR', str(tmp_path / 'not-a-checkout'))
     monkeypatch.setattr(view, 'replay', lambda *a, **kw: [
         {'id': 'peer', 't0': 1.95, 't1': 2.07, 'kind': 'peer control',
          'status': 'decoded control', 'symbols': None, 'frame_type': 'observation'}])
@@ -96,3 +99,4 @@ def test_connected_replay_assigns_boundary_frame_to_the_peer(tmp_path, monkeypat
     peer = next(e for e in events if e['id'] == 'peer')
     assert peer['direction'] == 'rx' and peer['role'] == 'called'
     assert 'Peer transmission' in peer['attribution']
+    assert json.loads((artifact / 'manifest.json').read_text())['decoder']['commit'] is None

@@ -1,7 +1,9 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Robust Packet waveform
 
 brubru renders and receives Robust Packet at 9600 samples/s. The
-[station attachment](station.md) converts the card stream, assesses channel
+[station attachment](../../implementation/robust-packet/station.md) converts the card stream, assesses channel
 occupancy, and serves KISS clients.
 
 Eight carriers run at 50 symbols/s, spaced 60 Hz apart, from 1290 to 1710 Hz

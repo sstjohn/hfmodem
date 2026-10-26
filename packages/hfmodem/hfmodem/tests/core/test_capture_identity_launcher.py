@@ -1,7 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Fake-exec-only launcher handoff; no live script or producer is invoked."""
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -356,13 +359,20 @@ def test_invalid_launcher_exit_refuses_without_side_effect(tmp_path, returncode)
 
 def test_shell_owned_exit_and_eof_keep_legacy_cleanup_and_exit_status():
     source = (ROOT / "tools/onair.sh").read_text()
+    ports = (ROOT / "tools/lib/ports.sh").read_text()
     assert "capture_rc=${1:-$?}" in source
-    assert "capture_trap_rc=$?;" in source
-    # rigctld setup, PACTOR, and ARDOP's child and post-child EXIT handlers.
-    assert source.count('capture_exit "$capture_trap_rc"') == 4
+    # Every later EXIT handler is the claim's, and the claim's ends the capture
+    # with the shell's own status.
+    traps = re.findall(r"trap '([^']*)' EXIT", source + ports)
+    assert traps[0] == "capture_exit"
+    assert set(traps[1:]) == {"claim_exit $?"}, traps
+    claim_exit = ports[ports.index("claim_exit() {"):ports.index("claim_processes() {")]
+    assert 'capture_exit "$rc" || rc=$?' in claim_exit
+    assert claim_exit.rstrip().endswith('exit "$rc"\n}')
     assert source.count('capture_transcript_finish "$capture_tee_rc"') == 2
     assert "--returncode" in source and "--outcome" in source
-    assert "for _ in $(seq 20)" in source
+    witness_stop = source[source.index("witness_stop() {"):]
+    assert 'claim_processes end "$pid" || return' in witness_stop[:witness_stop.index("\n}\n")]
 
 
 
@@ -405,4 +415,4 @@ def test_shell_witness_stdout_uses_original_descriptor_without_replacing_cleanup
     assert 'witness_log_target="/dev/fd/$HFMODEM_CAPTURE_WITNESS_LOG_FD"' in branch
     assert '>"$witness_log_target" 2>&1 &' in branch
     assert '>"$SESSION/witness.log" 2>&1 &' not in branch
-    assert 'capture_exit "$capture_trap_rc"' in branch
+    assert "trap 'claim_exit $?' EXIT" in branch

@@ -183,6 +183,7 @@ def test_1116_nine_clear_tails_register_once_and_first_answer_is_on_time(empty):
                for c in empty['captures'])
 
 
+@pytest.mark.realtime
 def test_1116_actual_clock_first_answer_is_on_time():
     result = replay()
     assert result['clock'] == 'actual'
@@ -228,7 +229,7 @@ def test_1116_no_readable_return_retains_four_grant_bound():
 
 
 def test_1116_work_overrun_cannot_key_first_answer_late():
-    result = replay(stall_ms=100)
+    result = replay(stall_ms=100, clock='declared')
     assert any(h['onset_sample'] == CLEAR[0] for h in tails(result))
     assert not any(e['audio_start'] == CLEAR[0] + round(.920 * FS) for e in result['emissions'])
     assert all(k['margin'] >= 0 for k in result['keys'])
@@ -251,3 +252,64 @@ def test_grant_revoked_after_partial_cannot_lend_its_pending_read_time():
                    for e in result['emissions'])
     assert all(k['margin'] >= 0 for k in result['keys'])
     assert result['buffered'] == 0 and result['breakins'] == 0
+
+
+def test_1116_empty_word_rollover_reads_measured_crc_before_its_own_deadline():
+    result = replay(clock='declared', empty_partial_work_ms=65)
+    legal(result)
+    charged = [r for r in result['reads'] if r.get('host_work_ms')]
+    assert len(charged) == 1
+    assert charged[0]['capture_end'] == 3267383
+    assert not charged[0]['registered']
+    assert charged[0]['wall_end'] > 3270215
+    assert not any(e['audio_start'] == 3272663 for e in result['emissions'])
+    capture = next(c for c in result['captures'] if c['requested'] == 3327383)
+    assert capture['last_key'] == capture['emission'] == 3152663
+    assert capture['grant'] == (3152663, capture['generation'])
+    assert capture['available'] > 3270215
+    registrations = [r for r in result['reads']
+                     if any(o['onset'] == 3288500 and o['kind'] == Kind.NORMAL
+                            and o['crc'] for o in r['registered'])]
+    assert len(registrations) == 1
+    reader = registrations[0]
+    assert reader['reader'] == 'read_partial' and reader['capture_end'] == 3327383
+    assert reader['wall_start'] < reader['wall_end'] <= 3330212
+    heard = [h for h in tails(result) if h['onset_sample'] == 3288500]
+    assert len(heard) == 1 and heard[0]['received_at_sample'] <= 3330212
+    assert heard[0]['capture_end_sample'] == 3327383
+    assert 3332660 - result['lead'] == 3330212
+    answer = next(k for k in result['keys'] if k['at'] == 3332660)
+    assert answer['read_margin'] >= 0 and answer['margin'] >= 0
+    assert any(e['audio_start'] == 3332660 for e in result['emissions'])
+
+
+@pytest.mark.parametrize('control', ['revoked', 'late'])
+def test_1116_intervening_capture_rechecks_owner_and_packet_deadline(monkeypatch, control):
+    normal_calls = []
+    original = P4Receiver._normal
+
+    def normal_call(self, *args, **kwargs):
+        normal_calls.append(kwargs.get('predicted'))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(P4Receiver, '_normal', normal_call)
+    result = replay(clock='declared', empty_partial_work_ms=65,
+                    revoke_at_peer_capture=control == 'revoked',
+                    peer_capture_lag_ms=100 if control == 'late' else 0)
+    capture = next(c for c in result['captures'] if c['requested'] == 3327383)
+    # The callback runs inside this capture, after its entry snapshot.
+    assert capture['grant'] == (3152663, capture['generation'])
+    assert capture['last_key'] == capture['emission'] == 3152663
+    later = next(c for c in result['captures'] if c['requested'] > 3327383)
+    if control == 'revoked':
+        assert later['generation'] == capture['generation'] + 1
+        assert later['grant'] == capture['grant']
+    else:
+        assert later['available'] > 3330215
+        assert later['generation'] == capture['generation']
+    assert not any(r['reader'] == 'read_partial' and r['capture_end'] == 3327383
+                   for r in result['reads'])
+    assert 3288503 not in normal_calls
+    assert not any(h['onset_sample'] == 3288500 for h in tails(result))
+    assert not any(e['audio_start'] == 3332660 for e in result['emissions'])
+    assert result['keys'] and all(k['margin'] >= 0 for k in result['keys'])

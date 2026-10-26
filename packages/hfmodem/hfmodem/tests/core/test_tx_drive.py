@@ -62,6 +62,8 @@ def station(tmp_path, monkeypatch):
         out.write_text(re.sub(r"(?m)^tx_drive.*$", f"tx_drive = {drive}", raw),
                        encoding="utf-8")
         monkeypatch.setenv(config.STATION_ENV, str(out))
+        monkeypatch.setenv("CAT_PORT", "/dev/null")
+        monkeypatch.setenv("PTT_PORT", "/dev/null")
         return out
     return _write
 

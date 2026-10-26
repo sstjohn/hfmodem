@@ -283,7 +283,7 @@ def test_a_dragon_chirp_is_read_on_its_track(tmp_path):
     from hfmodem import tests
     from scipy.signal import resample_poly
 
-    with np.load(Path(tests.__file__).parent / "shrike/fixtures/p4-chirps/audio.npz") as z:
+    with np.load(Path(tests.__file__).parent / "shrike/fixtures/sigidwiki/p4-chirps/audio.npz") as z:
         fs, x = int(z["fs"]), z["audio"][0].astype(float)
     x = np.r_[np.zeros(6 * 48000), resample_poly(_moved(x, 242.4, fs), 48000, fs),
               np.zeros(4800)]

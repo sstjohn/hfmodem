@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """E5: hear the gateway's autonomous ladder without answering it."""
 from dataclasses import replace
 import numpy as np

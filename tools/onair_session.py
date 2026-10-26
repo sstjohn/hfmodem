@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """One command for a supervised on-air connect session.
 
 Operator time on a shared band is the scarcest thing in this project, and the two
@@ -28,8 +30,6 @@ Each attempt keys the serial line named by ``--ptt-device`` and leaves rigctld t
 tune. On 2026-08-13 this station's daemon answered every command until the first
 key-down and then answered nothing — twelve unkeys out of twelve, ~8.4 s of
 unintended carrier apiece — while the line read low instantly, eight of eight.
-``--no-line-ptt`` puts the key back on the daemon, for a station keyed some other
-way.
 
 The callsign goes out once, in Morse, by :mod:`hfmodem.core.cwid`, at the end of the
 session and nowhere else — nothing in a connect attempt names this station, since
@@ -76,20 +76,20 @@ import threading
 import time
 import wave
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import numpy as np
 import sounddevice as sd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from hfcapture import GATEWAY_LIST, grid_to_latlon  # noqa: E402
+from hfcapture import GATEWAY_LIST, grid_to_latlon, device_claim, device_opened  # noqa: E402
 from hfmodem.core.audio import play_drained  # noqa: E402
 from hfmodem.core.busy import FULL_BAND, is_busy, level_range, receiver_fault, scores
 from hfmodem.core.occupied import occupied_hz
 from kestrel_connect import TX_IDLE_HOLD_S  # noqa: E402
 from vara_rig_bridge import Rig  # noqa: E402
 from hfmodem.core import band, cwid
-from hfmodem.core import config
+from hfmodem.core import config, claim, coexist
 from hfmodem.core.ptt import arming_refusal
 
 _HERE = Path(__file__).resolve().parent
@@ -252,6 +252,8 @@ class Cat:
 
     def __init__(self, hostport: str, wait: float = 1.1, armed: bool = False,
                  ptt_device: str | None = None) -> None:
+        if armed and not ptt_device:
+            raise ValueError("transmit unavailable: no keying line")
         import socket
         host, _, port = hostport.partition(":")
         if not port.isdigit():
@@ -265,8 +267,15 @@ class Cat:
         self._s = socket.create_connection((host, int(port)), timeout=8)
         self._s.setblocking(False)
         self._wait = wait
-        self.rig = Rig(hostport, armed, lambda m: print(f"  {m}", flush=True),
-                       ptt_device=ptt_device)
+        try:
+            # Rig.armed owns the line's lifetime; constructing it must not open
+            # and hand back a line that the model/mode gate has yet to admit.
+            self.rig = Rig(hostport, False, lambda m: print(f"  {m}", flush=True),
+                           ptt_device=ptt_device, line_ptt=True)
+            self.rig.armed = armed
+        except BaseException:
+            self._s.close()
+            raise
         self._stop = threading.Event()
 
     # -- tuning, on this session's own connection ------------------------------
@@ -360,9 +369,16 @@ class Cat:
     def armed(self, on: bool) -> None:
         self.rig.armed = on
 
+    @property
+    def line_held(self) -> bool:
+        return self.rig.line_held
+
     def ptt_state(self) -> bool | None:
-        """True keyed, False down, None if the rig did not answer intelligibly."""
-        return self.rig.ptt_state()
+        """True keyed, False down, None without a confirmed line reading."""
+        if not self.line_held:
+            low = self.rig.released_low
+            return None if low is None else not low
+        return self.rig.line_state()
 
     def ptt_is_down(self) -> bool:
         return self.ptt_state() is False
@@ -374,8 +390,7 @@ class Cat:
         return self.rig.key(True, why) if on else self.unkey(why)
 
     def unkey(self, why: str) -> bool:
-        # `drop`, not `key(False)`: a dry run still drops a transmitter it finds up.
-        return self.rig.drop(why)
+        return self.line_held and self.rig.drop(why)
 
     def ensure_down(self, why: str) -> bool:
         """Read PTT back, and drop it if it is up. Never takes anyone's word."""
@@ -390,8 +405,14 @@ class Cat:
         if self._stop.is_set():
             return
         self._stop.set()
-        self.ensure_down("shutdown")
-        self.rig.retire()
+        try:
+            if self.line_held:
+                self.ensure_down("shutdown")
+        finally:
+            try:
+                self.rig.shutdown()
+            finally:
+                self._s.close()
 
 
 def write_wav(path: Path, samples: np.ndarray) -> None:
@@ -421,27 +442,34 @@ class Sense(NamedTuple):
 
 def listen(secs: float, device: str, record: Path | None = None,
            band: tuple[float, float] = FULL_BAND) -> Sense:
-    audio = sd.rec(int(FS * secs), samplerate=FS, channels=1, device=device,
-                   dtype="float32")
-    sd.wait()
-    a = audio[:, 0]
-    if record is not None:
-        write_wav(record, a)
-    busy, _per_sec, margin = is_busy(a, FS, band)
-    loud, quiet = level_range(a)
-    return Sense(busy, margin, loud, quiet, scores(a, FS, band) is not None)
+    with device_claim("onair_session listen", devices=claim.Devices(capture=device)):
+        audio = sd.rec(int(FS * secs), samplerate=FS, channels=1, device=device,
+                       dtype="float32")
+        device_opened()
+        try:
+            sd.wait()
+        finally:
+            sd.stop()
+        a = audio[:, 0]
+        if record is not None:
+            write_wav(record, a)
+        busy, _per_sec, margin = is_busy(a, FS, band)
+        loud, quiet = level_range(a)
+        return Sense(busy, margin, loud, quiet, scores(a, FS, band) is not None)
 
 
 def play(samples: np.ndarray, device: str) -> None:
     """Into the transmit device, filling its channel count — a mono stream is
     silent on a multi-channel codec, and a silent identification is no
     identification."""
-    channels = int(sd.query_devices(device, "output")["max_output_channels"])
-    block = np.zeros((len(samples), channels), np.float32)
-    block[:, 0] = samples
-    if channels > 1:
-        block[:, 1] = block[:, 0]
-    play_drained(block, FS, device)
+    with device_claim("onair_session output", devices=claim.Devices(playback=device)):
+        channels = int(sd.query_devices(device, "output")["max_output_channels"])
+        block = np.zeros((len(samples), channels), np.float32)
+        block[:, 0] = samples
+        if channels > 1:
+            block[:, 1] = block[:, 0]
+        play_drained(block, FS, device)
+        device_opened()
 
 
 def stop_child() -> None:
@@ -463,8 +491,21 @@ def stop_child() -> None:
         p.wait(timeout=5)
 
 
+class NotAdmitted(claim.ClaimError):
+    """The attempt ended, or ran out its admission window, without acknowledging."""
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__("CLAIM NOT ADMITTED")
+        self._lines = lines       # complete once run_attempt has joined its reader
+
+    @property
+    def out(self) -> str:
+        return "".join(self._lines)
+
+
 def run_attempt(cmd: list[str], window: float, cat: Cat,
-                transcript: Path | None = None) -> tuple[int, str]:
+                transcript: Path | None = None, *,
+                on_admitted: Callable[[], None] | None = None) -> tuple[int, str]:
     """Run the connect tool, and never let it take the transmitter with it.
 
     The parent drops PTT afterwards whatever happened, because it cannot know
@@ -482,46 +523,78 @@ def run_attempt(cmd: list[str], window: float, cat: Cat,
     """
     global _child
     lines: list[str] = []
-    _child = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, bufsize=1)
-    fh = transcript.open("w") if transcript is not None else None
-
-    def tee() -> None:
-        for line in _child.stdout:
-            lines.append(line)
-            # An attempt's output is summarised when it ends, which is far too late
-            # for an alarm: on 2026-07-28 the child shouted TRANSMITTER MAY BE STUCK
-            # into this pipe for eight seconds while the terminal showed nothing and
-            # the operator found it at the radio. Alarms are marked `***`, and they
-            # go through now.
-            if "***" in line:
-                print(f"    {line.rstrip()}", flush=True)
-            if fh is not None:
-                fh.write(line)
-                fh.flush()
-
-    reader = threading.Thread(target=tee, daemon=True)
-    reader.start()
-    try:
+    with device_claim("onair_session attempt") as held:
+        fd = held.claim.fd
+        trampoline = ("import os,sys; fd=int(sys.argv[1]); os.dup2(fd,9); "
+                      "os.set_inheritable(9,True); "
+                      "os.close(fd) if fd != 9 else None; os.execv(sys.argv[2],sys.argv[2:])")
+        _child = subprocess.Popen([sys.executable, "-c", trampoline, str(fd), *cmd],
+                                  pass_fds=(fd,), stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, bufsize=1)
         try:
-            _child.wait(timeout=window)
-        except subprocess.TimeoutExpired:
-            print(f"  attempt ran past {window:.0f}s — terminating "
-                  f"({_CHILD_GRACE_S:.0f}s to unkey itself)", flush=True)
+            started = claim.process_started(_child.pid)
+        except BaseException:
             stop_child()
-        rc = _child.returncode
-    finally:
-        _child = None
-        cat.unkey("after attempt")
-    reader.join(timeout=5)
-    if fh is not None:
-        fh.close()
-    out = "".join(lines)
-    if rc < 0:
-        print(f"  attempt was killed by signal {-rc}")
-    elif rc > 1:
-        print(f"  attempt exited {rc} (it never got as far as calling)")
-    return rc, out
+            raise
+        coexist.event("tool_spawn", child_pid=_child.pid, child_started=started, argv=cmd)
+        admitted = threading.Event()
+        process = _child
+        fh = transcript.open("w") if transcript is not None else None
+
+        def tee() -> None:
+            for line in process.stdout:
+                if line.strip() == "CLAIM ADMITTED":
+                    admitted.set()
+                lines.append(line)
+                # An attempt's output is summarised when it ends, which is far too late
+                # for an alarm: on 2026-07-28 the child shouted TRANSMITTER MAY BE STUCK
+                # into this pipe for eight seconds while the terminal showed nothing and
+                # the operator found it at the radio. Alarms are marked `***`, and they
+                # go through now.
+                if "***" in line:
+                    print(f"    {line.rstrip()}", flush=True)
+                if fh is not None:
+                    fh.write(line)
+                    fh.flush()
+
+        reader = threading.Thread(target=tee, daemon=True)
+        reader.start()
+        try:
+            start = time.monotonic()
+            deadline = start + min(window, claim.ADMISSION_TIMEOUT)
+            while not admitted.wait(0.05):
+                if _child.poll() is not None or time.monotonic() >= deadline:
+                    stop_child()
+                    raise NotAdmitted(lines)
+            device_opened()
+            if on_admitted is not None:
+                on_admitted()
+            try:
+                elapsed = time.monotonic() - start
+                _child.wait(timeout=max(0.01, window - elapsed))
+            except subprocess.TimeoutExpired:
+                print(f"  attempt ran past {window:.0f}s — terminating "
+                      f"({_CHILD_GRACE_S:.0f}s to unkey itself)", flush=True)
+                stop_child()
+            rc = _child.returncode
+        finally:
+            stop_child()
+            _child = None
+            try:
+                cat.unkey("after attempt")
+            finally:
+                reader.join(timeout=5)
+                if reader.is_alive():
+                    raise claim.ClaimError("attempt output reader did not stop")
+                process.stdout.close()
+                if fh is not None:
+                    fh.close()
+        out = "".join(lines)
+        if rc < 0:
+            print(f"  attempt was killed by signal {-rc}")
+        elif rc > 1:
+            print(f"  attempt exited {rc} (it never got as far as calling)")
+        return rc, out
 
 
 def attempt_reached_air(out: str) -> bool:
@@ -559,6 +632,14 @@ def attempt_lost_transmitter(out: str) -> bool:
 
 
 def main() -> int:
+    try:
+        return session()
+    except claim.ClaimError as exc:
+        print(f"\nclaim problem: {exc}", flush=True)
+        return 5 if isinstance(exc, claim.ClaimBusy) else 2
+
+
+def session() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mycall", required=True, help="your callsign (you are the licensee)")
@@ -571,9 +652,8 @@ def main() -> int:
     ap.add_argument("--device", default="USB Audio Device")
     ap.add_argument("--arm", action="store_true", help="permit keying; without it, nothing transmits")
     ap.add_argument("--ptt-device", metavar="DEV",
-                    help="serial line whose RTS is the PTT, used as the last resort "
-                         "in an unkey rigctld has stopped answering. Required with "
-                         "--arm, and passed to every attempt")
+                    help="serial line whose RTS is the PTT. Required with --arm, "
+                         "and passed to every attempt; CAT tunes only")
     # THE ATTEMPT KEYS THE LINE, AND THAT IS THE DEFAULT RATHER THAN A FLAG. On
     # 2026-08-13 every armed attempt at this station held ~8.4 s of unintended
     # carrier, one shape twelve times over: the socket connects in under a
@@ -582,11 +662,7 @@ def main() -> int:
     # daemon answers everything until it keys the rig, then answers nothing. So
     # the attempt drives --ptt-device itself and rigctld is left to tune, which
     # it does before there is any RF about; it is the shape onair.sh's vara and
-    # vara-mail verbs hold. --no-line-ptt puts the key back on the daemon, for a
-    # station whose PTT is not a serial line and for a bench with no pin to move.
-    ap.add_argument("--line-ptt", action=argparse.BooleanOptionalAction, default=True,
-                    help="each attempt keys --ptt-device itself and rigctld only "
-                         "tunes (the default); --no-line-ptt keys through rigctld")
+    # vara-mail verbs hold.
     ap.add_argument("--dry-run", action="store_true", help="rehearse: sense and report, never call")
     ap.add_argument("--force", action="store_true",
                     help="call a channel the occupancy check reports busy — the "
@@ -661,234 +737,269 @@ def main() -> int:
         print("--force IS IN EFFECT: a channel the occupancy check calls busy will "
               "be called anyway")
 
-    try:
-        cat = Cat(args.rigctld, ptt_device=args.ptt_device)
-    except ValueError as e:
-        print(f"\n{e}")
-        return 2
-    except OSError as e:
-        print(f"\ncannot reach rigctld at {args.rigctld}: {e}")
-        print("start it with:")
-        print(f"  {_ROOT.parent}/hamlib/_install/bin/rigctld -m 1036 "
-              "-r /dev/cu.usbserial-XXXXB0 -s 38400 &")
-        return 2
-    model = cat.model()
-    print(f"\nrig: {model[:60]} (rigctld {args.rigctld})")
-    if args.arm and args.expect_model.lower() not in model.lower():
-        print(f"REFUSING TO ARM: rig identifies as {model!r}, not {args.expect_model!r}")
-        return 2
-
-    # The emission has to fit the filter the rig actually selected.
-    min_passband = int(args.bw)
-    try:
-        got, got_pb = cat.set_mode(args.mode, args.passband, min_passband)
-        print(f"mode: {got} / {got_pb} Hz")
-    except RuntimeError as e:
-        print(f"mode not confirmed: {e}")
-        if args.arm:
-            print(f"REFUSING TO ARM: the rig will not confirm {args.mode} — in a voice "
-                  "mode it transmits the microphone, not the codec")
-            return 2
-
-    # Armed only once the rig has named itself and confirmed its mode.
-    cat.armed = args.arm and not args.dry_run
-    if not cat.armed:
-        print("NOT ARMED — this run will not key the transmitter")
-
-    owes_id = False
-    link_open = ""        # the gateway still holding a session open, if any
-
-    def identify(why: str) -> None:
-        """MYCALL in Morse, keyed through the same checked, watchdogged path.
-
-        Sent once, at the end of the session — see the module docstring for why it
-        is not sent between attempts. It is a transmission like any other, so it
-        obeys --arm; unarmed it says what it would have sent, which is what makes a
-        rehearsal worth running. It is also never the reason a session stops: if it
-        cannot key or the audio device refuses, it reports that and the session ends
-        anyway — the operator is at the control point and sends the call by hand as
-        before.
-        """
-        nonlocal owes_id
-        if not cat.armed:
-            print(f"  (would identify: {args.mycall.upper()} in Morse, "
-                  f"{len(id_audio) / FS:.1f}s — {why})")
-            owes_id = False
-            return
-        print(f"  identifying {args.mycall.upper()} ({why})", flush=True)
+    with device_claim("onair_session", devices=claim.Devices(
+            ptt_port=args.ptt_device, capture=args.device, playback=args.device, cat="rigctld")):
         try:
-            if not cat.key(True, "station ID"):
-                print("  *** COULD NOT KEY TO IDENTIFY — send it by hand ***", flush=True)
-                return                              # still owed, and said so
-            play(id_audio, args.device)
-            # `play` returns only once the device has emitted the audio, so the
-            # callsign is whole before the key is even considered; this is the same
-            # idle hold a burst gets, and for the same reason. It used to be a
-            # quarter second covering the drain as well, because nothing else did:
-            # a dah at 20 WPM is 0.18 s, and an unkey on the old `sd.play` return
-            # sent W9SSJ as W9SSW. A callsign missing its last element identifies
-            # somebody else.
-            time.sleep(TX_IDLE_HOLD_S)
-            owes_id = False
-        except Exception as e:                      # noqa: BLE001 - never fatal
-            print(f"  *** IDENTIFICATION FAILED ({e!r}) — send it by hand ***", flush=True)
-        finally:
-            cat.unkey("station ID sent")
+            cat = Cat(args.rigctld, ptt_device=args.ptt_device)
+        except ValueError as e:
+            print(f"\n{e}")
+            return 2
+        except OSError as e:
+            print(f"\ncannot reach rigctld at {args.rigctld}: {e}")
+            print("start it with:")
+            print(f"  {_ROOT.parent}/hamlib/_install/bin/rigctld -m 1036 "
+                  "-r /dev/cu.usbserial-XXXXB0 -s 38400 &")
+            return 2
+        try:
+            device_opened()
+            model = cat.model()
+            print(f"\nrig: {model[:60]} (rigctld {args.rigctld})")
+            if args.arm and args.expect_model.lower() not in model.lower():
+                print(f"REFUSING TO ARM: rig identifies as {model!r}, not {args.expect_model!r}")
+                return 2
 
-    def panic(*_) -> None:
-        """An interrupt is an emergency stop, and it stops at the transmitter.
-
-        A `finally:` does not survive a Ctrl-C mid-over, and an interrupt that
-        left the attempt running would leave it keying with nobody watching. It
-        deliberately does not identify on the way out: the operator reaching for
-        Ctrl-C is not asking for one more transmission, and he is at the control
-        point.
-        """
-        nonlocal owes_id
-        stop_child()
-        owes_id = False
-        cat.shutdown()
-        print("*** interrupted — send your call by hand if the attempt transmitted ***",
-              flush=True)
-        sys.exit(1)
-
-    atexit.register(cat.shutdown)
-    for _sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(_sig, panic)
-
-    result = 1
-    try:
-        for n, (call, hz, dist, mode) in enumerate(targets, 1):
-            dial = dial_hz(hz)
-            stem = f"{n:02d}-{call.upper()}" if session_dir else None
-            print(f"\n=== {call}  channel {hz / 1000:.3f} -> dial {dial / 1000:.3f} kHz USB "
-                  f"({dist:.0f} mi, {mode}) ===", flush=True)
+            # The emission has to fit the filter the rig actually selected.
+            min_passband = int(args.bw)
             try:
-                cat.qsy(dial)
-                # Re-asserted after every QSY, like the dial: a Yaesu restores the
-                # mode last used on the band it is tuned to, so a mode confirmed on
-                # 40 m says nothing about 30 m.
-                cat.set_mode(args.mode, args.passband, min_passband)
+                got, got_pb = cat.set_mode(args.mode, args.passband, min_passband)
+                print(f"mode: {got} / {got_pb} Hz")
             except RuntimeError as e:
-                print(f"  {e} — skipping")
-                continue
-            if not cat.ptt_is_down():
-                print("  PTT IS UP — dropping it and stopping the session")
-                cat.unkey("stuck PTT")
-                result = 3
-                break
-            try:
-                sense = listen(args.listen, args.device,
-                               session_dir / f"{stem}-listen.wav" if stem else None,
-                               occupied_hz("vara", args.bw))
-            except (sd.PortAudioError, OSError, ValueError) as e:
-                # The station runs a second modem against the same codec, so losing
-                # the device is a thing that happens rather than a thing that
-                # cannot. It costs this target, not the slot.
-                print(f"  cannot listen on {args.device!r} ({e}) — skipping")
-                continue
-            # Whether we can hear at all comes before what we heard. A receiver that
-            # is not attached scores as a busy channel on every target in turn, so
-            # the session that has this wrong reads as an unlucky band and spends the
-            # whole window on it. Neither fault is `--force`'s to overrule and the
-            # sentence itself says so; this end used to let --force past the
-            # intermittent one, which is a rig somebody else is keying.
-            fault = receiver_fault(sense.loud, sense.quiet, seconds=args.listen,
-                                   device=args.device)
-            if fault is not None:
-                print(f"\n*** {fault.reason}\n    Stopping the session: no target "
-                      "can work through this. ***", flush=True)
-                result = 5
-                break
-            if sense.judged:
-                verdict = (f"{sense.margin:+.1f} dB against the occupancy thresholds "
-                           f"-> {'BUSY' if sense.busy else 'clear'}")
-            else:
-                verdict = ("NO VERDICT — too little live audio in this window to "
-                           "score, which is not the same as a clear channel")
-            if sense.busy:
-                verdict += (", but --force is set — calling anyway" if args.force
-                            else ", skipping")
-            print(f"  channel sense: {verdict}", flush=True)
-            if sense.busy and not args.force:
-                continue
-            if not cat.armed:
-                print("  (would call here)")
-                owes_id = True
-                continue
-            cmd = [sys.executable, str(_HERE / "kestrel_connect.py"),
-                   "--gateway", call, "--mycall", args.mycall, "--bw", args.bw,
-                   "--tx-device", args.device, "--rx-device", args.device,
-                   "--rigctld", args.rigctld, "--expect-model", args.expect_model,
-                   "--arm", "--ptt-device", args.ptt_device,
-                   *(("--line-ptt",) if args.line_ptt else ()),
-                   "--listen-first", "0",              # already sensed, above
-                   "--timeout", str(args.per_target)]
-            cmd += ["--record", str(session_dir)] if session_dir else ["--no-record"]
-            if args.force:
-                cmd.append("--force")
-            owes_id = True                             # from the first burst onward
-            rc, out = run_attempt(cmd, args.per_target + 90, cat,
-                                  session_dir / f"{stem}.log" if stem else None)
-            # "The gateway stayed silent" and "nothing we did reached the air" are
-            # opposite conclusions, and only the first is worth carrying to the
-            # next target: the second — a child that never started, or a rig that
-            # refused every key-up — would repeat identically on every one of them
-            # and take the slot with it.
-            attempted = attempt_reached_air(out)
-            for line in out.strip().splitlines()[-(10 if attempted else 30):]:
-                print("   ", line)
-            if not attempted:
-                owes_id = False                # nothing on the air, nothing to identify
-                print(f"\n*** the attempt never reached the air (exit {rc}). That is this "
-                      "software failing, not a gateway staying silent — the lines above "
-                      "are the diagnosis. Stopping with the slot intact. ***")
-                result = 4
-                break
-            if rc == 0 and "CONNECTED" in out:
-                print(f"\n*** CONNECTED to {call} ***")
-                # The connect tool drives the close and says which way it
-                # went; the session's duties differ with the answer — a closed
-                # link owes the identification, an open one forbids it. Read the
-                # child's verdict, never assume one. A 4.9.0 keys its own close
-                # once and nothing answers it (spec 05 §5.6, measured
-                # 2026-08-26), so an unanswered close is not by itself a peer
-                # that ignored us.
-                if "DISCONNECTED: clean close" in out:
-                    print(f"    Local session closed; disconnect sent to {call}. "
-                          "Peer receipt is unconfirmed.")
-                else:
-                    link_open = call
-                    print(f"    Local close to {call} did not complete. "
-                          "Peer state is unknown; allow its inactivity timeout.")
-                result = 0
-                break
-            if attempt_lost_transmitter(out):
-                # Not a per-target condition: a rig that cannot key does not get
-                # better at the next channel, and every target called over it
-                # would log the same false silence in turn.
-                print(f"\n*** the transmitter has been taken down — not {call} "
-                      "staying silent. Stopping the session with the remaining "
-                      "target(s) uncalled. ***")
-                result = 6
-                break
-            print(f"  {call} did not answer")
-    finally:
-        if owes_id and link_open:
-            # Morse into a live ARQ session is a transmission out of turn: the peer
-            # is still holding the link and still expecting VARA overs on it.
-            print(f"\n  NOT identifying: {link_open} still holds the link open, and "
-                  "keying the callsign into somebody's session corrupts it. Send "
-                  f"{args.mycall.upper()} by hand.", flush=True)
-        elif owes_id:
-            identify("end of session")
-        cat.shutdown()
+                print(f"mode not confirmed: {e}")
+                if args.arm:
+                    print(f"REFUSING TO ARM: the rig will not confirm {args.mode} — in a voice "
+                          "mode it transmits the microphone, not the codec")
+                    return 2
 
-    print(f"\n{'connected' if result == 0 else 'no connect'}. "
-          f"PTT down: {cat.ptt_is_down()}")
-    if session_dir is not None:
-        print(f"recordings and transcripts: {session_dir}")
-    return result
+            # Armed only once the rig has named itself and confirmed its mode.
+            cat.armed = args.arm and not args.dry_run
+            if not cat.armed:
+                print("NOT ARMED — this run will not key the transmitter")
+
+            owes_id = False
+            link_open = ""        # the gateway still holding a session open, if any
+
+            def identify(why: str) -> None:
+                """MYCALL in Morse, keyed through the same checked, watchdogged path.
+
+                Sent once, at the end of the session — see the module docstring for why it
+                is not sent between attempts. It is a transmission like any other, so it
+                obeys --arm; unarmed it says what it would have sent, which is what makes a
+                rehearsal worth running. It is also never the reason a session stops: if it
+                cannot key or the audio device refuses, it reports that and the session ends
+                anyway — the operator is at the control point and sends the call by hand as
+                before.
+                """
+                nonlocal owes_id
+                if not cat.armed:
+                    print(f"  (would identify: {args.mycall.upper()} in Morse, "
+                          f"{len(id_audio) / FS:.1f}s — {why})")
+                    owes_id = False
+                    return
+                print(f"  identifying {args.mycall.upper()} ({why})", flush=True)
+                try:
+                    if not cat.key(True, "station ID"):
+                        print("  *** COULD NOT KEY TO IDENTIFY — send it by hand ***", flush=True)
+                        return                              # still owed, and said so
+                    play(id_audio, args.device)
+                    # `play` returns only once the device has emitted the audio, so the
+                    # callsign is whole before the key is even considered; this is the same
+                    # idle hold a burst gets, and for the same reason. It used to be a
+                    # quarter second covering the drain as well, because nothing else did:
+                    # a dah at 20 WPM is 0.18 s, and an unkey on the old `sd.play` return
+                    # sent W9SSJ as W9SSW. A callsign missing its last element identifies
+                    # somebody else.
+                    time.sleep(TX_IDLE_HOLD_S)
+                    owes_id = False
+                except Exception as e:                      # noqa: BLE001 - never fatal
+                    print(f"  *** IDENTIFICATION FAILED ({e!r}) — send it by hand ***", flush=True)
+                finally:
+                    cat.unkey("station ID sent")
+
+            def panic(*_) -> None:
+                """An interrupt is an emergency stop, and it stops at the transmitter.
+
+                A `finally:` does not survive a Ctrl-C mid-over, and an interrupt that
+                left the attempt running would leave it keying with nobody watching. It
+                deliberately does not identify on the way out: the operator reaching for
+                Ctrl-C is not asking for one more transmission, and he is at the control
+                point.
+                """
+                nonlocal owes_id
+                stop_child()
+                owes_id = False
+                cat.shutdown()
+                print("*** interrupted — send your call by hand if the attempt transmitted ***",
+                      flush=True)
+                sys.exit(1)
+
+            atexit.register(cat.shutdown)
+            for _sig in (signal.SIGINT, signal.SIGTERM):
+                signal.signal(_sig, panic)
+
+            result = 1
+
+            def attempt_admitted() -> None:
+                nonlocal owes_id
+                owes_id = True
+
+            try:
+                for n, (call, hz, dist, mode) in enumerate(targets, 1):
+                    dial = dial_hz(hz)
+                    stem = f"{n:02d}-{call.upper()}" if session_dir else None
+                    print(f"\n=== {call}  channel {hz / 1000:.3f} -> dial {dial / 1000:.3f} kHz USB "
+                          f"({dist:.0f} mi, {mode}) ===", flush=True)
+                    try:
+                        cat.qsy(dial)
+                        # Re-asserted after every QSY, like the dial: a Yaesu restores the
+                        # mode last used on the band it is tuned to, so a mode confirmed on
+                        # 40 m says nothing about 30 m.
+                        cat.set_mode(args.mode, args.passband, min_passband)
+                    except RuntimeError as e:
+                        print(f"  {e} — skipping")
+                        continue
+                    if not cat.line_held:
+                        print("  PTT UNKNOWN (no line held)")
+                    elif not cat.ptt_is_down():
+                        print("  PTT IS UP — dropping it and stopping the session")
+                        cat.unkey("stuck PTT")
+                        result = 3
+                        break
+                    try:
+                        sense = listen(args.listen, args.device,
+                                       session_dir / f"{stem}-listen.wav" if stem else None,
+                                       occupied_hz("vara", args.bw))
+                    except (sd.PortAudioError, OSError, ValueError) as e:
+                        # The station runs a second modem against the same codec, so losing
+                        # the device is a thing that happens rather than a thing that
+                        # cannot. It costs this target, not the slot.
+                        print(f"  cannot listen on {args.device!r} ({e}) — skipping")
+                        continue
+                    # Whether we can hear at all comes before what we heard. A receiver that
+                    # is not attached scores as a busy channel on every target in turn, so
+                    # the session that has this wrong reads as an unlucky band and spends the
+                    # whole window on it. Neither fault is `--force`'s to overrule and the
+                    # sentence itself says so; this end used to let --force past the
+                    # intermittent one, which is a rig somebody else is keying.
+                    fault = receiver_fault(sense.loud, sense.quiet, seconds=args.listen,
+                                           device=args.device)
+                    if fault is not None:
+                        print(f"\n*** {fault.reason}\n    Stopping the session: no target "
+                              "can work through this. ***", flush=True)
+                        result = 5
+                        break
+                    if sense.judged:
+                        verdict = (f"{sense.margin:+.1f} dB against the occupancy thresholds "
+                                   f"-> {'BUSY' if sense.busy else 'clear'}")
+                    else:
+                        verdict = ("NO VERDICT — too little live audio in this window to "
+                                   "score, which is not the same as a clear channel")
+                    if sense.busy:
+                        verdict += (", but --force is set — calling anyway" if args.force
+                                    else ", skipping")
+                    print(f"  channel sense: {verdict}", flush=True)
+                    if sense.busy and not args.force:
+                        continue
+                    if not cat.armed:
+                        print("  (would call here)")
+                        owes_id = True
+                        continue
+                    cmd = [sys.executable, str(_HERE / "kestrel_connect.py"),
+                           "--gateway", call, "--mycall", args.mycall, "--bw", args.bw,
+                           "--tx-device", args.device, "--rx-device", args.device,
+                           "--rigctld", args.rigctld, "--expect-model", args.expect_model,
+                           "--arm", "--ptt-device", args.ptt_device,
+                           "--line-ptt",
+                           "--listen-first", "0",              # already sensed, above
+                           "--timeout", str(args.per_target)]
+                    cmd += ["--record", str(session_dir)] if session_dir else ["--no-record"]
+                    if args.force:
+                        cmd.append("--force")
+                    already_owes_id = owes_id
+                    try:
+                        rc, out = run_attempt(cmd, args.per_target + 90, cat,
+                                              session_dir / f"{stem}.log" if stem else None,
+                                              on_admitted=attempt_admitted)
+                    except NotAdmitted as exc:
+                        for line in exc.out.strip().splitlines()[-30:]:
+                            print("   ", line)
+                        if attempt_reached_air(exc.out):
+                            owes_id = True      # keyed before acknowledging: still a transmission
+                            print(f"\n*** attempt claim problem: {exc}, after it transmitted. "
+                                  "Stopping the session. ***", flush=True)
+                        else:
+                            print(f"\n*** the attempt never reached the air ({exc}). That is "
+                                  "this software failing, not a gateway staying silent — the "
+                                  "lines above are the diagnosis. Stopping with the slot "
+                                  "intact. ***", flush=True)
+                        result = 4
+                        break
+                    except claim.ClaimError as exc:
+                        print(f"\n*** attempt claim problem: {exc}. "
+                              "Stopping the session. ***", flush=True)
+                        result = 4
+                        break
+                    # "The gateway stayed silent" and "nothing we did reached the air" are
+                    # opposite conclusions, and only the first is worth carrying to the
+                    # next target: the second — a child that never started, or a rig that
+                    # refused every key-up — would repeat identically on every one of them
+                    # and take the slot with it.
+                    attempted = attempt_reached_air(out)
+                    for line in out.strip().splitlines()[-(10 if attempted else 30):]:
+                        print("   ", line)
+                    if not attempted:
+                        owes_id = already_owes_id       # this attempt added no transmission
+                        print(f"\n*** the attempt never reached the air (exit {rc}). That is this "
+                              "software failing, not a gateway staying silent — the lines above "
+                              "are the diagnosis. Stopping with the slot intact. ***")
+                        result = 4
+                        break
+                    if rc == 0 and "CONNECTED" in out:
+                        print(f"\n*** CONNECTED to {call} ***")
+                        # The connect tool drives the close and says which way it
+                        # went; the session's duties differ with the answer — a closed
+                        # link owes the identification, an open one forbids it. Read the
+                        # child's verdict, never assume one. A 4.9.0 keys its own close
+                        # once and nothing answers it (spec 05 §5.6, measured
+                        # 2026-08-26), so an unanswered close is not by itself a peer
+                        # that ignored us.
+                        if "DISCONNECTED: clean close" in out:
+                            print(f"    Local session closed; disconnect sent to {call}. "
+                                  "Peer receipt is unconfirmed.")
+                        else:
+                            link_open = call
+                            print(f"    Local close to {call} did not complete. "
+                                  "Peer state is unknown; allow its inactivity timeout.")
+                        result = 0
+                        break
+                    if attempt_lost_transmitter(out):
+                        # Not a per-target condition: a rig that cannot key does not get
+                        # better at the next channel, and every target called over it
+                        # would log the same false silence in turn.
+                        print(f"\n*** the transmitter has been taken down — not {call} "
+                              "staying silent. Stopping the session with the remaining "
+                              "target(s) uncalled. ***")
+                        result = 6
+                        break
+                    print(f"  {call} did not answer")
+            finally:
+                if owes_id and link_open:
+                    # Morse into a live ARQ session is a transmission out of turn: the peer
+                    # is still holding the link and still expecting VARA overs on it.
+                    print(f"\n  NOT identifying: {link_open} still holds the link open, and "
+                          "keying the callsign into somebody's session corrupts it. Send "
+                          f"{args.mycall.upper()} by hand.", flush=True)
+                elif owes_id:
+                    identify("end of session")
+                cat.shutdown()
+
+            print(f"\n{'connected' if result == 0 else 'no connect'}. "
+                  f"PTT down: {cat.ptt_is_down()}")
+            if session_dir is not None:
+                print(f"recordings and transcripts: {session_dir}")
+            return result
+        finally:
+            stop_child()
+            cat.shutdown()
 
 
 if __name__ == "__main__":

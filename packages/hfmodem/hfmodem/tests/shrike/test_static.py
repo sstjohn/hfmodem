@@ -39,6 +39,7 @@ Run:  python -m hfmodem.tests.shrike.test_static
 """
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 import sys
@@ -225,6 +226,19 @@ HARNESS_INPUTS = {
 }
 
 
+def _published_docs(root: Path = ROOT) -> list[Path]:
+    """Read actual shipping prose, not private notes beside it in a checkout."""
+    manifest = root / "publish" / "manifest.toml"
+    if not manifest.is_file():
+        return sorted((root / "docs").rglob("*.md"))
+    spec = importlib.util.spec_from_file_location(
+        "shrike_publication_builder", root / "publish" / "build.py")
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    return [path for path in build.expand(build.load())
+            if path.is_relative_to(root / "docs") and path.suffix == ".md"]
+
+
 def publication_ratchet() -> None:
     """Working-record material must not grow, in the package or in its suite.
 
@@ -241,7 +255,7 @@ def publication_ratchet() -> None:
     """
     text = {p: p.read_text(errors="replace")
             for p in sorted((*SRC.glob("*.py"), *SUITE.glob("*.py"),
-                             *DOCS.rglob("*.md")))
+                             *_published_docs()))
             if p.name not in UNSCANNED}
     slack = []
     for name, pattern in PUBLICATION_PATTERNS.items():

@@ -46,15 +46,21 @@ def test_checked_long_delivers_once_and_answers_each_copy_on_long_deadline(statu
 
 
 @pytest.mark.parametrize('status,kind,word,state', [
-    (0x40, Kind.BODY, None, State.ISS_GRANT),
+    (0x40, Kind.WORD, 'X27', State.IRS_ANSWER),
     (0x20, Kind.WORD, 'V27', State.IRS_CLOSE),
 ])
 def test_checked_long_control_uses_its_status_and_long_deadline(status, kind, word, state):
-    m, _ = machine(role='irs', data='body')
+    m, queue = machine(role='irs', data='body')
     m.observe(long(status=status), now=FS+round(3.30*FS))
     p = m.decide(FS+round(3.4*FS)-m.lead)
     assert p.kind == kind and p.word == word and p.state == state
     assert p.stream_sample == FS+round(3.4*FS)
+    if status == 0x40:
+        epoch = m._receive_epoch
+        assert not p.payload and not m.outbox.inflight and queue.tx_acked_bytes == 0
+        m.keyed()
+        assert m._receive_epoch == epoch and m.grants == 0 and queue._buffer_raw == 0
+        assert not [e for e in m.link_events if e['event'] == 'turn']
 
 
 def test_unsupported_long_source_is_terminal_without_delivering_bytes():

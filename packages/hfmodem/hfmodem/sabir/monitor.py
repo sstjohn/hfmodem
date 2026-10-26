@@ -26,14 +26,21 @@ convenience that spawns ffmpeg on a named audio input. Both are INPUT only.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import errno
+import os
 import platform
-import subprocess
+import shutil
 import sys
+import tempfile
+import threading
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
 import numpy as np
 
+from hfmodem.core import claim
+from hfmodem.core.native import NativeSpawnError, spawn_native
 from hfmodem.sabir import offair
 from hfmodem.sabir.arq import wire
 from hfmodem.sabir.arq.fsm import ArqConfig
@@ -301,33 +308,84 @@ def _ffmpeg_input(device: str) -> list[str]:
     return ["-f", "alsa", "-i", device]
 
 
+@contextmanager
+def _device_claim(device):
+    acquired = False
+    try:
+        os.fstat(9)
+    except OSError as exc:
+        if exc.errno != errno.EBADF or os.environ.get("RIG_CLAIMED"):
+            raise claim.ClaimError("missing inherited claim descriptor") from exc
+        descriptor = claim.acquire("tool", "sabir-monitor",
+                                   devices=claim.Devices(capture=device), prove_line=True)
+        acquired = True
+    else:
+        descriptor = claim.ClaimDescriptor(os.dup(claim.inherited(9).fd))
+    complete = False
+    admission = None
+    try:
+        admission = claim.inherited(descriptor, launch=True)
+        yield admission
+        complete = True
+    finally:
+        if admission is not None:
+            admission.failed()
+        if acquired and complete:
+            claim.release(descriptor)
+        else:
+            claim.close(descriptor)
+
+
+def _stop_capture(proc):
+    proc.terminate()
+    if not proc.wait_gone(2):
+        proc.kill()
+        if not proc.wait_gone(5):
+            raise claim.ClaimError(f"termination unresolved for pid {proc.pid}")
+
+
 def device_chunks(device: str) -> Iterator[np.ndarray]:
-    """Live audio off a named INPUT device via ffmpeg (s16le mono 48 kHz).
-    No output stream, no PTT -- receive only."""
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", *_ffmpeg_input(device),
            "-ac", "1", "-ar", str(FS), "-f", "s16le", "-"]
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE)
-    except FileNotFoundError:
-        raise SystemExit("ffmpeg not found -- install it, or pipe audio to "
-                         "--stdin instead")
-    any_audio = False
-    try:
-        for chunk in raw_chunks(proc.stdout):
-            any_audio = True
-            yield chunk
-    finally:
-        proc.terminate()
+    with _device_claim(device) as held:
+        if shutil.which("ffmpeg") is None:
+            raise SystemExit("ffmpeg not found -- install it, or pipe audio to --stdin")
         try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    if not any_audio:                                  # ffmpeg opened nothing
-        err = (proc.stderr.read() if proc.stderr else b"").decode(
-            "utf-8", "replace").strip()
-        raise SystemExit(f"ffmpeg could not open {device!r}"
-                         + (f": {err.splitlines()[-1]}" if err else ""))
+            proc = spawn_native(cmd, claim_fd=held.claim, long_lived=True, device=device)
+            held.opened()
+        except NativeSpawnError as exc:
+            if exc.child is None:
+                raise
+            proc = exc.child
+            _stop_capture(proc)
+            err = proc.stderr.read().decode("utf-8", "replace").strip()
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
+            raise SystemExit(f"ffmpeg could not open {device!r}: {err or exc}") from exc
+        any_audio = False
+        with tempfile.TemporaryFile() as diagnostics:
+            def drain():
+                for block in iter(lambda: proc.stderr.read(4096), b""):
+                    diagnostics.write(block)
+            reader = threading.Thread(target=drain, daemon=True)
+            reader.start()
+            proc.stdin.close()
+            try:
+                for chunk in raw_chunks(proc.stdout):
+                    any_audio = True
+                    yield chunk
+            finally:
+                _stop_capture(proc)
+                reader.join(timeout=2)
+                if reader.is_alive():
+                    raise claim.ClaimError("capture diagnostic reader did not stop")
+                for stream in (proc.stdin, proc.stdout, proc.stderr):
+                    stream.close()
+            if not any_audio:
+                diagnostics.seek(0)
+                err = diagnostics.read().decode("utf-8", "replace").strip()
+                raise SystemExit(f"ffmpeg could not open {device!r}"
+                                 + (f": {err.splitlines()[-1]}" if err else ""))
 
 
 def main(argv=None) -> int:
@@ -339,10 +397,12 @@ def main(argv=None) -> int:
                      help="live raw s16le mono 48 kHz on stdin (any source)")
     a = ap.parse_args(argv)
 
+    chunks = None
     if a.wav:
         label, events = a.wav, decode_events(offair.wav_read(a.wav))
     elif a.device:
-        label, events = f"device {a.device!r}", decode_stream(device_chunks(a.device))
+        chunks = device_chunks(a.device)
+        label, events = f"device {a.device!r}", decode_stream(chunks)
     else:
         label, events = "stdin", decode_stream(raw_chunks(sys.stdin.buffer))
 
@@ -356,6 +416,9 @@ def main(argv=None) -> int:
             print(f"{ev.t:8.2f}  {ev.kind:11s} {ev.text}", flush=True)
     except KeyboardInterrupt:
         pass
+    finally:
+        if chunks is not None:
+            chunks.close()
     if a.wav and not seen:
         print("#  (no sabir signal above the noise floor)")
     return 0

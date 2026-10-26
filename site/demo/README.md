@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Secret operating desk
 
 This is a static, nonoperational operating desk demo. Its Chat, Contest and
@@ -34,10 +36,10 @@ builder does not verify that those paths exist on a visitor’s machine.
 ## Public logbook data contract
 
 `public-qsos.mjs` is the desktop’s read-only adapter for the curated public
-logbook. It can also be loaded from a module script in this directory:
+logbook. A module script in this directory can load it too:
 
 ```js
-import {loadPublicQsos} from './public-qsos.mjs';
+import {loadPublicQsos} from '../js/demo/public-qsos.mjs';
 const rows = await loadPublicQsos();
 ```
 

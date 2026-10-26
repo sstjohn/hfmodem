@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Standalone, explicitly placed robust LONG C2 bench decoder.
 
 No acquisition, live dispatch, callbacks, delivery or cross-call saved work.

@@ -78,7 +78,7 @@ def load_packets(arm):
 
 
 def seed(arm):
-    host, seam = sender(enabled=False)
+    host, seam = sender(enabled=False, payload=arm['_expected'])
     host.p3_mail_active = True
     a = host.arq
     wire = compress.transparent(arm['_expected'])
@@ -521,7 +521,7 @@ def test_operator_1003_attached_mail_client_uses_default_guard():
 def test_operator_1003_ve3kpg_arm_validates_c1_before_c2_cs4_and_c3_repeat():
     """Operator decision 2026-10-03: a second CS4 alone does not credit the pending field."""
     host, seam, peer = proposal_leg()
-    host.arq._buffer_raw += len(host.arq._inflight.payload)
+    assert host.arq._buffer_raw == len(host.arq._inflight.payload) + len(host.arq._outbuf)
 
     def send_long_packet(sl, payload, status):
         seam.frames.append((sl, status, payload))
@@ -594,8 +594,7 @@ def exchange(host, frame):
 @pytest.mark.parametrize('gear_hold', [False, True])
 def test_operator_1003_external_hostmode_no_credit_failure_event_and_retained_history(end, gear_hold):
     """Opaque external writes use the mail policy; the first terminal poll fails."""
-    host, seam = sender(enabled=gear_hold)
-    host.feed(b'\x1bJHOST4\r')
+    host, seam = sender(enabled=gear_hold, payload=b';FW', hostmode=True)
     ch = host.ptchn
     reply = exchange(host, hostmode.command(ch, 'G', ignore_counter=True))
     assert reply.code == hostmode.LINK and b'CONNECTED to' in reply.data

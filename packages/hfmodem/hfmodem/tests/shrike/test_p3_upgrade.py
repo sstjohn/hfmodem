@@ -1116,7 +1116,7 @@ def _grant_arm(path: Path, check) -> None:
 
     # The entry packet is the entry and nothing more: once the peer has answered
     # it the waveform is acquired, and the traffic stays at the level acquired.
-    # Only the peer's CS4 moves it -- docs/protocols/pactor/P3-ADAPTATION.md.
+    # Only the peer's CS4 moves it -- docs/implementation/pactor/P3-ADAPTATION.md.
     ci = CS_ACK if host.arq.tx_seq % 2 == 0 else CS_REQUEST
     host.on_rx_event(rxfront.Event(0.0, "cs", "", protocol="PACTOR-3", cs=ci))
     check("an acknowledged entry packet keeps the link at the granted entry level",

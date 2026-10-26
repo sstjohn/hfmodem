@@ -196,7 +196,7 @@ def test_init_attaches_with_desired_state(daemon, modem):
     d = daemon([("a", modem)])
     assert d.r.state == R.LISTEN_ALL
     assert d.r.modem_states == {"a": "up"}
-    assert modem.session_log[0][:4] == ["MYCALL N0RSP", "BW2300",
+    assert modem.session_log[0][:5] == ["VERSION", "MYCALL N0RSP", "BW2300",
                                         "COMPRESSION OFF", "LISTEN ON"]
     assert d.sup.acquired == ["a"]
     assert d.r._links["a"].version == "fake-1.2"
@@ -301,7 +301,7 @@ def test_dual_pending_one_connected_wins(daemon, modem, modem2):
     # the loser is muted; the winner is never touched
     assert wait(lambda: "LISTEN OFF" in modem2.commands)
     assert "LISTEN OFF" not in modem.commands
-    assert modem2.commands == ["MYCALL N0RSP", "BW2300", "COMPRESSION OFF",
+    assert modem2.commands == ["VERSION", "MYCALL N0RSP", "BW2300", "COMPRESSION OFF",
                                "LISTEN ON", "VERSION", "LISTEN OFF"]
 
     # session dies of its own hello timeout; LISTEN comes back on everywhere

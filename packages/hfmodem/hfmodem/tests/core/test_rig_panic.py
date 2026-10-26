@@ -15,6 +15,7 @@ answer. So the interesting case is not the tidy one; it is the wedged daemon.
 """
 from __future__ import annotations
 
+import select
 import subprocess
 import sys
 import textwrap
@@ -33,36 +34,59 @@ CHILD = textwrap.dedent("""
     from hfmodem.tests.core.fakerig import FakePtt
 
     port = int(sys.argv[1])
-    ptt = FakePtt()
+    class MarkingPtt(FakePtt):
+        def release(self):
+            super().release()
+            assert self.line is False and self.released_low is True
+            print("RELEASED LOW", flush=True)
+
+    ptt = MarkingPtt()
     r = Rig(model="ft891", cat=Cat("127.0.0.1", port), ptt=ptt,
             profile=Unregulated(because="child process test"),
             control=Control.LOCAL, mycall="N0CALL", transmit=True)
-    r.cat.open()
-    r._armed = True
-    r._dial_hz = 7_100_000
+    r.arm(prove_ptt=False)
     r.key(centred(7_100_000, 500.0), why="child", duration_s=30.0)
     print("KEYED", flush=True)
+    assert sys.stdin.readline() == "panic\\n"
     r.panic()
     print("UNREACHABLE", flush=True)
 """)
 
 
-def run_child(port: int, timeout: float = 8.0) -> tuple[int, float, str]:
-    t0 = time.monotonic()
-    p = subprocess.run([sys.executable, "-c", CHILD, str(port)],
-                       capture_output=True, text=True, timeout=timeout)
-    return p.returncode, time.monotonic() - t0, p.stdout + p.stderr
+def run_child(fake, timeout: float = 8.0, *, wedge: bool = False) -> tuple[int, float, str]:
+    with subprocess.Popen([sys.executable, "-c", CHILD, str(fake.port)],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True) as p:
+        try:
+            assert select.select([p.stdout], [], [], timeout)[0], "child never became ready"
+            ready = p.stdout.readline()
+            if ready != "KEYED\n":
+                out, err = p.communicate(timeout=timeout)
+                pytest.fail(f"child never keyed:\n{ready}{out}{err}")
+            # Silence only the panic path, after real key() admission succeeded.
+            fake.wedge = wedge
+            t0 = time.monotonic()
+            out, err = p.communicate("panic\n", timeout=timeout)
+            return p.returncode, time.monotonic() - t0, ready + out + err
+        finally:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
 
 
 @pytest.mark.realtime
 def test_panic_exits_promptly_and_unkeys_through_cat():
     fake = FakeRigctld()
     try:
-        rc, elapsed, out = run_child(fake.port)
+        rc, elapsed, out = run_child(fake)
         assert "KEYED" in out, out
         assert "UNREACHABLE" not in out, "panic() returned; it must not"
         assert elapsed < 6.0, f"panic took {elapsed:.1f} s"
-        assert "T 0" in fake.log, "the transmitter was never told to stop"
+        assert rc == 0, out
+        assert "+T 0" in fake.log, "the transmitter was never told to stop"
+        # The emergency connection must disable caching before its readback.
+        start = fake.log.index("+T 0")
+        assert fake.log[start - 1:start + 2] == ["+\\set_cache 0", "+T 0", "+t"]
     finally:
         fake.close()
 
@@ -74,14 +98,15 @@ def test_panic_exits_even_when_rigctld_never_answers():
     the deadman is armed before the unkey is attempted rather than after."""
     fake = FakeRigctld()
     try:
-        rc, elapsed, out = run_child(fake.port, timeout=10.0)
+        rc, elapsed, out = run_child(fake, timeout=10.0, wedge=True)
         assert "KEYED" in out, out
-        # Wedge only after the child is up, so key() succeeds and the panic path
-        # is what meets the silence.
-        fake.wedge = True
-        rc2, elapsed2, out2 = run_child(fake.port, timeout=10.0)
-        assert elapsed2 < 8.0, f"a wedged rigctld held the process for {elapsed2:.1f} s"
-        assert "UNREACHABLE" not in out2
+        assert "unkeying" in out, out
+        assert "RELEASED LOW" in out, out
+        assert fake.log.count("+\\set_cache 0") > 1, "the emergency CAT path was never attempted"
+        assert elapsed < 8.0, f"a wedged rigctld held the process for {elapsed:.1f} s"
+        assert "UNREACHABLE" not in out
+        # A silent CAT path cannot erase the independent line's confirmation.
+        assert rc == 0 and "confirmed down" in out, out
     except subprocess.TimeoutExpired:
         pytest.fail("panic() did not terminate against a wedged rigctld — the "
                     "deadman is not arming before the unkey")
@@ -95,9 +120,12 @@ def test_the_line_is_released_before_the_process_goes():
     hangup behaviour, which is the one kill path still unproven."""
     fake = FakeRigctld()
     try:
-        rc, elapsed, out = run_child(fake.port)
+        rc, elapsed, out = run_child(fake)
         assert "unkeying" in out, out          # panic_unkey writes this to fd 2
-        assert "T 0" in fake.log
+        assert "RELEASED LOW" in out, "process exited before confirmed line release"
+        assert out.index("KEYED") < out.index("RELEASED LOW")
+        assert rc == 0 and "UNREACHABLE" not in out, out
+        assert "+T 0" in fake.log
     finally:
         fake.close()
 

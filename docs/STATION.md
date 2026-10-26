@@ -1,11 +1,11 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Running the station
 
-One process owns the radio: the CAT port, the keying line, and the sound card. It
-hosts whichever protocols are enabled, each still serving its own host interface on
-its own port. Contention is impossible by construction rather than by discipline —
-which matters, because a transmitting radio mutes its own receiver, and one modem
-transmitting while another recorded has already invalidated eight sessions that
-were reported as a silent band.
+The station service takes the shared rig claim before opening the radio's CAT,
+keying line and sound devices. It releases the claim after checked teardown.
+See the [station service guide](README-station.md) for startup, ownership,
+STOP and handoff to the legacy tools.
 
 For a first PACTOR-3 or VARA Winlink call, use `hfmodem winlink` and the
 [operator quickstart](CONSOLE.md#install-and-receive-winlink-mail). It guides
@@ -44,16 +44,19 @@ voice passband. Active ALE scanning owns tuning until you stop its scan.
 to a Winlink gateway, and the automatic-control setting derived from
 `listen = true`. See `[station] client_sid` in CONFIG.md for the SID format.
 
-The station's CAT is a socket to a `rigctld` you start, so Hamlib has to be on
-`PATH` — `command -v rigctl rigctld` before anything else. A build of your own
-goes on `PATH` via `HAMLIB_BIN`.
+The station drives the supported Yaesu radios through native serial CAT
+(`[rig] cat = "yaesu"`); no Hamlib daemon is needed for that path. The
+`rigctld` backend remains available for other rigs. PTT uses the separate
+keying line, not CAT commands. Legacy shell tools still use Hamlib.
 
 ## The interlocks, and why each exists
 
-**`transmit = false`** is a hard interlock, not a preference. With it set, nothing
-keys, no CAT port is opened and no keying line is held — a receive-only station has
-no business touching either. It is the default in `examples/replay.toml`, which is
-the configuration to develop against.
+**`transmit = false`** prevents keying. Receive ownership opens capture audio
+and, when configured, CAT for readback, but never the PTT line or playback
+device. Attaching does not change ownership; a newly launched detached service
+starts observing, with no devices open.
+For development without hardware, use the replay configuration in
+`examples/replay.toml`.
 
 **`control`** has no default. `local` means an operator is at the control point;
 `automatic` means the station answers on its own, which is what `listen = true`
@@ -73,20 +76,23 @@ owe a callsign.
 
     hfmodem station station.toml
 
-In order: config, devices, audio, channel sense, arm, lanes, host servers. Lanes
-before servers is not cosmetic — a client that connects to a modem whose receiver
-is not running gets a station transmitting into a channel it cannot hear.
+With protocols enabled, foreground startup takes ownership in the mode allowed
+by `transmit`. Transmit ownership includes a brief keying proof and preflight
+before lanes and host servers start. With no protocols enabled, the live
+service stays observing. Use `--detach` to start observing regardless of the
+protocol settings; see the [service guide](README-station.md).
 
 ## Arming
 
 `hfmodem rig station.toml --arm` proves the keying line reaches the radio. This
 transmits briefly, so it requires `transmit = true` and refuses without it.
 
-Two things the arm gate does. It asks rigctld how it is
-configured to key (`ptt_type`) rather than testing by keying — on a daemon set up
-for CAT PTT, finding out the other way genuinely puts an unidentified carrier on
-the air. And it re-reads the dial, because the dial does not stay where you left
-it.
+The arm gate checks the configured radio identity, reads the dial and checks
+whether the radio is already transmitting before proving the keying line.
+Station ownership and the standalone `hfmodem rig` command both drive the
+configured CAT backend: the radio's own serial CAT for `cat = "yaesu"`, and
+rigctld for `rigctld` and `civ`, which needs that daemon running and checks its
+configuration as well.
 
 `PTT UNPROVEN` in the report means the line was not tested, not that it failed.
 
@@ -106,9 +112,9 @@ therefore asserted both answers at once. They now say what this section says.
 
 The one observation on file points the wrong way. On 2026-08-04 a shrike session
 keying RTS was stopped from outside and kept transmitting on 10.1 MHz until the
-operator powered the radio down. That is not the experiment — `ota.Rig` keys
+operator powered the radio down. That was not the experiment — that version keyed
 through a child `rigctl`, so the process holding the port was not the one that
-died, and hamlib clears `HUPCL` on the ports it opens — but it is the only time
+died, and Hamlib cleared `HUPCL` on the ports it opened — but it is the only time
 the question has been put to this station in anger, and the answer was no.
 
 ### The measurement, which needs no transmitter
@@ -122,22 +128,25 @@ nothing below puts anything on the air.
    the labelled pads on a bare CP210x breakout. `PTT_PORT` keeps naming the
    keying line; call the witness `$WITNESS`.
 
-2. Watch it. This only ever reads:
+2. Record the witness at **1 kHz**, retaining every CTS sample with its
+   monotonic timestamp. A gap over **2 ms** invalidates pulse assertions;
+   printing only changes or polling every 10 ms cannot establish them.
+   Observe a LOW baseline before opening the keying port.
 
-   ```
-   ./.venv/bin/python - "$WITNESS" <<'EOF'
-   import fcntl, os, struct, sys, termios, time
-   fd = os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-   was = None
-   while True:
-       bits, = struct.unpack("i", fcntl.ioctl(fd, termios.TIOCMGET, struct.pack("i", 0)))
-       cts = bool(bits & termios.TIOCM_CTS)
-       if cts != was:
-           print(f"{time.time():.3f} CTS {'HIGH' if cts else 'low'}", flush=True)
-           was = cts
-       time.sleep(0.01)
-   EOF
-   ```
+   Before each run, validate the witness with commanded 20, 10, 5 and 2 ms
+   pulses from `RtsPtt`. Use a second witness channel on a source with known
+   timing, or an oscilloscope capture, to establish physical edge times;
+   the driving ioctl's timestamp is not a physical edge reference. Retain
+   the reference capture with the samples. Measure rising and falling
+   reporting delays separately, the shortest reported pulse, and blindness
+   to shorter pulses.
+
+   Bound a detected pulse by the span from the sample before its first HIGH
+   to the sample after its last HIGH, plus the measured delay asymmetry.
+   For an undetected pulse, use the largest gap between surrounding LOW
+   samples plus blindness and reporting delay. Compare that upper bound
+   with the 20 ms initial-open pulse limit. Unknown bounds, or insufficient
+   witness resolution for the limit, mean **unresolved**, not a pass.
 
 3. Key the line from a process you can kill, and note the pid it prints:
 
@@ -159,13 +168,10 @@ nothing below puts anything on the air.
 
 4. `kill -9 <pid>` from a third shell, and read the witness.
 
-   * CTS low within a few milliseconds of the kill: the driver honours `HUPCL`
-     on last close, the fail-safe is real, and this section can be rewritten as
-     a measurement with the date on it.
-   * CTS still HIGH: process death does not lower this line, and every path that
-     leans on it — the SIGKILL in `hfhost.supervisor`, the last line of
-     `shrike/onair._unkey_on_signal`, and whatever reap a launcher does — is
-     leaning on nothing.
+   * CTS goes low: record the measured delay from the kill and the sampling
+     uncertainty; this is evidence for this adapter, line and scenario.
+   * CTS stays HIGH: record that process death did not lower the line.
+   * Missing samples or unvalidated witness timing: record unresolved.
 
 Three runs, because they are three different mechanisms and only the first is
 `HUPCL`: as above; again with a child of the holder also holding the port open,
@@ -175,3 +181,9 @@ pulling the adapter's USB plug while keyed, which `HUPCL` cannot reach at all.
 Jumper the witness to **DTR** and repeat if a rig here ever keys on that line.
 `core.ptt.drop_rts` already takes both down and reads both back for the same
 reason: which line keys a given rig is a measurement, not an assumption.
+
+Repeat on macOS and Linux for each adapter and keying line. Publish the date,
+platform, adapter, line, scenario and measured death-unkeys result (`true` or
+`false`), with timing evidence. A measured `false` is still a result; an
+unperformed or unresolved measurement does not complete the hardware gate.
+No such measurement is recorded here yet.

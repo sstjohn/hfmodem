@@ -1,0 +1,280 @@
+[
+  {
+    "source": "working/varac-p3/bench/b4-args/20261020-220637-chat.jsonl",
+    "sha256": "fa7ae24177434eb8aff849074dfae4b1093b0a0952296a2a9f4d2dc5dbcb21af",
+    "line": 142,
+    "events": [
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "tx",
+        "kind": "cmd_tx",
+        "text": "CQFRAME W9SSJ-1 500",
+        "t": 111.25012,
+        "wall": "2026-10-20T22:08:28.312"
+      },
+      {
+        "who": "S",
+        "chan": "sys",
+        "dir": "",
+        "kind": "note",
+        "text": "step A:CQFRAME W9SSJ-2 500",
+        "t": 111.250154,
+        "wall": "2026-10-20T22:08:28.312"
+      },
+      {
+        "who": "cap",
+        "chan": "audio",
+        "dir": "",
+        "kind": "audio",
+        "text": "mark: step",
+        "capture_id": 1,
+        "t_capture": 111.250162,
+        "step": "A:CQFRAME W9SSJ-2 500",
+        "t": 111.250164,
+        "wall": "2026-10-20T22:08:28.312"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "tx",
+        "kind": "cmd_tx",
+        "text": "CQFRAME W9SSJ-2 500",
+        "t": 111.250172,
+        "wall": "2026-10-20T22:08:28.312"
+      },
+      {
+        "who": "S",
+        "chan": "sys",
+        "dir": "",
+        "kind": "note",
+        "text": "step wait 20",
+        "t": 111.250183,
+        "wall": "2026-10-20T22:08:28.312"
+      },
+      {
+        "who": "cap",
+        "chan": "audio",
+        "dir": "",
+        "kind": "audio",
+        "text": "mark: step",
+        "capture_id": 1,
+        "t_capture": 111.250189,
+        "step": "wait 20",
+        "t": 111.250191,
+        "wall": "2026-10-20T22:08:28.312"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "OK",
+        "t": 111.284744,
+        "wall": "2026-10-20T22:08:28.347"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "PENDING",
+        "t": 111.284804,
+        "wall": "2026-10-20T22:08:28.347"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "PTT ON",
+        "t": 111.284818,
+        "wall": "2026-10-20T22:08:28.347"
+      },
+      {
+        "who": "A",
+        "chan": "ptt",
+        "dir": "rx",
+        "kind": "ptt",
+        "text": "ON",
+        "t": 111.284827,
+        "wall": "2026-10-20T22:08:28.347"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "WRONG",
+        "t": 111.284836,
+        "wall": "2026-10-20T22:08:28.347"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "BUSY ON",
+        "t": 111.284843,
+        "wall": "2026-10-20T22:08:28.347"
+      },
+      {
+        "who": "B",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "BUSY ON",
+        "t": 111.357877,
+        "wall": "2026-10-20T22:08:28.420"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "BITRATE (1)  18 bps TX",
+        "t": 112.678379,
+        "wall": "2026-10-20T22:08:29.741"
+      }
+    ]
+  },
+  {
+    "source": "working/varac-p3/bench/b3-cases/20261020-223937-chat.jsonl",
+    "sha256": "901a6695d62065f598de1d8a7c960e2e1d5af024792fc0b564f1334cd9f5ba73",
+    "line": 528,
+    "events": [
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "tx",
+        "kind": "cmd_tx",
+        "text": "CQFRAME W9SSJ 500",
+        "t": 234.762064,
+        "wall": "2026-10-20T22:43:32.300"
+      },
+      {
+        "who": "S",
+        "chan": "sys",
+        "dir": "",
+        "kind": "note",
+        "text": "step A:CQFRAME W9SSJ-1 500",
+        "t": 234.762101,
+        "wall": "2026-10-20T22:43:32.300"
+      },
+      {
+        "who": "cap",
+        "chan": "audio",
+        "dir": "",
+        "kind": "audio",
+        "text": "mark: step",
+        "capture_id": 1,
+        "t_capture": 234.762108,
+        "step": "A:CQFRAME W9SSJ-1 500",
+        "t": 234.76211,
+        "wall": "2026-10-20T22:43:32.300"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "tx",
+        "kind": "cmd_tx",
+        "text": "CQFRAME W9SSJ-1 500",
+        "t": 234.762117,
+        "wall": "2026-10-20T22:43:32.300"
+      },
+      {
+        "who": "S",
+        "chan": "sys",
+        "dir": "",
+        "kind": "note",
+        "text": "step wait 20",
+        "t": 234.762126,
+        "wall": "2026-10-20T22:43:32.300"
+      },
+      {
+        "who": "cap",
+        "chan": "audio",
+        "dir": "",
+        "kind": "audio",
+        "text": "mark: step",
+        "capture_id": 1,
+        "t_capture": 234.762132,
+        "step": "wait 20",
+        "t": 234.762133,
+        "wall": "2026-10-20T22:43:32.300"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "OK",
+        "t": 234.874528,
+        "wall": "2026-10-20T22:43:32.412"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "PENDING",
+        "t": 234.874566,
+        "wall": "2026-10-20T22:43:32.413"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "PTT ON",
+        "t": 234.874577,
+        "wall": "2026-10-20T22:43:32.413"
+      },
+      {
+        "who": "A",
+        "chan": "ptt",
+        "dir": "rx",
+        "kind": "ptt",
+        "text": "ON",
+        "t": 234.874584,
+        "wall": "2026-10-20T22:43:32.413"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "WRONG",
+        "t": 234.874591,
+        "wall": "2026-10-20T22:43:32.413"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "BUSY ON",
+        "t": 234.874597,
+        "wall": "2026-10-20T22:43:32.413"
+      },
+      {
+        "who": "B",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "BUSY ON",
+        "t": 234.939383,
+        "wall": "2026-10-20T22:43:32.477"
+      },
+      {
+        "who": "A",
+        "chan": "cmd",
+        "dir": "rx",
+        "kind": "cmd_rx",
+        "text": "BITRATE (1)  18 bps TX",
+        "t": 236.193814,
+        "wall": "2026-10-20T22:43:33.732"
+      }
+    ]
+  }
+]

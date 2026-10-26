@@ -1,8 +1,10 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Console and operator tools
 
 The console provides per-mode monitoring, bounded PACTOR/VARA/ARDOP Winlink
-attempts and campaigns, a foreground ALE/HFLINK station, HF selcall, and a
-logbook with audio replay. The project remains an experimental prerelease for developers only. Successful live-radio
+attempts and campaigns, Kestrel chat with VarAC peers, supervised voice and CW,
+ALE/HFLINK, HF selcall, and a logbook with audio replay. The project remains an experimental prerelease for developers only. Successful live-radio
 mail exchanges are established; experimental waveform and host interoperability
 limits are described in the [status guide](STATUS.md).
 
@@ -192,6 +194,19 @@ before using `--execute`. Named level presets describe launch parameters;
 verify actual RF output and audio linearity on your own station. An accepted
 command or a local decode does not establish delivery to the far end.
 
+## Station ownership
+
+```sh
+hfmodem console attach station.toml
+hfmodem console own station.toml --receive
+hfmodem console release station.toml
+```
+
+Attach leaves hardware unopened. Omit `--receive` to request transmit ownership,
+including its brief keying proof. See [station service](README-station.md).
+
+VARA's former `--speed-limited` option is now `--winlink-cartel-mode`.
+
 ## Receive-only operation
 
 ```sh
@@ -216,6 +231,207 @@ pages have different encoding, length and acknowledgement rules; the console
 reports them explicitly. External DTM/DBM and automatic selcall acknowledgement
 interoperability still require a cooperative rig test. The passive `ale monitor`
 and `selcall monitor` commands never transmit.
+
+## Kestrel chat
+
+### VARA chat quickstart
+
+Chat with VarAC peers using hfmodem's Kestrel modem, included in 0.3.0.
+Use Python 3.13 on macOS or Linux and an
+FTDX10 with USB audio, or an FT-891 with an external audio interface.
+
+From the checkout root, install and configure the station:
+
+```sh
+python3.13 -m venv ~/hfmodem-env
+. ~/hfmodem-env/bin/activate
+python3 -m pip install -e packages/hfhost -e packages/creance -e packages/hfmodem
+hfmodem console setup --transmit
+```
+
+Setup asks for your radio, callsign, licence, CAT/PTT ports and audio devices.
+Enter your grid for beacons. It saves configuration without transmitting and
+checks the required system tools. If Winlink setup is already saved, reuse it;
+add `--replace` only to change it. A saved receive-only station needs setup
+with `--replace --transmit` before chat can transmit.
+
+Choose a band your licence and antenna support. Preview the 20 m plan, then
+start the session:
+
+```sh
+hfmodem console vara chat --band 20 --bw 500 --dry-run
+hfmodem console vara chat --band 20 --bw 500
+```
+
+The second command opens the radio and answers incoming calls.
+Check the displayed calling frequency and watch ALC during transmission.
+
+1. Type `/heard` to list heard stations and CQs.
+2. Answer a listed CQ with `/answer N`, using its displayed number. To call
+   CQ yourself, type `/cq`; hfmodem checks a slot and waits there for an answer.
+3. Once connected, type text and press Enter to send it.
+4. Type `/bye` to end the contact and return to monitoring, or `/quit` to exit.
+   `/stop` cancels an operation or aborts a link, discarding unconfirmed text.
+
+Use `/status` for progress and `/help` for commands. `/beacon` enables repeating
+beacons; `/beacon off` stops them. For passive listening only,
+use `hfmodem console vara monitor`.
+
+In a new Terminal, run `. ~/hfmodem-env/bin/activate` again before starting
+chat. Change `--band 20` to your chosen band; 500 Hz is the default chat bandwidth.
+
+### Chat commands
+
+The session monitors the calling frequency, makes or answers contacts, and
+returns to monitoring when a contact ends. Bandwidths are 500, 2300 and 2750 Hz.
+`/answer N` uses the bandwidth advertised by the heard CQ.
+
+| Command | Action |
+|---|---|
+| `/heard`, `/slots` | Show heard stations and channel activity |
+| `/answer N` | Answer a heard CQ |
+| `/cq [SLOT] [repeat]` | Call CQ on a free slot, optionally repeating |
+| `/call CALL [SLOT]`, `/call CALL cf` | Call a station on a slot or the calling frequency |
+| `/qsy SLOT`, `/band N` | Request a slot change or change bands while idle |
+| `/follow TARGET` | Follow `all`, `cf`, a slot or dial kHz; `off` hides transcripts |
+| `/beacon [MINUTES]` | Set cadence; `now`, `force` and `off` control one-shot or repeating beacons |
+| `/beacon hop BANDS [every MINUTES]` | Rotate through a list of bands' calling frequencies, beaconing on arrival |
+| `/beacon hop auto [BANDS] [every MINUTES]` | Choose ready bands using local heard activity and periodic exploration |
+| `/beacon hop status`, `/band ready`, `/band unready` | Inspect hopping, acknowledge the current band's match, or withdraw readiness |
+| `/away [MESSAGE]`, `/back` | Set or clear the away reply |
+| `/vmail [N]`, `/vmail send SUBJECT` | Read or send VMail |
+| `/vmail pending`, `/vmail collect CALL`, `/vmail dismiss CALL` | List parked-mail notices, connect to collect mail, or dismiss a notice |
+| `/bbs list`, `/bbs get N` | List files and download a selected file with checksum and format validation |
+| `/all` | All-stations broadcast; choose `cf` or `slot N`, enter text, inspect `status` or stop with `off` |
+| `/inquire heard` | Request the connected peer’s last-heard list |
+| `/auto on`, `/auto off` | Enable or disable automatic answers |
+| `/verbose on`, `/verbose off` | Show or hide transmit and receive diagnostics |
+| `/status`, `/help` | Show the current operation or commands |
+| `/bye [text]`, `/quit` | Close the contact or leave the session |
+| `/stop` | Cancel the current operation; abort a connected link and discard unconfirmed text |
+
+Plain text goes to the connected peer. Passive following covers the current
+receive passband; activity outside it is missed. `/follow cf` returns to the
+calling frequency. Passive transcripts are logged.
+
+See [BBS files](VARAC-BBS.md) for download limits, directory hosting and the
+distinction between validated downloads and raw research capture.
+
+Receive retry requests, successful retry reception, held outgoing bytes and local
+stall closure are shown even with `/verbose off`. The closing notice reports
+elapsed time without protocol progress, recovery requests sent and unacknowledged
+outgoing bytes. A transmitted request does not prove the peer received it;
+undecoded activity does not prove that a retry arrived.
+
+In a BW500 chat initiated here, a pending receive retry can solicit up to two
+additional NAKs after at least 12 seconds since the previous request and sufficient
+fresh receive audio. Recovery waits for a clear channel and completed receive
+candidates. Complete CRC-clean replies at an earlier requested base rate remain
+acceptable if the peer missed a later request. Recovery consumes the existing
+stall budget; it does not acknowledge unread data or keep a broken link alive
+indefinitely.
+
+### Beacon band hopping
+
+Hopping is optional and starts only when requested. Visit each intended band with
+`/band N`, verify its antenna match (use the rig's TUNE control if needed), then
+type `/band ready` on that band. Readiness lasts for this session; `/band unready`
+withdraws it. ATU on/off and filter readback alone never establish a usable match.
+
+```
+/beacon hop 80 40 20 every 15
+/beacon hop auto 80 40 20 every 20
+/beacon hop status
+/beacon off
+```
+
+The first form cycles through the listed calling channels in order. The second
+chooses automatically within the list; `/beacon hop auto` considers all supported
+bands. Lists use band numbers, not arbitrary dial frequencies or QSO slots.
+Hop dwell defaults to 15 minutes and can be as short as 5 minutes, for example
+`/beacon hop 80 40 20 every 5`. Use `every MINUTES` to
+distinguish an interval from a band number such as 15, 20 or 30.
+
+Each move requests one beacon on arrival, after five seconds of clear channel.
+A manual `/band N` also requests an arrival beacon while hopping is enabled.
+Each band has a 15-minute minimum since its last confirmed beacon, including
+manual beacons; turning hopping off and on does not erase that history. A busy
+arrival waits until clear or misses that opportunity. Missed opportunities never
+produce catch-up bursts. Contacts, calling, close exchanges, keying and off-channel
+following suspend hopping. Failed band transitions pause it until an operator
+retries `/band N` and re-enables hopping. Fixed rotation pauses at an unready band;
+automatic selection skips it and reports why.
+
+Automatic choices use unique stations heard in this session near the current UTC
+hour (including adjacent hours), normalized by listening time. Evidence is bounded
+to seven days and is separate from slot occupancy. Every third choice, or every
+choice without activity evidence, explores the least recently monitored eligible
+band. The reason is printed before each move. This is a local activity heuristic;
+it does not query PSKReporter or a propagation forecast, and evidence is not saved
+across restarts.
+
+`/beacon MINUTES` returns to single-band beaconing. `/beacon off` and `/quit` cancel
+hopping; repeating beacons also expire after 24 hours. Existing single-band and
+one-shot behavior is unchanged when hopping is off.
+
+An addressed `<SMP>` broadcast means the sender has parked VMail for you.
+`/vmail pending` lists notices saved in your mailbox across restarts.
+For example, `/vmail collect KQ4QWH` calls that station on its saved notice
+channel and uses the normal QSY exchange. If the notice is on another band,
+use `/band N` first. Without a saved notice, collection calls on the current
+band's calling frequency. Reception of a notice never starts a call by itself.
+
+The relay forwards its mail after connection and QSY; there is no separate
+download request. Each complete VMail is saved before `<SMR>` acknowledges it.
+Forwarded mail retains its original sender and compose time separately from
+the connected relay. `/vmail` lists saved mail, `/vmail N` reads it, and
+`/bye` ends the contact. `/stop` uses the normal call/QSY cancellation behavior.
+Failed calls and interrupted messages leave the notice available for retry.
+A repeated forwarded message with the same author, compose time, recipient,
+subject and body is acknowledged without adding another inbox entry.
+
+Notices remain until `/vmail dismiss CALL`: receiving one message does not
+prove that the relay has no more mail. Dismissing a notice keeps downloaded
+VMails. Only complete supported text envelopes addressed to your station (or
+with the compact envelope's omitted destination) are accepted. Unsupported
+extensions, including urgent/attachment envelopes, remain in the session log
+without a success acknowledgement.
+
+`/bbs list` requests a peer's directory. `/bbs offer N` selects an offer;
+`/bbs capture` explicitly records opaque transfer bytes. It does not produce a
+validated download. Use `/help bbs` for peer-service requirements.
+
+`/email send TO_EMAIL REPLY_EMAIL SUBJECT` starts an outbound email-gateway
+submission. Use `/email status` for its result and `/help email` for the workflow.
+Replies go to the external reply address; submission does not confirm delivery.
+
+Add `--pskreporter --loc GRID` at launch to publish validated CQ and beacon
+reception reports. Reporting is off by default. `/pskreporter status` shows its
+state; `/pskreporter off` stops it.
+
+## Voice and CW
+
+Macagua provides speech recognition and synthesized voice; merlin encodes and
+decodes CW. The contact terminal prepares reply drafts for operator review.
+Both modes are experimental. Preview a contact without opening the radio:
+
+```sh
+hfmodem console voice fly --dial 14.285 --cq --dry-run
+hfmodem console voice fly --waveform cw --dial 14.050 --cq --dry-run
+```
+
+Dial frequencies here are MHz. Replace `--dry-run` with `--execute` for a
+supervised contact; Enter approves each transmitted over. Voice requires local
+speech models and a speech runtime. `hfmodem console voice test` uses the
+computer's microphone and speakers without the radio.
+
+## VARA transmit calibration
+
+`hfmodem console vara txcal --band 40 --execute` transmits stepped audio drives
+at the current dial and reports RF power and ALC. `--band` checks the band; it
+does not retune. Use the recommendation for the current radio and audio chain;
+`--set` records the recommended drive and codec volume. Transmit-level monitoring warns
+when the codec volume changes.
 
 ## Advanced messages, witness and power options
 
@@ -273,21 +489,33 @@ Complete diagnostic transcripts stay in arm records; the terminal normally
 shows milestones and refusals. `hfmodem console MODE status` and `hfmodem console log`
 read saved evidence without touching the radio.
 
-```sh
-.venv/bin/python tools/logbook_view/serve.py --port 8738
+The station service mounts the watch-only logbook and replay face at
+`http://127.0.0.1:8737/` (or the station's configured port). It uses the loaded
+station identity, including empty defaults. Audio access is restricted to the
+selected evidence trees. Expand a QSO and select **Inspect rehear** to decode
+saved audio; playback and decode events share the recording clock.
+
+To include additional contacts in the live logbook and `/api/log.adi`, set an
+optional directory in the station file. Relative paths resolve beside that file:
+
+```toml
+[desk]
+adif_dir = "imported-logs"
 ```
 
-Open `http://127.0.0.1:8738/`. The logbook reads your selected data directory and
-station identity, and can start empty. Supply `--root PATH` to inspect an
-explicit historical data tree, `--adif FILE` to import contacts, or
-`--viewer-root PATH` to choose derived replay storage. Audio access is restricted
-to the selected evidence trees. Expand an existing QSO and select **Inspect
-rehear** to decode its saved audio. TX and peer RX use distinct waterfall colours;
-recording playback and decode events share the recording clock.
+The face reads that directory's `.adi` files on each log request. `/api/log.adi`
+is the LoTW ADIF export. Inbox confirmations are refreshed only on explicit request:
 
-Inbox polling is off unless `--imap ACCOUNT` is supplied. Static export uses
-`--export DIR`, optional `--audio-base URL` and optional `--hostname HOST`;
-it excludes local transcripts and requires recordings to be uploaded separately.
+```sh
+hfmodem console logbook --imap ACCOUNT
+hfmodem console logbook --root PATH --adif FILE --export DIR
+```
+
+`--imap` performs one refresh using the app password in `~/.imap_password`;
+the service never polls the inbox. `--adif FILE` imports contacts into an offline
+snapshot and is repeatable. Static export accepts optional `--audio-base URL`
+and `--hostname HOST`; it excludes transcripts and requires recordings to be
+uploaded separately. With no action, `console logbook` prints usage.
 See the [replay guide](../tools/logbook_view/README.md) for packet, byte and timing
 limits. The [site examples](https://hfmodem.ssj.lol/examples/) show successful
 PACTOR-3, VARA and ARDOP mail transfers, with the recorded outcomes and limits

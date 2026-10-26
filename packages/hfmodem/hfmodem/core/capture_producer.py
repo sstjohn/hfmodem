@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Pure capture delegation preflight for optional independent recorder children."""
 from pathlib import Path
 from . import capture_identity as identity

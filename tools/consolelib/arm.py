@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """CALL A HOST: build one arm, fly it, tail it, and write down what it did.
 
 An arm is a plan before it is a flight. The plan is the whole launcher line, the
@@ -22,11 +24,13 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import subprocess
 import sys
 import time
+import threading
 
 from . import operator, claim, logbook, mail, modes, residency, roster, station, view
 
@@ -51,7 +55,7 @@ def source_evidence():
              for p in (station.ROOT / 'packages' / parent).rglob('*')
              if p.is_file() and p.suffix in ('.py', '.c', '.h', '.npz', '.npy', '.i32', '.json', '.z')
              and '__pycache__' not in p.parts and 'tests' not in p.parts]
-    files += [p for parent in ('consolelib', 'logbook_view')
+    files += [p for parent in ('consolelib', 'logbook_view', 'desk')
               for p in (station.ROOT / 'tools' / parent).rglob('*')
               if p.is_file() and (p.suffix in ('.py', '.sh', '.mjs', '.js', '.json') or p.name == 'console')
               and '__pycache__' not in p.parts and not p.name.startswith('test_')]
@@ -206,14 +210,16 @@ def plan(mode, args, now):
                     console_argv=getattr(args, 'console_argv', None),
                     source=source, git=git)
     station_file = os.environ.get(config.STATION_ENV) or str(station.ROOT / 'station.toml')
+    present = station_file if Path(station_file).is_file() else None
+    args.client_sid = config.client_sid(path=present)
     identity = None
     if mode.name in ('pactor', 'vara', 'ardop'):
         from hfmodem.core import identification
         identity_env = dict(os.environ)
-        if Path(station_file).is_file():
-            identity_env[config.STATION_ENV] = station_file
+        if present:
+            identity_env[config.STATION_ENV] = present
         effective = identification.options(
-            extra, mycall=config.mycall(path=station_file if Path(station_file).is_file() else None),
+            extra, mycall=config.mycall(path=present),
             idcall=getattr(args, 'idcall', None))
         identity = identification.resolve(effective.mycall, effective.idcall, environ=identity_env)
     send, delivery = mail.outbound(mode.name, peer, named_send, directory, now, profile,
@@ -246,7 +252,7 @@ def plan(mode, args, now):
     if identity is not None:
         env['MYCALL'] = identity.digital_call
         env['IDCALL'] = identity.cw_call
-        if not os.environ.get(config.STATION_ENV) and not Path(station_file).is_file():
+        if not os.environ.get(config.STATION_ENV) and not present:
             del env[config.STATION_ENV]
     if selected_name != 'ft891' or requested:
         env['HFMODEM_RIG'] = selected_name
@@ -315,6 +321,20 @@ def verdict(mode, directory, code=0):
     return dict(reached=reached, line=line)
 
 
+_FAULT = re.compile(r'\b(?:error|usage):|^[\w.]*(?:Error|Exception)\b|^!! ', re.I)
+
+
+def faults(directory, code):
+    """The last error lines of arm.log when the launcher failed, for the operator
+    who otherwise sees only its exit code."""
+    log = Path(directory) / 'arm.log'
+    if not code or not log.is_file():
+        return []
+    found = [line.strip() for line in log.read_text(errors='replace').splitlines()
+             if _FAULT.search(line.strip())]
+    return list(dict.fromkeys(found[-3:]))
+
+
 def refusal(text):
     """The last warning the modem printed after the argv it was launched with, which
     is where an argument it would not take is said."""
@@ -373,32 +393,69 @@ def qualified(mode, plan, named):
     return plan, found
 
 
+def cleanup_result(text, code):
+    lines = [line.strip() for line in text.splitlines()]
+    return dict(complete=code == 0 and 'CLEANUP COMPLETE' in lines,
+                line=next((line for line in reversed(lines)
+                           if line in ('PTT LINE low', 'PTT LINE high',
+                                       'PTT LINE unreadable', 'PTT LINE none')), None),
+                returncode=code)
+
+
 def pump(launcher, sink, screen):
-    """Every line to the transcript, the contact to the screen. Returns the exit code."""
-    for line in launcher.stdout:
-        sink.write(line)
-        for shown in screen.feed(line):
-            sys.stdout.write(shown)
-            sys.stdout.flush()
-    return launcher.wait()
+    admission = getattr(launcher, '_claim_admission', None)
+    previous = None
+    outer_timer = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
+    if (admission is not None and admission.fd is not None
+            and threading.current_thread() is threading.main_thread()):
+        def expired(signum, frame):
+            raise TimeoutError('launcher did not acknowledge claim admission')
+        previous = signal.signal(signal.SIGALRM, expired)
+        # Admission may be pending when settle starts. Neither deadline may
+        # extend the other: the operator's unwind grace is still a hard bound.
+        signal.setitimer(signal.ITIMER_REAL, min(claim.ADMISSION_TIMEOUT_S,
+                            outer_timer[0] or claim.ADMISSION_TIMEOUT_S))
+    try:
+        for line in launcher.stdout:
+            if line.rstrip('\r\n') == 'CLAIM ADMITTED' and admission is not None:
+                admission.failed()
+                if previous is not None:
+                    signal.signal(signal.SIGALRM, previous)
+                    signal.setitimer(signal.ITIMER_REAL,
+                        max(.001, outer_timer[0] - (time.monotonic() - started))
+                        if outer_timer[0] else 0, outer_timer[1])
+                    previous = None
+            launcher._cleanup_lines = getattr(launcher, '_cleanup_lines', [])
+            if line.strip().startswith('PTT LINE ') or line.strip() == 'CLEANUP COMPLETE':
+                launcher._cleanup_lines.append(line)
+            # Keep the complete transcript on disk; the screen deliberately
+            # folds repetitive modem chatter for an operator watching live.
+            sink.write(line)
+            for shown in screen.feed(line):
+                sys.stdout.write(shown)
+                sys.stdout.flush()
+        code = launcher.wait()
+        if admission is not None and admission.fd is not None:
+            launcher._admission_warning = (
+                f'CLAIM NOT ADMITTED: launcher exited {code} without acknowledgement')
+            sink.write(launcher._admission_warning + '\n')
+            print('  ' + launcher._admission_warning, flush=True)
+        return code
+    finally:
+        if previous is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+            signal.setitimer(signal.ITIMER_REAL,
+                max(.001, outer_timer[0] - (time.monotonic() - started))
+                if outer_timer[0] else 0, outer_timer[1])
 
 
 def settle(launcher, sink, screen):
-    """Read the launcher's own teardown rather than exiting out from under it.
-
-    A ^C at the terminal reaches the whole foreground group, so the modem is
-    already unkeying itself; the console's part is not to exit first. When it
-    did, the launcher took SIGPIPE at the next line it printed -- before the mail
-    summary, before the recorders closed, before `prove_unkeyed` -- so a hand
-    stop cost the evidence AND the keying verdict rather than only the arm.
-
-    The clock is for a console interrupted on its own, whose launcher never saw
-    anything; a second ^C ends the wait early. Either way the return is None when
-    the launcher did not finish, which is what names the artifacts at risk.
-    """
+    # Drain the pipe while the launcher unwinds: its final mail summary and
+    # recorder artifacts arrive only here. A stuck child gets a bounded grace.
     def out_of_time(_signum, _frame):
         raise TimeoutError
-
     previous = signal.signal(signal.SIGALRM, out_of_time)
     signal.setitimer(signal.ITIMER_REAL, INTERRUPT_GRACE_S)
     try:
@@ -410,47 +467,60 @@ def settle(launcher, sink, screen):
         signal.signal(signal.SIGALRM, previous)
 
 
-def bring_down(directory, *, env=None):
-    """`tools/onair.sh down`, whose `prove_down` is the only reading of the keying line.
-
-    In a session of its own, and with ^C ignored for the seconds it takes: the
-    operator is hammering the key by now, and the one reading that says whether
-    the transmitter is still up is the one thing here that may not be skipped.
-    Everything before this point honours the second interrupt; this does not, and
-    `subprocess.run` would kill the check on its way out if it did.
-
-    Its exit code is not read -- `down` comes back non-zero with nothing left to
-    stop, and reading that as failure has already put two arms on the air at once.
-    """
-    deferred = signal.signal(signal.SIGINT, signal.SIG_IGN)
+def _down_once(env, timeout):
+    process = claim.remember(subprocess.Popen(
+        [str(station.ONAIR), 'down'], cwd=station.ROOT, text=True,
+        env=dict(os.environ, **(env or {})), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, start_new_session=True, pass_fds=(9,)))
     try:
-        done = subprocess.run([str(station.ONAIR), 'down'], cwd=station.ROOT, text=True,
-                              env=None if env is None else dict(os.environ, **env),
-                              capture_output=True, timeout=DOWN_TIMEOUT_S,
-                              start_new_session=True)
-        said = done.stdout + done.stderr
-    except (OSError, subprocess.SubprocessError) as trouble:
-        said = f'`onair.sh down` did not run: {type(trouble).__name__}: {trouble}'
-    finally:
-        signal.signal(signal.SIGINT, deferred)
-    (directory / 'interrupt.log').write_text(said + '\n')
-    return next((line.strip() for line in reversed(said.splitlines())
-                 if 'PTT VERDICT' in line), None)
+        stdout, stderr = process.communicate(timeout=timeout)
+        return process.returncode, stdout + stderr
+    except subprocess.TimeoutExpired as error:
+        process._claim_child.terminate()
+        # A cleanup may have surviving fd-8 children; never kill its proof.
+        text = ''.join(part.decode(errors='replace') if isinstance(part, bytes) else part
+                       for part in (error.stdout or '', error.stderr or ''))
+        return None, text + '\nNOT CONFIRMED: cleanup deadline expired\n'
+
+
+def bring_down(directory, *, env=None):
+    hardware = claim.hardware
+    hardware.inherited(9)
+    deadline = time.monotonic() + DOWN_TIMEOUT_S
+    said, code = '', None
+    with claim.uninterrupted():
+        while time.monotonic() < deadline:
+            try:
+                code, output = _down_once(env, max(.001, deadline - time.monotonic()))
+                said += output
+            except (OSError, subprocess.SubprocessError, RuntimeError) as trouble:
+                said += f'`onair.sh down` failed: {type(trouble).__name__}: {trouble}\n'
+                code = None
+                break
+            if code != 2:
+                break
+            time.sleep(min(.1, max(0, deadline - time.monotonic())))
+        result = cleanup_result(output if code == 0 else said, code)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / 'interrupt.log').write_text(said + '\n')
+        except OSError as error:
+            result['finalization_error'] = f'console finalization failed: {error}'
+            print(result['finalization_error'], file=sys.stderr, flush=True)
+        return result
 
 
 def hand_stop(plan, launcher, sink, screen):
-    """A ^C mid-arm: let the launcher close its own artifacts, then prove the line down."""
-    print('\n  stopping the arm. It closes its recordings as it goes; ^C again to '
-          'stop it harder.', flush=True)
-    code = settle(launcher, sink, screen)
-    if code is None:
-        print('  the launcher did not finish unwinding: the mail transcript, stream.wav '
-              'and the rx windows are written at teardown and will be short or missing. '
-              'Everything it printed up to here is in arm.log.', flush=True)
-    keying = bring_down(Path(plan['directory']))
-    print(f'  {keying}' if keying else
-          '  NO PTT VERDICT -- `onair.sh down` never reached the keying line, so this '
-          'console cannot say the transmitter is unkeyed. Check it by hand.', flush=True)
+    print('\n  stopping the arm; further interrupts are absorbed during cleanup.', flush=True)
+    with claim.uninterrupted():
+        # Signal the launcher first so it can unkey and flush its own children;
+        # closing stdout early would SIGPIPE away the only teardown evidence.
+        launcher._claim_child._signal(signal.SIGINT)
+        code = settle(launcher, sink, screen)
+        if code is None:
+            print('  the launcher did not finish unwinding; stream.wav and other '
+                  'teardown artifacts may be incomplete.', flush=True)
+        claim.end_child(launcher)
     return code
 
 
@@ -546,113 +616,144 @@ def _fly(mode, plan, qualify=None, *, capture=None, capture_state=None):
         capture_state['writers'].append(transcript_writer)
         transcript_writer.update_status(state='ongoing', pending=1, component='native-session')
     transcript = transcript_writer.reserve('arm.log') if transcript_writer else None
-    with claim.lease(mode), ready(mode, plan):
-        note = claim.spacing_note(mode, plan['call'], now)
-        if note:
-            print(note, flush=True)
-        if plan['adjustments'].get('prepare_radio'):
-            station.prepare_radio(plan)
-        plan = dict(plan, started_utc=now.isoformat(), residency=resided,
-                    readings=station.check_rig(plan))
+    with claim.lease(mode, env=plan.get('env')), ready(mode, plan):
+        tap = witness = launcher = admission = None
+        code, interrupted = None, False
+        screen = view.View()
+        plan = dict(plan, started_utc=now.isoformat(), residency=resided)
         if capture is None:
             directory.mkdir(parents=True)
-        if plan['delivery']:
-            mail.write(plan['delivery'])
-        if provenance is None:
-            (directory / 'provenance.json').write_text(json.dumps(plan, indent=2) + '\n')
-        else:
-            provenance.update(plan | {'capture_state': 'ongoing'})
-        for line in station.spell_environment(plan['readings'], plan['band_m'],
-                                              plan['codec_gain_working_point'],
-                                              selection=station.selection_for_plan(plan)):
-            print(line, flush=True)
-        print('  the launcher loads ' + residency.label(resided['modules'])
-              + (f' -- {resided["refusal"]}' if resided['refusal'] else ''), flush=True)
-        flown_with = passthrough_note(plan)
-        if flown_with:
-            print(flown_with, flush=True)
-        tap = station.start_tap(plan, directory, writer=writer) if writer else station.start_tap(plan, directory)
-        witness = ((station.place_kiwi(plan, directory, writer=writer) if writer
-                    else station.place_kiwi(plan, directory)) if plan['adjustments']['kiwi'] else None)
-        print(spelled(plan), flush=True)
-        code = None
-        # The sink takes the whole stream and the screen takes the contact: this
-        # arm.log is what every sweep and tools/rehear read, so the filter is on
-        # the terminal write and nowhere else. The screen's tally is printed in
-        # the teardown, because an operator who interrupts an arm still wants it.
-        screen = view.View()
-        interrupted = False
         try:
+            note = claim.spacing_note(mode, plan['call'], now)
+            if note:
+                print(note, flush=True)
+            if plan['adjustments'].get('prepare_radio'):
+                station.prepare_radio(plan)
+            plan['readings'] = station.check_rig(plan)
+            if plan['delivery']:
+                mail.write(plan['delivery'])
+            if provenance is None:
+                (directory / 'provenance.json').write_text(json.dumps(plan, indent=2) + '\n')
+            else:
+                provenance.update(plan | {'capture_state': 'ongoing'})
+            for line in station.spell_environment(plan['readings'], plan['band_m'],
+                    plan['codec_gain_working_point'], selection=station.selection_for_plan(plan)):
+                print(line, flush=True)
+            print('  the launcher loads ' + residency.label(resided['modules'])
+                  + (f' -- {resided["refusal"]}' if resided['refusal'] else ''), flush=True)
+            flown_with = passthrough_note(plan)
+            if flown_with:
+                print(flown_with, flush=True)
+            tap = station.start_tap(plan, directory, writer=writer) if writer else station.start_tap(plan, directory)
+            if tap is not None:
+                claim.remember(tap)
+            witness = ((station.place_kiwi(plan, directory, writer=writer) if writer
+                        else station.place_kiwi(plan, directory)) if plan['adjustments']['kiwi'] else None)
+            if witness is not None:
+                claim.remember(witness)
+            print(spelled(plan), flush=True)
             with (io.TextIOWrapper(transcript.open()) if transcript
                   else (directory / 'arm.log').open('w')) as sink:
-                # Into the transcript as well as onto the screen: the terminal is
-                # gone by the time anyone asks what a surprising arm actually keyed.
                 if flown_with:
                     sink.write(flown_with + '\n')
-                launcher = subprocess.Popen(
-                    plan['command'], cwd=station.ROOT, env=dict(os.environ, **plan['env']),
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                admission = claim.hardware.inherited(9, launch=True)
+                with claim.defer_interrupts():
+                    launcher = claim.remember(subprocess.Popen(
+                        plan['command'], cwd=station.ROOT, env=dict(os.environ, **plan['env']),
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                        pass_fds=(9,)))
+                    launcher._claim_admission = admission
                 try:
                     code = pump(launcher, sink, screen)
                 except KeyboardInterrupt:
                     interrupted = True
                     code = hand_stop(plan, launcher, sink, screen)
+        except KeyboardInterrupt:
+            interrupted = True
+            raise
         finally:
-            with _preserve_primary_failure():
-                sys.stdout.writelines(screen.close())
-                try:
-                    if witness and witness.poll() is None:
-                        witness.terminate()         # it closes its wav in a finally
-                        witness.wait(timeout=60)
-                    # No tail on a hand stop: the operator asked for it to be over.
-                    tail = 0 if interrupted else plan['adjustments']['tap_tail_s']
-                    if tap and tap.poll() is None and tail:
-                        print(f'  the tap records {tail:g}s past teardown; a peer that is still '
-                              'audible belongs in the recording. Interrupt to end it sooner.',
-                              flush=True)
-                        try:
-                            time.sleep(tail)
-                        except KeyboardInterrupt:   # the record is written below either way
-                            pass
-                    if tap and tap.poll() is None:
-                        tap.terminate()             # likewise
-                        tap.wait(timeout=60)
+            with claim.uninterrupted(), _preserve_primary_failure():
+                failures = []
+                def finalize(action):
                     try:
-                        plan['readings_at_end'] = station.read_environment(
-                            selection=station.selection_for_plan(plan))
-                    except Exception as trouble:
-                        plan['readings_at_end'] = dict(
-                            error=f'{type(trouble).__name__}: {trouble}')
-                    # Read again, because the runtime this console flies has moved eight
-                    # times inside one day. A pair that disagrees names an arm whose
-                    # source set is not single-valued, whatever either reading says.
-                    ended = residency.evidence(mode, plan, qualify)
-                    plan['residency_at_end'] = dict(
-                        ended, same_as_start=ended['modules'] == resided['modules'])
-                except KeyboardInterrupt:
-                    # Honoured, but not at the cost of the record: an operator who
-                    # hammers ^C through the teardown still gets the arm written down.
-                    interrupted = True
-                    for unread in ('readings_at_end', 'residency_at_end'):
-                        plan.setdefault(unread, dict(error='the teardown was interrupted'))
+                        return action()
+                    except Exception as error:
+                        failures.append(f'console finalization failed: {type(error).__name__}: {error}')
+                try:
+                    if launcher is not None:
+                        claim.end_child(launcher)
+                finally:
+                    if admission is not None:
+                        admission.failed()
+                finalize(lambda: sys.stdout.writelines(screen.close()))
+                if witness and witness.poll() is None:
+                    finalize(witness.terminate)
+                    finalize(lambda: witness.wait(timeout=60))
+                tail = 0 if interrupted or sys.exc_info()[0] else plan['adjustments']['tap_tail_s']
+                if tap and tap.poll() is None and tail:
+                    print(f'  listening to the tap for {tail:g}s. Interrupt to end it sooner.', flush=True)
+                    # Only the optional listening tail is interruptible; restore
+                    # teardown's signal protection before stopping recorders.
+                    previous = (signal.signal(signal.SIGINT, signal.default_int_handler)
+                                if threading.current_thread() is threading.main_thread() else None)
+                    try:
+                        time.sleep(tail)
+                    except KeyboardInterrupt:
+                        pass
+                    finally:
+                        if previous is not None:
+                            signal.signal(signal.SIGINT, previous)
+                if tap and tap.poll() is None:
+                    finalize(tap.terminate)
+                    finalize(lambda: tap.wait(timeout=60))
+                if witness is not None:
+                    claim.end_child(witness)
+                if tap is not None:
+                    claim.end_child(tap)
+                claim.end_children(allow_cleanup=True)
+                inherited = cleanup_result(''.join(getattr(launcher, '_cleanup_lines', [])), code)
+                plan['cleanup'] = inherited if inherited['complete'] else bring_down(directory, env=plan['env'])
+                print('  ' + (plan['cleanup']['line'] or 'NO PTT LINE evidence'), flush=True)
+                if not plan['cleanup']['complete']:
+                    print('  cleanup NOT CONFIRMED', flush=True)
+                    if code == 0:
+                        code = 1
+                try:
+                    plan['readings_at_end'] = station.read_environment(selection=station.selection_for_plan(plan))
+                except Exception as trouble:
+                    plan['readings_at_end'] = dict(error=f'{type(trouble).__name__}: {trouble}')
+                    failures.append(f'console finalization failed: {trouble}')
+                ended = finalize(lambda: residency.evidence(mode, plan, qualify))
+                if ended is not None:
+                    plan['residency_at_end'] = dict(ended, same_as_start=ended['modules'] == resided['modules'])
                 plan.update(ended_utc=datetime.now(timezone.utc).isoformat(),
                             returncode=code, verdict=verdict(mode, directory, code))
+                if getattr(launcher, '_admission_warning', None):
+                    plan['verdict']['line'] += '; ' + launcher._admission_warning
                 if mode.name == 'pactor' and plan.get('adjustments', {}).get('connect') == 'robust':
                     from .pactor import robust_observations
                     plan['adjustments'].update(robust_observations(directory))
                 if interrupted:
-                    # Only on the arms it is true of: this record is what every sweep
-                    # reads, and a verdict of "nothing answered" means one thing after
-                    # a spent budget and another after a hand stop.
                     plan['hand_stopped'] = True
+                if failures:
+                    plan['console finalization failed'] = failures
                 if provenance is None:
-                    (directory / 'provenance.json').write_text(json.dumps(plan, indent=2) + '\n')
+                    finalize(lambda: (directory / 'provenance.json').write_text(json.dumps(plan, indent=2) + '\n'))
                 else:
-                    provenance.update(plan | {'capture_state': (
-                    'finalized' if code is not None and sys.exc_info()[0] is None
-                    else 'partial')})
+                    finalize(lambda: provenance.update(plan | {'capture_state': (
+                        'finalized' if code is not None and sys.exc_info()[0] is None else 'partial')}))
+                if failures:
+                    print('\n'.join(failures), file=sys.stderr, flush=True)
+                    try:
+                        (directory / 'console-finalization.json').write_text(json.dumps({
+                            'console finalization failed': failures,
+                            'cleanup': plan['cleanup']}, indent=2) + '\n')
+                    except OSError:
+                        pass
         print(f'  {plan["arm"]}: {", ".join(plan["verdict"]["reached"]) or "no milestone"} '
               f'-- {plan["verdict"]["line"]}', flush=True)
+        for line in faults(directory, code):
+            print('  ' + line, flush=True)
         if interrupted:
             raise KeyboardInterrupt
         return code

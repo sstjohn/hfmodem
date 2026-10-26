@@ -29,16 +29,16 @@ Run: python -m hfmodem.tests.shrike.test_p1rx_heads
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import p1rx, pactor1
+from hfmodem.tests import evidence
+from hfmodem.core.wav import stored
 
 FS = p1rx.FS
-REPO = Path(__file__).resolve().parents[5]
-CAPTURES = REPO / "captures"
+CAPTURES = evidence.CAPTURES
 
 #: (capture, the packet reader's first bit, the instant that session called at).
 #: Named rather than globbed, for `test_csalias`' reason: `captures/` is ignored
@@ -234,7 +234,7 @@ def the_alias_it_must_not_take() -> None:
     """The other side of the same gate: a bare CS4 read two bit periods late."""
     print("\nThe alias, which looks exactly like a head and is not one")
     arm = CAPTURES / "onair-0828-1838" / "hold_11.wav"
-    if not arm.exists():
+    if not stored(arm).exists():
         print(f"  [SKIP] {arm} is not on this machine")
         return
     a = p1rx.load_wav(str(arm))
@@ -284,7 +284,7 @@ def test_our_own_render() -> None:
 
 
 _missing = [c for c in {f[0] for f in FIXTURE} | set(REPEATS)
-            if not (CAPTURES / c / "stream.wav").exists()]
+            if not stored(CAPTURES / c / "stream.wav").exists()]
 
 requires_captures = pytest.mark.skipif(
     bool(_missing),

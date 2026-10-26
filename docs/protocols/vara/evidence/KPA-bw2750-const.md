@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # BW2750 levels 11-17 closed from known plaintext
 
 `kpa_bw2750_const.py` prints every table below (about 3 min, nothing written). It runs the BW2300 chain

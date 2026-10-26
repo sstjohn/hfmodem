@@ -690,6 +690,64 @@ zero-error CS4 in the same sense. The codewords therefore cannot say which of
 the two is on the air, and `cs_anchored` asks the silence instead."""
 
 
+class EntryGrantMatch(NamedTuple):
+    at: float
+    observed_bits: int
+    sense: int
+    quality: float
+    complete: bool = False
+
+
+def entry_grant_match(audio: np.ndarray, t0: float,
+                      fs: int = FS) -> EntryGrantMatch | None:
+    sps = FS // 100
+    lo = max(0, round((t0 - CS_SEARCH_HALF_S) * fs))
+    hi = min(len(audio), round((t0 + .12 + CS_SEARCH_HALF_S) * fs))
+    x = _to_fs(np.asarray(audio[lo:hi], float), fs)
+    if len(x) < 9 * sps:
+        return None
+    tones = _Tones(x, sps)
+    center = round(t0 * FS - lo * FS / fs)
+    reach = round(CS_SEARCH_HALF_S * FS)
+    hop = max(1, round(ACQUIRE_HOP_S * FS))
+    matches = []
+    identities = set()
+    for start in range(max(0, center - reach), center + reach + 1, hop):
+        count = min(12, (len(x) - start) // sps)
+        if count < 9:
+            continue
+        cols = start + np.arange(count) * sps
+        m, s = tones.mark[cols], tones.space[cols]
+        if (np.any(m + s < PREFIX_FLOOR * np.median(m + s))
+                or _eye(tones, np.array([start]), sps, count)[0] < EYE_MIN):
+            continue
+        d = m - s
+        order = np.argsort(d)
+        scale = max(float(np.abs(d).mean()), 1e-12)
+        for word_index, word in enumerate(pactor1.CS_WORDS):
+            ref = np.array([(word >> b) & 1 for b in range(count)], bool)
+            for sense in (0, 1):
+                expected = ref ^ bool(sense)
+                weight = int(expected.sum())
+                if weight in (0, count):
+                    continue
+                split_at = count - weight
+                split = (d[order[split_at]] - d[order[split_at-1]]) / scale
+                bits = np.zeros(count, bool)
+                bits[order[split_at:]] = True
+                if (split < CS_SPLIT_MIN or not np.array_equal(bits, expected)
+                        or np.mean(m[bits]) <= np.mean(m[~bits])
+                        or np.mean(s[~bits]) <= np.mean(s[bits])):
+                    continue
+                identities.add((word_index, sense))
+                if word_index == pactor1.CS_59A:
+                    matches.append(EntryGrantMatch(lo / fs + start / FS,
+                                                  count, sense, float(split)))
+    if not matches or len(identities) != 1:
+        return None
+    return max(matches, key=lambda m: (m.observed_bits, m.quality))
+
+
 def cs_anchored(audio: np.ndarray, t0: float, fs: int = FS) -> CS | None:
     """Read at the grid first; recover a displaced word only at a stronger eye."""
     got = _cs_anchored(audio, t0, fs, CS_SEARCH_HALF_S, CS_SEARCH_EYE_MIN)

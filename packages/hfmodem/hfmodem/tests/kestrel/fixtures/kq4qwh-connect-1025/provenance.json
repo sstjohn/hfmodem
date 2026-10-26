@@ -1,0 +1,7 @@
+{
+  "source": "operator-data/working/vara-chat/sessions/20261025T215622291998Z/receive.wav",
+  "start_sample": 12860000,
+  "end_sample": 12963328,
+  "sample_rate": 48000,
+  "description": "Peer response after late KQ4QWH link setup; local runtime had already aborted."
+}

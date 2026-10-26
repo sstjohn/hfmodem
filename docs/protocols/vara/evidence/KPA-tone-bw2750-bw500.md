@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # BW2750 levels 5-10 and BW500 levels 5-6: the tone family, closed from known plaintext
 
 `kpa_tone_bw2750_bw500.py` prints every table below in about 12 minutes. It reuses

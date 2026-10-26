@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Alternate P1 response and entry waveform are independent selections."""
 import pytest
 from hfmodem.shrike import onair, pactor1

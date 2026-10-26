@@ -11,8 +11,9 @@ lays twenty-four 207-symbol data blocks behind twenty-four trainings and closes
 with a twenty-fifth, which `p4normal` constructs. Section 10 shapes every chip
 with the 129-tap pulse on the 1500 Hz centre, and `p4long` reads it back.
 
-What the two CRC-valid Dragon long frames in `tests/shrike/fixtures/p4-long`
-say about the parts the document leaves open:
+What the two CRC-valid Dragon long frames in
+`tests/shrike/fixtures/sigidwiki/p4-long` say about the parts the document
+leaves open:
 
 THE TAIL. Section 3 charges 1656 systematic bits for a 206-byte field's 1648,
 and the eight are spent exactly as the short packet's eight are: five zero
@@ -57,7 +58,7 @@ The fill behind a short payload is `spec.field_fill`'s, PACTOR-3's measured
 convention carried over as it is for the chirp; no P4 source framing
 underwrites it.
 
-Source recording and provenance: `tests/shrike/fixtures/p4-long/README.md`.
+Source recording and provenance: `tests/shrike/sigidwiki-p4-long.md`.
 """
 from __future__ import annotations
 

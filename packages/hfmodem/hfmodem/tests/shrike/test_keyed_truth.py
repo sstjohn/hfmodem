@@ -13,16 +13,9 @@ reads it. Nothing between the flag and the ioctl ever asked whether the device
 was there, and the carrier count was appended where PTT was ASKED FOR rather
 than anywhere the asking could be checked.
 
-Three seams close it, and each is tested here the way it would have been caught:
-
-  * `ota.ptt_device` refuses a keying path that is not a character device,
-    naming what it derived and from what (`core.ptt.require_char_device` -- a
-    stat, never an open, because opening a keying line asserts RTS).
-  * `ota.Rig.ptt(True)` refuses a device that is not there, and
-    `ota.Rig.key_failure` reports, after the burst, a key-down whose taker is
-    gone -- the pipe-write lie, checked at the only time it can be.
-  * `ota.Rig.stop` falls to `core.ptt.drop_rts` -- one local ioctl, no daemon,
-    no reply -- when the one-shot unkey cannot confirm the rig is down.
+P1 preserves those safety properties through a held keying line: arm reads
+low before keying, each drive requires readback, and stop unkeys and reads the
+line low before handing it back. CAT remains a separate tune-only child.
 
 The decisive tests drive `onair.main()` whole, with `--transmit` armed, over
 the arithmetic-clock bench from `test_grid` and the REAL `ota.Rig` talking to a
@@ -42,6 +35,7 @@ import inspect
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -49,12 +43,15 @@ from pathlib import Path
 
 import pytest
 
+from hfmodem.core import native
 from hfmodem.core import ptt as core_ptt
 from hfmodem.core.occupied import FILTER_HZ
 from hfmodem.core.ptt import PttError
 from hfmodem.shrike import onair, ota
+from hfmodem.tests import fakeclaim
 
 from .test_grid import _Bench
+from .test_p1_line_keyer import FakeLine
 
 PLACEHOLDER = "/dev/cu.usbserial-XXXXB0"
 
@@ -109,7 +106,41 @@ def fake_rigctl(tmp_path, monkeypatch):
     return d
 
 
-def _rig(rigctl_dir: Path, *, serial: str = "/dev/null", ptt_type: str = "RTS",
+@pytest.fixture(autouse=True)
+def cat_children(monkeypatch):
+    """Every rigctl the rig starts, as (long_lived, child): admitted, and run as
+    plain subprocesses of this one."""
+    children = []
+
+    def spawn(argv, **kw):
+        child = fakeclaim.spawn(argv, **kw)
+        children.append((kw.get("long_lived", False), child))
+        return child
+
+    fakeclaim.install(monkeypatch, spawner=spawn)
+    yield children
+    for _, child in children:
+        if child.alive():
+            child.kill()
+
+
+@pytest.fixture(autouse=True)
+def fake_lines(monkeypatch):
+    lines = []
+
+    def make(device):
+        core_ptt.require_char_device(device)
+        line = FakeLine(device)
+        lines.append(line)
+        return line
+
+    monkeypatch.setattr(core_ptt, "RtsPtt", make)
+    yield lines
+    for line in lines:
+        line.release()
+
+
+def _rig(rigctl_dir: Path, *, serial: str = "/dev/null", ptt_type: str = "LINE",
          ptt_port: str | None = None) -> ota.Rig:
     return ota.Rig(1036, serial, 38400, ptt_type=ptt_type,
                    ptt_port=ptt_port or serial, rigctl_dir=str(rigctl_dir))
@@ -136,12 +167,9 @@ def test_a_derived_ptt_path_that_exists_is_returned() -> None:
     assert ota.ptt_device("ft891", "/dev/null") == "/dev/null"
 
 
-def test_a_cat_keyed_rig_checks_the_one_port_it_has() -> None:
-    """No second interface to derive does not mean nothing to check: for a rig
-    that keys over CAT, the CAT port IS the keying path."""
-    with pytest.raises(PttError) as e:
-        ota.ptt_device("g90", PLACEHOLDER)
-    assert PLACEHOLDER in str(e.value)
+def test_a_profile_without_a_line_never_uses_cat_as_ptt() -> None:
+    assert ota.ptt_device("g90", PLACEHOLDER) is None
+    assert ota.ptt_device("g90", "/dev/null") is None
 
 
 def test_a_trailing_digit_on_a_foreign_adapter_is_not_advanced(tmp_path) -> None:
@@ -161,59 +189,55 @@ def test_a_trailing_digit_on_a_foreign_adapter_is_not_advanced(tmp_path) -> None
 # -- fix 2: the last-resort unkey -------------------------------------------
 
 def test_stop_takes_the_line_down_itself_when_rigctl_cannot(
-        fake_rigctl, monkeypatch) -> None:
-    """The bridge's escape hatch, on this path too: when the one-shot unkey
-    cannot confirm the rig is down, the keying line is dropped with our own
-    ioctl -- no daemon, no socket, no reply to wait for. The ladder lives in
-    `core.ptt.Keyer` now, so that is where the drop is intercepted."""
+        fake_rigctl, monkeypatch, fake_lines) -> None:
+    """A dead CAT transport cannot prevent an independently confirmed unkey."""
     monkeypatch.setenv("FAKE_RIGCTL_ONESHOT_FAILS", "1")
-    dropped: list[str] = []
-    monkeypatch.setattr(core_ptt, "drop_rts",
-                        lambda dev, log: dropped.append(dev) or True)
     rig = _rig(fake_rigctl)
+    assert rig.ptt(True)
+    line = fake_lines[-1]
     rig.stop()
-    assert dropped == ["/dev/null"]
+    assert line.calls[-4:] == ["sense", False, "sense", "release"]
+    assert line.released_low is True and line.state is False
+    assert rig.ptt(True) is False
 
 
-def test_stop_trusts_a_oneshot_that_answered(fake_rigctl, monkeypatch) -> None:
-    """...and only then. `drop_rts` opens the port, which is what makes it work
-    and also what makes it unfit as a routine unkey."""
-    dropped: list[str] = []
-    monkeypatch.setattr(core_ptt, "drop_rts",
-                        lambda dev, log: dropped.append(dev) or True)
+def test_stop_trusts_only_line_readback(fake_rigctl, monkeypatch, fake_lines):
+    """A successful drive without low readback must alarm and retire."""
     rig = _rig(fake_rigctl)
+    assert rig.ptt(True)
+    line = fake_lines[-1]
+    line.readable = False
     rig.stop()
-    assert dropped == []
+    assert line.state is False  # the write succeeded; confirmation did not
+    assert line.released_low is False
+    assert rig.retired and rig.key_failure() is not None
+    assert rig.ptt(True) is False
 
 
-def test_stop_has_no_line_to_drop_on_a_cat_keyed_rig(
-        fake_rigctl, monkeypatch) -> None:
-    monkeypatch.setenv("FAKE_RIGCTL_ONESHOT_FAILS", "1")
-    monkeypatch.setattr(core_ptt, "UNKEY_BUDGET_S", 0.2)   # the ladder, hurried
-    dropped: list[str] = []
-    monkeypatch.setattr(core_ptt, "drop_rts",
-                        lambda dev, log: dropped.append(dev) or True)
-    rig = _rig(fake_rigctl, ptt_type="RIG")
+def test_stop_has_no_line_to_drop_on_a_receive_only_rig(fake_rigctl, fake_lines):
+    rig = ota.Rig(1036, "/dev/null", 38400, rigctl_dir=str(fake_rigctl))
     rig.stop()
-    assert dropped == []
+    assert fake_lines == []
+    assert rig.ptt(True) is False
+    assert rig.key_failure() == ota.NO_KEYING_LINE
 
 
 def test_nothing_respawns_rigctl_after_stop(fake_rigctl) -> None:
     """The watchdog's `stop()` and the main thread's `finally` both mutate
     `_proc`, from two threads, and until now only timing kept them apart. After
     a stop, an unkey must not spawn a fresh rigctl: it would re-open the CAT
-    port `stop` just released and block the one-shot unkey on it for up to
-    8 s, with the rig possibly keyed."""
+    port `stop` just released. P1 keys separately, but CAT ownership must
+    still end at stop."""
     rig = _rig(fake_rigctl)
     assert rig.ptt(True) is True
     rig.stop()
-    assert rig.ptt(False) is False, "an unkey after stop has nothing to write into"
+    assert rig.ptt(False) is True  # stop already confirmed low and released
     assert rig._proc is None, "the unkey respawned rigctl after stop()"
     assert rig.ptt(True) is False, "a key-down after stop must be refused"
     assert rig._proc is None, "the refused key-down still spawned rigctl"
 
 
-def test_a_dead_child_is_not_replaced_once_stop_has_begun(fake_rigctl) -> None:
+def test_a_dead_child_is_not_replaced_once_stop_has_begun(fake_rigctl, cat_children) -> None:
     """The window the test above cannot see. `_cmd`'s gate reads *(child dead)
     and stop begun*, so a thread whose child is still alive walks past it; the
     watchdog's `stop()` then sets `_down` and kills the child, and that
@@ -221,49 +245,51 @@ def test_a_dead_child_is_not_replaced_once_stop_has_begun(fake_rigctl) -> None:
     spawning a fresh rigctl onto the CAT port `stop` just released. The
     refusal has to live where the spawn does."""
     rig = _rig(fake_rigctl)
-    assert rig.ptt(True) is True                 # a live rigctl is standing
+    assert rig.set_freq(7100000) is True          # a live CAT child is standing
     proc = rig._proc
     # The interleave, made flesh: stop() lands between the gate and _open.
     rig._down.set()
     proc.kill()
-    proc.wait()
+    assert proc.wait_gone(5)
+    spawned = len(cat_children)
     assert rig._open() is None, (
         "a fresh rigctl was spawned onto the CAT port stop() released")
-    assert rig._proc is proc, "the dead child was replaced behind stop()'s back"
-    assert rig._cmd("T", "0") is False
+    assert len(cat_children) == spawned and rig._proc in (None, proc), (
+        "the dead child was replaced behind stop()'s back")
+    assert rig.set_freq(7100000) is False
+    rig.stop()
 
 
 def test_a_stop_landing_inside_the_spawn_leaves_no_stray_rigctl(
         fake_rigctl, monkeypatch) -> None:
     """The window the gate above narrowed but could not close: check-and-spawn
     is not atomic, and `stop()` deliberately takes no lock. A thread passes the
-    `_down` check and enters `Popen`; the watchdog's `stop()` sets `_down`,
-    closes the old child and runs its one-shot; the `Popen` completes and hands
+    `_down` check and enters the spawn; the watchdog's `stop()` sets `_down`,
+    closes the old child and releases the line; the spawn completes and hands
     back a fresh rigctl nothing will ever kill — holding the CAT port every
-    later one-shot blocks on for up to 8 s, with the ladder ending unconfirmed
-    on a CAT-PTT rig. The spawn must re-check `_down` once `Popen` returns and
+    later CAT readback needs. The spawn must re-check `_down` once it returns and
     kill what it made."""
     import threading
     rig = _rig(fake_rigctl)
     entered, resume = threading.Event(), threading.Event()
-    spawned: list[subprocess.Popen] = []
-    real_popen = subprocess.Popen
+    spawned = []
+    real_spawn = native.spawn_native
 
-    def slow_popen(*a, **kw):
-        persistent = kw.get("stdin") is subprocess.PIPE
-        if persistent:                    # the one-shots pass no stdin pipe
+    def slow_spawn(argv, **kw):
+        persistent = kw.get("long_lived", False)
+        if persistent:
             entered.set()
             assert resume.wait(5.0), "stop() never released the spawn"
-        p = real_popen(*a, **kw)
+        child = real_spawn(argv, **kw)
         if persistent:
-            spawned.append(p)
-        return p
+            spawned.append(child)
+        return child
 
-    monkeypatch.setattr(ota.subprocess, "Popen", slow_popen)
-    t = threading.Thread(target=rig.ptt, args=(True,))
+    monkeypatch.setattr(native, "spawn_native", slow_spawn)
+    t = threading.Thread(target=rig.set_freq, args=(7100000,))
     t.start()
     try:
-        assert entered.wait(5.0), "the key-down never reached the spawn"
+        assert entered.wait(5.0), "the tune never reached the spawn"
         rig.stop()                        # the watchdog's ladder, mid-spawn
     finally:
         resume.set()
@@ -271,12 +297,12 @@ def test_a_stop_landing_inside_the_spawn_leaves_no_stray_rigctl(
     assert not t.is_alive()
 
     deadline = time.monotonic() + 5.0
-    while any(p.poll() is None for p in spawned) and time.monotonic() < deadline:
+    while any(c.alive() for c in spawned) and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert spawned and all(p.poll() is not None for p in spawned), (
+    assert spawned and not any(c.alive() for c in spawned), (
         "a rigctl spawned while stop() ran is still alive, holding the CAT "
-        "port against the one-shot unkey")
-    assert rig._proc is None or rig._proc.poll() is not None, (
+        "port against later CAT access")
+    assert rig._proc is None or not rig._proc.alive(), (
         "the fresh child was installed behind stop()'s back")
 
 
@@ -287,10 +313,10 @@ def test_a_close_racing_a_put_is_a_refusal_not_a_traceback(fake_rigctl) -> None:
     traceback instead of a summary. The `finally` still unkeyed; the record
     did not survive. Sequential here, but the same interleave."""
     rig = _rig(fake_rigctl)
-    assert rig.ptt(True) is True
+    assert rig.set_freq(7100000) is True
     rig._close()                          # the concurrent teardown, made flesh
     assert rig._proc is None
-    assert rig._put("T 0\n") is False, (
+    assert rig._put("F 7100000\n") is False, (
         "a put with no child behind it must answer False, not raise")
     rig.stop()
 
@@ -350,34 +376,19 @@ def test_run_leaves_a_profile_width_to_tune(
 # -- fix 3: keying that cannot be confirmed is not keying --------------------
 
 def test_a_key_down_refuses_a_device_that_is_not_there(fake_rigctl) -> None:
-    rig = _rig(fake_rigctl, serial=PLACEHOLDER, ptt_port=PLACEHOLDER)
-    with pytest.raises(PttError) as e:
-        rig.ptt(True)
-    assert PLACEHOLDER in str(e.value)
-    # The unkey checks nothing: it must stay possible in every state the
-    # channel can be in, including this one.
-    rig.ptt(False)
-    # That unkey spawns rigctl, which exits at once against a port no machine
-    # has, and `stop()` is the only path that reaps it. Without this the last
-    # line of the test left a defunct child for however long it took the
-    # collector to notice -- 21 tests, on the run that found it.
-    rig.stop()
+    with pytest.raises(PttError, match=PLACEHOLDER):
+        _rig(fake_rigctl, serial=PLACEHOLDER, ptt_port=PLACEHOLDER)
 
 
-def test_a_key_that_landed_in_a_dead_pipe_is_reported(
-        fake_rigctl, monkeypatch) -> None:
-    """The incident's exact lie, at the seam it lives on: the write that keys
-    succeeds into a child that is already dying, so the only honest answer is
-    an after-the-burst one."""
-    monkeypatch.setenv("FAKE_RIGCTL_DIE_ON_KEY", "1")
+def test_a_key_without_readback_is_reported(fake_rigctl, fake_lines):
+    """An accepted drive is not carrier evidence when readback disappears."""
     rig = _rig(fake_rigctl)
-    assert rig.ptt(True) is True          # the pipe write itself succeeds
-    deadline = time.monotonic() + 5.0
-    why = rig.key_failure()
-    while why is None and time.monotonic() < deadline:
-        time.sleep(0.02)
-        why = rig.key_failure()
-    assert why is not None and "exited" in why, why
+    rig.arm()
+    line = fake_lines[-1]
+    line.readable = False
+    assert rig.ptt(True) is False
+    assert rig.key_failure() is not None
+    assert rig.retired
     rig.stop()
 
 
@@ -390,21 +401,14 @@ def test_a_standing_channel_reports_no_failure(fake_rigctl) -> None:
     rig.stop()
 
 
-def test_a_rigctl_that_refuses_in_band_is_seen(fake_rigctl, monkeypatch) -> None:
-    """Radio off, CAT cable out, USB adapter still enumerated: rigctl stays
-    alive and answers `set_ptt: error = ...` to every command. Until now nothing
-    read those answers -- stdout was pumped to nowhere and stderr to DEVNULL --
-    so this passed all four of `key_failure`'s checks against a radio that
-    never keyed, which is the 2026-08-10 false record one failure mode over."""
-    monkeypatch.setenv("FAKE_RIGCTL_REFUSES", "1")
+def test_a_line_that_refuses_a_key_is_seen(fake_rigctl, fake_lines):
+    """A present adapter refusing its assert cannot produce a carrier record."""
     rig = _rig(fake_rigctl)
-    assert rig.ptt(True) is True          # the pipe write itself still succeeds
-    deadline = time.monotonic() + 5.0
-    why = rig.key_failure()
-    while why is None and time.monotonic() < deadline:
-        time.sleep(0.02)
-        why = rig.key_failure()
-    assert why is not None and "error" in why, why
+    line = fake_lines[-1]
+    line.fail_on = True
+    assert rig.ptt(True) is False
+    assert rig.key_failure() is not None
+    assert line.state is False
     rig.stop()
 
 
@@ -458,20 +462,27 @@ def _run_onair(monkeypatch, tmp_path, fake_rigctl, serial: str, *,
     """
     bursts = [0]
 
-    def peer(bench, end):
-        bursts[0] += 1
-        if unplug_during and bursts[0] == unplug_during:
-            Path(serial).unlink()
+    def drive(on):
+        if on:
+            bursts[0] += 1
+        elif unplug_during and bursts[0] == unplug_during:
+            if Path(serial).exists():
+                Path(serial).unlink()
+            for line in lines:
+                line.readable = False
 
     real_rig = ota.Rig
-    monkeypatch.setattr(ota, "Rig",
-                        lambda *a, **kw: real_rig(
-                            *a, rigctl_dir=str(fake_rigctl), **kw))
-    # The vanished-device case ends in `stop()`'s ladder retrying a one-shot
-    # that can never answer; the budget is real time, so it is shortened here.
-    monkeypatch.setattr(core_ptt, "UNKEY_BUDGET_S", 0.2)
+    lines = []
+
+    def make_rig(*a, **kw):
+        rig = real_rig(*a, rigctl_dir=str(fake_rigctl), **kw)
+        lines.append(rig._keyer.transport._ptt)
+        lines[-1].drive_hook = drive
+        return rig
+
+    monkeypatch.setattr(ota, "Rig", make_rig)
     monkeypatch.setattr(onair, "_LiveInput",
-                        lambda *a, **kw: _Bench(peer=peer))
+                        lambda *a, **kw: _Bench())
     monkeypatch.setattr(onair, "find_device",
                         lambda name, kind, required=False: 0)
     monkeypatch.setattr(onair, "_save_capture_async", lambda *a, **kw: None)
@@ -518,7 +529,7 @@ def test_a_device_that_vanishes_mid_session_is_a_truthful_summary(
     code, log, exc = _run_onair(monkeypatch, tmp_path, fake_rigctl, str(cat),
                                 unplug_during=3)
     assert "KEYING FAILED" in log, log[-2000:]
-    assert str(cat) in log, log[-2000:]
+    assert "keying line" in log and str(cat) in log, log[-2000:]
     assert re.search(r"keyed 2 of \d+ cycles", log), (
         "the summary must count exactly the two bursts that had a keying "
         f"channel behind them:\n{log[-2000:]}")
@@ -561,13 +572,16 @@ def test_a_path_without_hamlib_refuses_instead_of_raising(tmp_path) -> None:
     """
     empty = tmp_path / "bin"
     empty.mkdir()
+    assert all(shutil.which(name, path=str(empty)) is None
+               for name in ("rigctl", "rigctld"))
     r = subprocess.run(
         [sys.executable, "-m", "hfmodem.shrike.onair", "--transmit",
          "--mycall", "W9SSJ", "--dxcall", "K7ABC", "--dial", "7100000",
          "--serial", "/dev/null", "--max-cycles", "1",
          "--outdir", str(tmp_path / "cap")],
         capture_output=True, text=True, timeout=120,
-        env={**os.environ, "PATH": f"{empty}:/usr/bin:/bin"})
+        env={**os.environ, "PATH": str(empty),
+             "HAMLIB_BIN": str(tmp_path / "nope")})
     said = r.stdout + r.stderr
     assert r.returncode != 0, said
     assert "Traceback" not in said and "FileNotFoundError" not in said, said
@@ -626,35 +640,35 @@ def test_the_launcher_refuses_a_machine_with_no_hamlib_at_all(tmp_path, launcher
     reached for it first."""
     empty = tmp_path / "bin"
     empty.mkdir()
+    dirname = shutil.which("dirname")
+    assert dirname is not None
+    (empty / "dirname").symlink_to(Path(dirname).resolve())
+    assert all(shutil.which(name, path=str(empty)) is None
+               for name in ("rigctl", "rigctld"))
     r = subprocess.run(
-        ["/bin/bash", "-c", f'source "{launcher}"; require_hamlib'],
+        ["/bin/bash", "-c", f'source "{launcher}"; '
+                            '! command -v rigctl && ! command -v rigctld || exit 97; require_hamlib'],
         capture_output=True, text=True, timeout=60,
-        env={**os.environ, "PATH": f"{empty}:/usr/bin:/bin",
+        env={**os.environ, "PATH": str(empty), "HFMODEM_PYTHON": sys.executable,
              "HAMLIB_BIN": str(tmp_path / "nope")})
     said = r.stdout + r.stderr
     assert r.returncode != 0, said
     assert "hamlib is not on PATH" in said and "HAMLIB_BIN" in said, said
 
 
-def test_a_rig_whose_unkey_ladder_ran_out_refuses_to_key_again():
-    """The ladder's last rung, which shrike alone did not reach: `core.ptt`
-    documents retiring the rig as the step after the alarm, and besra and sabir
-    both poll `must_retire`, but `ota.Rig` held no such state — so an unkey that
-    failed at every level left the rig keyable. Unkeys stay allowed regardless:
-    they must be possible in every state the channel can be in."""
-    import threading
-    import types
-
-    rig = ota.Rig.__new__(ota.Rig)
-    rig._down, rig.retired, rig._sick = threading.Event(), False, False
-    calls: list[tuple] = []
-    rig._cmd = lambda *a: (calls.append(a), True)[1]
-    rig._devices_present = lambda: None
-    rig._errs = types.SimpleNamespace(clear=lambda: None)
-
-    rig.retire()
+def test_a_rig_whose_unkey_ladder_ran_out_refuses_to_key_again(
+        fake_rigctl, fake_lines):
+    """Retirement refuses further keys but must still allow another unkey."""
+    rig = _rig(fake_rigctl)
+    assert rig.ptt(True)
+    line = fake_lines[-1]
+    line.fail_on = False
+    assert rig.ptt(False) is False
     assert rig.retired
-    assert rig.ptt(True) is False, "a retired rig keyed"
-    assert not calls, "a retired rig reached the transport"
-    rig.ptt(False)
-    assert calls == [("T", "0")], "a retired rig refused an unkey"
+    before = list(line.calls)
+    assert rig.ptt(True) is False
+    assert line.calls == before
+    line.fail_on = None
+    assert rig.ptt(False) is True
+    assert line.state is False and line.calls[-2:] == [False, "sense"]
+    rig.stop()

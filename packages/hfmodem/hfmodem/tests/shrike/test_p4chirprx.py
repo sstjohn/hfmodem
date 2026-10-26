@@ -11,7 +11,9 @@ from hfmodem.tests.shrike.test_p4chirp import REAL_FIELDS
 
 
 def test_recorded_dragon_chirps():
-    path = Path(__file__).parent / 'fixtures/p4-chirps/audio.npz'
+    path = Path(__file__).parent / 'fixtures/sigidwiki/p4-chirps/audio.npz'
+    if not path.exists():
+        pytest.skip(f"{path} is absent")
     with np.load(path, allow_pickle=False) as fixture:
         rows = fixture['audio']
         fs = int(fixture['fs'])

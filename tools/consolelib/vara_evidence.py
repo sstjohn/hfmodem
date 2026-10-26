@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Read bounded existing VARA arm evidence; no radio, audio, DSP or network.
 
 BITRATE TX names the next over, not proof of keying. Native 'tx DATA over'

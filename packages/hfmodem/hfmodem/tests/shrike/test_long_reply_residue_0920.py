@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """VE3KPG 22:42: a delayed long CRC must not strand replies inside the packet."""
 from types import SimpleNamespace
 import pytest

@@ -11,7 +11,7 @@ is empty, so the PACTOR-3 loop never runs and nothing 18-tone is in the audio.
 A beacon verifies only what it transmits -- checking the 18-tone P3 waveform
 itself takes `shrike.ota --data`, which renders a real data packet.
 
-    python -m hfmodem.shrike.beacon --rig x6100 --serial <port> --mycall <call> \
+    python -m hfmodem.shrike.beacon --rig ftdx10 --serial <port> --mycall <call> \
         --dxcall <call> --band 40m --count 12 --gap 2 --audio-out "USB Audio"
 
 The connect is ADDRESSED, so `--dxcall` has no default: the station named hears
@@ -26,13 +26,15 @@ import time
 from . import session, spec
 from ..core.devices import find_device
 from ..core.ptt import PttError
-from ..core.rigs import RIGS
-from .ota import Rig, _play, center_to_dial, mode_passband, ptt_device, GATEWAYS
+from ..core.occupied import FILTER_HZ
+from ..core.rigs import RIGS, mode_passband
+from .ota import Rig, _play, center_to_dial, ptt_device, GATEWAYS, NO_KEYING_LINE
 
 
 def main():
     p = argparse.ArgumentParser(description="shrike on-air TX beacon")
-    p.add_argument("--rig", choices=list(RIGS), default="x6100")
+    p.add_argument("--rig", choices=list(RIGS), default="ftdx10",
+                   help="rig profile (default: %(default)s, the station rig)")
     p.add_argument("--serial", required=True,
                    help="CAT serial port, e.g. /dev/cu.usbserial-XXXXB0 -- "
                         "`ls /dev/cu.*` to find yours")
@@ -49,6 +51,10 @@ def main():
     p.add_argument("--max-key", type=float, default=6.0)
     p.add_argument("--audio-out")
     args = p.parse_args()
+
+    if RIGS[args.rig].get("ptt_iface") is None:
+        print(NO_KEYING_LINE, flush=True)
+        return
 
     if args.dial:
         dial = args.dial
@@ -69,14 +75,18 @@ def main():
     except PttError as exc:
         raise SystemExit(f"NOT KEYING: {exc}") from None
     rig = Rig(r["model"], args.serial, args.baud or r["baud"],
-              ptt_type=r.get("ptt_type", "RIG"), ptt_port=ptt_port)
+              ptt_type="LINE", ptt_port=ptt_port)
     try:
-        rig.set_mode(r["mode"], mode_passband(r)); rig.set_freq(dial)
+        if not (rig.set_mode(r["mode"], mode_passband(r, FILTER_HZ)) and rig.set_freq(dial)):
+            raise SystemExit(f"NOT KEYING: rigctl on {args.serial} did not take "
+                             f"the mode/frequency commands -- the CAT channel "
+                             f"is not standing")
         centre = dial + int(spec.CENTER_FREQ_HZ)
         print(f"beacon: dial {dial} Hz, signal centre ~{centre} Hz {r['mode']}  "
               f"({args.count} x {dur:.1f}s connect, {args.gap}s gap ~= "
               f"{args.count*(dur+args.gap):.0f}s total). Watch a KiwiSDR on "
               f"{centre/1e6:.4f} MHz.")
+        rig.arm()
         for i in range(1, args.count + 1):
             print(f"  key {i}/{args.count}", flush=True)
             _play(audio, out_dev, args.max_key, rig)

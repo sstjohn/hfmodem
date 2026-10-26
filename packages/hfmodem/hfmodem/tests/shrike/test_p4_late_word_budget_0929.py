@@ -170,13 +170,20 @@ def test_1024_prompt_long_decoded_late_is_answered_once_on_its_repeat(monkeypatc
     assert len(received) == 1 and received[0].endswith(b'CMS via VE3KPG >\r')
 
 
-def test_1024_idle_long_decoded_late_keys_its_grant_over_the_unread_repeat(monkeypatch):
+def test_1024_idle_long_decoded_late_keys_its_policy_answer_over_the_unread_repeat(monkeypatch):
     tx, received, events = replay_1024(monkeypatch, 70.999, (70.999,), seconds=8.5)
     assert [e['event'] for e in events] == ['Refused', 'answer-deferred']
     assert not any(e['event'] == 'long decode' and e.get('crc_valid')
                    and abs(e['at']-round(74.749*FS)) < FS//10 for e in tx.p4_probe.link_events)
-    grant = tx.p4_probe.emissions[0]
-    assert (grant['status'], grant['audio_start']) == (0x40, deferred_instant(tx, 70.999))
+    answer = tx.p4_probe.emissions[0]
+    assert (answer['word'], answer['status'], answer['payload'], answer['audio_start']) == (
+        'X27', 0, '', 3751140)
+    assert answer['audio_start'] == deferred_instant(tx, 70.999)
+    keyed, = [e for e in tx.p4_probe.link_events if e['event'] == 'Keyed']
+    assert keyed['state'] == 'IRS_ANSWER'
+    assert keyed['accepted_target'] is not None and not keyed['current_slot_accepted']
+    assert tx.p4_link_host.arq.tx_acked_bytes == 0
+    assert not [e for e in tx.p4_probe.link_events if e['event'] == 'turn']
     assert [e['purpose'] for e in tx.p4_probe.link_events if e['event'] == 'Keyed'][:1] == [None]
 
 

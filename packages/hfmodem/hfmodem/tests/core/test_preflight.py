@@ -16,6 +16,10 @@ reason this check exists as something to run rather than something to assert.
 from __future__ import annotations
 
 import itertools
+import os
+import subprocess
+import sys
+from types import SimpleNamespace as NS
 
 import numpy as np
 import pytest
@@ -25,6 +29,9 @@ from hfmodem.core import config
 from hfmodem.core.rates import CARD_RATE_HZ
 from hfmodem.station import preflight
 from hfmodem.tests.core.fakerig import FakePtt, FakeRigctld
+from hfmodem.tests.hermetic import fake_claim_audio_metadata  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_claim_audio_metadata")
 
 CONFIG = """\
 schema = 1
@@ -42,6 +49,9 @@ centre_hz = 7101500
 host      = "127.0.0.1"
 port      = {port}
 
+[rig.profiles.ft891]
+cat_port = "{cat_port}"
+
 [rig.ptt]
 port     = "{ptt}"
 settle_s = 0.04
@@ -56,11 +66,14 @@ input_gain = 0.040
 NO_DEVICE = "hfmodem preflight test — no such device"
 
 
-def station_file(tmp_path, *, transmit: bool, device: str = NO_DEVICE, port: int = 4532):
+def station_file(tmp_path, *, transmit: bool, device: str = NO_DEVICE, port: int = 4532,
+                 cat: str | None = None):
     path = tmp_path / "station.toml"
     path.write_text(CONFIG.format(transmit=str(transmit).lower(), port=port,
-                                  ptt=tmp_path / "no-such-tty", device=device),
-                    encoding="utf-8")
+                                  ptt=tmp_path / "no-such-tty", cat_port=tmp_path / "no-such-cat",
+                                  device=device), encoding="utf-8")
+    if cat:
+        path.write_text(path.read_text().replace("[rig]\n", f'[rig]\ncat = "{cat}"\n'))
     return path
 
 
@@ -133,7 +146,7 @@ def armed(tmp_path, monkeypatch, line: FakePtt):
     """A `Preflight` whose rig is armed against a fake rigctld and `line`."""
     rigctld = FakeRigctld(ptt_line=line, ptt_type="None")
     monkeypatch.setattr(preflight, "RtsPtt", lambda port: line)
-    cfg = config.load(station_file(tmp_path, transmit=True, port=rigctld.port))
+    cfg = config.load(station_file(tmp_path, transmit=True, port=rigctld.port, cat="rigctld"))
     p = preflight.Preflight(cfg)
     return p, p._rig(), rigctld
 
@@ -165,6 +178,127 @@ def test_preflight_runs_the_station_check_and_returns_its_answer(tmp_path, monke
     assert seen["mycall"] == "N0CALL"
 
 
+@pytest.mark.parametrize("cat,backend", [(None, "serial"), ("rigctld", "rigctld")])
+@pytest.mark.parametrize("verb", ["--arm", "--preflight"])
+def test_the_rig_claim_checks_the_station_cat_backend(tmp_path, monkeypatch, cat, backend, verb):
+    from hfmodem.core import claim
+    path = station_file(tmp_path, transmit=True, cat=cat)
+    seen = []
+
+    def refuse(kind, operation, *, devices):
+        seen.append(devices)
+        raise claim.ClaimBusy("rig claimed: test")
+
+    monkeypatch.setattr(claim, "acquire", refuse)
+    assert cli.main(["rig", str(path), verb]) == 5
+    assert [d.cat for d in seen] == [backend]
+
+
+@pytest.mark.parametrize("error,rc", [("ClaimBusy", 5), ("ClaimError", 1)])
+def test_a_refused_claim_is_printed_not_a_traceback(tmp_path, monkeypatch, capsys, error, rc):
+    from hfmodem.core import claim
+
+    def refuse(kind, operation, *, devices):
+        raise getattr(claim, error)("rig claimed: Holder(pid=4242)")
+
+    monkeypatch.setattr(claim, "acquire", refuse)
+    assert cli.main(["rig", str(station_file(tmp_path, transmit=True)), "--arm"]) == rc
+    assert capsys.readouterr().err == "hfmodem rig: rig claimed: Holder(pid=4242)\n"
+
+
+@pytest.fixture
+def drivers(monkeypatch):
+    """The CAT drivers the station would build, as (driver, endpoint)."""
+    from hfmodem.station import process
+    built = []
+
+    def driver(name):
+        return type(name, (), {"__init__": lambda self, *args, **kw: built.append((name, args[0]))})
+
+    monkeypatch.setattr(process, "YaesuCat", driver("YaesuCat"))
+    monkeypatch.setattr(process, "RigctldCat", driver("RigctldCat"))
+    return built
+
+
+@pytest.mark.parametrize("cat,driver", [("yaesu", "YaesuCat"), ("rigctld", "RigctldCat"),
+                                        ("civ", "RigctldCat"), ("none", None)])
+def test_rig_arm_drives_the_station_cat_backend(tmp_path, monkeypatch, capsys, drivers, cat, driver):
+    from hfmodem.core import ptt, rig
+
+    class FakeRig:
+        def __init__(self, **kwargs):
+            self.cat = kwargs["cat"]
+
+        def arm(self, *, prove_ptt):
+            return f"armed through {type(self.cat).__name__}"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rig, "Rig", FakeRig)
+    monkeypatch.setattr(ptt, "RtsPtt", lambda port: FakeLine())
+    path = station_file(tmp_path, transmit=cat != "none", cat=cat)
+    rc = cli.main(["rig", str(path), "--arm"])
+    if driver is None:
+        assert rc == 2 and drivers == []
+        return
+    endpoint = str(tmp_path / "no-such-cat") if cat == "yaesu" else "127.0.0.1"
+    assert (rc, drivers) == (0, [(driver, endpoint)])
+    assert f"armed through {driver}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("cat,driver,wire", [("yaesu", "YaesuCat", "CAT on "),
+                                             ("rigctld", "RigctldCat", "CAT via rigctld at ")])
+def test_preflight_drives_the_station_cat_backend(tmp_path, monkeypatch, drivers, cat, driver, wire):
+    def unarmable(**kwargs):
+        raise preflight.RigError("not this test's concern")
+
+    monkeypatch.setattr(preflight, "Rig", unarmable)
+    p = preflight.Preflight(config.load(station_file(tmp_path, transmit=True, cat=cat)))
+    assert p._rig() is None
+    assert [name for name, _ in drivers] == [driver]
+    assert wire in p.lines[-1].detail
+
+
+LAUNCHED = """
+import sys
+from hfmodem import cli
+from hfmodem.core import claim
+from hfmodem.station import preflight
+
+def fresh_claim(*args, **kwargs):
+    raise AssertionError("took a claim of its own under the launcher's")
+
+def ran(cfg):
+    print("PREFLIGHT RAN", flush=True)
+    return 0
+
+claim.acquire, preflight.run = fresh_claim, ran
+sys.exit(cli.main(["rig", sys.argv[1], "--preflight"]))
+"""
+
+
+@pytest.mark.parametrize("cat", ["rigctld", "yaesu"])
+def test_rig_under_a_launchers_claim_runs_on_that_claim(tmp_path, monkeypatch, cat):
+    """`onair.sh preflight` runs this verb under claim_run: the claim is the
+    launcher's, on fd 9, and the verb's own acquire would be refused by it."""
+    from hfmodem.core import claim
+    (tmp_path / "state").mkdir()
+    monkeypatch.setenv("HFMODEM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("HFMODEM_COEXIST_HARNESS", "1")
+    station = station_file(tmp_path, transmit=True, cat=cat)
+    descriptor = claim.acquire("shell", "preflight")
+    try:
+        run = subprocess.run([sys.executable, "-c", LAUNCHED, str(station)],
+                             env=dict(os.environ, RIG_CLAIMED=str(claim.claim_path())),
+                             preexec_fn=lambda: os.dup2(claim._fd(descriptor), 9),
+                             close_fds=False, capture_output=True, text=True, timeout=60)
+        assert (run.returncode, run.stdout) == (0, "CLAIM ADMITTED\nPREFLIGHT RAN\n"), run.stderr
+        assert claim.holder(descriptor).operation == "preflight"
+    finally:
+        claim.release(descriptor)
+
+
 def test_arm_is_untouched_by_the_new_flag(tmp_path, capsys):
     """--arm on a transmit = false station still refuses, in its own words."""
     rc = cli.main(["rig", str(station_file(tmp_path, transmit=False)), "--arm"])
@@ -187,7 +321,11 @@ def test_transmit_false_refuses_before_anything_opens(tmp_path, capsys, monkeypa
 
 # --- a station with no radio on it --------------------------------------------
 
-def test_no_rig_and_no_card_cannot_measure_and_is_not_a_pass(tmp_path, capsys):
+def test_no_rig_and_no_card_cannot_measure_and_is_not_a_pass(tmp_path, capsys, monkeypatch):
+    def no_card(name, kind):
+        raise preflight.AudioError("this test has no card")
+
+    monkeypatch.setattr(preflight, "_device", no_card)
     rc = cli.main(["rig", str(station_file(tmp_path, transmit=True)), "--preflight"])
     out = capsys.readouterr().out
     assert rc != 0
@@ -337,6 +475,106 @@ def test_every_keying_brings_the_line_back_down(tmp_path, monkeypatch):
         rigctld.close()
 
 
+class AfterUnkeys(FakeLine):
+    """A line that misbehaves after its `good`th deassert: it reads back `reads`,
+    or the driver refuses the deassert."""
+
+    def __init__(self, good: int, *, reads=None, refuse: bool = False) -> None:
+        super().__init__()
+        self.good, self.reads, self.refuse = good, reads, refuse
+
+    def _bad(self) -> bool:
+        return self.calls.count("assert down") > self.good
+
+    def assert_(self, on: bool) -> None:
+        super().assert_(on)
+        if self.refuse and not on and self._bad():
+            raise preflight.PttError("the fake refuses to deassert")
+
+    def sense(self):
+        return self.reads if self._bad() and not self.released else super().sense()
+
+
+class Deadmen:
+    """`threading` as preflight sees it, recording every deadman it starts."""
+
+    def __init__(self) -> None:
+        self.started = []
+
+    def Timer(self, interval, function, args=()):
+        timer = NS(interval=interval, daemon=False, cancel=lambda: None)
+        timer.start = lambda: self.started.append(timer)
+        return timer
+
+
+@pytest.mark.parametrize("good", [1, preflight.KEYINGS], ids=["first", "last"])
+def test_an_unconfirmed_unkey_stops_the_keying_and_fences_the_rig(
+        tmp_path, monkeypatch, capsys, good):
+    """I4: after an unkey nobody could read back, nothing keys until one reads low.
+    On the last keying there is no next key to refuse, so the loop says so itself."""
+    line = AfterUnkeys(good)
+    p, rig, rigctld = armed(tmp_path, monkeypatch, line)
+    try:
+        assert rig.line_state == "low"
+        p._keying(QuietCard(), rig)
+        # The arm gate's proof, then each preflight keying up to the unread unkey.
+        assert line.calls.count("assert up") == 1 + good
+        assert rig.line_state == "unconfirmed" and not rig.retired
+        stopped = [ln for ln in p.lines if ln.verdict == preflight.STOP]
+        assert [ln.name for ln in stopped] == ["PTT actuation", "T/R recovery"]
+        assert all(ln.detail == f"after {good} of {preflight.KEYINGS} keyings"
+                   for ln in stopped)
+        assert all("the keying line is unconfirmed after the preflight unkey" in ln.note
+                   for ln in stopped)
+        assert p.verdict() == 1
+        assert "== preflight FAILED ==" in capsys.readouterr().out
+
+        deadmen = Deadmen()
+        monkeypatch.setattr(preflight, "threading", deadmen)
+        with pytest.raises(preflight.RigError, match="keying line is unconfirmed"):
+            p._key(rig)
+        assert deadmen.started == [], "a refused key armed a deadman"
+        assert line.calls.count("assert up") == 1 + good
+        assert not rig.retired
+    finally:
+        rig.close()
+        rigctld.close()
+
+
+def test_preflight_keys_only_a_line_that_reads_low(tmp_path, monkeypatch):
+    line = FakeLine()
+    p, rig, rigctld = armed(tmp_path, monkeypatch, line)
+    try:
+        rig.line_state = "high"
+        with pytest.raises(preflight.RigError, match="keying line is high"):
+            p._key(rig)
+        assert line.calls.count("assert up") == 1
+    finally:
+        rig.close()
+        rigctld.close()
+
+
+@pytest.mark.parametrize("fault, why", [
+    ({"reads": True}, "the keying line reads high after the preflight deassert"),
+    ({"refuse": True}, "the keying line refused to deassert"),
+], ids=["reads-high", "refused-deassert"])
+def test_an_unkey_that_fails_outright_retires_the_rig(tmp_path, monkeypatch, fault, why):
+    line = AfterUnkeys(1, **fault)
+    p, rig, rigctld = armed(tmp_path, monkeypatch, line)
+    try:
+        p._keying(QuietCard(), rig)
+        assert rig.retired and why in rig.retired_why
+        assert line.calls.count("assert up") == 2
+        stopped = [ln for ln in p.lines if ln.verdict == preflight.STOP]
+        assert [ln.name for ln in stopped] == ["PTT actuation", "T/R recovery"]
+        assert all(ln.note.startswith("the rig retired: ") and why in ln.note
+                   for ln in stopped)
+        assert p.verdict() == 1
+    finally:
+        rig.close()
+        rigctld.close()
+
+
 def test_a_quiet_band_reports_nothing_measured_rather_than_a_pass(
         tmp_path, monkeypatch):
     line = FakeLine()
@@ -437,7 +675,7 @@ def test_a_rig_that_could_not_be_armed_is_not_left_under_the_signal_guard(
     rigctld = FakeRigctld(ptt_line=line, ptt_type="None", refuse=True)
     monkeypatch.setattr(preflight, "RtsPtt", lambda port: line)
     p = preflight.Preflight(config.load(
-        station_file(tmp_path, transmit=True, port=rigctld.port)))
+        station_file(tmp_path, transmit=True, port=rigctld.port, cat="rigctld")))
     try:
         assert p._rig() is None
         assert p.rig is None, "the guard was left holding a closed rig"

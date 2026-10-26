@@ -1,11 +1,13 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Why things are where they are
 
-Four modems, one station. This file records the decisions that are easy to
+Multiple modes, one station. This file records the decisions that are easy to
 mistake for accidents, so they do not get undone.
 
 ## Three distributions
 
-    packages/hfmodem    the station and all four protocols
+    packages/hfmodem    the station and its protocol implementations
     packages/hfhost     host-protocol clients — stdlib only, forever
     packages/creance    the conformance bench
 
@@ -32,8 +34,8 @@ Not shared, each for its own reason:
   drafts of one interface. `hfhost.Link` normalises client operations; the
   modem host protocols remain distinct. Sabir uses its native framed-CBOR
   interface rather than the VARA-style two-socket command grammar.
-- **No shared ARQ core.** Four state machines and four gearshift rules, the
-  smallest around 600 lines and the largest past 1400. The pattern is
+- **No shared ARQ core.** Each protocol keeps its own synchronous state machine
+  and gearshift rules. The pattern is
   documented; the code is not hoisted.
 - **Shared coding primitives have explicit parameters.** `core.fec` holds
   convolutional encoding, soft Viterbi and puncturing; protocols select
@@ -49,20 +51,19 @@ Not shared, each for its own reason:
 
 ## The station owns the radio
 
-One process owns the CAT port, the PTT line and the sound card, and hosts
-whichever protocols are enabled — each still serving its own host interface.
-That is what makes contention impossible by construction rather than by operator
-discipline, and it is the point: a transmitting radio mutes its own receiver, and
-one modem transmitting while another recorded has already invalidated eight
-on-air sessions reported as a silent band.
+The station service takes the shared interprocess rig claim before opening CAT,
+the separate PTT line and sound devices. A second cooperating process is refused
+ownership until the holder releases that claim. Within the station, enabled protocol lanes
+retain their own host interfaces and share the service's radio ownership and
+transmit scheduling. See [station service ownership](docs/README-station.md).
 
-**No on-air session has yet run this way.** Every one has been a per-modem
-process launched on its own, so the exclusion above is a property of the station
-process and not of how this station has actually operated. Two modems started by
-hand still contend, and the interlock is a lock inside one process — it could not
-have prevented those eight sessions either.
+A transmitting radio mutes its own receiver, so overlap can invalidate receive
+evidence. The claim coordinates cooperating processes; it cannot exclude a
+program that opens the devices without taking it. Software ownership and teardown
+checks do not establish physical PTT behavior or an on-air interoperability result.
+Those require their own attended measurements and recorded sessions.
 
-Threads, not asyncio: a PortAudio callback cannot `await`, all four ARQ machines
+Threads, not asyncio: a PortAudio callback cannot `await`, the protocol state machines
 are synchronous, and every timing budget here is measured against `time.monotonic()`
 and sample counters.
 

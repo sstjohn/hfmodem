@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Owned recording paths use synthetic samples and a fake FLAC executable."""
 import json
 from pathlib import Path

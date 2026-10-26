@@ -1,0 +1,7 @@
+{
+  "source": "operator-data/working/vara-chat/sessions/20261025T202827170660Z/receive.wav",
+  "start": 181435904,
+  "end": 181810176,
+  "sha256": "76985f55d49afbd15554671734b78adc1fe1bfad00909b579e478dd8b128fb2a",
+  "note": "KQ4QWH CRC-clean L4 retransmission after receiver predicted L1; live log located it but did not deliver it."
+}

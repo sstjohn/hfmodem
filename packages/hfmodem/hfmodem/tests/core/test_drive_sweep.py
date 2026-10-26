@@ -39,17 +39,26 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hfmodem.core import levels
+from hfmodem.core import levels, ptt
 from hfmodem.shrike import pactor1, placement
+from hfmodem.tests.kestrel.fake_line_keyer import LINE_ENV, FakeLine, LineRecord, pty_line
 
 REPO = Path(__file__).resolve().parents[5]
 sys.path[:0] = [str(REPO / "tools")]
 DS = pytest.importorskip("drive_sweep", reason="tools/ is not beside the package")
 
-#: A character device the arm gate accepts and nothing here opens.
-PTT_LINE = "/dev/null"
+ptt_line = pytest.fixture(scope="module")(pty_line)
 
 STATION_DRIVE = levels.TX_DRIVE
+
+
+@pytest.fixture
+def line(tmp_path, monkeypatch):
+    """The claim proves the keying line low before it admits anything; this is the
+    line it proves, with only the ioctls faked."""
+    monkeypatch.setenv(LINE_ENV, str(tmp_path / "line.jsonl"))
+    monkeypatch.setattr(ptt, "RtsPtt", FakeLine)
+    return LineRecord(tmp_path / "line.jsonl")
 
 
 @pytest.fixture
@@ -57,10 +66,10 @@ def reference() -> float:
     return DS.reference_rms(STATION_DRIVE)
 
 
-def _armed_argv(*extra: str) -> list[str]:
+def _armed_argv(ptt_line: str, *extra: str) -> list[str]:
     return ["drive_sweep", "--seconds", "0.2", "--dummy-load", "--arm",
             "--rigctld", "127.0.0.1:4532", "--expect-model", "FT-891",
-            "--ptt-device", PTT_LINE, *extra]
+            "--ptt-device", ptt_line, *extra]
 
 
 def _args(*argv: str):
@@ -270,10 +279,10 @@ def test_the_bounds_leave_room_for_the_run_the_tool_is_for():
     assert DS.refusal(args, [0.6, 0.7, 0.8, 0.9, 1.0]) is None
 
 
-def test_arming_is_refused_without_a_load_acknowledgement():
+def test_arming_is_refused_without_a_load_acknowledgement(ptt_line):
     """The tool keys at drives chosen to find where the ALC acts. Into an antenna
     that is a splattering transmitter on a shared band."""
-    args = _args(*_armed_argv()[1:], )
+    args = _args(*_armed_argv(ptt_line)[1:])
     args.dummy_load = False
     args.clear_frequency = False
     why = DS.refusal(args, [STATION_DRIVE])
@@ -285,22 +294,22 @@ def test_a_dry_run_needs_no_acknowledgement_because_it_keys_nothing():
 
 
 @pytest.mark.parametrize("drop", ["--rigctld", "--expect-model", "--ptt-device"])
-def test_arming_is_refused_without_the_radio_it_would_key(drop):
+def test_arming_is_refused_without_the_radio_it_would_key(drop, ptt_line):
     """A radio nobody can name, or a keying line nothing can pull down when
     rigctld stops answering -- `core.ptt.arming_refusal`'s gate, the one every
     transmit tool here runs."""
-    argv = _armed_argv()[1:]
+    argv = _armed_argv(ptt_line)[1:]
     i = argv.index(drop)
     del argv[i:i + 2]
     why = DS.refusal(_args(*argv), [STATION_DRIVE])
     assert why and (drop in why or "keying line" in why)
 
 
-def test_an_armed_run_with_everything_named_is_not_refused():
-    assert DS.refusal(_args(*_armed_argv()[1:]), [STATION_DRIVE]) is None
+def test_an_armed_run_with_everything_named_is_not_refused(ptt_line):
+    assert DS.refusal(_args(*_armed_argv(ptt_line)[1:]), [STATION_DRIVE]) is None
 
 
-def test_a_refused_run_never_builds_a_rig(monkeypatch):
+def test_a_refused_run_never_builds_a_rig(monkeypatch, ptt_line):
     """The refusal has to happen before anything that can key exists. A gate
     downstream of the rig is a gate with a transmitter behind it."""
     def explode(*a, **kw):
@@ -308,7 +317,7 @@ def test_a_refused_run_never_builds_a_rig(monkeypatch):
 
     monkeypatch.setattr(DS, "Rig", explode)
     monkeypatch.setattr(DS, "_install_unkey_handlers", explode)
-    argv = _armed_argv()
+    argv = _armed_argv(ptt_line)
     argv.remove("--dummy-load")
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit) as exc:
@@ -371,12 +380,22 @@ def test_a_step_that_outlives_its_audio_is_unkeyed_by_the_deadman(monkeypatch,
 def test_the_deadman_stands_down_when_the_step_ends_on_time(monkeypatch,
                                                             reference):
     """An alarm that fires on the ordinary case is one an operator reads past."""
-    monkeypatch.setattr(DS, "DEADMAN_MARGIN_S", 0.05)
+    # Exercise cancellation without racing real device-claim work against an
+    # artificially shortened 100 ms deadline. The stalled-play test above keeps
+    # the independent, real-time alarm proof.
+    pending, entered = [], threading.Event()
+    real_deadman = DS.deadman
+    def deferred_deadman(*args):
+        pending.append(args)
+        entered.set()
+    monkeypatch.setattr(DS, "deadman", deferred_deadman)
     rig = FakeRig()
     code, _ = _sweep(rig, [DS.step("pactor1", 0, 0.6, 0.05, reference)],
                      lambda *a: None)
-    threading.Event().wait(0.3)
-    assert code == 0 and rig.forced == []
+    assert entered.wait(10), "the sweep did not start its deadman"
+    assert len(pending) == 1 and pending[0][0].is_set(), "the sweep did not cancel its deadman"
+    real_deadman(*pending[0])
+    assert code == 0 and rig.keys == [True, False] and rig.forced == []
 
 
 def test_a_transmitter_that_never_came_up_ends_the_sweep(reference):
@@ -407,18 +426,18 @@ def test_a_retired_rig_ends_the_sweep(reference):
 
 # -- the verdict on the way out --------------------------------------------
 
-def test_the_line_is_proved_low_off_the_line_itself(monkeypatch):
+def test_the_line_is_proved_low_off_the_line_itself(monkeypatch, line, ptt_line):
     lines: list[str] = []
     monkeypatch.setattr(DS, "drop_rts", lambda dev, log: True)
-    assert DS.prove_down(PTT_LINE, lines.append) is True
+    assert DS.prove_down(ptt_line, lines.append) is True
     assert "PTT VERDICT: down" in "\n".join(lines)
 
 
 def test_a_line_that_will_not_read_low_says_so_where_it_cannot_be_missed(
-        monkeypatch):
+        monkeypatch, line, ptt_line):
     lines: list[str] = []
     monkeypatch.setattr(DS, "drop_rts", lambda dev, log: False)
-    assert DS.prove_down(PTT_LINE, lines.append) is False
+    assert DS.prove_down(ptt_line, lines.append) is False
     assert "NOT CONFIRMED DOWN" in "\n".join(lines)
 
 
@@ -434,7 +453,7 @@ def test_an_absent_keying_line_is_not_an_alarm(tmp_path, monkeypatch):
 # -- the run, end to end, with the radio faked out -------------------------
 
 @pytest.fixture
-def armed(monkeypatch):
+def armed(monkeypatch, line, ptt_line):
     """An armed run whose rig, codec and keying line are all fakes."""
     rig = FakeRig()
     monkeypatch.delenv("HFMODEM_STATION", raising=False)
@@ -443,7 +462,7 @@ def armed(monkeypatch):
     monkeypatch.setattr(DS, "warm_output", lambda dev: None)
     monkeypatch.setattr(DS, "_install_unkey_handlers", lambda r: None)
     monkeypatch.setattr(DS, "prove_down", lambda dev, log: True)
-    monkeypatch.setattr(sys, "argv", _armed_argv("--waveform", "pactor3"))
+    monkeypatch.setattr(sys, "argv", _armed_argv(ptt_line, "--waveform", "pactor3"))
     return rig
 
 
@@ -459,7 +478,7 @@ def test_an_armed_run_hands_the_rig_to_the_trees_own_signal_handlers(monkeypatch
 
 
 def test_a_run_that_fails_mid_sweep_still_shuts_the_rig_down_and_proves_the_line(
-        monkeypatch, armed):
+        monkeypatch, armed, ptt_line):
     proved: list = []
     monkeypatch.setattr(DS, "prove_down", lambda dev, log: proved.append(dev) or True)
 
@@ -470,7 +489,7 @@ def test_a_run_that_fails_mid_sweep_still_shuts_the_rig_down_and_proves_the_line
     with pytest.raises(RuntimeError):
         DS.main()
     assert armed.shutdowns == 1
-    assert proved == [PTT_LINE]
+    assert proved == [ptt_line]
 
 
 def test_a_run_that_cannot_prove_the_line_low_does_not_exit_clean(monkeypatch,

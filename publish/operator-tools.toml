@@ -1,8 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 # Exact reviewed operator runtime, assets, and portable regression tests.
 version = 1
 
 [operators]
 paths = [
+  "tools/consolelib/txcal.py",
+  "tools/consolelib/varac.py",
+  "tools/kestrel_host.py",
+  "tools/vara_txcal.py",
+  "tools/varac_chat.py",
+
   "tools/ardop_call.py",
   "tools/capture_identity.py",
   "tools/codec_gain.py",
@@ -53,6 +61,7 @@ paths = [
   "tools/lib/attempts.sh",
   "tools/lib/ports.sh",
   "tools/lib/rig.sh",
+  "tools/desk/face.py",
   "tools/logbook_view/README.md",
   "tools/logbook_view/ardop_view.py",
   "tools/logbook_view/audio.py",
@@ -65,7 +74,6 @@ paths = [
   "tools/logbook_view/pactor_timing.py",
   "tools/logbook_view/pactor_view.py",
   "tools/logbook_view/rehear.py",
-  "tools/logbook_view/serve.py",
   "tools/logbook_view/summary.js",
   "tools/logbook_view/test_link_state.mjs",
   "tools/logbook_view/test_playback.mjs",

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """FIND A HOST: the channels this station has worked, and which one an arm means.
 
 The roster is data on disk, one `peers.json` per mode: channel, band, centre and

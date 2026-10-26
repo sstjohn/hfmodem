@@ -12,6 +12,12 @@ oddities. ``creance selftest`` gates on deviations from GOLDEN, not on raw
 FAIL/ABSENT, so it is meaningful today: an ABSENT entry is a standing statement
 that the behavior is documented but not yet implemented, and it flips to PASS
 -- with GOLDEN re-derived against the live target -- when the modem grows it.
+The legacy kestrel-pair profile supports CHAT OFF timing only. Its
+listen_semantics FAIL is accepted only with the exact four-command evidence:
+LISTEN ON/OFF and CHAT OFF return OK; CHAT ON alone returns WRONG. Additional
+failures, missing replies, or support appearing are deviations requiring review.
+This exact legacy-pair limitation was observed again on 2026-10-26 against the
+in-memory AudioChannel target; it does not describe a physical station test.
 kestrel-loopback now passes preconnect_queue; its bitrate_absent and sn_absent
 are ABSENT because the loopback stopped fabricating channel state the real core
 has no hook for. Sabir's bitrate/sn/pending entries flip when its ARQ wires
@@ -838,6 +844,10 @@ GOLDEN: dict[str, dict[str, str]] = {
     # and sn_absent stay ABSENT from _SINGLE_COMMON because the core has no
     # hook for either.
     "kestrel-pair": _SINGLE_COMMON | {
+        # Legacy AudioChannel ARQ implements CHAT OFF timing only. The strict
+        # grammar probe must still FAIL, solely for CHAT ON -> WRONG; the exact
+        # remaining successful replies are required by _GOLDEN_FAILURE_EVIDENCE.
+        "listen_semantics": FAIL,
         "preconnect_queue": PASS,
         "buffer_cadence": PASS,         # was FAIL, and the FAIL was ours: the
                                         # connect after preconnect_queue's ABORT
@@ -874,6 +884,19 @@ GOLDEN: dict[str, dict[str, str]] = {
 }
 
 
+# A known FAIL is not permission for unrelated failures in the same probe.
+# Only built-in targets use these exact reviewed wire-reply fingerprints;
+# callers supplying independent tables retain their existing verdict contract.
+_GOLDEN_FAILURE_EVIDENCE = {
+    ("kestrel-pair", "listen_semantics"): (
+        "'LISTEN ON' -> OK",
+        "'LISTEN OFF' -> OK",
+        "'CHAT ON' -> WRONG (expected OK)",
+        "'CHAT OFF' -> OK",
+    ),
+}
+
+
 def diff_golden(target: str, findings: Iterable[Finding],
                 tables: dict[str, dict[str, str]] | None = None) -> list[str]:
     """Deviations of a findings set from the golden table (empty == selftest
@@ -881,13 +904,20 @@ def diff_golden(target: str, findings: Iterable[Finding],
     structured catalog reuse this with its own golden entries."""
     expected = (GOLDEN if tables is None else tables)[target]
     got: dict[str, str] = {}
+    first: dict[str, Finding] = {}
     for f in findings:
         got.setdefault(f.probe, f.verdict)
+        first.setdefault(f.probe, f)
     devs = [f"{pid}: expected {want}, " +
             (f"got {got[pid]}" if pid in got else "not run")
             for pid, want in expected.items() if got.get(pid) != want]
     devs += [f"{pid}: unexpected probe (not in golden table)"
              for pid in got if pid not in expected]
+    if tables is None:
+        for (known_target, pid), evidence in _GOLDEN_FAILURE_EVIDENCE.items():
+            if (target == known_target and got.get(pid) == expected.get(pid)
+                    and first[pid].evidence != evidence):
+                devs.append(f"{pid}: evidence differs from the known capability deficit")
     return devs
 
 

@@ -73,3 +73,6 @@ class RegisteredObservation:
     response_generation: int | None = None
     response_slot: int | None = None
     response_owner: object | None = None
+    peer_watch_generation: int | None = None
+    # Only historical watch refinements need this current primary-read proof.
+    primary_packet_due: int | None = None

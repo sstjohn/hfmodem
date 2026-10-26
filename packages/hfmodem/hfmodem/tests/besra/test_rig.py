@@ -1,16 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""The persistent-`rigctl` Rig, exercised against a fake rigctl — no radio.
-
-The real-rig PTT path (alignment item 4) fires only when a Rig is built with a
-serial device, so nothing in the suite touched it: set/PTT are pipe writes to one
-long-lived process, and the emergency unkey deliberately does NOT use that pipe —
-it kills the process and keys down through a fresh one-shot, so a wedged pipe can
-never block the unkey. This drives that logic against a stand-in rigctl that just
-records what it was told, so the orchestration is a test rather than a claim.
-"""
-
 from __future__ import annotations
 
 import atexit
@@ -25,23 +15,27 @@ import pytest
 from hfmodem.besra.radio import Rig, tune_atu
 from hfmodem.core import audio
 from hfmodem.core.occupied import FILTER_HZ
+from hfmodem.tests import fakeclaim
 
 _FAKE = r"""#!/usr/bin/env python3
-import sys
+import os, sys
 a = sys.argv[1:]
 serial = a[a.index("-r") + 1]                      # we pass the log path as the serial
 log = serial + ".cmds"
 pos, i = [], 0
-while i < len(a):                                  # strip -m/-r/-s <val>, keep positionals
-    if a[i] in ("-m", "-r", "-s"): i += 2; continue
+while i < len(a):
+    if a[i] in ("-m", "-r", "-s", "-P"): i += 2; continue
     pos.append(a[i]); i += 1
 if pos[:1] == ["\\dump_caps"]:
     print("Model name: Fake FT-891"); sys.exit(0)
 if pos[:1] == ["F"] and pos[-1:] == ["f"]:         # qsy: set then read back, one shot
     open(log, "a").write("ONESHOT " + " ".join(pos) + "\n")
     print(pos[1]); sys.exit(0)
-if pos:                                            # one-shot command (the independent unkey)
+if pos:
     open(log, "a").write("ONESHOT " + " ".join(pos) + "\n"); sys.exit(0)
+if os.environ.get("BESRA_FAKE_DIAGNOSTICS"):
+    for stream in (sys.stdout.buffer, sys.stderr.buffer):
+        stream.write(b"diagnostic\n" * 20000); stream.flush()
 with open(log, "a") as f:                          # persistent: record piped commands
     for line in sys.stdin:
         f.write("PIPE " + line); f.flush()
@@ -49,7 +43,20 @@ with open(log, "a") as f:                          # persistent: record piped co
 
 
 @pytest.fixture
-def fake_rig(tmp_path):
+def native_cat(monkeypatch):
+    """Direct CAT children, admitted and run as plain subprocesses: the
+    persistent one names its device, a one-shot carries only the claim."""
+    def spawn(argv, **kwargs):
+        serial = argv[argv.index("-r") + 1]
+        assert argv[argv.index("-P") + 1] == "NONE"
+        assert kwargs in (dict(claim_fd=9, long_lived=True, device=serial), dict(claim_fd=9))
+        return fakeclaim.spawn(argv, **kwargs)
+
+    return fakeclaim.install(monkeypatch, spawner=spawn)
+
+
+@pytest.fixture
+def fake_rig(tmp_path, native_cat):
     exe = tmp_path / "fake_rigctl"
     exe.write_text(_FAKE)
     exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
@@ -77,7 +84,7 @@ def test_base_routes_direct_or_through_rigctld(tmp_path):
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
     direct = Rig(1036, "/dev/ttyUSB0", 38400, rigctl=str(exe))
-    assert direct._base() == [str(exe), "-m", "1036", "-r", "/dev/ttyUSB0", "-s", "38400"]
+    assert direct._base() == [str(exe), "-m", "1036", "-r", "/dev/ttyUSB0", "-s", "38400", "-P", "NONE"]
     atexit.unregister(direct._atexit_unkey)
 
     daemon = Rig(1036, "/dev/ttyUSB0", 38400, rigctl=str(exe), rigctld="localhost:4532")
@@ -97,7 +104,7 @@ def test_a_rigctl_nobody_can_find_refuses_at_construction(tmp_path, monkeypatch)
         Rig(1036, "/dev/ttyUSB0", 38400, rigctl=str(tmp_path / "nowhere/rigctl"))
 
 
-def test_set_and_ptt_are_persistent_pipe_writes(fake_rig):
+def test_only_cat_commands_are_persistent_pipe_writes(fake_rig):
     rig, log = fake_rig
     rig.set_freq(7103500)
     rig.set_mode("PKTUSB")
@@ -105,14 +112,14 @@ def test_set_and_ptt_are_persistent_pipe_writes(fake_rig):
     rig.ptt(False)
     for _ in range(50):
         c = _cmds(log)
-        if "T 0" in c and "F 7103500" in c:
+        if f"PIPE M PKTUSB {FILTER_HZ}" in c and "F 7103500" in c:
             break
         time.sleep(0.02)
     assert "PIPE F 7103500" in c
     assert f"PIPE M PKTUSB {FILTER_HZ}" in c
-    assert "PIPE T 1" in c and "PIPE T 0" in c
+    assert "PIPE T" not in c
     # one long-lived process served them all — not a spawn per command
-    assert rig._proc is not None and rig._proc.poll() is None
+    assert rig._proc is not None and rig._proc.alive()
 
 
 def test_set_mode_never_asks_for_the_rigs_default_width(fake_rig):
@@ -136,6 +143,16 @@ def test_set_mode_never_asks_for_the_rigs_default_width(fake_rig):
     assert "M PKTUSB 0" not in c
 
 
+def test_both_native_diagnostic_pipes_are_drained(fake_rig, monkeypatch):
+    # More than either pipe can hold: the child cannot consume a CAT command
+    # until both streams have readers. No hardware or supervisor is involved.
+    monkeypatch.setenv("BESRA_FAKE_DIAGNOSTICS", "1")
+    rig, log = fake_rig
+    assert rig._write("F", "7103500")
+    assert "PIPE F 7103500" in _cmds(log)
+    assert rig._proc.alive()
+
+
 def test_qsy_sets_and_reads_back_in_one_shot(fake_rig):
     """The set and its readback travel in one rigctl invocation: the persistent
     pipe's writes are asynchronous, so a set through it followed by a
@@ -147,7 +164,7 @@ def test_qsy_sets_and_reads_back_in_one_shot(fake_rig):
     assert rig._proc is None                       # reads need exclusive access
 
 
-def test_qsy_answers_none_when_the_rig_will_not_say(tmp_path):
+def test_qsy_answers_none_when_the_rig_will_not_say(tmp_path, native_cat):
     exe = tmp_path / "rigctl"
     exe.write_text("#!/bin/sh\nexit 0\n")          # takes the command, reports nothing
     exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
@@ -165,17 +182,16 @@ def test_identify_reads_the_model(fake_rig):
     assert rig._proc is None                        # identify kills it for exclusive access
 
 
-def test_unkey_is_independent_of_the_pipe(fake_rig):
+def test_unkey_closes_cat_without_sending_ptt(fake_rig):
     rig, log = fake_rig
-    rig.ptt(True)
+    rig.set_freq(7103500)
     _cmds(log)
     proc = rig._proc
     rig.unkey("test")
-    # the persistent process is killed (freeing the CAT port)...
     assert rig._proc is None
-    assert proc.poll() is not None
-    # ...and the unkey went out as a fresh one-shot, not down the (now-dead) pipe
-    assert "ONESHOT T 0" in _cmds(log)
+    assert not proc.alive()
+    assert "T 0" not in _cmds(log)
+    assert rig._write("F", "7200000") is False
 
 
 def test_a_clean_stop_is_not_announced_as_an_emergency(fake_rig, caplog):
@@ -185,35 +201,31 @@ def test_a_clean_stop_is_not_announced_as_an_emergency(fake_rig, caplog):
     import logging
 
     rig, log = fake_rig
-    rig.ptt(True)
+    rig.set_freq(7103500)
     _cmds(log)
     caplog.set_level(logging.INFO, logger="hfmodem.besra.radio")
 
     rig.stop()
 
-    assert "ONESHOT T 0" in _cmds(log), "a quieter teardown that stopped unkeying"
+    assert rig._proc is None
+    assert "T 0" not in _cmds(log)
     assert "emergency" not in caplog.text, caplog.text
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING], caplog.text
 
 
 def test_the_atexit_backstop_does_not_run_the_ladder_twice(fake_rig, caplog):
-    """`stop` and the atexit handler both reach the unkey, 7 ms apart, and on
-    the daemon path the second ran the whole ladder again — a second one-shot
-    at a CAT port already given up, and two more lines between the operator and
-    the reason the session ended. After `stop` nothing can key through this rig
-    again, so the backstop has nothing left to put down."""
     import logging
 
     rig, log = fake_rig
-    rig.ptt(True)
+    rig.set_freq(7103500)
     _cmds(log)
     rig.stop()
-    assert _cmds(log).count("ONESHOT T 0") == 1
+    assert "T 0" not in _cmds(log)
     caplog.set_level(logging.INFO, logger="hfmodem.besra.radio")
 
     rig._atexit_unkey()
 
-    assert _cmds(log).count("ONESHOT T 0") == 1, "the backstop keyed down a second time"
+    assert "T 0" not in _cmds(log)
     assert caplog.records == [], caplog.text
 
 
@@ -231,64 +243,19 @@ def test_a_real_emergency_still_says_so(fake_rig, caplog):
         ["emergency unkey: watchdog: keyed past 30.0s"], caplog.text
 
 
-def test_an_unkey_the_oneshot_could_not_confirm_still_escalates(tmp_path, monkeypatch,
-                                                                caplog):
-    """rigctl reports a dead rigctld by EXITING NONZERO in milliseconds --
-    connection refused, or an in-band refusal -- and `subprocess.run` does not
-    raise for that. The escalation read it as success: no `drop_rts`, no
-    alarm, no retire, nothing in the log. The returncode check lives in
-    `core.ptt.OneShotRigctl` now, for every modem at once, and the ladder --
-    with the drop this intercepts -- in `core.ptt.Keyer`."""
-    import logging
-
-    from hfmodem.core import ptt as core_ptt
-
-    exe = tmp_path / "fake_rigctl"
-    exe.write_text("#!/bin/sh\nexit 2\n")
-    exe.chmod(0o755)
-    rig = Rig(1036, "/dev/null", 38400, rigctl=str(exe), ptt_device="/dev/null")
-    atexit.unregister(rig._atexit_unkey)
-    dropped: list[str] = []
-    monkeypatch.setattr(core_ptt, "drop_rts",
-                        lambda dev, log: dropped.append(dev) or False)
-    monkeypatch.setattr(core_ptt, "UNKEY_BUDGET_S", 0.2)   # real seconds, hurried
-    caplog.set_level(logging.ERROR, logger="hfmodem.besra.radio")
-
-    rig.unkey("daemon dead")
-
-    assert dropped == ["/dev/null"], "the last resort never ran on a nonzero exit"
-    assert "MAY BE STUCK" in caplog.text and "manually" in caplog.text, caplog.text
-    assert rig.retired, ("a transmitter nobody has confirmed down is not one "
-                         "this program may key again")
-
-
-def test_an_unkey_the_oneshot_confirmed_does_not_escalate(fake_rig, monkeypatch):
-    """...and only the unconfirmed one. `drop_rts` opens the keying port, which
-    is what makes it work and what makes it wrong as a routine unkey -- and an
-    alarm that fires on every clean shutdown is one an operator learns past."""
-    from hfmodem.core import ptt as core_ptt
-
-    rig, _ = fake_rig
-    dropped: list[str] = []
-    monkeypatch.setattr(core_ptt, "drop_rts",
-                        lambda dev, log: dropped.append(dev) or False)
-    rig.unkey("test")
-    assert dropped == []
-    assert not rig.retired
-
-
 def test_pipe_reopens_after_the_process_dies(fake_rig):
     rig, log = fake_rig
     rig.set_freq(7100000)
     _cmds(log)
-    rig._proc.kill(); rig._proc.wait()             # simulate a dropped process
+    rig._proc.kill()                              # simulate a dropped process
+    assert rig._proc.wait_gone(2)
     rig.set_freq(7200000)                          # must transparently reopen
     for _ in range(50):
         if "F 7200000" in _cmds(log):
             break
         time.sleep(0.02)
     assert "PIPE F 7200000" in _cmds(log)
-    assert rig._proc is not None and rig._proc.poll() is None
+    assert rig._proc is not None and rig._proc.alive()
 
 
 def test_tune_atu_warms_audio_then_keys_then_unkeys(monkeypatch):

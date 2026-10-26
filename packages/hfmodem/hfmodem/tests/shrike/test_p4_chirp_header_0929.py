@@ -75,7 +75,7 @@ def test_header_never_depends_on_the_payload_or_expands_its_bracket():
 
 
 def test_both_recorded_header_markers_choose_a_crc_valid_placement():
-    path = Path(__file__).parent/'fixtures/p4-chirps/audio.npz'
+    path = Path(__file__).parent/'fixtures/sigidwiki/p4-chirps/audio.npz'
     with np.load(path, allow_pickle=False) as fixture:
         rows, fs = fixture['audio'], int(fixture['fs'])
     for row, marker in zip(rows, (9, 9, 8, 8)):

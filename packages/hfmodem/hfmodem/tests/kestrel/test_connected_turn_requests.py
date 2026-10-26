@@ -8,7 +8,9 @@ import wave
 import numpy as np
 import pytest
 
+from hfmodem.kestrel.rx import varahf500 as rx500
 from hfmodem.kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as MK
+from hfmodem.tests.kestrel import corpora, test_bw500_session as bw500_session
 from hfmodem.tests.kestrel.test_data_over_gate import _connected
 
 FIXTURES = Path(__file__).with_name("fixtures") / "kc9-connected-asks"
@@ -138,3 +140,45 @@ def test_a_repeated_request_releases_again_without_resetting_progress():
     assert hs.progress == progress
     assert hs._since_progress == 7
     assert hs._released
+
+
+def _bw500_request(hs):
+    burst = MK.synth_burst(hs.caller, VF.for_bw(VF.SESSION_TURN_REQUEST_RESPONDER, "500"))
+    noise = np.random.default_rng(7).standard_normal(int(2.5 * MK.FS)) * 1e-3
+    return np.concatenate([noise[:MK.FS // 2], burst + noise[:len(burst)], noise[MK.FS // 2:]])
+
+
+def _peers_over_read():
+    """A stock BW500 over read off the stream and answered: the peer holds its turn."""
+    session = corpora.wav_mono(corpora.MULTIFRAME_SESSION)
+    a, b = rx500.burst_spans(session)[1]
+    hs, io = bw500_session._station()
+    bw500_session._stream(hs, io, session[a - MK.FS:b + MK.FS])
+    assert io.keys == 1 and len(io.host) == 1, io.msgs
+    return hs, io
+
+
+def _released(io):
+    return [m for m in io.msgs if m.startswith("tx session-turn-release")]
+
+
+@corpora.requires_multiframe_session
+def test_a_request_behind_our_release_is_answered_after_the_peers_overs():
+    hs, io = _peers_over_read()
+    hs.turn = VA._TURN_OURS                 # the peer's delivery has handed us the turn
+    hs.idle_keepalive()
+    assert io.keys == 2 and len(_released(io)) == 1, io.msgs[-3:]
+    bw500_session._stream(hs, io, _bw500_request(hs))
+    assert io.keys == 3 and len(_released(io)) == 2, io.msgs[-3:]
+
+
+@corpora.requires_multiframe_session
+def test_a_peer_keying_overs_we_read_is_not_taken_to_ask_for_the_turn():
+    hs, io = _peers_over_read()
+    bw500_session._stream(hs, io, np.zeros(20 * MK.FS))
+    bw500_session._stream(hs, io, _bw500_request(hs))
+    assert io.keys == 1 and not any(m.startswith("rx turn-request") for m in io.msgs), io.msgs[-3:]
+    # The same request with no over read draws the release.
+    hs, io = bw500_session._station()
+    bw500_session._stream(hs, io, _bw500_request(hs))
+    assert io.keys == 1 and _released(io), io.msgs[-3:]

@@ -1,0 +1,16 @@
+[
+  {
+    "file": "query97.wav",
+    "source": "operator-data/working/vara-chat/sessions/20261025T215622291998Z/receive.wav",
+    "start_sample": 39489024,
+    "end_sample": 39731200,
+    "sample_rate": 48000
+  },
+  {
+    "file": "query103.wav",
+    "source": "operator-data/working/vara-chat/sessions/20261025T215622291998Z/receive.wav",
+    "start_sample": 40968704,
+    "end_sample": 41217024,
+    "sample_rate": 48000
+  }
+]

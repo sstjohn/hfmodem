@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # VARA HF — functional specification
 
 [Implementation constants and public source map](implementation-constants.md)
@@ -60,13 +62,13 @@ campaign’s conditions rather than an implementation speed ceiling.
 | [`07-host-api-mapping.md`](07-host-api-mapping.md) | The TCP host interface: commands, notifications, transport |
 | [`08-compression.md`](08-compression.md) | The payload compression codec |
 | [`21-data-answer-recovery.md`](21-data-answer-recovery.md) | Measured DATA ACK/NAK detection and state-query recovery after missing feedback |
-| [`22-turnaround-capture.md`](22-turnaround-capture.md) | Monitored transmit-end detection without waiting for codec DC settling |
+| [`22-turnaround-capture.md`](../../implementation/vara/22-turnaround-capture.md) | Monitored transmit-end detection without waiting for codec DC settling |
 | [`23-nak-repacketization.md`](23-nak-repacketization.md) | Solicited NAK recovery with smaller frames and exact byte preservation |
-| [`24-lower-record-recovery.md`](24-lower-record-recovery.md) | Lost intermediate and final answers after qualified rate changes |
-| [`25-recovery-diagnostics.md`](25-recovery-diagnostics.md) | Query phases, matched replies and pending-byte ownership in recovery logs |
+| [`24-lower-record-recovery.md`](../../implementation/vara/24-lower-record-recovery.md) | Lost intermediate and final answers after qualified rate changes |
+| [`25-recovery-diagnostics.md`](../../implementation/vara/25-recovery-diagnostics.md) | Query phases, matched replies and pending-byte ownership in recovery logs |
 | [`26-data-rejection-naks.md`](26-data-rejection-naks.md) | Direct and queried DATA NACKs requiring a one-record-lower retry |
-| [`27-nak-scan-deadline.md`](27-nak-scan-deadline.md) | Scheduling the next receive scan at a partially received NACK tail |
-| [`28-short-final-nak-retry.md`](28-short-final-nak-retry.md) | Lower-rate retry after a missing short-final DATA frame |
-| [`29-low-level-data-nacks.md`](29-low-level-data-nacks.md) | Distinguishing eight-symbol ACK/NACK tails and recovery through host levels 1–4 |
+| [`27-nak-scan-deadline.md`](../../implementation/vara/27-nak-scan-deadline.md) | Scheduling the next receive scan at a partially received NACK tail |
+| [`28-short-final-nak-retry.md`](../../implementation/vara/28-short-final-nak-retry.md) | Lower-rate retry after a missing short-final DATA frame |
+| [`29-low-level-data-nacks.md`](../../implementation/vara/29-low-level-data-nacks.md) | Distinguishing eight-symbol ACK/NACK tails and recovery through host levels 1–4 |
 | [`evidence/`](evidence/README.md) | The bench measurements the speed levels 5–17 were closed from
 | `hfmodem/kestrel/rx/tablegen.py` (companion implementation) | The constant data tables the waveform depends on — regenerated in code, byte-exact, with how each is known |

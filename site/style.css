@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: CC-BY-4.0 */
+/* SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) */
 /* Shared site typography, colour and layout. */
 :root {
   color-scheme:light;
@@ -321,6 +323,23 @@ h2 {
   padding-left:28px;
   border-left:1px solid var(--line);
 }
+.recording-grid>a:first-child {
+  grid-column:1 / -1;
+}
+.recording-grid>a:nth-child(even) {
+  padding-left:0;
+  border-left:0;
+}
+.recording-grid>a:nth-child(odd):not(:first-child) {
+  padding-left:28px;
+  border-left:1px solid var(--line);
+}
+@media (max-width:700px) {
+  .recording-grid>a:nth-child(odd):not(:first-child) {
+    padding-left:0;
+    border-left:0;
+  }
+}
 .guides .eyebrow {
   display:block;
   margin-bottom:22px;
@@ -425,6 +444,20 @@ footer nav {
   margin:44px 0 24px;
   border-top:1px solid var(--line);
   font-size:32px;
+}
+.document .guides h2 {
+  margin:0 0 8px;
+  padding:0;
+  border:0;
+  font-size:23px;
+  font-weight:500;
+  letter-spacing:-.04em;
+}
+.document audio {
+  display:block;
+  width:100%;
+  max-width:48rem;
+  margin:24px 0 16px;
 }
 .document h3 {
   margin:28px 0 16px;

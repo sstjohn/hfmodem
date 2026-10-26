@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Standalone, placed normal-LONG SL6--10 diagnostics. No live receiver dispatch.
 
 Constants are immutable generated arrays. The symbol noise parameter

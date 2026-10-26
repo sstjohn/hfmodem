@@ -1,0 +1,50 @@
+{
+ "slot1-qso-nc3z-dl4vcw": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T222533471470Z/receive.wav",
+  "samples": [
+   12000000,
+   15840000
+  ],
+  "rate": 48000,
+  "sha256": "e26a672ea86733b386fb4e5d9e914dfb6550740ce754bfee537a6cbd15981020",
+  "flac_sha256": "8215c3f853f9b7f7f135a894446abe2ce913a90703faa826e16cd16e0a64ada3",
+  "dial_hz": 7105000,
+  "description": "40 m calling frequency, 2026-10-23 22:30Z, dial on the CF: a VarAC QSO on slot 1 (audio 500-1000 Hz), one side heard at levels 1-4, its text naming NC3Z (`Cluster de NC3Z <R-1457 <VW>`) and DL4VCW (`<MSG:DL4VCW`); slot 11 quiet throughout; beacons on the CF"
+ },
+ "slot11-unread-session": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T222533471470Z/receive.wav",
+  "samples": [
+   480000,
+   4800000
+  ],
+  "rate": 48000,
+  "sha256": "fa70cc482f601acb6b21595a5bd95ad7d64fd09937ce0a86947aaf84cdfd50cf",
+  "flac_sha256": "3aff651b4419535a22d25bf0b7ddcd2baac838fb689526aedb55f309ec552159",
+  "dial_hz": 7105000,
+  "description": "the same session, 10-100 s: the slot 1 QSO's level-1 overs from 27.8 s of the session, and a BW500 session on slot 11 (audio 2000-2500 Hz, 47-93 s) whose base-level overs no reader decodes"
+ },
+ "noise-width3000": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T222533471470Z/receive.wav",
+  "samples": [
+   72000000,
+   74880000
+  ],
+  "rate": 48000,
+  "sha256": "6c69e095b80d9f4a2b53acf0cdcae301b52bed46953a20697b8a953fb31602cb",
+  "flac_sha256": "d426c4eb596b2763e7b22b9f9d55677998587aaebbf3a8442143b27d880ab3a6",
+  "dial_hz": 7105000,
+  "description": "the same session, 1500-1560 s: 40 m noise and beacons with the FTDX10 where varac_chat's `M PKTUSB 3000` left it, WIDTH 3000 and the 3 kHz roofing filter; the receive audio ends in a cliff near 3100 Hz"
+ },
+ "noise-opened": {
+  "source": "operator-data/working/vara-chat/sessions/20261023T222533471470Z/receive.wav",
+  "samples": [
+   186480000,
+   191280000
+  ],
+  "rate": 48000,
+  "sha256": "75064e2ab220a67642b6103acb567e3e001d6426fbbcaa049a131ffe7ec25489",
+  "flac_sha256": "d98eb201f1cb94b2e479bb68975d456ff06ace4c25d7f993edd401656c05e735",
+  "dial_hz": 7105000,
+  "description": "the same session, 3885-3985 s, after the operator opened the filter by hand from 3840 s: no cliff, the skirt 10 dB down near 3400 Hz and 14 dB by 3800"
+ }
+}

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 name: release
 
 on:
@@ -76,6 +78,9 @@ jobs:
       OPENBLAS_NUM_THREADS: '1'
       OMP_NUM_THREADS: '1'
       MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+      BLIS_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v5
         with:
@@ -86,7 +91,7 @@ jobs:
       - name: Install audio file tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flac ffmpeg libportaudio2
+          sudo apt-get install -y --no-install-recommends flac ffmpeg libportaudio2 strace lsof
       - name: Install editable packages and test tools
         run: >-
           python -m pip install
@@ -96,12 +101,17 @@ jobs:
           pytest-xdist
       - name: Run release tests
         # Hosted runners do not guarantee station-class timing. The unchanged
-        # realtime budgets are qualified serially on macOS and Linux before
+        # realtime and wall-clock budgets are qualified separately before
         # tagging; see docs/STATUS.md#release-qualification.
-        run: >-
-          nice -n 19 python -m pytest -c pyproject.toml -q -n auto --dist loadfile
-          -m "not slow and not realtime and not corpus and not hardware and not ardopcf"
-          packages
+        run: |
+          selection='not slow and not realtime and not wall_clock and not corpus and not hardware and not ardopcf'
+          nice -n 19 python -m pytest -c pyproject.toml -q -n auto --dist loadfile \
+            -m "$selection" \
+            --ignore packages/hfmodem/hfmodem/tests/coexist \
+            packages
+          nice -n 19 python -m pytest -c pyproject.toml -q -n 0 \
+            -m "$selection" \
+            packages/hfmodem/hfmodem/tests/coexist
   publish:
     needs: [build, test]
     # A branch dispatch rehearses build and test; a tag dispatch can recover a

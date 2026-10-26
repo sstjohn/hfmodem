@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # 04 — Frame & block formats
 
 The frame types VARA HF puts on the air, the callsign-keyed handshake tone
@@ -305,6 +307,14 @@ are the free build's, symbol for symbol. `vara_frames.link_setup_frame(...,
 high_speed=True)` builds it, and `link_setup_marks` reads `(high_speed, ask)` back.
 
 ### 4.2B DATA over frame layout
+
+Later TEXT boundary controls
+establish an exception to equating short payload with final delivery: a coded
+partial frame whose low field bits are 00 remains intermediate. At BW500 its
+44-byte body can hold 42 compressed bytes, a lone 14 trailer and field b4.
+Full 01 and terminal 10/11 forms retain the layouts below. An overlapping
+caller CRC equal to the field remains ambiguous; its historical interpretation
+is preserved.
 
 The 92-byte container is **90 body bytes + CRC-16/GENIBUS(body[0:90]) big-endian**,
 as for the link-setup frame, but the body is laid out differently:

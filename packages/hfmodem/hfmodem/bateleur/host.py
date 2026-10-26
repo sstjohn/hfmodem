@@ -5,7 +5,7 @@
 
 Neither standard defines how an application drives a modem, and the dialects
 the commercial and military modems speak are their own. This one is small and
-written down in ``docs/protocols/bateleur/HOST-API.md``; it is not a copy of any
+written down in ``docs/implementation/bateleur/HOST-API.md``; it is not a copy of any
 other modem's, and an application written for one of those will not attach
 here unchanged.
 
@@ -56,6 +56,7 @@ class BateleurHost(Observer):
         self.autosend_ms: int | None = None
         self._running = False
         self._threads: list[threading.Thread] = []
+        self._connections: list[hostio.Connection] = []
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -71,25 +72,31 @@ class BateleurHost(Observer):
         self.cmd_port = cmd.getsockname()[1]
         self.data_port = data.getsockname()[1]
         self._running = True
-        for fn, s in ((self._accept_cmd, cmd), (self._accept_data, data)):
-            t = threading.Thread(target=fn, args=(s,), daemon=True, name="bateleur-host")
+        for fn, args, name in ((self._accept_cmd, (cmd,), "bateleur-host"),
+                               (self._accept_data, (data,), "bateleur-host"),
+                               (self._autosender, (), "bateleur-autosend")):
+            t = threading.Thread(target=fn, args=args, daemon=True, name=name)
+            with self._lock:
+                self._threads.append(t)
             t.start()
-            self._threads.append(t)
-        t = threading.Thread(target=self._autosender, daemon=True, name="bateleur-autosend")
-        t.start()
-        self._threads.append(t)
 
-    def stop(self) -> None:
-        self._running = False
-        self.modem.abort()
-        for s in self._srv + [self._cmd, self._data]:
+    def stop(self, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            self._running = False
+            connections = list(self._connections)
+            threads = list(self._threads)
+        for s in self._srv + connections:
             if s is not None:
                 try:
-                    s.close()
+                    s.cancel() if isinstance(s, hostio.Connection) else s.close()
                 except OSError:
                     pass
-        for t in self._threads:
-            t.join(timeout=2.0)
+        self.modem.abort()
+        ended = hostio.join_threads(threads, deadline)
+        for conn in connections:
+            ended = conn.join(max(0.0, deadline - time.monotonic())) and ended
+        return ended
 
     def _listen(self, port: int) -> socket.socket:
         return hostio.listen(self._bind_host, port)
@@ -102,20 +109,31 @@ class BateleurHost(Observer):
                 continue
             except OSError:
                 return
-            if not self._running:
-                conn.close()
-                continue
-            yield hostio.Connection(conn, line=srv is self._srv[0])
+            with self._lock:
+                if not self._running:
+                    conn.close()
+                    continue
+                self._threads[:] = [t for t in self._threads
+                                    if t.ident is None or t.is_alive()]
+                self._connections[:] = [c for c in self._connections if not c.join(0)]
+                conn = hostio.Connection(conn, line=srv is self._srv[0])
+                self._connections.append(conn)
+            yield conn
 
     # -- the command port --------------------------------------------------
 
     def _accept_cmd(self, srv) -> None:
         for conn in self._take(srv):
             with self._lock:
+                if not self._running:
+                    conn.close()
+                    continue
                 old, self._cmd = self._cmd, conn
-            if old is not None:
-                old.close()
-            threading.Thread(target=self._serve_cmd, args=(conn,), daemon=True).start()
+                if old is not None:
+                    old.close()
+                thread = threading.Thread(target=self._serve_cmd, args=(conn,), daemon=True)
+                self._threads.append(thread)
+                thread.start()
 
     def _serve_cmd(self, conn: socket.socket) -> None:
         hostio.serve_lines(conn, lambda: self._running, self.command, self._line)
@@ -224,10 +242,15 @@ class BateleurHost(Observer):
     def _accept_data(self, srv) -> None:
         for conn in self._take(srv):
             with self._lock:
+                if not self._running:
+                    conn.close()
+                    continue
                 old, self._data = self._data, conn
-            if old is not None:
-                old.close()
-            threading.Thread(target=self._serve_data, args=(conn,), daemon=True).start()
+                if old is not None:
+                    old.close()
+                thread = threading.Thread(target=self._serve_data, args=(conn,), daemon=True)
+                self._threads.append(thread)
+                thread.start()
 
     def _serve_data(self, conn: socket.socket) -> None:
         try:

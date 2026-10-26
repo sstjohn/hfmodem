@@ -1,0 +1,27 @@
+{
+  "source": "operator-data/working/vara-chat/sessions/20261025T202827170660Z/receive.wav",
+  "start_sample": 12127232,
+  "end_sample": 12213248,
+  "sha256": "f2f413dfef925122e16742ec48af6b7aa75f08265340c0cc1811d00958683938",
+  "note": "W1HPC DATA_NAK_QUERY: 29 exact leading payload tones and two trailing erasures. The old decoder rejected it; the stronger solicited-prefix path waits through the complete nominal reply interval before retransmitting.",
+  "receive_gaps": [
+    {
+      "file": "after-data.wav",
+      "start_sample": 11702272,
+      "end_sample": 11761664,
+      "sha256": "40f3264b9d52fc1e1bed2343254d8cae5725050a7109e9d451777ca23a6e3278"
+    },
+    {
+      "file": "after-query1.wav",
+      "start_sample": 11804672,
+      "end_sample": 11889664,
+      "sha256": "69b2e77121dfd27808de7118a5655148adcf2454e9ffa0a3be6cf1fa2b6fe457"
+    },
+    {
+      "file": "after-query2.wav",
+      "start_sample": 11966464,
+      "end_sample": 12051456,
+      "sha256": "a700e41e11175586a88cf7ffe1b6d12d56789f995374621639ced23455e190f1"
+    }
+  ]
+}

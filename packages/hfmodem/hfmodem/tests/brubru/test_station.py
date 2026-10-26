@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 import threading
@@ -25,7 +26,7 @@ from hfmodem.tests.brubru.test_host import Socket
 
 class Audio(StationAudio):
     def __init__(self):
-        super().__init__(input_device=None, output_device=None, blocksize=256)
+        super().__init__(input_device=None, output_device="fake-output", blocksize=256)
         self.lat = 0
         self.output = []
         self.on_output = None
@@ -48,6 +49,15 @@ class Audio(StationAudio):
                 raise BurstInvalidated('cancelled')
             self.step()
 
+    def dac_time(self, output_frame):
+        return time.monotonic() + (output_frame - self.samples) / 48000
+
+    def dac_frame_at(self, timestamp):
+        return self.samples + (timestamp - time.monotonic()) * 48000
+
+    def wait_until_dac(self, output_frame, **kwargs):
+        self.wait_until(output_frame, **kwargs)
+
 
 class Rig:
     def __init__(self, audio, *, key_delay=0):
@@ -55,22 +65,69 @@ class Rig:
         self.max_key_s = 40
         self.retired = False
         self.keyed = False
+        self.line_state = 'low'
         self.key_delay = key_delay
         self.assertions = []
+        self.panics = []
 
     def dial(self):
         return 10_147_600
 
     def key(self, emission, *, sample_now, **kwargs):
         self.audio.wait_until(self.audio.samples + round(self.key_delay * 48000))
-        self.keyed = True
+        self.keyed, self.line_state = True, 'high'
         at = int(sample_now())
         self.assertions.append(at)
         return KeyToken(len(self.assertions), 0, self.max_key_s, 'test', at,
                         at + round(self.max_key_s * 48000))
 
     def unkey(self, token):
-        self.keyed = False
+        self.keyed, self.line_state = False, 'low'
+
+    def panic_unkey(self, why):
+        self.panics.append(why)
+        self.retired = True
+        self.unkey(None)
+
+
+class Cat:
+    cache_free = reads_ptt = True
+
+    def __init__(self):
+        self.clock = lambda: 0
+
+    def open(self):
+        pass
+
+    def close(self):
+        pass
+
+    def hold(self, deadline_index=None):
+        return nullcontext(True)
+
+    def protect(self, start_index, end_index):
+        return object()
+
+    def unprotect(self, token):
+        pass
+
+    def identify(self):
+        return ''
+
+    def freq(self):
+        return 10_147_600
+
+    def ptt_state(self, *, _arming=False):
+        return False
+
+
+def armed_rig(ptt):
+    from hfmodem.core.rig import Rig as StationRig
+    rig = StationRig(model='test', identity='', cat=Cat(), ptt=ptt, transmit=True,
+                     profile=SimpleNamespace(check=lambda *args, **kwargs: None),
+                     control=None)
+    rig.arm(prove_ptt=False)
+    return rig
 
 
 def station(options=None, *, transmitter=True):
@@ -158,6 +215,40 @@ def request(audio, state=None, **kw):
                      state=state or RequestState(), lead_s=0.1, **kw)
 
 
+@pytest.mark.parametrize('gain', [0., .1, .25, 1.])
+def test_host_gain_reaches_reserved_card_output(gain):
+    audio = Audio()
+    rig = Rig(audio)
+    arbiter = TxArbiter(audio, rig, drive=.6)
+    result = arbiter.submit_result(request(audio, gain=gain))
+    assert result.outcome == 'sent' and not rig.keyed
+    assert np.max(np.abs(np.concatenate(audio.output))) == pytest.approx(.6*gain)
+
+
+def test_tracker_xr_reaches_the_rpr_worker_and_card_output(monkeypatch):
+    from hfmodem.brubru.host.runtime import PacketRuntime
+    st = station()
+    runtime = PacketRuntime(st.link)
+    # The real packet worker still renders, reserves and completes each burst;
+    # deterministic access removes the random slot and receive-clock dependency.
+    monkeypatch.setattr(st.link.access, 'contend', lambda *args: True)
+    monkeypatch.setattr(st.link, '_fresh', lambda: None)
+    monkeypatch.setattr(st.link, '_eligible', lambda: True)
+    raw = ui_frame('W9SSJ', 'CQ', b'original')
+    from hfmodem.station.link import RprRequest
+    try:
+        for millivolts in (3000, 300):
+            runtime._configure('%XR', millivolts)
+            st.audio.output.clear()
+            request = RprRequest(millivolts, raw, RequestState(), time.monotonic())
+            st.link._serve(request)
+            assert request.completion[0] == 'sent'
+            assert np.max(np.abs(np.concatenate(st.audio.output))) == pytest.approx(
+                .6*millivolts/3000, rel=1e-5)
+    finally:
+        runtime.stop()
+
+
 @pytest.mark.parametrize('limiter', [False, True])
 @pytest.mark.parametrize('key_delay', [0, 0.05])
 def test_ptt_to_first_card_sample_includes_keying_delay(limiter, key_delay):
@@ -214,11 +305,11 @@ def test_reservation_rejects_before_publication_even_with_callback_contending():
 def test_displaced_burst_ends_committed_error_without_output():
     audio = Audio()
     rig = Rig(audio)
-    rig.max_key_s = 0.3
+    rig.max_key_s = 2.5
     original = rig.key
     def delayed(*args, **kwargs):
         token = original(*args, **kwargs)
-        audio.samples += 10000
+        audio.samples += 3 * 48000
         return token
     rig.key = delayed
     arbiter = TxArbiter(audio, rig)
@@ -233,7 +324,8 @@ def test_cancel_wins_lock_wait_and_commit_wins_later_cancel():
     arbiter = TxArbiter(audio, Rig(audio))
     state = RequestState()
     result = []
-    with arbiter._lock:
+    with arbiter.try_hold() as held:
+        assert held
         worker = threading.Thread(target=lambda: result.append(arbiter.submit_result(request(audio, state))))
         worker.start()
         assert state.cancel()
@@ -352,7 +444,7 @@ def test_two_kiss_endpoints_move_ui_both_directions():
 def test_callback_health_covers_lead_body_and_playback_tail(monkeypatch, stop):
     import hfmodem.core.audio as module
     clock = [0.0]
-    audio = StationAudio(input_device=None, output_device=None, blocksize=256)
+    audio = StationAudio(input_device=None, output_device="fake-output", blocksize=256)
     audio.lat = 4800
     audio._stream = SimpleNamespace(active=True, latency=(0.01, 0.01))
     audio._callback_at = 0
@@ -370,6 +462,7 @@ def test_callback_health_covers_lead_body_and_playback_tail(monkeypatch, stop):
             if not stopped:
                 audio._fill(np.zeros((256, 1)), 256, n)
                 audio.samples = n + 256
+                audio._dac = ((n + audio.loop_lat) / 48000, n)
             next_callback[0] += 256 / 48000
     monkeypatch.setattr(module.time, 'sleep', sleep)
     if stop is None:
@@ -414,6 +507,38 @@ def test_worker_outcomes_retries_and_deferrals(results, attempts, outcomes):
     assert [e['outcome'] for e in st.link.outcomes] == outcomes
     assert queued.deferrals == sum(outcome == 'deferred' for outcome, _ in results)
     assert not st.link.events.pending
+
+
+def test_a_burst_is_sized_to_what_the_arbiter_admits():
+    from hfmodem.station.arbiter import TxResult
+    frame = ui_frame('N0CALL', 'CQ', bytes(200))
+    burst, = tx.transmit([frame])
+    lead = burst.lead_s(100, 0.04)
+    duration = len(burst.audio) / tx.waveform.RATE + 0.1
+    for slack, offered in ((max(2, duration / 4) + 0.01, True), (0.5, False)):
+        st = station()
+        st.cfg.rig.max_key_s = st.rig.max_key_s = lead + duration + slack
+        st.link.access.contend = lambda *args: True
+        submitted = []
+        st.arbiter.submit_result = lambda req: submitted.append(req) or TxResult('sent', 'committed')
+        queued = st.link.enqueue(frame)
+        st.link._queue.clear()
+        st.link._serve(queued)
+        assert bool(submitted) is offered
+        assert st.link.outcomes[-1]['outcome'] == ('sent' if offered else 'refused')
+
+
+def test_a_keyed_interval_too_short_for_any_burst_is_refused_as_such():
+    st = station()
+    st.cfg.rig.max_key_s = st.rig.max_key_s = 2
+    st.link.access.contend = lambda *args: True
+    st.arbiter.submit_result = lambda req: pytest.fail('offered a burst that cannot fit')
+    queued = st.link.enqueue(ui_frame('N0CALL', 'CQ', b'x'))
+    st.link._queue.clear()
+    st.link._serve(queued)
+    outcome = st.link.outcomes[-1]
+    assert outcome['outcome'] == 'refused'
+    assert outcome['reason'].startswith("burst cannot fit the rig's keyed interval")
 
 
 def test_unknown_commit_state_never_retries():
@@ -470,7 +595,7 @@ def test_stop_between_eligibility_and_commit_cancels_without_keying():
 
 
 def test_audio_calls_after_close_are_rejected():
-    audio = StationAudio(input_device=None, output_device=None)
+    audio = StationAudio(input_device=None, output_device="fake-output")
     audio.close()
     for call in (lambda: audio.wait_until(0),
                  lambda: audio.reserve_burst(np.zeros(1), 0, 10000),
@@ -481,22 +606,20 @@ def test_audio_calls_after_close_are_rejected():
 
 def test_rig_close_waits_for_admitted_assertion_and_rejects_later_calls():
     from hfmodem.core.regulatory import Emission
-    from hfmodem.core.rig import Rig as StationRig
     entered, release, closed = threading.Event(), threading.Event(), threading.Event()
     edges = []
     class Ptt:
+        released_low = True
         def assert_(self, value):
             if value:
                 entered.set()
                 assert release.wait(1)
             edges.append(value)
+        def sense(self):
+            return False
         def release(self):
             edges.append(False)
-    cat = SimpleNamespace(freq=lambda: 10147600, close=lambda: None)
-    rig = StationRig(model='test', cat=cat, ptt=Ptt(), transmit=True,
-                     profile=SimpleNamespace(check=lambda *args, **kwargs: None),
-                     control=None)
-    rig._armed = True
+    rig = armed_rig(Ptt())
     rig._arm_watchdog = lambda *args: None
     burst = Emission(10147600, 1200, 1800)
     worker = threading.Thread(target=lambda: rig.key(burst, why='test', duration_s=0.1))
@@ -568,7 +691,8 @@ def test_fault_published_during_arbiter_contention_defers():
     st.audio.samples = 144000
     result = []
     req = request(st.audio, eligible=st.link._eligible)
-    with st.arbiter._lock:
+    with st.arbiter.try_hold() as held:
+        assert held
         worker = threading.Thread(target=lambda: result.append(st.arbiter.submit_result(req)))
         worker.start()
         st.link.lane.fault(144000, 'timestamp loss')
@@ -725,13 +849,15 @@ def test_station_releases_ptt_when_rig_startup_fails(monkeypatch, failure):
             self.ptt.release()
 
     monkeypatch.setattr(process, 'RtsPtt', Line)
-    monkeypatch.setattr(process, 'Cat', lambda *args: None)
+    monkeypatch.setattr(process, 'RigctldCat', lambda *a, **kw: SimpleNamespace(
+        open=lambda: None, close=lambda: None))
     monkeypatch.setattr(process, 'Rig', Radio)
     cfg = SimpleNamespace(
-        selected_rig='ft891',
+        selected_rig='ft891', protocols={}, resolved_profile={},
         station=StationSettings(transmit=True, mycall='N0CALL'),
         rig=SimpleNamespace(ptt=SimpleNamespace(port='/dev/test'), model='ft891',
-                            host='localhost', port=4532, max_key_s=40),
+                            host='localhost', port=4532, max_key_s=40, cat='rigctld',
+                            max_watts=100, identity='', dial_max_age_s=5),
         profile=None, control=None)
     with pytest.raises(RigError):
         process.Station(cfg).open_rig()
@@ -740,18 +866,14 @@ def test_station_releases_ptt_when_rig_startup_fails(monkeypatch, failure):
 
 def test_card_deadline_does_not_add_watchdog_setup_time(monkeypatch):
     from hfmodem.core.regulatory import Emission
-    from hfmodem.core.rig import Rig as StationRig
 
     clock = [0.0]
     def advance(*args):
         clock[0] += 0.05
     monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
-    cat = SimpleNamespace(freq=lambda: 10147600, close=lambda: None)
-    ptt = SimpleNamespace(assert_=advance, release=lambda: None)
-    rig = StationRig(model='test', cat=cat, ptt=ptt, transmit=True,
-                     profile=SimpleNamespace(check=lambda *args, **kwargs: None),
-                     control=None)
-    rig._armed = True
+    ptt = SimpleNamespace(assert_=advance, sense=lambda: False, release=lambda: None,
+                          released_low=True)
+    rig = armed_rig(ptt)
     rig._arm_watchdog = advance
     try:
         token = rig.key(Emission(10147600, 1200, 1800), why='test', duration_s=1,
@@ -768,7 +890,7 @@ def test_callback_health_with_three_ms_rms_delivery_jitter(monkeypatch, stall):
 
     clock = [0.0]
     monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
-    audio = StationAudio(input_device=None, output_device=None, blocksize=128)
+    audio = StationAudio(input_device=None, output_device="fake-output", blocksize=128)
     audio.lat = 1152
     audio._stream = SimpleNamespace(active=True, latency=(0.01, 0.01))
     audio.sample_now = lambda: round(clock[0] * 48000)
@@ -786,6 +908,7 @@ def test_callback_health_with_three_ms_rms_delivery_jitter(monkeypatch, stall):
             if not stall or when < 0.3:
                 audio._fill(np.zeros((128, 1), np.float32), 128, index * 128)
                 audio.samples = (index + 1) * 128
+                audio._dac = ((index * 128 + audio.loop_lat) / 48000, index * 128)
             next_delivery[0] = next(pending)
     monkeypatch.setattr(module.time, 'sleep', sleep)
     for _ in range(50):
@@ -793,11 +916,11 @@ def test_callback_health_with_three_ms_rms_delivery_jitter(monkeypatch, stall):
     at = audio.reserve_burst(np.ones(24000), 4800, 48000)
     if stall:
         with pytest.raises(BurstInvalidated, match='callbacks stopped'):
-            audio.wait_until(at + 24000, healthy=True, deadline=1)
+            audio.wait_until_dac(at - audio.loop_lat + 24000, healthy=True, deadline=1)
         assert 0.3 < clock[0] < 0.35
         audio.cancel_burst()
     else:
-        audio.wait_until(at + 24000, healthy=True, deadline=1)
+        audio.wait_until_dac(at - audio.loop_lat + 24000, healthy=True, deadline=1)
         assert audio.finish_burst() == at + 24000
 
 
@@ -805,7 +928,7 @@ def test_callback_health_with_three_ms_rms_delivery_jitter(monkeypatch, stall):
 def test_callback_allowance_tracks_reported_output_latency(monkeypatch, latency):
     import hfmodem.core.audio as module
 
-    audio = StationAudio(input_device=None, output_device=None, blocksize=128)
+    audio = StationAudio(input_device=None, output_device="fake-output", blocksize=128)
     audio._stream = SimpleNamespace(active=True, latency=(0.001, latency))
     audio._callback_at = 0
     timeout = latency + audio.blocksize / module.CARD_RATE_HZ + module.CALLBACK_JITTER_ALLOWANCE_S
@@ -882,10 +1005,10 @@ def test_blocked_release_reaches_station_fatal_path_with_watchdog_armed():
                      ptt=SimpleNamespace(release=blocked_release),
                      transmit=False, profile=None, control=None)
     rig._timer = SimpleNamespace(cancel=lambda: calls.append('watchdog'))
-    st = object.__new__(Station)
+    st = Station(SimpleNamespace(protocols={}))
     st.hosts, st.lanes, st.rig, st.audio = {}, {}, rig, None
 
-    class FatalReached(Exception):
+    class FatalReached(BaseException):
         pass
 
     def fatal(reason):
@@ -897,7 +1020,10 @@ def test_blocked_release_reaches_station_fatal_path_with_watchdog_armed():
         with pytest.raises(FatalReached):
             st.shutdown()
         assert entered.is_set()
-        assert calls == [('fatal', 'keying line did not release during close', True)]
+        assert calls[0] == 'cat'
+        assert calls[-1][0] == 'fatal' and calls[-1][2] is True
+        assert 'keying line did not release during close' in calls[-1][1]
+        assert 'watchdog' not in calls
     finally:
         release.set()
 
@@ -918,7 +1044,8 @@ def test_arbiter_public_results_and_immutable_receive_barrier():
     assert before.end == 0
     arbiter.disable('rpr', 'test')
     result = arbiter.submit_result(request(audio))
-    assert type(result) is TxResult and result.state == 'cancelled'
+    assert type(result) is TxResult and (result.outcome, result.state) == ('refused', 'waiting')
+    assert 'disabled' in result.reason
     assert arbiter.transmit_history() == after
     assert not hasattr(arbiter, 'retired')
 
@@ -934,7 +1061,7 @@ def test_protocol_options_are_validated_once_before_resources(monkeypatch):
                                                  regulatory='part97',
                                                  regulatory_settings={'licence': 'technician'},
                                                  transmit=False), selected_rig='ft891',
-                          rig=SimpleNamespace(max_key_s=40,
+                          rig=SimpleNamespace(max_key_s=40, centre_hz=7_102_000,
                                               ptt=SimpleNamespace(settle_s=0.04)))
     st = Station(cfg, replay=np.zeros(48000))
     st.open_audio()
@@ -962,8 +1089,10 @@ def test_station_command_runs_rpr_configuration(monkeypatch, tmp_path):
                       '[audio]\noutput = "fake output"\n'
                       '[protocols.rpr]\nenabled = true\nhost = "kiss"\nport = 8001\n')
     seen = []
-    monkeypatch.setattr(Station, 'run', lambda self: seen.append(self.cfg) or 0)
-    assert cli.cmd_station(SimpleNamespace(file=str(config))) == 0
+    from hfmodem.station.service import Service
+    monkeypatch.setattr(Service, 'bind', lambda self: None)
+    monkeypatch.setattr(Station, 'run', lambda self, **kw: seen.append(self.cfg) or 0)
+    assert cli.cmd_station(SimpleNamespace(file=str(config), target=None, detach=False, preflight=False)) == 0
     assert seen[0].protocols['rpr'].host == 'kiss'
 
 
@@ -972,9 +1101,7 @@ def test_existing_lanes_keep_synchronous_end_index_and_refusal(protocol):
     from hfmodem.station.arbiter import Refused
 
     audio = Audio()
-    rig = SimpleNamespace(max_key_s=40, retired=False,
-                          key=lambda *args, **kwargs: object(), unkey=lambda token: None)
-    arbiter = TxArbiter(audio, rig)
+    arbiter = TxArbiter(audio, Rig(audio))
     req = TxRequest(LIVE, 1, protocol, np.ones(4800), emission=object())
     end = arbiter.submit(req)
     assert type(end) is int and end == 3 * audio.blocksize + 4800
@@ -986,7 +1113,6 @@ def test_existing_lanes_keep_synchronous_end_index_and_refusal(protocol):
 @pytest.mark.parametrize('reserved', [False, True])
 def test_failed_key_up_immediately_runs_panic_release(reserved):
     from hfmodem.core.rig import RigError
-    from hfmodem.station.arbiter import Refused
 
     audio = Audio()
 
@@ -994,16 +1120,20 @@ def test_failed_key_up_immediately_runs_panic_release(reserved):
         max_key_s = 40
         retired = False
         keyed = False
+        line_state = 'low'
 
         def __init__(self):
             self.released = False
 
         def key(self, *args, **kwargs):
-            self.retired = True
+            self.retired, self.line_state = True, 'unconfirmed'
             raise RigError('PTT assertion failed')
 
+        def unkey(self, token):
+            pass
+
         def panic_unkey(self, why):
-            self.released = True
+            self.released, self.line_state = True, 'low'
 
     rig = FailingRig()
     arbiter = TxArbiter(audio, rig)
@@ -1012,8 +1142,8 @@ def test_failed_key_up_immediately_runs_panic_release(reserved):
                     lead_s=0.1 if reserved else None)
     if reserved:
         result = arbiter.submit_result(req)
-        assert result.outcome == 'refused'
+        assert result.outcome == 'invalidated' and 'retired' in result.reason
     else:
-        with pytest.raises(Refused, match='PTT assertion failed'):
+        with pytest.raises(BurstInvalidated, match='retired'):
             arbiter.submit(req)
     assert rig.released

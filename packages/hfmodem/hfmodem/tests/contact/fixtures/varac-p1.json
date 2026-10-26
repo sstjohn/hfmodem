@@ -1,0 +1,425 @@
+[
+  {
+    "message_index": 0,
+    "declared_length": 11,
+    "content": "<R-05> <VW>",
+    "fragments_hex": [
+      "3131203c522d30353e203c56573e"
+    ],
+    "sources": [
+      {
+        "session": 1,
+        "file": "20261018/20261018T190001Z_14106.5kHz_iq.flac",
+        "slot": 0,
+        "start_s": 437.3175217212435,
+        "stop_s": 442.24093838791015
+      }
+    ]
+  },
+  {
+    "message_index": 2,
+    "declared_length": 5,
+    "content": "<AWQ>",
+    "fragments_hex": [
+      "35203c4157513e"
+    ],
+    "sources": [
+      {
+        "session": 1,
+        "file": "20261018/20261018T190001Z_14106.5kHz_iq.flac",
+        "slot": 0,
+        "start_s": 481.4200425545768,
+        "stop_s": 486.3486050545768
+      }
+    ]
+  },
+  {
+    "message_index": 3,
+    "declared_length": 8,
+    "content": "<Q:-150>",
+    "fragments_hex": [
+      "38203c513a2d3135303e"
+    ],
+    "sources": [
+      {
+        "session": 2,
+        "file": "20261018/20261018T190001Z_14106.5kHz_iq.flac",
+        "slot": 0,
+        "start_s": 1347.225878297738,
+        "stop_s": 1351.1741699644047
+      }
+    ]
+  },
+  {
+    "message_index": 6,
+    "declared_length": 7,
+    "content": "<Q:225>",
+    "fragments_hex": [
+      "37203c513a3232353e"
+    ],
+    "sources": [
+      {
+        "session": 4,
+        "file": "20261018/20261018T210001Z_14106.5kHz_iq.flac",
+        "slot": 0,
+        "start_s": 541.6677957028979,
+        "stop_s": 545.9830248695646
+      }
+    ]
+  },
+  {
+    "message_index": 10,
+    "declared_length": 5,
+    "content": "<VSI>",
+    "fragments_hex": [
+      "35203c5653493e"
+    ],
+    "sources": [
+      {
+        "session": 6,
+        "file": "20261018/20261018T220001Z_14106.5kHz_iq.flac",
+        "slot": -5,
+        "start_s": 271.10895833333336,
+        "stop_s": 275.204
+      }
+    ]
+  },
+  {
+    "message_index": 74,
+    "declared_length": 21,
+    "content": "de K7QB <R+11> <S:VE>",
+    "fragments_hex": [
+      "3231206465204b375142203c522b31313e203c533a56453e"
+    ],
+    "sources": [
+      {
+        "session": 10,
+        "file": "20261018/20261018T220001Z_14106.5kHz_iq.flac",
+        "slot": -2,
+        "start_s": 1789.6917576509732,
+        "stop_s": 1793.995007650973
+      }
+    ]
+  },
+  {
+    "message_index": 75,
+    "declared_length": 4,
+    "content": "&IT&",
+    "fragments_hex": [
+      "342026495426"
+    ],
+    "sources": [
+      {
+        "session": 10,
+        "file": "20261018/20261018T220001Z_14106.5kHz_iq.flac",
+        "slot": -2,
+        "start_s": 1823.2894659843064,
+        "stop_s": 1827.3912159843064
+      }
+    ]
+  },
+  {
+    "message_index": 76,
+    "declared_length": 178,
+    "content": "Good evening. This is:\r\n<NAME:Alex>\r\n<QTH:Test Townxxxxxxxx>\r\n<LOC:AA00AA>\r\n<EM:xxxxx@example.test>\r\nAge: 00\r\nProfession: Testxxxx\r\nHobbies: Testxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "fragments_hex": [
+      "31373820476f6f64206576656e696e672e20546869732069733a0d0a3c4e414d453a416c65783e0d0a3c5154483a5465737420546f776e78787878787878783e0d0a3c4c4f433a4141303041413e0d0a3c454d3a7878787878406578616d706c652e746573743e0d0a4167653a2030300d0a50726f66657373696f6e3a2054657374787878780d0a486f62626965733a20546573747878787878787878787878787878",
+      "78787878787878787878787878787878787878"
+    ],
+    "sources": [
+      {
+        "session": 10,
+        "file": "20261018/20261018T220001Z_14106.5kHz_iq.flac",
+        "slot": -2,
+        "start_s": 1828.798195150973,
+        "stop_s": 1832.9119659843063
+      },
+      {
+        "session": 10,
+        "file": "20261018/20261018T220001Z_14106.5kHz_iq.flac",
+        "slot": -2,
+        "start_s": 1833.559257650973,
+        "stop_s": 1837.8740909843063
+      }
+    ]
+  },
+  {
+    "message_index": 79,
+    "declared_length": 138,
+    "content": "<NAME:Ale>\r\n<QTH:Test To>\r\n<LOC:AA00AA>\r\nAge: 00\r\nProfession: Testxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\nHobbies: Testxxxxxxxxxxx\r\nMotorcycle",
+    "fragments_hex": [
+      "313338203c4e414d453a416c653e0d0a3c5154483a5465737420546f3e0d0a3c4c4f433a4141303041413e0d0a4167653a2030300d0a50726f66657373696f6e3a2054657374787878787878787878787878787878787878787878787878787878787878787878780d0a486f62626965733a205465737478787878787878787878780d0a4d6f746f726379636c65"
+    ],
+    "sources": [
+      {
+        "session": 10,
+        "file": "20261018/20261018T220001Z_14106.5kHz_iq.flac",
+        "slot": -2,
+        "start_s": 1858.4612368176397,
+        "stop_s": 1862.560757650973
+      }
+    ]
+  },
+  {
+    "message_index": 94,
+    "declared_length": 7,
+    "content": "<Q:375>",
+    "fragments_hex": [
+      "37203c513a3337353e"
+    ],
+    "sources": [
+      {
+        "session": 15,
+        "file": "20261018/20261018T230001Z_14106.5kHz_iq.flac",
+        "slot": 0,
+        "start_s": 2999.9081353294773,
+        "stop_s": 3004.2081353294775
+      }
+    ]
+  },
+  {
+    "message_index": 120,
+    "declared_length": 22,
+    "content": "de <FC:N1ZZZ/M> <R-14>",
+    "fragments_hex": [
+      "3232206465203c46433a4e315a5a5a2f4d3e203c522d31343e"
+    ],
+    "sources": [
+      {
+        "session": 20,
+        "file": "20261018/20261018T190001Z_14106.5kHz_iq.flac",
+        "slot": 2,
+        "start_s": 622.1334478328732,
+        "stop_s": 626.4372603328733
+      }
+    ]
+  },
+  {
+    "message_index": 123,
+    "declared_length": 5,
+    "content": "<SMR>",
+    "fragments_hex": [
+      "35203c534d523e"
+    ],
+    "sources": [
+      {
+        "session": 20,
+        "file": "20261018/20261018T190001Z_14106.5kHz_iq.flac",
+        "slot": 2,
+        "start_s": 712.1857811662065,
+        "stop_s": 717.5953228328732
+      }
+    ]
+  },
+  {
+    "message_index": 126,
+    "declared_length": 196,
+    "content": "<SM><SBJ:RE: Exploring New Paths - 2><MSG:KL7QR\u00bb Hello Ale,\n\nI was excited to research this new pat...\r\n---\r\nThis whole project... YOU ARE MAKING IT EXCITING FOR ME ... THANK YOU EVER SO MUCH !\r\n",
+    "fragments_hex": [
+      "313936203c534d3e3c53424a3a52453a204578706c6f72696e67204e6577205061746873202d20323e3c4d53473a4b4c375152c2bb2048656c6c6f20416c652c0a0a4920776173206578636974656420746f2072657365617263682074686973206e6577207061742e2e2e0d0a2d2d2d0d0a546869732077686f6c652070726f6a6563742e2e2e20594f5520415245204d414b494e47204954204558434954494e472046",
+      "4f52204d45202e2e2e205448414e4b20594f55204556455220534f204d55434820210d0a"
+    ],
+    "sources": [
+      {
+        "session": 21,
+        "file": "20261018/20261018T190001Z_14106.5kHz_iq.flac",
+        "slot": -2,
+        "start_s": 1551.8675304277135,
+        "stop_s": 1555.9421970943802
+      },
+      {
+        "session": 21,
+        "file": "20261018/20261018T190001Z_14106.5kHz_iq.flac",
+        "slot": -2,
+        "start_s": 1556.6790929277136,
+        "stop_s": 1561.0774887610469
+      }
+    ]
+  },
+  {
+    "message_index": 127,
+    "declared_length": 6,
+    "content": "<INFO>",
+    "fragments_hex": [
+      "36203c494e464f3e"
+    ],
+    "sources": [
+      {
+        "session": 22,
+        "file": "20261018/20261018T190001Z_14106.5kHz_iq.flac",
+        "slot": 5,
+        "start_s": 3424.916595803962,
+        "stop_s": 3429.027574970629
+      }
+    ]
+  },
+  {
+    "message_index": 131,
+    "declared_length": 4,
+    "content": "<TL>",
+    "fragments_hex": [
+      "34203c544c3e"
+    ],
+    "sources": [
+      {
+        "session": 23,
+        "file": "20261018/20261018T210001Z_14106.5kHz_iq.flac",
+        "slot": 3,
+        "start_s": 572.2179446845523,
+        "stop_s": 576.5311321845523
+      }
+    ]
+  },
+  {
+    "message_index": 133,
+    "declared_length": 23,
+    "content": "de KL7QR <R-03> <S:VEB>",
+    "fragments_hex": [
+      "3233206465204b4c375152203c522d30333e203c533a5645423e"
+    ],
+    "sources": [
+      {
+        "session": 23,
+        "file": "20261018/20261018T210001Z_14106.5kHz_iq.flac",
+        "slot": 3,
+        "start_s": 648.972423851219,
+        "stop_s": 653.8740696845523
+      }
+    ]
+  },
+  {
+    "message_index": 135,
+    "declared_length": 49,
+    "content": "73's Ale!\r\nKL7QR DE KQ4QWH Disconnecting...<DISC>",
+    "fragments_hex": [
+      "3439203733277320416c65210d0a4b4c375152204445204b513451574820446973636f6e6e656374696e672e2e2e3c444953",
+      "433e"
+    ],
+    "sources": [
+      {
+        "session": 23,
+        "file": "20261018/20261018T210001Z_14106.5kHz_iq.flac",
+        "slot": 3,
+        "start_s": 674.9866321845523,
+        "stop_s": 679.2982218145276
+      },
+      {
+        "session": 23,
+        "file": "20261018/20261018T210001Z_14106.5kHz_iq.flac",
+        "slot": 3,
+        "start_s": 681.0334030178857,
+        "stop_s": 685.9709863512189
+      }
+    ]
+  },
+  {
+    "message_index": 136,
+    "declared_length": 4,
+    "content": "<TL>",
+    "fragments_hex": [
+      "34203c544c3e"
+    ],
+    "sources": [
+      {
+        "session": 24,
+        "file": "20261018/20261018T230001Z_14106.5kHz_iq.flac",
+        "slot": 5,
+        "start_s": 3037.908989496144,
+        "stop_s": 3042.218801996144
+      }
+    ]
+  },
+  {
+    "message_index": 137,
+    "declared_length": 6,
+    "content": "<QSYR>",
+    "fragments_hex": [
+      "36203c515359523e"
+    ],
+    "sources": [
+      {
+        "session": 24,
+        "file": "20261018/20261018T230001Z_14106.5kHz_iq.flac",
+        "slot": 5,
+        "start_s": 3044.765989496144,
+        "stop_s": 3049.077676996144
+      }
+    ]
+  },
+  {
+    "message_index": 138,
+    "declared_length": 36,
+    "content": "de KQ4QWH <R-04>\r\nGood evening Alexx",
+    "fragments_hex": [
+      "3336206465204b5134515748203c522d30343e0d0a476f6f64206576656e696e6720416c657878"
+    ],
+    "sources": [
+      {
+        "session": 24,
+        "file": "20261018/20261018T230001Z_14106.5kHz_iq.flac",
+        "slot": 5,
+        "start_s": 3050.813885329477,
+        "stop_s": 3055.118801996144
+      }
+    ]
+  },
+  {
+    "message_index": 139,
+    "declared_length": 22,
+    "content": "de N9NLP <R+01> <S:VB>",
+    "fragments_hex": [
+      "3232206465204e394e4c50203c522b30313e203c533a56423e"
+    ],
+    "sources": [
+      {
+        "session": 24,
+        "file": "20261018/20261018T230001Z_14106.5kHz_iq.flac",
+        "slot": 5,
+        "start_s": 3057.6836978294773,
+        "stop_s": 3062.0013228294774
+      }
+    ]
+  },
+  {
+    "message_index": 142,
+    "declared_length": 51,
+    "content": "73's Alexx!\r\nN9NLP DE KQ4QWH Disconnecting...<DISC>",
+    "fragments_hex": [
+      "3531203733277320416c657878210d0a4e394e4c50204445204b513451574820446973636f6e6e656374696e672e2e2e3c44",
+      "4953433e"
+    ],
+    "sources": [
+      {
+        "session": 24,
+        "file": "20261018/20261018T230001Z_14106.5kHz_iq.flac",
+        "slot": 5,
+        "start_s": 3186.669864496144,
+        "stop_s": 3190.9800648083346
+      },
+      {
+        "session": 24,
+        "file": "20261018/20261018T230001Z_14106.5kHz_iq.flac",
+        "slot": 5,
+        "start_s": 3191.6692811628104,
+        "stop_s": 3196.5951561628103
+      }
+    ]
+  },
+  {
+    "message_index": 164,
+    "declared_length": 4,
+    "content": "<ER>",
+    "fragments_hex": [
+      "34203c45523e"
+    ],
+    "sources": [
+      {
+        "session": null,
+        "file": "20261019/20261019T000001Z_14106.5kHz_iq.flac",
+        "slot": -1,
+        "start_s": 2043.3245478879003,
+        "stop_s": 2047.6245478879002
+      }
+    ]
+  }
+]

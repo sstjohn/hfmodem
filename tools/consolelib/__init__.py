@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The station console: one substrate, one profile per radio mode.
 
 find a host   roster.py    peers, channel resolution, dial arithmetic, hours

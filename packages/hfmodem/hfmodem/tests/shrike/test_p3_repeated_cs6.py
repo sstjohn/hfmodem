@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Repeated cycle grants must not consume the following unconfirmed frame."""
 import pytest
 from hfmodem.shrike import arq

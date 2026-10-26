@@ -7,7 +7,7 @@ The serial-110 tables were transcribed from 110A/B text and remain unverified
 against a foreign implementation. The 4285 Annex A tables were cross-checked
 against hcab14's published decoder; Annex E message framing was not. Local
 round trips establish consistency, not interoperability. The unresolved
-readings and recordings needed to test them are in docs/protocols/bateleur/README.md.
+readings and recordings needed to test them are in docs/implementation/bateleur/README.md.
 
 Symbols throughout are 8-PSK *indices*: ``k`` is the phase ``k * 45`` degrees
 (110B 5.3.2.3.9, 4285 Annex A 2(c)), and every constellation smaller than eight

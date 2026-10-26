@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """P4 probes preserve full RX windows and cannot inherit P3 retry behaviour."""
 import contextlib
 import io

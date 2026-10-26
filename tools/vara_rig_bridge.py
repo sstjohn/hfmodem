@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Put a Wine VARA on the radio, and record everything it hears.
 
 VARA under Wine talks to BlackHole, not to the rig. This bridges the two —
@@ -47,8 +49,7 @@ from hfmodem.core.busy import ReceiverFault, level_range, receiver_fault
 from hfmodem.core.busy import is_busy as _is_busy
 from hfmodem.core.config import ConfigError, station_profile
 from hfmodem.core.occupied import occupied_hz
-from hfmodem.core.ptt import (Attempt, Keyer, LineKeyer, arming_refusal,
-                              KEY_BUDGET_S, UNKEY_BUDGET_S)
+from hfmodem.core.ptt import LineKeyer, arming_refusal, drop_unheld_line
 from hfmodem.core.rig import FATAL_SIGNALS, arm_deadman
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "working" / "vara" / "oracle"))
@@ -124,36 +125,16 @@ class _Leg:
 # a continuous key beyond this is a stuck transmitter, not traffic.
 MAX_KEY_S = 25.0
 
+# What the rig's own meters say while keyed, read through rigctld beside the keying
+# line: radiated power in watts and ALC. Until 10-23 they were read only at rest,
+# where they say nothing, and power was an estimate.
+TX_METERS = ('RFPOWER_METER_WATTS', 'ALC')
+METER_PERIOD_S = 0.25
+
 
 _ID_INTERVAL_S = 600.0            # identification reminder interval
 
-# A forced unkey runs against the clock, not against a retry count. An operator who
-# reached for Ctrl-C is entitled to a dead transmitter and a dead process in about a
-# second, whatever rigctld is doing — and the moment they reach for it is exactly the
-# moment rigctld is least likely to answer.
-_UNKEY_BUDGET_S = UNKEY_BUDGET_S  # ordinary ``PTT OFF``, where there is time to be patient
-_PANIC_BUDGET_S = 1.0             # forced unkey: signal, watchdog, watcher death, shutdown
-
-# Per command, and it decides what the budgets above are worth. A budget spent
-# waiting on one blocked read is a single attempt wearing a retry loop's clothes:
-# that is what held this station's FT-891 on the air for 7.84 s past its last sample
-# on 2026-07-28, when the ordinary unkey used three seconds per command and so asked
-# exactly once in six. Round trips to this rig measure 0.27 s for ``T 0`` and 0.05 s
-# for ``t``, so 0.75 s is threefold generous and still buys four passes; the forced
-# path keeps a tighter one because an operator reaching for Ctrl-C is owed a dead
-# transmitter in about a second. Re-sending ``T 0`` costs nothing — the write is what
-# drops the transmitter, and the read is only evidence.
-_UNKEY_TIMEOUT_S = 0.75
-_PANIC_TIMEOUT_S = 0.4
-_DEADMAN_S = 2.0                  # ... after which the interpreter is killed outright
-
-# Key-up runs to a clock as well, and a tighter one — the clock itself, and the
-# reasons for its size, live with the ladder in `core.ptt`.
-_KEY_BUDGET_S = KEY_BUDGET_S
-
-
-def _ms(seconds: float) -> str:
-    return f"{seconds * 1000:.0f}ms"
+_DEADMAN_S = 2.0
 
 
 def _id_reminders_owed(log) -> bool:
@@ -170,209 +151,17 @@ def _id_reminders_owed(log) -> bool:
     return declared is None or declared.name != "unregulated"
 
 
-def _rprt_codes(reply: str) -> list[int] | None:
-    """Every status code in the reply, or None if an ``RPRT`` arrives without one.
-
-    The framing is not fixed: the same daemon has answered with one ``RPRT 0`` per
-    line and, on the extended command form, with ``RPRT 0 RPRT 0`` on a single
-    line. Reading tokens rather than lines takes both, and an ``RPRT`` with
-    nothing readable after it — a reply cut off mid-verdict — is None, not a pass.
-    """
-    toks = reply.split()
-    codes = []
-    for i, tok in enumerate(toks):
-        if tok == "RPRT":
-            if i + 1 >= len(toks) or not toks[i + 1].lstrip("-").isdigit():
-                return None
-            codes.append(int(toks[i + 1]))
-    return codes
-
-
-class _Wire:
-    """What actually crossed the socket for one rigctld command.
-
-    The unkey timeouts of 2026-08-09 went into the log as one sentence — "rigctld
-    took the command and did not answer" — and that sentence covers half a dozen
-    failures with different causes: a connection refused, a connection accepted and
-    then held silent, a peer that closed without a byte, a reply cut off mid-line,
-    a verdict the parser could not read. Two days of theory grew where the
-    distinction should have been. So :meth:`Rig._cmd` fills one of these as it
-    works — the bytes sent, every read with its own elapsed time, the connect
-    time, the errno if the OS gave one — and the PTT paths log it whenever a
-    command does not get the reply it expected.
-    """
-
-    def __init__(self):
-        self.sent = b""
-        self.received = b""
-        self.connect_s: float | None = None   # None: the connection never completed
-        self.reads: list[str] = []            # one per recv: bytes, EOF, or timeout
-        self.eof = False
-        self.timed_out = False
-        self.exc: OSError | None = None
-        self.elapsed = 0.0
-
-    def failure(self) -> str:
-        """Which way rigctld failed to answer; meaningful once a reply is rejected.
-
-        Each mode points somewhere different: a refused connection is a daemon not
-        listening; accepted-then-silent is a daemon alive on the socket and dead to
-        the radio; a reply cut short is the transport failing mid-sentence; an
-        in-band refusal is a rig that heard and said no; a truncated or off-script
-        verdict is a framing problem, and that one is ours.
-        """
-        if self.exc is not None:
-            if isinstance(self.exc, ConnectionRefusedError):
-                return "refused the connection"
-            if self.connect_s is None:
-                return ("never completed the connection"
-                        if isinstance(self.exc, TimeoutError)
-                        else f"failed connecting: {self.exc}")
-            return f"failed mid-exchange: {self.exc}"
-        if self.connect_s is None:
-            return "was never asked (no rigctld address)"
-        if not self.received:
-            return ("accepted the connection, then closed it without a byte"
-                    if self.eof else "accepted the command and went silent")
-        if self.eof:
-            return "closed the connection mid-reply"
-        if self.timed_out:
-            return "went silent mid-reply"
-        text = self.received.decode(errors="replace").strip()
-        codes = _rprt_codes(text)
-        if codes is None:
-            return f"answered a truncated verdict: {text!r}"
-        if any(codes):
-            return f"refused in-band: {text!r}"
-        return f"answered off-script: {text!r}"
-
-    def detail(self) -> str:
-        parts = [f"sent {self.sent!r}", f"got {self.received!r}",
-                 "connect " + (_ms(self.connect_s) if self.connect_s is not None
-                               else "incomplete")]
-        if self.reads:
-            parts.append("read " + ", then ".join(self.reads))
-        if self.exc is not None and getattr(self.exc, "errno", None) is not None:
-            parts.append(f"errno {self.exc.errno}")
-        parts.append(f"total {_ms(self.elapsed)}")
-        return "; ".join(parts)
-
-    def answered(self) -> bool:
-        """Whether a readable verdict came back at all — the split the unkey
-        ladder turns on. An answer, even a refusal, is a daemon alive and worth
-        asking again inside the budget; silence in any shape is not, and on
-        this station it has never once turned back into an answer
-        (2026-08-09, 2026-08-13: every retry of a quiet ``T 0`` stayed quiet).
-        """
-        return (self.exc is None and bool(self.received) and not self.eof
-                and not self.timed_out
-                and _rprt_codes(self.received.decode(errors="replace")) is not None)
-
-
-class _RigctldPtt:
-    """The daemon as a keying transport for `core.ptt.Keyer`.
-
-    Every byte still goes through :meth:`Rig._cmd` — tests rely on that to prove
-    a path never touched the daemon — and every attempt fills a :class:`_Wire`,
-    so a failed command reaches the log with the bytes, timings and errno that
-    say which way the daemon went. The verdict is what the rig read back: a
-    ``T 0`` is believed only when ``t`` reads the PTT down, or when the rig has
-    no PTT to report and the accepted write is all the evidence there is —
-    taken, never silently. The key-up is not read back, and that is the same
-    argument the other way up: everything between the key and the first sample
-    is unmodulated carrier, so the cheapest confirmation there is the one not
-    asked for.
-    """
-
-    place = "rig"
-    peer = "rigctld"
-    paced = True
-    reads_back = True
-    attempt_timeout = _UNKEY_TIMEOUT_S
-    taken_note = "rig will not report PTT; unverified"
-
-    def __init__(self, rig: "Rig") -> None:
-        self._rig = rig
-
-    def drive(self, on: bool, timeout: float, *,
-              confirm_silence: bool = True) -> Attempt:
-        wire = _Wire()
-        try:
-            reply = self._rig._cmd(f"T {'1' if on else '0'}\n", timeout=timeout,
-                                   want=64, wire=wire)
-        except OSError:
-            reply = ""                # the wire holds the errno and the story
-        accepted = bool(reply.strip()) and Rig._rprt_ok(reply)
-        quiet = not wire.answered()
-        if on:
-            if accepted:
-                return Attempt("taken")
-            return Attempt("failed", why=f"rigctld {wire.failure()}",
-                           detail=wire.detail(), quiet=quiet)
-        if quiet and not confirm_silence:
-            # The ``T 0`` got no verdict and the caller holds a keying line: a
-            # ``t`` here spends another timeout of carrier asking the component
-            # that just went silent, for an answer the line gives directly.
-            return Attempt("failed", why=f"rigctld {wire.failure()}",
-                           detail=wire.detail(), quiet=True)
-        state = self._rig.ptt_state(timeout)
-        if state is False:
-            return Attempt("confirmed", state=False, state_read=True)
-        if accepted and state is None:
-            return Attempt("taken", state_read=True)
-        return Attempt("failed",
-                       why=("rig still reports PTT on" if accepted
-                            else f"rigctld {wire.failure()}"),
-                       detail=wire.detail(), state=state, state_read=True,
-                       quiet=quiet)
-
-    def release(self) -> bool | None:
-        return None
-
-
 class Rig:
-    """rigctld PTT with positive identification and an independent unkey watchdog.
-
-    A failed unkey is retried and escalated rather than logged and forgotten — including
-    an in-band ``RPRT <negative>``, which rigctld returns instead of raising — the
-    watchdog force-unkeys on its own thread if the key outlives a plausible over, and
-    SIGINT/SIGTERM/atexit all unkey, since ``finally:`` does not survive a Ctrl-C
-    mid-over. It cannot help if rigctld itself wedges: that failure took a power cycle
-    on 2026-07-24 and wants a transport the daemon is not on.
-
-    Both directions run to a clock rather than a retry count, so every caller has a
-    worst case it can state. Every unkey is confirmed by reading the PTT line back — a
-    write rigctld accepts is not evidence the transmitter dropped, since a wedged daemon
-    still accepts connections and still takes the bytes. The key-up is not read back,
-    and that is the same argument the other way up: everything between the key and the
-    first sample is unmodulated carrier, so the cheapest confirmation there is the one
-    not asked for.
-
-    The forced unkey takes no lock. It runs on whatever thread caught the signal, which
-    is normally the thread already inside :meth:`key` — so waiting for ``_lock`` there
-    is a deadlock with the transmitter keyed, which is the worst state this program has.
-    Nor is a reentrant lock the answer: that just lets the handler interleave its ``T 0``
-    with a half-finished key-up. Going around the lock cannot corrupt a transaction
-    anyway, because :meth:`_cmd` gives every command its own connection; the only real
-    risk is that our ``T 0`` and an in-flight ``T 1`` reach rigctld out of order, and
-    ``_no_tx`` settles that — it aborts the interrupted key-up, and makes whoever holds
-    the lock put the rig back down on the way out.
-    """
-
     def __init__(self, hostport: str | None, armed: bool, log,
                  ptt_device: str | None = None, line_ptt: bool = False):
+        if armed and not (line_ptt and ptt_device):
+            raise ValueError("armed rig requires --line-ptt and --ptt-device")
         self.log = log
-        self.armed = armed
         # The serial line whose RTS IS the PTT, when there is one.
         self.ptt_device = ptt_device
-        # With ``line_ptt`` we drive that line ourselves and rigctld is left to tune
-        # the radio, which it does with the transmitter down. Without it,
-        # every key goes through the daemon and the line is touched only when the
-        # daemon has stopped answering with the rig possibly still up.
+        self.released_low: bool | None = None
         self._keyer = None
-        if line_ptt and ptt_device and armed:
-            self._keyer = LineKeyer(ptt_device, log)
-            self._keyer.arm()         # opens deasserted, announces the split
+        self._armed = False
         self._first_key = None        # when this station first keyed
         self._id_last = None          # last identification reminder
         self._id_owed = _id_reminders_owed(log)
@@ -384,68 +173,57 @@ class Rig:
         self.key_since = 0.0
         self._lock = threading.Lock()     # serialises key-ups; the unkey path never takes it
         self._no_tx = threading.Event()   # set once this rig is being taken down for good
-        # The daemon path's half of the one keying mechanism (`core.ptt.Keyer`):
-        # same ladder, same wordings, same retire as every other modem, with
-        # this Rig supplying only the transport and what retiring means here.
-        self._daemon = Keyer(_RigctldPtt(self), log,
-                             ptt_device=ptt_device,
-                             held=lambda: self.key_since,
-                             abort=self._no_tx.is_set,
-                             on_retire=self._no_tx.set)
         self._panicked = False
         self._stop = threading.Event()
+        self._metering, self._unkeyed = threading.Event(), threading.Event()
+        self._key_ups = 0
+        self.meter_reports: queue.SimpleQueue = queue.SimpleQueue()
+        self.armed = armed
         threading.Thread(target=self._watchdog, daemon=True).start()
+        if self.addr is not None:
+            threading.Thread(target=self._meter, daemon=True).start()
 
     # -- rigctld ---------------------------------------------------------------
-    def _cmd(self, text: str, timeout: float = 3.0, want: int = 4096,
-             wire: _Wire | None = None) -> str:
-        """One command on its own connection; fills ``wire`` with what crossed it.
+    def _cmd(self, text: str, timeout: float = 3.0, want: int = 4096, *, whole: bool = False) -> str:
+        """One command on its own connection; return the reply received.
 
         Every byte this program sends rigctld goes through here — tests rely on
-        that to prove a path never touched the daemon. Raises what the socket
-        raises, as it always has, but records the exception (and everything up to
-        it) in ``wire`` first, so a caller that must not lose the story passes one
-        in and reads it back whatever happened.
+        that to prove a path never touched the daemon. A read timeout returns
+        the reply so far; other socket errors propagate to the caller.
+
+        rigctld can reset a connection instead of replying: on 2026-10-22 one
+        reset the mode set of a VarAC slot QSY just after an unkey, and the
+        session died with the slot unreached. Every command sent here is a read
+        or an idempotent set, so a reset is asked once more on a fresh connection.
+        `whole` reads to the close, for a batch that ends in `q`.
         """
         if self.addr is None:
             return ""
-        w = wire if wire is not None else _Wire()
-        w.sent = text.encode()
-        t0 = time.monotonic()
         try:
-            try:
-                s = socket.create_connection(self.addr, timeout=timeout)
-            except OSError as e:
-                w.exc = e
-                raise
-            w.connect_s = time.monotonic() - t0
-            try:
-                s.sendall(w.sent)
-                s.settimeout(timeout)
-                while True:
-                    t_read = time.monotonic()
-                    try:
-                        chunk = s.recv(want)
-                    except TimeoutError:
-                        w.timed_out = True
-                        w.reads.append(f"timeout at {_ms(time.monotonic() - t_read)}")
-                        break
-                    if not chunk:
-                        w.eof = True
-                        w.reads.append(f"EOF at {_ms(time.monotonic() - t_read)}")
-                        break
-                    w.reads.append(f"{len(chunk)}B at {_ms(time.monotonic() - t_read)}")
-                    w.received += chunk
-                    if len(chunk) < want:
-                        break
-                return w.received.decode(errors="replace")
-            except OSError as e:
-                w.exc = e
-                raise
-            finally:
-                s.close()
+            return self._ask(text, timeout, want, whole)
+        except ConnectionResetError:
+            self.log(f"rigctld reset the connection on {text.strip()!r}; asking once more")
+            return self._ask(text, timeout, want, whole)
+
+    def _ask(self, text: str, timeout: float, want: int, whole: bool = False) -> str:
+        received = bytearray()
+        s = socket.create_connection(self.addr, timeout=timeout)
+        try:
+            s.sendall(text.encode())
+            s.settimeout(timeout)
+            while True:
+                try:
+                    chunk = s.recv(want)
+                except TimeoutError:
+                    break
+                if not chunk:
+                    break
+                received.extend(chunk)
+                if len(chunk) < want and not whole:
+                    break
+            return received.decode(errors="replace")
         finally:
-            w.elapsed = time.monotonic() - t0
+            s.close()
 
     def model(self) -> str:
         """The rig's own name for itself, found by label in ``\\dump_caps``.
@@ -492,6 +270,10 @@ class Rig:
             "passband_hz": int(passband) if passband.isdigit() else None,
         }
 
+    def batch(self, text: str, timeout: float = 5.0) -> str:
+        """An extended-framing batch closed by `q`, on one connection, read to its end."""
+        return self._cmd(text, timeout, whole=True)
+
     def set_freq(self, hz: float) -> str:
         return self._cmd(f"F {int(hz)}\n")
 
@@ -499,6 +281,27 @@ class Rig:
         return self._cmd(f"M {mode} {int(passband)}\n")
 
     # -- PTT -------------------------------------------------------------------
+    @property
+    def armed(self) -> bool:
+        return self._armed
+
+    @armed.setter
+    def armed(self, on: bool) -> None:
+        # onair_session arms only once the rig has named itself, so arming opens the line.
+        if on and self._no_tx.is_set():
+            raise ValueError("cannot arm a rig that has been taken down")
+        if not on and self._keyer is not None:
+            self._unkey()
+            self._keyer.hand_back()  # deassert, read back, close before disarming
+            self.released_low = self._keyer.released_low
+            self._keyer = None
+        if on and self._keyer is None:
+            if not self.ptt_device:
+                raise ValueError("armed rig requires --line-ptt and --ptt-device")
+            self._keyer = LineKeyer(self.ptt_device, self.log)
+            self._keyer.arm()         # opens deasserted, announces the split
+        self._armed = on
+
     def key(self, on: bool, why: str = "") -> bool:
         if not self.armed:
             self.log(f"PTT {'ON' if on else 'OFF'} (DISARMED — not keying)")
@@ -510,12 +313,8 @@ class Rig:
             self._note_identification_due()
         with self._lock:
             ok = self._key_locked(on, why)
+            # A forced unkey can overtake key-up; the losing key must leave the line low.
             if on and ok and self._no_tx.is_set():
-                # A forced unkey overtook us while our own ``T 1`` was in flight, so
-                # rigctld may have applied them in that order. Put the rig back down —
-                # but only if the key-up worked, because a failed one has already
-                # dropped PTT itself and set this flag doing it, and dropping twice
-                # spends the unkey budget twice over.
                 self._key_locked(False, "overtaken by a forced unkey")
                 return False
         return ok
@@ -538,66 +337,36 @@ class Rig:
             self.log(f"*** {int((now - self._first_key) // 60)} min of transmitting: "
                      "station identification reminder is due ***")
 
-    @staticmethod
-    def _rprt_ok(reply: str) -> bool:
-        """rigctld reports failure in-band as ``RPRT <negative>``; it does not raise.
-
-        Every code must be zero, wherever it sits — see :func:`_rprt_codes` for the
-        framings this has to take. The line-based reading before it stopped at the
-        first ``RPRT`` it saw, so ``RPRT 0 RPRT -9`` on one line read as success.
-        No verdict at all is still a pass: nothing to contradict.
-        """
-        codes = _rprt_codes(reply)
-        return codes is not None and not any(codes)
-
     def _key_locked(self, on: bool, why: str = "") -> bool:
-        """One keying mechanism for both configurations: the line keyer holds
-        the descriptor, the daemon keyer holds the socket ladder, and both are
-        `core.ptt.Keyer` — the budgets, the retries, the drop-to-be-sure on an
-        unconfirmed key-up and the wordings all live there. What is this Rig's
-        own is the bookkeeping the watchdog reads (`keyed`, `key_since`) and
-        what retiring is called here (`_no_tx`)."""
         if not on:
-            return self._unkey(_UNKEY_BUDGET_S, _UNKEY_TIMEOUT_S)
-        keyer = self._keyer if self._keyer is not None else self._daemon
+            return self._unkey()
+        keyer = self._keyer
+        if keyer is None:
+            self.log("PTT ON refused — no keying line available")
+            return False
         if keyer.key(True, why):
             self.keyed = True
             self.key_since = time.time()
+            self._key_ups += 1
+            self._unkeyed.clear()
+            self._metering.set()
             return True
         self.keyed = False
         if keyer.must_retire:
             self._no_tx.set()
         return False
 
-    def _unkey(self, budget: float, timeout: float) -> bool:
-        """The unkey ladder — `core.ptt.Keyer.unkey`, the same one every modem
-        runs. Deliberately lock-free (see the class docstring) and bounded by a
-        deadline, so the emergency callers get a predictable worst case. An
-        accepted write is not proof; the rig is read back, and a daemon that
-        answers with the rig still up is asked again inside the budget — where
-        one that goes silent forfeits it after a single ask, because on
-        2026-08-13 four silent ``T 0``s in a row held ~4.7 s of unintended
-        carrier while the keying line, consulted at last, read LOW at once.
-        Every failed pass is logged with its `_Wire` record — the bytes both
-        directions, per-read timing, the ``t`` read-back, how long PTT has been
-        up — which is the instrument the 2026-08-09 timeouts were missing.
-        """
-        if self._keyer is not None:
-            # The budgets are daemon money — the keyer has no reply to wait for
-            # and spends nothing, alarming and setting `must_retire` on its own
-            # if the line will not go low.
-            if self._keyer.key(False):
-                self.keyed = False
-                self.key_since = 0.0
-                return True
-            self._no_tx.set()
-            return False
-        if self.addr is None:
-            return True
-        if self._daemon.unkey(budget, timeout):
+    def _unkey(self) -> bool:
+        # A signal or watchdog must not wait on the lock held by the stalled key-up.
+        self._metering.clear()
+        self._unkeyed.set()
+        if self._keyer is None:
+            return drop_unheld_line(self.ptt_device, self.log)
+        if self._keyer.key(False):
             self.keyed = False
             self.key_since = 0.0
             return True
+        self._no_tx.set()
         return False
 
     @property
@@ -611,18 +380,11 @@ class Rig:
         if not self.armed:
             return True
         self.log(f"force unkey ({why})")
-        return self._unkey(_PANIC_BUDGET_S, _PANIC_TIMEOUT_S)
+        return self._unkey()
 
     def drop(self, why: str) -> bool:
-        """Put PTT down to the ordinary budget, armed or not.
-
-        The arm gate stops this program putting a signal on the air; it is not a reason
-        to walk away from a transmitter that is already up. A caller that has read the
-        PTT line back and found it high has found something to drop — a dry run
-        included, which is exactly when it is somebody else's mistake being cleaned up.
-        """
         self.log(f"unkey ({why})")
-        return self._unkey(_UNKEY_BUDGET_S, _UNKEY_TIMEOUT_S)
+        return self._unkey()
 
     def panic(self, why: str) -> None:
         """Signal-handler entry: retire the rig, unkey it, and guarantee an exit.
@@ -630,9 +392,9 @@ class Rig:
         Runs on the interrupted thread, so it must complete without waiting on
         anything that thread might already own. Order matters: retire first so a
         racing key-up cannot undo the unkey, arm the deadman before the unkey rather
-        than after so that even a hung unkey cannot outlive it, and only then talk to
-        rigctld. A second signal while the first is still working means the operator
-        has asked twice and is done asking.
+        than after so that even a hung unkey cannot outlive it, and only then drop
+        the keying line. A second signal while the first is still working means
+        the operator has asked twice and is done asking.
         """
         if self._panicked:
             os._exit(1)
@@ -654,6 +416,20 @@ class Rig:
         """
         arm_deadman(_DEADMAN_S)
 
+    @property
+    def line_held(self) -> bool:
+        return self._keyer is not None
+
+    def line_state(self) -> bool | None:
+        """Read the held keying line without asking CAT or opening a port."""
+        keyer = self._keyer
+        if keyer is None:
+            return None
+        try:
+            return keyer.transport.sense()
+        except OSError:
+            return None
+
     def ptt_state(self, timeout: float = 2.0) -> bool | None:
         """Ask the rig, rather than believing our own bookkeeping. None = unknown.
 
@@ -674,6 +450,39 @@ class Rig:
                     self.log(f"WATCHDOG: keyed {held:.0f}s > {MAX_KEY_S:.0f}s")
                     self.unkey_hard("watchdog")
 
+    def _meter(self) -> None:
+        """Peak power and ALC over each key-down, said once the key is up.
+
+        Its own thread and its own rigctld connections: the key is the serial line,
+        never CAT, so nothing here can hold a key-up or an unkey. A read that fails
+        is named in the summary and costs nothing else.
+        """
+        while not self._stop.is_set():
+            if not self._metering.wait(0.5):
+                continue
+            started, peaks, reads, unread, this = time.time(), {}, 0, {}, self._key_ups
+            # The count tells a quick unkey and key-up apart, which the flag alone cannot.
+            while self._metering.is_set() and self._key_ups == this and not self._stop.is_set():
+                for name in TX_METERS:
+                    try:
+                        value = float(self._cmd(f"l {name}\n", timeout=1.0, want=64).split()[0])
+                    except (OSError, ValueError, IndexError) as error:
+                        unread.setdefault(name, type(error).__name__)
+                        continue
+                    peaks[name] = max(value, peaks.get(name, value))
+                reads += 1
+                self._unkeyed.wait(METER_PERIOD_S)
+            watts, alc = peaks.get('RFPOWER_METER_WATTS'), peaks.get('ALC')
+            report = dict(utc_start=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(started)),
+                          seconds=round(time.time() - started, 1), reads=reads,
+                          peak_watts=watts, peak_alc=alc, unread=unread or None)
+            self.log("TX METERS: peak "
+                     + ("power unread" if watts is None else f"{watts:.1f} W") + ", "
+                     + ("ALC unread" if alc is None else f"ALC {alc:.2f}")
+                     + f" over {reads} reads in {report['seconds']:.1f} s"
+                     + (f" ({', '.join(f'{k} {v}' for k, v in unread.items())})" if unread else ""))
+            self.meter_reports.put(report)
+
     def shutdown(self) -> None:
         """Unkey, then stand the watchdog down — never the other way round.
 
@@ -686,6 +495,7 @@ class Rig:
         keyer, self._keyer = self._keyer, None
         if keyer is not None:
             keyer.hand_back()         # deassert, read back, close — never reopens
+            self.released_low = keyer.released_low
         self.retire()
 
     def retire(self) -> None:
@@ -756,16 +566,14 @@ def main() -> int:
                     help="device VARA LISTENS on (we write rig audio here)")
     ap.add_argument("--vara-out", default="BlackHole 16ch",
                     help="device VARA TRANSMITS into (we read it and feed the rig)")
-    ap.add_argument("--rigctld", help="host:port for PTT (FT-891 bench rig = 127.0.0.1:4533; "
+    ap.add_argument("--rigctld", help="host:port for CAT (FT-891 bench rig = 127.0.0.1:4533; "
                                       "4532 is a DIFFERENT radio)")
     ap.add_argument("--expect-model", help="required with --arm: refuse to key unless "
                                            "rigctld reports this model (e.g. FT-891)")
     ap.add_argument("--arm", action="store_true",
                     help="actually key the transmitter (omit for a safe dry run)")
     ap.add_argument("--ptt-device", metavar="DEV",
-                    help="serial line whose RTS is the PTT, used as the last "
-                         "resort in an unkey rigctld has stopped answering. "
-                         "Required with --arm")
+                    help="serial line whose RTS is the PTT. Required with --arm")
     ap.add_argument("--line-ptt", action="store_true",
                     help="key --ptt-device directly and leave rigctld to tune. "
                          "Required with --arm: the daemon's rig side dies on "

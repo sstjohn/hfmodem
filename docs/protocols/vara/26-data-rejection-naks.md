@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # DATA rejection NACKs: 289/31 and 288/63
 
 K0SI answered an 89-byte BW2300 DATA frame on September 19 with a 16-symbol
@@ -48,7 +50,7 @@ frame pending and a complete delivery boundary queued. The short NACK requires a
 fresh post-DATA window; the long NACK requires a successful, fresh query for the
 same pending frame. Unsupported bandwidths and explicit transmit ladders do not
 acquire this action; a short final frame now does, as its own delivery boundary
-([29](29-low-level-data-nacks.md)).
+([29](../../implementation/vara/29-low-level-data-nacks.md)).
 
 Recognition uses the called station's payload, at least 13 exact clear symbols
 for the short form or 20 for the long form, no contradictory clear symbols, and

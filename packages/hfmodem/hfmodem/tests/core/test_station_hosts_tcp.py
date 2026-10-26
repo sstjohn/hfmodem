@@ -14,6 +14,8 @@ from contextlib import ExitStack
 
 import pytest
 
+from hfmodem.tests.core.test_host_teardown import loopback_bind as loopback_bind
+
 KINDS = ("bateleur", "ale", "selcall", "sis")
 PORTS = (("bateleur", 0), ("bateleur", 1), ("ale", 0), ("selcall", 0), ("sis", 0))
 TIMEOUT = 10.0
@@ -288,7 +290,6 @@ def test_tcp_error_line_arrives_before_eof(shutdown_first, monkeypatch):
         closer.start()
         try:
             assert closing.wait(TIMEOUT)
-            closer.join(.02)
             write.set()
             _exact(client, b"ERROR bad command\r\n")
             assert client.recv(1) == b""

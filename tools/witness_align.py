@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Measure a session recording's timebase against an independent receiver's.
 
 A dropped block leaves no trace in the file it is missing from. The cycle grid,

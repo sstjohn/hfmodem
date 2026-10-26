@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Logbook and QSO rehear inspector
 
 The logbook opens with fixed-size map dots. **Size dots by attempts** enables
@@ -24,22 +26,51 @@ filters. Static exports include the summary script.
 
 ## QSO rehear inspector
 
-Run the logbook server from the standard hfmodem checkout, using that checkout
-as its QSO/audio source. The server does not open audio hardware or
-start the multimode monitor. It includes the logbook and VARA, PACTOR and ARDOP replay inspector.
-
-Start from the checkout, with your operator station configuration selected:
-
-```sh
-.venv/bin/python tools/logbook_view/serve.py --port 8738
-```
+The station service includes the logbook and VARA, PACTOR and ARDOP replay inspector
+on its configured port (8737 by default). The desk itself opens no radio devices.
 
 The default data root is `HFMODEM_DATA_DIR` (or `operator-data` in the checkout).
-`--root PATH` explicitly selects a historical data tree; `--viewer-root PATH`
-selects where derived replay artifacts are written. Inbox polling is disabled
-unless `--imap ACCOUNT` is supplied.
+Visit http://127.0.0.1:8737, expand a VARA, PACTOR or ARDOP QSO, and click **Inspect rehear**.
 
-Visit http://127.0.0.1:8738, expand a VARA, PACTOR or ARDOP QSO, and click **Inspect rehear**.
+Offline exports need neither a radio nor a running station:
+
+```sh
+hfmodem console logbook --root PATH --export DIR
+hfmodem console logbook --root PATH --adif imported.adi --export DIR
+hfmodem console logbook --imap ACCOUNT
+```
+
+`--adif PATH` imports additional contacts and can be repeated. For live imports,
+set `[desk] adif_dir = "imported-logs"` in the station file (relative to that file).
+Its `.adi` files appear in the live logbook and `/api/log.adi`, the LoTW export.
+
+Attended contacts use the same `working/*/arms/*/provenance.json` format as
+mail links. VarAC saves one arm per QSO at link-up and closes it at disconnect,
+with its own `receive.wav` cutout and `arm.log`. Cutouts retain the session's PCM
+without resampling; transmit sample positions are rebased to the cutout clock.
+Saving runs behind pending PCM on the recorder thread, away from modem and audio
+callbacks. Original session recordings and journals remain intact. A failed
+cutout is recorded in provenance and does not discard the contact or stop capture.
+Both console and station logbooks read these arms, export VARA HF ADIF, and use
+the ordinary VARA/PACTOR/ARDOP rehear and inspector paths. Incoming contacts carry
+the local protocol role so TX/RX labels remain correct.
+
+Backfill older VarAC sessions once with:
+
+```sh
+python -m hfmodem.station.contactlog --sessions /path/to/varac-session-journals
+```
+
+Backfill preserves source files and skips finished cutouts. Older journals lack
+sample counters; their cutouts use UTC relative to the first host event, with the
+unmeasured audio startup latency explicitly recorded as an approximation. New
+contacts use callback sample positions. Incomplete contacts have no cutout.
+
+`--imap ACCOUNT` refreshes delivery evidence once; the service never polls IMAP.
+The release ships the desk without its tests. Of this directory's tests it ships
+the portable ones: `test_link_state.mjs`, `test_playback.mjs`, `test_tx_timing.py`,
+`test_vara_packets.py` and `test_vara_timing.py`.
+
 Click **Rehear this QSO** to build it. The page displays queued/running status
 and elapsed time, then loads the result automatically. Requests are deduplicated
 per QSO and processed serially; eight requests may be pending. Errors appear in

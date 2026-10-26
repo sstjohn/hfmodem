@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 /* Summaries use the same entries as the map; no additional log store. */
 const LogSummary = (() => {
   const peer = e => (e.call || '').toUpperCase().replace(/-\d+$/, '');

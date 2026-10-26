@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # PACTOR-III: waveform, coding and framing
 
 Winlink mail has been sent and received through WS8EOC over hfmodem’s

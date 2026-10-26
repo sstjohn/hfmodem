@@ -176,7 +176,7 @@ def test_mail_exchange(monkeypatch, capsys, ending, lead):
         wire = b''.join(settled)
         plain = compress.Supervisor().feed(wire)
         assert session.done and not session.failure
-        assert host._txbuf == 0 and host.sent_total == len(wire)
+        assert host._txbuf == 0 and host.sent_total == len(plain)
         assert plain.count(session.sid.encode()) == 1
         assert all(field in [p.payload for p in emitted if p.kind in ('body', 'normal')]
                    for field in settled)

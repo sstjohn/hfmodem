@@ -148,6 +148,8 @@ def test_bound_port_is_reported(monkeypatch, server):
             pass
         def join(self, timeout):
             pass
+        def is_alive(self):
+            return False
     monkeypatch.setattr('hfmodem.brubru.host.server.socket.socket', lambda *args: Listener())
     monkeypatch.setattr('hfmodem.brubru.host.server.threading.Thread', Thread)
     server.start()

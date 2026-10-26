@@ -113,6 +113,23 @@ class TestOracleClientLoopback(unittest.TestCase):
 class TestRawProtocol(unittest.TestCase):
     """Talk to the command socket directly to check syntax + BUFFER cadence."""
 
+    def test_chat_toggles_are_supported_by_the_simulated_modem(self):
+        srv = _make_server()
+        cmd = socket.create_connection(("127.0.0.1", srv.cmd_port), timeout=5)
+        data = socket.create_connection(("127.0.0.1", srv.data_port), timeout=5)
+        try:
+            self.assertIn("LINK REGISTERED", self._readlines(cmd, 1))
+            for command, enabled in ((b"CHAT ON\r", True), (b"CHAT OFF\r", False)):
+                cmd.sendall(command)
+                lines = self._readlines(cmd, 1)
+                self.assertIn("OK", lines)
+                self.assertEqual(srv._session.chat, enabled)
+            self.assertTrue(srv._session.listening)
+        finally:
+            cmd.close()
+            data.close()
+            srv.stop()
+
     def _readlines(self, sock, want, timeout=5.0):
         """Read until `want` complete CR-terminated messages are seen."""
         sock.settimeout(timeout)
@@ -268,22 +285,16 @@ class TestNotifications(unittest.TestCase):
         sess.modem_bitrate(4, 3000, tx=True)
         sess.modem_bitrate(2, 512, tx=False)
         msgs = self._readlines(peer, 2)
-        self.assertEqual(msgs, ["BITRATE (4) 3000 bps TX", "BITRATE (2) 512 bps RX"])
+        self.assertEqual(msgs, ["BITRATE (4)  3000 bps TX", "BITRATE (2)  512 bps RX"])
 
-    def test_sn_gated_on_chat(self):
+    def test_sn_is_reported_in_both_chat_modes(self):
         sess, peer = self._session()
-
-        sess.chat = False
         sess.modem_snr(15)
         sess.chat = True
-        sess.modem_snr(-7)          # negative SN is ordinary on a real link
-        msgs = self._readlines(peer, 1)
-        self.assertEqual(msgs, ["SN -7"], "SN must be silent until CHAT ON")
-
+        sess.modem_snr(-7)
         sess.chat = False
         sess.modem_snr(3)
-        self.assertEqual(self._readlines(peer, 1, timeout=0.5), [],
-                         "SN resumed after CHAT OFF")
+        self.assertEqual(self._readlines(peer, 3), ["SN 15.0", "SN -7.0", "SN 3.0"])
 
     def test_preconnect_data_buffered_and_flushed(self):
         srv = _make_server()

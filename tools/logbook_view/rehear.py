@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Every arm in the logbook, heard again through a pinned decoder.
 
     .venv/bin/python tools/logbook_view/rehear.py run [--commit REV] [--arm ID ...] [--workers 12]
@@ -879,18 +881,19 @@ class Gate:
 # -- the whole logbook -----------------------------------------------------------------
 
 def logbook(root: Path, out: Path) -> tuple[dict, list[dict]]:
-    """The logbook's entries, read by serve.py; its last good reading if it cannot be imported now."""
+    """The logbook's entries, read by desk/face.py; its last good reading if it cannot be imported now."""
     snapshot = out / 'entries.json'
     try:
         sys.path.insert(0, str(HERE))
-        import serve
-        book = serve.Logbook(root)
+        sys.path.insert(0, str(HERE.parent))
+        from desk import face
+        book = face.Logbook(root)
         got = {'station': book.station, 'entries': book.entries()['entries']}
         atomic(snapshot, got)
     except Exception as exc:                                        # noqa: BLE001
         if not snapshot.is_file():
             raise
-        print(f'serve.py could not be read ({type(exc).__name__}: {exc}); using {snapshot}', file=sys.stderr)
+        print(f'desk/face.py could not be read ({type(exc).__name__}: {exc}); using {snapshot}', file=sys.stderr)
         got = json.loads(snapshot.read_text())
     return got['station'], got['entries']
 

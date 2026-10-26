@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The mode profile: everything one radio mode does differently, as data.
 
 `console <mode> <verb>` resolves a name here. A profile says where its roster
@@ -32,7 +34,7 @@ KNOWN = ('pactor', 'vara', 'ardop')
 #: Everything that holds the rig's card under a lock of its own. The RTTY
 #: terminal is one and is not a campaign mode, which `multimode` takes every
 #: KNOWN mode to be.
-RIG_HOLDERS = KNOWN + ('rtty',)
+RIG_HOLDERS = KNOWN + ('rtty', 'voice')
 
 # THE COMMON CORE. Every mode's arm record carries these fields, spelled the same
 # way, because `console log` is one view over all of them and a second spelling

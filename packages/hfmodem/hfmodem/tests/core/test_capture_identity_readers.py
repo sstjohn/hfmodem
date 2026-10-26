@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 from datetime import datetime,timezone
 from pathlib import Path
 from types import SimpleNamespace

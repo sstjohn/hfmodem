@@ -33,6 +33,7 @@ import termios
 import pytest
 
 from hfmodem.besra.radio import Rig
+from hfmodem.core.ptt import PttError
 
 
 class _FakePort:
@@ -68,10 +69,13 @@ class _FakePort:
 class _BlindPort(_FakePort):
     """Takes TIOCMBIS and TIOCMBIC, fails TIOCMGET — a driver that accepts the
     command and cannot report the line, so the pin can be high with nothing
-    able to confirm it."""
+    able to confirm it. It goes blind on `blind`: a line unreadable at arm
+    never arms."""
+
+    blind = False
 
     def ioctl(self, fd, request, arg):
-        if request == termios.TIOCMGET:
+        if self.blind and request == termios.TIOCMGET:
             self.calls.append(request)
             raise OSError(6, "Device not configured")
         return super().ioctl(fd, request, arg)
@@ -191,6 +195,7 @@ def test_an_unconfirmed_key_up_still_lowers_the_line(line_rig, caplog):
     exit is the drop-to-be-sure the bridge's line branch already takes."""
     p = _BlindPort()
     rig = line_rig(p)
+    p.blind = True
     rig.ptt(True)
     assert not p.high, (
         "the ioctl may have raised the pin; an unconfirmed key-up must deassert")
@@ -201,8 +206,13 @@ def test_an_unconfirmed_key_up_still_lowers_the_line(line_rig, caplog):
 def test_a_line_that_will_not_unkey_raises_the_alarm_and_retires(line_rig, caplog):
     """The one case that must keep the loud message: the line itself has failed,
     so nothing is left to try and the operator does need to go to the rig."""
-    rig = line_rig(_FakePort(stuck=termios.TIOCM_RTS))
-    rig.ptt(False)
+    with pytest.raises(PttError, match="not confirmed low at arm"):
+        line_rig(_FakePort(stuck=termios.TIOCM_RTS))
+    p = _FakePort()
+    rig = line_rig(p)
+    assert rig.ptt(True)
+    p.stuck = termios.TIOCM_RTS
+    assert rig.ptt(False) is False
     assert "MAY BE STUCK" in caplog.text and "manually" in caplog.text, caplog.text
     assert rig.retired, "a transmitter that will not go down must not be keyed again"
 
@@ -274,12 +284,121 @@ def test_the_line_must_be_named(port):
         Rig(1036, "/dev/no-such-cat", 38400, rigctl="/bin/sh", line_ptt=True)
 
 
-def test_without_the_flag_the_daemon_still_keys(monkeypatch):
-    """The other three callers of this class are unchanged."""
+def test_without_the_flag_ptt_never_reaches_hamlib(monkeypatch):
     r = Rig(1036, "/dev/no-such-cat", 38400, rigctl="/bin/sh", rigctld="127.0.0.1:1")
     atexit.unregister(r._atexit_unkey)
-    sent = []
-    monkeypatch.setattr(Rig, "_write", lambda self, *a: sent.append(a))
-    r.ptt(True)
-    r.ptt(False)
-    assert sent == [("T", "1"), ("T", "0")]
+    monkeypatch.setattr(Rig, "_write", _no_daemon)
+    monkeypatch.setattr(subprocess, "run", _no_daemon)
+    monkeypatch.setattr(subprocess, "Popen", _no_daemon)
+    assert r.ptt(True) is False
+    assert r.ptt(False) is True
+    r.unkey("test")
+    r.stop()
+    r._atexit_unkey()
+
+
+@pytest.mark.parametrize("transport", [["--serial", "/dev/fake-cat"],
+                                         ["--rigctld", "127.0.0.1:1"]])
+def test_radio_requires_line_ptt_before_devices_open(monkeypatch, capsys, transport):
+    import sys
+    from hfmodem.besra.host import run_server
+
+    monkeypatch.setattr(sys, "argv", ["run_server", "--radio", "ft891",
+                                    "--ptt-device", "/dev/fake-ptt", *transport])
+    monkeypatch.setattr(run_server, "arming_refusal", lambda device: None)
+    monkeypatch.setattr(run_server, "_radio_modem", _no_daemon)
+    with pytest.raises(SystemExit) as exc:
+        run_server.main()
+    assert exc.value.code == 2
+    assert "--radio requires --line-ptt" in capsys.readouterr().err
+
+
+def test_radio_line_ptt_keeps_the_arming_refusal(monkeypatch, capsys):
+    import sys
+    from hfmodem.besra.host import run_server
+
+    monkeypatch.setattr(sys, "argv", ["run_server", "--radio", "ft891",
+                                    "--serial", "/dev/fake-cat", "--line-ptt",
+                                    "--ptt-device", "/dev/fake-ptt"])
+    monkeypatch.setattr(run_server, "arming_refusal", lambda device: "fake refusal")
+    monkeypatch.setattr(run_server, "_radio_modem", _no_daemon)
+    with pytest.raises(SystemExit) as exc:
+        run_server.main()
+    assert exc.value.code == 2
+    assert "fake refusal" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("daemon", [None, "127.0.0.1:1"])
+def test_serial_cat_disables_hamlib_ptt(daemon):
+    rig = Rig(1036, "/dev/fake-cat", 38400, rigctl="/bin/sh", rigctld=daemon)
+    atexit.unregister(rig._atexit_unkey)
+    argv = rig._base()
+    if daemon:
+        assert argv == ["/bin/sh", "-m", "2", "-r", daemon]
+    else:
+        assert argv == ["/bin/sh", "-m", "1036", "-r", "/dev/fake-cat",
+                        "-s", "38400", "-P", "NONE"]
+
+
+@pytest.fixture
+def launch_admission(monkeypatch):
+    from hfmodem.core import claim
+
+    events = []
+
+    class Admission:
+        def opened(self):
+            events.append("opened")
+
+        def failed(self):
+            events.append("failed")
+
+    def inherited(fd, *, launch):
+        assert (fd, launch) == (9, True)
+        events.append("inherited")
+        return Admission()
+
+    monkeypatch.setattr(claim, "inherited", inherited)
+    return events
+
+
+def test_radio_with_line_ptt_reaches_device_setup(monkeypatch, launch_admission):
+    import sys
+    from hfmodem.besra.host import run_server
+
+    monkeypatch.setattr(sys, "argv", ["run_server", "--radio", "ft891",
+                                    "--rigctld", "127.0.0.1:1", "--line-ptt",
+                                    "--ptt-device", "/dev/fake-ptt"])
+    monkeypatch.setattr(run_server, "arming_refusal", lambda device: None)
+
+    def setup(args):
+        assert args.line_ptt
+        assert args.ptt_device == "/dev/fake-ptt"
+        raise SystemExit(42)
+
+    monkeypatch.setattr(run_server, "_radio_modem", setup)
+    with pytest.raises(SystemExit) as exc:
+        run_server.main()
+    assert exc.value.code == 42
+    assert launch_admission == ["inherited", "failed"]
+
+
+def test_radio_without_a_rig_transport_does_not_require_line_ptt(monkeypatch, launch_admission):
+    import sys
+    from hfmodem.besra.host import run_server
+
+    monkeypatch.setattr(sys, "argv", ["run_server", "--radio", "ft891"])
+
+    def no_gate(device):
+        raise AssertionError("applied the rig arming gate without a rig transport")
+
+    def setup(args):
+        assert not (args.serial or args.rigctld or args.line_ptt)
+        raise SystemExit(42)
+
+    monkeypatch.setattr(run_server, "arming_refusal", no_gate)
+    monkeypatch.setattr(run_server, "_radio_modem", setup)
+    with pytest.raises(SystemExit) as exc:
+        run_server.main()
+    assert exc.value.code == 42
+    assert launch_admission == ["inherited", "failed"]

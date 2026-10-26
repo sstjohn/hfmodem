@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # The 39-tone parallel mode (MIL-STD-188-110 appendix B)
 
 `hfmodem.bateleur.tone39` sends and receives the 39-tone parallel waveform of
@@ -175,8 +177,8 @@ python -m hfmodem.bateleur.measure --preset b-xii --trials 1 --seconds 1 --outpu
 
 Omitting the short-run overrides requests sixteen 20-second payloads per
 row; the counts above do not describe that longer run. See
-[README.md](README.md#simulation-measurements) for the channel correction
-and the recorded fields.
+[bateleur's simulation measurements](../../implementation/bateleur/README.md#simulation-measurements)
+for the channel correction and the recorded fields.
 
 ## Recordings
 

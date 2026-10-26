@@ -96,7 +96,7 @@ def test_identified_incomplete_peer_window_owes_data_not_previous_ack(missing,mo
     hs,io=_waiting(); result,_=_partial_result()
     if missing=='not_demodulated':
         result=RX.DecodeResult(result.frames[:1],result.data_frames[:1])
-    monkeypatch.setattr(VA._RX500,'decode_stream',lambda _:result)
+    monkeypatch.setattr(VA._RX500,'decode_stream',lambda _, **kwargs:result)
     assert hs._answer_data_over(np.zeros(100))
     assert hs._owed_block and hs._answer_owed==VA._OWED_OVER
     assert io.payloads==[]
@@ -114,6 +114,6 @@ def test_uncertain_or_own_failed_frame_does_not_get_a_nak(case,monkeypatch):
     hs,io=_waiting(); result,body=_partial_result(good=case!='all_bad')
     if case=='our_echo': hs._keyed_bodies.add(body)
     if case=='no_peer_delivery': hs._peer_delivery_open=False
-    monkeypatch.setattr(VA._RX500,'decode_stream',lambda _:result)
+    monkeypatch.setattr(VA._RX500,'decode_stream',lambda _, **kwargs:result)
     assert not hs._answer_data_over(np.zeros(100))
     assert io.sent==[] and not hs._owed_block

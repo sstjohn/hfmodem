@@ -8,7 +8,8 @@ import pytest
 
 from hfmodem.shrike import arq, onair, rxfront
 from hfmodem.tests.shrike.test_p3_irs_sl3_ack_1003 import (
-    audio_callback_load as audio_callback_load, budget, crop, listen_current, receiver, stage_sl3)
+    audio_callback_load as audio_callback_load, budget, crop, listen_current, receive_gc, receiver,
+    stage_sl3)
 
 
 def test_staged_central_samples_match_independent_matched_filter():
@@ -71,6 +72,7 @@ def test_sl3_promotion_retains_next_reader_at_18ms(monkeypatch, following):
 
 
 @pytest.mark.parametrize('following', [202, 206])
+@pytest.mark.wall_clock
 def test_successive_holds_charge_final_listener_slice(audio_callback_load, following):  # noqa: F811
     costs = []
     for _ in range(20):
@@ -80,13 +82,14 @@ def test_successive_holds_charge_final_listener_slice(audio_callback_load, follo
             if index:
                 s.rx.new_cycle()
             audio, p = crop(hold)
-            elapsed = listen_current(s, audio, p['origin'])
-            costs.append(elapsed)
-            assert len(s.packets) == index+1
-            assert len(s.host.peer.sent) == index+1
-            assert s.packets[-1].packet[:2] == (2 if hold == 202 else 3, 0x23)
-            assert s.packets[-1].packet[3]
-            assert elapsed+1000*onair.P3_DECODE_RESERVE_S <= 18.
-            assert s.rx._p3_acquisition_fits(0)
+            with receive_gc():
+                elapsed = listen_current(s, audio, p['origin'])
+                costs.append(elapsed)
+                assert len(s.packets) == index+1
+                assert len(s.host.peer.sent) == index+1
+                assert s.packets[-1].packet[:2] == (2 if hold == 202 else 3, 0x23)
+                assert s.packets[-1].packet[3]
+                assert elapsed+1000*onair.P3_DECODE_RESERVE_S <= 18.
+                assert s.rx._p3_acquisition_fits(0)
     print(f'SUCCESSIVE_METRIC following={following} total_max_ms={max(costs):.3f} '
           f'margin_ms={12-max(costs):.3f} acks={len(costs)}/{len(costs)}')

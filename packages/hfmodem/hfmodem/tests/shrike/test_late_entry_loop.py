@@ -21,8 +21,10 @@ MESSAGE = b"pending late-entry application bytes"
 
 
 class LatePeer(_Bench):
-    def __init__(self, entry_number, lose_first):
-        super().__init__(seconds=150)
+    def __init__(self, entry_number, lose_first, *, d=.09, grant_pcm=None,
+                 grant_anchor=None):
+        super().__init__(seconds=150, d=d,
+                         holdback=916 if grant_pcm is not None else 608)
         self.entry_number = entry_number
         self.lose_first = lose_first
         self.call_at = None
@@ -30,6 +32,9 @@ class LatePeer(_Bench):
         self.responses = []
         self.controls = []
         self.p3_phase = None
+        self.d = d
+        self.grant_pcm = grant_pcm
+        self.grant_anchor = grant_anchor
 
     def transmit(self, samples, **kwargs):
         first, end = super().transmit(samples, **kwargs)
@@ -41,13 +46,21 @@ class LatePeer(_Bench):
                         pactor1.CS_ACK_A if slot % 2 else pactor1.CS_ACK_B)
                 signal = onair._trim_silence(pactor1.control_signal(
                     word, invert=bool(slot % 2))).astype(np.float32)
-                at = first + slot * SLOT + 46080 + round(.09 * FS)
+                at = first + slot * SLOT + 46080 + round(self.d * FS)
+                if slot >= 7 and self.grant_pcm is not None:
+                    at -= self.grant_anchor
+                    signal = (self.grant_pcm[(slot-7) % len(self.grant_pcm)]
+                              if isinstance(self.grant_pcm, tuple) else self.grant_pcm)
+                elif self.grant_pcm is not None:
+                    at -= round(.01 * FS)
                 self.audio[at:at + len(signal)] = signal
         if 35000 < len(samples) < 45000:
             packets = p3rx.decode_p3_packets(np.pad(samples, (2400, 2400))).packets
             for packet in packets:
                 if packet.sl == 1 and packet.status & 0xfc == 0x18 and not packet.payload:
                     self.entries.append(first)
+                    if self.grant_pcm is not None:
+                        self.lat_in = self.holdback
                     if len(self.entries) == self.entry_number:
                         self.start_p3(first)
         if len(samples) < FS // 2:
@@ -79,15 +92,23 @@ class LatePeer(_Bench):
             self.responses.append((at, at + len(signal)))
 
 
-def run_late(monkeypatch, tmp_path, entry_number, lose_first, *, scan_cost=.006):
+def run_late(monkeypatch, tmp_path, entry_number, lose_first, *, scan_cost=.006,
+             d=None, grant_pcm=None, grant_anchor=None, options=(),
+             acquire_cost=0., match_cost=0.):
     outdir = tmp_path / "out"
     number = 1
     while outdir.exists():
         outdir = tmp_path / f"out-{number}"
         number += 1
-    peer = LatePeer(entry_number, lose_first)
+    peer_options = {} if d is None else dict(d=d)
+    if grant_pcm is not None:
+        peer_options.update(grant_pcm=grant_pcm, grant_anchor=grant_anchor)
+    peer = LatePeer(entry_number, lose_first, **peer_options)
     hosts = []
     receivers = []
+    entry_reads = []
+    entry_heads = []
+    work = []
 
     class Host(onair.PtcHost):
         def __init__(self, *args, **kwargs):
@@ -126,6 +147,39 @@ def run_late(monkeypatch, tmp_path, entry_number, lose_first, *, scan_cost=.006)
             peer.spend(round(scan_cost * FS))
             return result
 
+        def _p3_read_ahead(self, key, read):
+            cached = key in self._p3_ahead
+            result = super()._p3_read_ahead(key, read)
+            if key[0] == 'acquire' and not cached and acquire_cost:
+                peer.spend(round(acquire_cost * FS))
+                work.append(('p3', round(acquire_cost * FS)))
+            return result
+
+        def control_signal_in(self, seg, origin, raster):
+            result = super().control_signal_in(seg, origin, raster)
+            if self.host.arq.entry_pending and self._p3_head_candidate is not None:
+                entry_heads.append((raster._p3_keyed_reply, self._p3_head_candidate[1]))
+            return result
+
+        def _entry_repeat_read(self, seg, origin, raster, extent, at):
+            previous = self._entry_repeat_result
+            before = None if previous is None else previous['end']
+            result = super()._entry_repeat_read(seg, origin, raster, extent, at)
+            proof = self._entry_repeat_result
+            if proof['end'] != before and match_cost:
+                peer.spend(round(match_cost * FS))
+                work.append(('match', round(match_cost * FS)))
+            if proof['match'] is not None and not proof['complete']:
+                entry_reads.append(dict(keyed=raster._p3_keyed_reply,
+                    at=extent[0], d=raster.d_n/FS, bits=proof['match'].observed_bits,
+                    sense=proof['match'].sense,
+                    truncated=self.host.arq._entry_window_truncated,
+                    current=self.host.arq._entry_p1_current,
+                    silence=self.host.arq._unanswered_upgrade,
+                    owed=self.host.arq._upgrade_reply_owed,
+                    requests=self.host.arq._upgrade_requests))
+            return result
+
     monkeypatch.setattr(onair, "PtcHost", Host)
     monkeypatch.setattr(onair, "_SessionRx", Receiver)
     monkeypatch.setattr(onair, "_LiveInput", lambda *a, **kw: peer)
@@ -145,7 +199,7 @@ def run_late(monkeypatch, tmp_path, entry_number, lose_first, *, scan_cost=.006)
         # than the receiver this scene imagines. What these scenes measure --
         # entry budget, slot accounting, fallback, delivery -- is the same at
         # either setting, and the follow has its own file.
-        "--p3-follow-offset", "none"])
+        "--p3-follow-offset", "none", *options])
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         onair.main()
@@ -158,7 +212,8 @@ def run_late(monkeypatch, tmp_path, entry_number, lose_first, *, scan_cost=.006)
         delivered=bytes(hosts[0].channel(hosts[0].ptchn).rx).decode("ascii"),
         pending_at_changeover=None if hosts[0].entry_result is None else
         [part.hex() for part in hosts[0].entry_result]), indent=2) + "\n")
-    return dict(peer=peer, host=hosts[0], rx=receivers[0], log=log, outdir=outdir)
+    return dict(peer=peer, host=hosts[0], rx=receivers[0], log=log, outdir=outdir,
+                entry_reads=entry_reads, entry_work=work, entry_heads=entry_heads)
 
 
 @requires_ws8eoc_p3

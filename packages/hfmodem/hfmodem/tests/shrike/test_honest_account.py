@@ -141,7 +141,8 @@ def test_the_fallback_names_the_peer_that_answered_rather_than_denying_it():
     assert fell, lines[-4:]
     assert "the peer never took the entry packet" not in fell[0]
     assert "it answered" in fell[0], fell[0]
-    assert "zero bit errors" in fell[0], fell[0]
+    assert "14 complete grants and 0 partial repeat matches" in fell[0], fell[0]
+    assert "remote entry reception and mode compatibility remain unknown" in fell[0]
     # ...and it must not claim silence, which is the other window's finding.
     assert "NOTHING AT ALL" not in fell[0], fell[0]
 
@@ -230,6 +231,7 @@ def test_a_peer_transmitting_data_while_we_send_still_takes_the_channel():
 
     class _Air(ArqIO):
         _p3_traffic_log = None
+        rf_scope = None
 
         def __init__(self):
             self.lines: list[str] = []

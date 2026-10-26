@@ -75,7 +75,7 @@ from typing import Callable, NamedTuple, Protocol
 import numpy as np
 
 from hfmodem.core import gil, levels, rates, resample
-from hfmodem.core.operations import OperationGate, leased
+from hfmodem.core.operations import LeaseTimeout, OperationGate, leased
 
 CARD_RATE_HZ = rates.CARD_RATE_HZ
 
@@ -648,6 +648,7 @@ class TxStream:
         self.capacity = capacity
         self.written = 0
         self.closed = False
+        self.idle = "fault"
         self.starved_at: int | None = None
         self.progress = Progress(0, at, ())
         self._chunks: deque[np.ndarray] = deque()
@@ -740,6 +741,7 @@ class StationAudio:
         self._stream = None
         self._lat_samples: list[int] = []
         self._last: tuple[float, int] | None = None
+        self._dac: tuple[float, int] | None = None
         self._ahead: float | None = None
         self._fit: list[tuple[float, int]] = []
         self._burst: tuple[np.ndarray, int] | None = None
@@ -758,7 +760,7 @@ class StationAudio:
         self._reserved = False
 
     @property
-    def loop_lat(self) -> int:
+    def loop_lat(self) -> int | None:
         """Capture samples from a sample's ADC to an armed sample's emission.
 
         `lat` is what the driver reports -- `outputBufferDacTime` against
@@ -771,7 +773,7 @@ class StationAudio:
         chain needs to close. `tx_latency_n` is the station's own measurement of
         the residue and this is the sum the scheduler actually owes.
         """
-        return (self.lat or 0) + self.tx_latency_n
+        return None if self.output_device is None else (self.lat or 0) + self.tx_latency_n
 
     # -- lanes -------------------------------------------------------------
 
@@ -784,15 +786,18 @@ class StationAudio:
     def open(self) -> None:
         import sounddevice as sd
 
-        self._stream = sd.Stream(
-            samplerate=CARD_RATE_HZ, blocksize=self.blocksize, dtype="float32",
-            channels=1, latency=LATENCY,
-            device=(self.input_device, self.output_device),
-            callback=self._callback)
+        options = dict(samplerate=CARD_RATE_HZ, blocksize=self.blocksize,
+                       dtype="float32", channels=1, latency=LATENCY)
+        if self.output_device is None:
+            self._stream = sd.InputStream(device=self.input_device,
+                                          callback=self._input_callback, **options)
+        else:
+            self._stream = sd.Stream(device=(self.input_device, self.output_device),
+                                     callback=self._callback, **options)
         self._stream.start()
 
         deadline = time.monotonic() + STARTUP_DEADLINE_S
-        while self.samples == 0 or self.lat is None:
+        while self.samples == 0 or (self.output_device is not None and self.lat is None):
             if self.failure is not None:
                 self.close()
                 raise AudioError(f"the audio callback failed: {self.failure}")
@@ -804,6 +809,9 @@ class StationAudio:
                     "Transmitting now would be calling into a channel we cannot hear.")
             time.sleep(0.002)
 
+        if self.output_device is None and self.failure is not None:
+            self.close()
+            raise AudioError(f"the audio callback failed: {self.failure}")
         lat = self._stream.latency
         in_lat = lat[0] if isinstance(lat, tuple) else lat
         self.holdback = self.blocksize + round(in_lat * CARD_RATE_HZ)
@@ -821,17 +829,39 @@ class StationAudio:
         self._breathing.enter_context(gil.breathing())
 
     def close(self) -> None:
+        deadline = time.monotonic() + self.close_budget_s
         self.operations.close(self.close_budget_s)
         self._breathing.close()
-        s, self._stream = self._stream, None
-        if s is not None:
-            try:
-                s.stop()
-                s.close()
-            except Exception:      # noqa: BLE001 — teardown must not mask a failure
-                pass
+        stream = self._stream
+        if stream is None:
+            return
+        if getattr(self, "_closing_stream", None) is not stream:
+            self._closing_stream = stream
+            self._close_errors = []
+
+            def close():
+                try:
+                    stream.stop()
+                    stream.close()
+                except BaseException as exc:
+                    self._close_errors.append(exc)
+
+            self._close_thread = threading.Thread(target=close, name="station-audio-close", daemon=True)
+            self._close_thread.start()
+        self._close_thread.join(max(0, deadline - time.monotonic()))
+        if self._close_thread.is_alive():
+            raise LeaseTimeout("station audio did not close")
+        if self._close_errors:
+            raise AudioError(f"station audio close failed: {self._close_errors[0]}")
+        self._stream = None
 
     # -- the callback ------------------------------------------------------
+
+    def _input_callback(self, indata, frames, t, status) -> None:
+        try:
+            self._body(indata, None, frames, t, status)
+        except BaseException as exc:
+            self.failure = exc
 
     def _callback(self, indata, outdata, frames, t, status) -> None:
         """Never raises.
@@ -894,7 +924,9 @@ class StationAudio:
         self._ahead = ahead
 
         self._last = (t.inputBufferAdcTime, n0)
-        if self.lat is None and not getattr(status, "priming_output", False):
+        if outdata is not None:
+            self._dac = (t.outputBufferDacTime, n0)
+        if outdata is not None and self.lat is None and not getattr(status, "priming_output", False):
             self._lat_samples.append(
                 round((t.outputBufferDacTime - t.inputBufferAdcTime) * CARD_RATE_HZ))
             if len(self._lat_samples) >= _LAT_MEDIAN_N:
@@ -916,7 +948,8 @@ class StationAudio:
         for lane in self._lanes:
             lane.push(block)
 
-        self._fill(outdata, frames, n0)
+        if outdata is not None:
+            self._fill(outdata, frames, n0)
 
         if self.trace is not None:
             self.trace.stamp(t_in, time.monotonic(), t, frames, n0, status)
@@ -961,8 +994,8 @@ class StationAudio:
         if burst is None:
             return
         tx, at = burst
-        # The DAC range this block covers, in capture indices.
-        start = n0 + self.loop_lat
+        # arm_burst uses DAC capture indices; reserve_burst uses on-air indices.
+        start = n0 + (self.loop_lat if self._reserved else (self.lat or 0))
         lo, hi = max(start, at), min(start + frames, at + len(tx))
         if hi <= lo:
             return              # the burst is not in this block, early or late
@@ -988,7 +1021,7 @@ class StationAudio:
         if len(got) < frames - offset and not stream.closed:
             if stream.starved_at is None:
                 stream.starved_at = n0
-            if stream.emitted:
+            if stream.emitted and stream.idle == "fault":
                 self._tx_invalid = True
         else:
             stream.starved_at = None
@@ -1005,6 +1038,32 @@ class StationAudio:
             return 0.0
         t0, n0 = self._last
         return n0 + (time.monotonic() - t0) * CARD_RATE_HZ
+
+    def dac_time(self, output_frame: int) -> float:
+        if self._dac is None:
+            raise AudioError("no DAC clock anchor")
+        timestamp, frame = self._dac
+        return timestamp + (output_frame - frame) / CARD_RATE_HZ
+
+    def dac_frame_at(self, timestamp: float) -> float:
+        if self._dac is None:
+            raise AudioError("no DAC clock anchor")
+        anchor, frame = self._dac
+        return frame + (timestamp - anchor) * CARD_RATE_HZ
+
+    @leased
+    def wait_until_dac(self, output_frame: int, *, healthy: bool = False,
+                       deadline: float | None = None, cancelled=None) -> None:
+        while True:
+            if cancelled is not None and cancelled():
+                raise BurstInvalidated("cancelled")
+            if healthy:
+                self.check_callbacks()
+            if time.monotonic() >= self.dac_time(output_frame):
+                return
+            if deadline is not None and time.monotonic() >= deadline:
+                raise BurstInvalidated("audio wait deadline expired")
+            time.sleep(_HOP_S)
 
     def clock_ppm(self) -> tuple[float, float]:
         """(ppm, 1 sigma) of the capture clock against the system clock.
@@ -1049,7 +1108,8 @@ class StationAudio:
     @leased
     def arm_burst(self, audio: np.ndarray, at: int) -> int:
         """Schedule `audio` so its first sample reaches the DAC as capture index
-        `at` reaches the ADC. Returns the index actually used.
+        `at` reaches the ADC. Returns the DAC capture index actually used;
+        the on-air index is that index plus `tx_latency_n`.
 
         The lead is the ADC->DAC offset plus a few blocks of notice — not
         `holdback`, which is a *reader's* constant and on this machine is 10986
@@ -1060,8 +1120,10 @@ class StationAudio:
         One immutable store, not three fields: a callback landing between two of
         them would emit the new burst against the previous index.
         """
+        if self.output_device is None:
+            raise AudioError("capture-only audio cannot transmit")
         buf = np.asarray(audio, np.float32)
-        earliest = int(self.samples) + self.loop_lat + 3 * self.blocksize
+        earliest = int(self.samples) + (self.lat or 0) + 3 * self.blocksize
         at = max(at, earliest)
         self._tx_invalid = False
         self._reserved = False
@@ -1072,11 +1134,17 @@ class StationAudio:
 
     @leased
     def reserve_burst(self, audio: np.ndarray, at: int, deadline: int) -> int:
-        """Publish under the callback lock only when the entire keyed interval fits."""
+        """Reserve an on-air capture index only when the keyed interval fits.
+
+        Both `at` and the returned index are on-air; `deadline` is the key's
+        capture-clock deadline, so the fit check removes TX latency.
+        """
+        if self.output_device is None:
+            raise AudioError("capture-only audio cannot transmit")
         buf = np.asarray(audio, np.float32)
         with self._lock:
             actual = max(at, int(self.samples) + self.loop_lat + 3 * self.blocksize)
-            if actual + len(buf) + round(0.1 * CARD_RATE_HZ) > deadline:
+            if actual - self.tx_latency_n + len(buf) + round(0.1 * CARD_RATE_HZ) > deadline:
                 exc = BurstInvalidated("reserved burst exceeds keyed deadline")
                 exc.displacement = actual - at
                 raise exc
@@ -1092,6 +1160,8 @@ class StationAudio:
         `at` or the earliest this card can still meet. Write to what comes back;
         `finish_burst` ends it, as it ends a burst.
         """
+        if self.output_device is None:
+            raise AudioError("capture-only audio cannot transmit")
         stream = TxStream(max(at, int(self.samples) + self.loop_lat + 3 * self.blocksize),
                           capacity)
         with self._lock:
@@ -1111,6 +1181,9 @@ class StationAudio:
         """Drop an armed burst that never keyed. Emits nothing and records nothing."""
         with self._lock:
             self._burst = None
+            stream, self._tx_stream = self._tx_stream, None
+            if stream is not None:
+                stream.close()
             self._emitted = self._consumed = 0
             self._tx_invalid = False
             self._reserved = False
@@ -1127,12 +1200,16 @@ class StationAudio:
             burst, self._burst = self._burst, None
             stream, self._tx_stream = self._tx_stream, None
             invalid, self._tx_invalid = self._tx_invalid, False
+            reserved = self._reserved
             if self._reserved and burst is not None:
                 self.check_callbacks()
                 invalid |= (self._consumed != len(burst[0]) or
-                            self.sample_now() < burst[1] + len(burst[0]))
+                            time.monotonic() < self.dac_time(
+                                burst[1] - self.loop_lat + len(burst[0])))
             self._reserved = False
         end = (burst[1] + len(burst[0])) if burst is not None else int(self.samples)
+        if burst is not None and not reserved:
+            end += self.tx_latency_n
         if stream is not None:
             stream.close()
             end = stream.end
@@ -1166,10 +1243,15 @@ class ReplayAudio:
         self.samples = 0
         self.holdback = 0        # a file has no blocks to hold back for
         self.lat = 0
+        self.loop_lat = 0
+        self._lock = threading.RLock()
+        self._tx_stream = None
+        self._stream_output = []
         self.tx_latency_n = 0
         self.underruns = self.overflows = 0
         self._lanes: list[Lane] = []
         self._i = 0
+        self._reserved = False
         self._pending: tuple[np.ndarray, int] | None = None
         #: (card index, samples) for every burst the station would have sent.
         self.transmitted: list[tuple[int, np.ndarray]] = []
@@ -1188,30 +1270,69 @@ class ReplayAudio:
         return None
 
     def pump(self, blocks: int = 1) -> int:
-        """Hand the next `blocks` to every lane. Returns how many were delivered."""
         sent = 0
-        for _ in range(blocks):
-            chunk = self.samples_in[self._i:self._i + self.blocksize]
-            if not len(chunk):
-                break
-            block = Block(self._i / CARD_RATE_HZ, self.samples,
+        with self._lock:
+            for _ in range(blocks):
+                if self.exhausted():
+                    break
+                self._advance(self.samples + min(self.blocksize, len(self.samples_in) - self._i))
+                sent += 1
+        return sent
+
+    def _advance(self, target):
+        count = min(target - self.samples, len(self.samples_in) - self._i)
+        if count > 0:
+            chunk = self.samples_in[self._i:self._i + count]
+            block = Block(self.samples / CARD_RATE_HZ, self.samples,
                           np.asarray(chunk, np.float32))
             for lane in self._lanes:
                 lane.push(block)
-            self._i += len(chunk)
-            self.samples += len(chunk)
-            sent += 1
-        return sent
+            self._i += count
+        stream = self._tx_stream
+        if stream is not None:
+            start = max(self.samples, stream.at)
+            if target > start:
+                got = stream._read(target - start)
+                if len(got):
+                    self._stream_output.append((start, got.copy()))
+                    stream._emitted(len(got), start)
+                if len(got) < target - start and not stream.closed:
+                    if stream.starved_at is None:
+                        stream.starved_at = start + len(got)
+                else:
+                    stream.starved_at = None
+        self.samples = target
 
     def exhausted(self) -> bool:
-        return self._i >= len(self.samples_in)
+        # A burst or stream in flight at the tape's end still completes its over.
+        with self._lock:
+            return (self._i >= len(self.samples_in)
+                    and self._pending is None and self._tx_stream is None)
 
     def sample_now(self) -> float:
         return float(self.samples)
 
-    def wait_until(self, card_index: int) -> None:
-        while self.samples < card_index and self.pump(8):
-            pass
+    def wait_until(self, card_index: int, *, healthy: bool = False,
+                   deadline: float | None = None, cancelled=None) -> None:
+        while True:
+            if cancelled is not None and cancelled():
+                raise BurstInvalidated("cancelled")
+            with self._lock:
+                if self.samples >= card_index:
+                    return
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise BurstInvalidated("audio wait deadline expired")
+                # EOF ends reception, not the virtual transmit clock.
+                self._advance(min(card_index, self.samples + self.blocksize))
+            # Let the station poll lanes between blocks, outside the audio lock.
+            time.sleep(0)
+
+    def wait_until_dac(self, output_frame: int, *, healthy: bool = False,
+                       deadline: float | None = None, cancelled=None) -> None:
+        self.wait_until(output_frame, healthy=healthy, deadline=deadline, cancelled=cancelled)
+
+    def check_callbacks(self) -> None:
+        return None
 
     # -- transmit, recorded rather than emitted ----------------------------
     #
@@ -1221,28 +1342,70 @@ class ReplayAudio:
     # burst is kept rather than dropped, and the lanes are still advanced past it,
     # because half-duplex is a property of the protocol rather than of the card.
 
-    def arm_burst(self, audio: np.ndarray, at: int) -> int:
-        at = max(at, int(self.samples))
-        self._pending = (np.asarray(audio), at)
-        return at
+    def arm_burst(self, audio: np.ndarray, at: int, *, strict_at=False) -> int:
+        with self._lock:
+            if strict_at and at < self.samples:
+                raise BurstInvalidated("requested burst index has passed")
+            at = max(at, int(self.samples))
+            self._reserved = False
+            self._pending = (np.asarray(audio, np.float32).copy(), at)
+            return at
+
+    def reserve_burst(self, audio: np.ndarray, at: int, deadline: int) -> int:
+        with self._lock:
+            actual = max(at, int(self.samples))
+            if actual + len(audio) + round(0.1 * CARD_RATE_HZ) > deadline:
+                exc = BurstInvalidated("reserved burst exceeds keyed deadline")
+                exc.displacement = actual - at
+                raise exc
+            self.arm_burst(audio, actual)
+            self._reserved = True
+            return actual
+
+    def arm_stream(self, at: int, capacity: int) -> TxStream:
+        with self._lock:
+            self._tx_stream = TxStream(max(at, int(self.samples)), capacity)
+            self._stream_output = []
+            return self._tx_stream
 
     def alive(self) -> None:
         return None
 
     def burst_done(self) -> bool:
-        return getattr(self, "_pending", None) is None
+        with self._lock:
+            if self._tx_stream is not None:
+                return self._tx_stream.drained
+            return self._pending is None or self.samples >= self._pending[1] + len(self._pending[0])
 
     def cancel_burst(self) -> None:
-        self._pending = None
+        with self._lock:
+            self._pending = None
+            self._reserved = False
+            if self._tx_stream is not None:
+                self._tx_stream.close()
+            self._tx_stream = None
+            self._stream_output = []
 
     def finish_burst(self) -> int:
-        pending = getattr(self, "_pending", None)
-        self._pending = None
-        if pending is None:
-            return self.samples
-        buf, at = pending
-        self.transmitted.append((at, buf))
-        end = at + len(buf)
-        for lane in self._lanes:
-            lane.flush_to(end)
-        return end
+        with self._lock:
+            pending, self._pending = self._pending, None
+            stream, self._tx_stream = self._tx_stream, None
+            reserved, self._reserved = self._reserved, False
+            end = self.samples
+            invalid = False
+            if pending is not None:
+                buf, at = pending
+                end = at + len(buf)
+                invalid = reserved and self.samples < end
+                if not invalid:
+                    self.transmitted.append((at, buf))
+            if stream is not None:
+                stream.close()
+                end = stream.end
+                self.transmitted.extend(self._stream_output)
+                self._stream_output = []
+            for lane in self._lanes:
+                lane.flush_to(end)
+            if invalid:
+                raise BurstInvalidated("reserved burst has not completed")
+            return end

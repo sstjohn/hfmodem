@@ -1,0 +1,620 @@
+{
+ "a1-request": {
+  "source": "working/varac-on-air/bench3/gate1/a1-bw-order/audio/20261020-221848-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   141360,
+   235200
+  ],
+  "burst_seconds": [
+   3.045,
+   4.8
+  ],
+  "description": "stock CR 500 Hz, after CHAT ON then BW500",
+  "rate": 48000,
+  "sha256": "eed0e8ec86c361c9318d984c394819edb9970dab01cacf6131a62ae1e75d6fe1"
+ },
+ "a2-request": {
+  "source": "working/varac-on-air/bench3/gate1/a2-main/audio/20261020-222152-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   141360,
+   235440
+  ],
+  "burst_seconds": [
+   3.045,
+   4.805
+  ],
+  "description": "stock CR 500 Hz",
+  "rate": 48000,
+  "sha256": "6f2593a58673a108ddd8f7995efc1488f36f26cd845877b7462c1660f6037dba"
+ },
+ "a2-link-setup": {
+  "source": "working/varac-on-air/bench3/gate1/a2-main/audio/20261020-222152-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   282000,
+   497280
+  ],
+  "burst_seconds": [
+   5.975,
+   10.26
+  ],
+  "description": "link-setup L4",
+  "rate": 48000,
+  "sha256": "e0bc90a03048c961bb7dce3d57d48d57f36f6c21f231859429ee9ca5ca4e3a0f"
+ },
+ "a2-confirm": {
+  "source": "working/varac-on-air/bench3/gate1/a2-main/audio/20261020-222152-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   528720,
+   571440
+  ],
+  "burst_seconds": [
+   11.115,
+   11.805
+  ],
+  "description": "session-confirm (16)",
+  "rate": 48000,
+  "sha256": "c66353da129ea62b59a24611511f2c30067ced1a7f0eaeba30006a6dcec5b002"
+ },
+ "a2-confirm-32": {
+  "source": "working/varac-on-air/bench3/gate1/a2-main/audio/20261020-222152-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   598080,
+   673440
+  ],
+  "burst_seconds": [
+   12.56,
+   13.93
+  ],
+  "description": "session-confirm-32",
+  "rate": 48000,
+  "sha256": "6897456522366fb056d21975a9a4d2bcd827f8d282c2db4eedd3d9dd5551d8d2"
+ },
+ "a2-turn-request": {
+  "source": "working/varac-on-air/bench3/gate1/a2-main/audio/20261020-222152-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   696000,
+   771360
+  ],
+  "burst_seconds": [
+   14.6,
+   15.97
+  ],
+  "description": "session-turn-request 850",
+  "rate": 48000,
+  "sha256": "31659cb944380cb7e861d4124a7021a13a30b4942d3bcde78fddf3c8c3fd9d2e"
+ },
+ "a2-data-1": {
+  "source": "working/varac-on-air/bench3/gate1/a2-main/audio/20261020-222152-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   798960,
+   1014240
+  ],
+  "burst_seconds": [
+   16.745,
+   21.03
+  ],
+  "description": "DATA L4, TEXT, 66 originals",
+  "rate": 48000,
+  "sha256": "173a8f6c21f13a0ed52d48856f849a9cb5d4fcecbd0fdbe2460bc809c9da0832"
+ },
+ "a2-data-2": {
+  "source": "working/varac-on-air/bench3/gate1/a2-main/audio/20261020-222152-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   1039440,
+   1255680
+  ],
+  "burst_seconds": [
+   21.755,
+   26.06
+  ],
+  "description": "DATA L5 last, 4 originals",
+  "rate": 48000,
+  "sha256": "482786c5d2eb27039f6e3e78f2c692d9d5ca44251870fcf8134f237571135b28"
+ },
+ "a2-release": {
+  "source": "working/varac-on-air/bench3/gate1/a2-main/audio/20261020-222152-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   1282080,
+   1326720
+  ],
+  "burst_seconds": [
+   26.81,
+   27.54
+  ],
+  "description": "session-turn-release f13",
+  "rate": 48000,
+  "sha256": "d4f19648bc48a50f37349ddd2debec6ab863c272244092edc135a430a74ba7d1"
+ },
+ "a2-request-2": {
+  "source": "working/varac-on-air/bench3/gate1/a2-main/audio/20261020-222152-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   45987120,
+   46080960
+  ],
+  "burst_seconds": [
+   958.165,
+   959.92
+  ],
+  "description": "stock CR of the second session",
+  "rate": 48000,
+  "sha256": "439a893740a11e277cee7dc4596a2cc07fb096c2c6c051f3fb9e9e0ec82487a3"
+ },
+ "sk-request": {
+  "source": "working/bw500-locator/bench-ladder/runs/sk-flight-0/audio/20261020-222952-chat-sk-flight-0/chat-sk-flight-0__a2b.wav",
+  "samples": [
+   283200,
+   403200
+  ],
+  "window_seconds": [
+   5.9,
+   8.4
+  ],
+  "description": "bench 2 sk-flight-0: stock CR ending 7.835 s",
+  "rate": 48000,
+  "sha256": "0d05df8114223635416fbb5d21fb86d82a7123643163f44db42335a67113e931"
+ },
+ "sk-retry": {
+  "source": "working/bw500-locator/bench-ladder/runs/sk-flight-0/audio/20261020-222952-chat-sk-flight-0/chat-sk-flight-0__a2b.wav",
+  "samples": [
+   811200,
+   912000
+  ],
+  "window_seconds": [
+   16.9,
+   19.0
+  ],
+  "description": "bench 2 sk-flight-0: stock retry ending 18.485 s",
+  "rate": 48000,
+  "sha256": "37b13d5250d7c09fa92721a9346eedce47e4b8220eb97a93451f435d5b3ec5d9"
+ },
+ "g3-level12": {
+  "source": "working/varac-on-air/bench3/gate3/audio/20261020-230448-chat-cleantx/chat-cleantx__b2a.wav",
+  "samples": [
+   22784171,
+   23055851
+  ],
+  "window_seconds": [
+   474.84,
+   480.5
+  ],
+  "clock_t0": 0.169781,
+  "description": "stock L12 over 474.935-478.755 and its tail (shared clock)",
+  "rate": 48000,
+  "sha256": "05088f1e3cd2b272d3d854265bda590c20676d4ad61f143b56de674c6861e327"
+ },
+ "g3-resend": {
+  "source": "working/varac-on-air/bench3/gate3/audio/20261020-230448-chat-cleantx/chat-cleantx__b2a.wav",
+  "samples": [
+   23243051,
+   23732651
+  ],
+  "window_seconds": [
+   484.4,
+   494.6
+  ],
+  "clock_t0": 0.169781,
+  "description": "stock's polls behind over #4 and its L9 resend at 490.62",
+  "rate": 48000,
+  "sha256": "e6d70269bcce465b65bf045d766a8091dc3603b150acece738ffb7f5ded8393a"
+ },
+ "r3-opening": {
+  "source": "working/varac-on-air/bench3/r3/gate1/audio/20261021-030150-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   124800,
+   1008000
+  ],
+  "window_seconds": [
+   2.6,
+   21.0
+  ],
+  "description": "r3 gate 1: stock CR, link-setup, f20, DATA 35 bytes, f20",
+  "rate": 48000,
+  "sha256": "9d534364e3289aedca5011ed52b0471ae30868fa314391a6e8a0394590db4467"
+ },
+ "r3-poll-answer": {
+  "source": "working/varac-on-air/bench3/r3/gate1/audio/20261021-030150-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   1502400,
+   1584000
+  ],
+  "window_seconds": [
+   31.3,
+   33.0
+  ],
+  "description": "stock's keepalive-b answer to our 30.88 poll",
+  "rate": 48000,
+  "sha256": "5cdfc358372a73a0d19b88455beb9b05f18ee9c6a2c1a540cb26cb411df2b6ba"
+ },
+ "r3-ask-answer": {
+  "source": "working/varac-on-air/bench3/r3/gate1/audio/20261021-030150-chat-s2k-chat/chat-s2k-chat__b2a.wav",
+  "samples": [
+   2083200,
+   2164800
+  ],
+  "window_seconds": [
+   43.4,
+   45.1
+  ],
+  "description": "stock's session-drained answer to our 43.02 frame-0 ask",
+  "rate": 48000,
+  "sha256": "d0b95c3945c0420a0cd5b9062b66aab1df3ec7c68f6e649f120f877cc05d18c6"
+ },
+ "b2-0003.05": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   141600,
+   235680
+  ],
+  "burst_seconds": [
+   3.05,
+   4.81
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "141aea497c71a5ba0c7cbf4e88a14e18d68d0621a11ecac711522c63b4419b98"
+ },
+ "b2-0005.70": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   268800,
+   484320
+  ],
+  "burst_seconds": [
+   5.7,
+   9.99
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "7b30d10cba8d0b1a46d7a11ea66cdfad2c18d0729276efcf166cfd073fb840a2"
+ },
+ "b2-0010.89": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   517920,
+   562560
+  ],
+  "burst_seconds": [
+   10.89,
+   11.62
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "454c7dfaa352aea75cfd528f6db9fc2176ed5c68c07e07bd5776980c18c84b92"
+ },
+ "b2-0013.07": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   622560,
+   667200
+  ],
+  "burst_seconds": [
+   13.07,
+   13.8
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "a17877a4ce7c9d7c6b701964ef8a7a6f2f6fe6c8a1a4371d20c2d8c93a8120bd"
+ },
+ "b2-0014.44": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   688320,
+   903840
+  ],
+  "burst_seconds": [
+   14.44,
+   18.73
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "deaa2a6f399886e7f844a7ea61a6d70f65a783253c1f679ea95da69cbb993bb0"
+ },
+ "b2-0019.62": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   936960,
+   982080
+  ],
+  "burst_seconds": [
+   19.62,
+   20.36
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "d38dbb59b30a16a8109c5d27b413f197f23d3f0f071cae588e9d8ae4df480714"
+ },
+ "b2-0031.13": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   1489440,
+   1564800
+  ],
+  "burst_seconds": [
+   31.13,
+   32.5
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "e601e882ecf9d44025bf528a9c32ee7baf917d64eb89d48d460c617cdb6515e0"
+ },
+ "b2-0043.23": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   2070240,
+   2146080
+  ],
+  "burst_seconds": [
+   43.23,
+   44.61
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "3a65ea254f102235911b6dcc0211b07283473980a7c6e27edadbcc6ee88448d2"
+ },
+ "b2-0055.84": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   2675520,
+   2750880
+  ],
+  "burst_seconds": [
+   55.84,
+   57.21
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "ab24f829f3975256541e94237804d39f97dcd1ff595939284076cd382ffbaeb4"
+ },
+ "b2-0904.75": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   43423200,
+   43517280
+  ],
+  "burst_seconds": [
+   904.75,
+   906.51
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "f097b19395f193bcb3ee672c81b1913436e598dff446d9548f5724a993ba214b"
+ },
+ "b2-0907.31": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   43546080,
+   43762080
+  ],
+  "burst_seconds": [
+   907.31,
+   911.61
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "f02b713fe37950b0651903825018b4213b25ae1939e6a629d244d9b13b19cdbd"
+ },
+ "b2-0912.50": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   43795200,
+   43840320
+  ],
+  "burst_seconds": [
+   912.5,
+   913.24
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "d38dbb59b30a16a8109c5d27b413f197f23d3f0f071cae588e9d8ae4df480714"
+ },
+ "b2-0914.67": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   43899360,
+   43944480
+  ],
+  "burst_seconds": [
+   914.67,
+   915.41
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "f1aa76274318357a2dfe41d1751ce5b66793199874943c469ef88341201b8134"
+ },
+ "b2-0916.09": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   43967520,
+   44183040
+  ],
+  "burst_seconds": [
+   916.09,
+   920.38
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "82bb2d58d1ac7e5d5664162b8d72d41b23992e35ff1ee36c6529882baea331b7"
+ },
+ "b2-0921.25": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   44215200,
+   44259840
+  ],
+  "burst_seconds": [
+   921.25,
+   921.98
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "f857dad58c4c55f6b5cfa00c8e5458d2619e6152dac514925ec56504d5086415"
+ },
+ "b2-0932.75": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   44767200,
+   44842560
+  ],
+  "burst_seconds": [
+   932.75,
+   934.12
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "aa7ea51846882e8fb2fd5056a352761805535570ac881b585d5f54bf06c110d6"
+ },
+ "b2-0944.85": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   45348000,
+   45423360
+  ],
+  "burst_seconds": [
+   944.85,
+   946.22
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "93b531fc88ba0eba02d2e07028c88b098c6c4527dc9044b33093d595b9904a45"
+ },
+ "b2-0957.45": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   45952800,
+   46028160
+  ],
+  "burst_seconds": [
+   957.45,
+   958.82
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "02d615bb60c4ddc9f09bc0561de1aaa8ae7b9f393864bab496148fc71701d02f"
+ },
+ "b2-0963.23": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   46230240,
+   46262880
+  ],
+  "burst_seconds": [
+   963.23,
+   963.71
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "8fbc7be11800981e1defce17dc596b862d0830601bd0b057dd798c2a733fafed"
+ },
+ "b2-0974.51": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   46771680,
+   46804320
+  ],
+  "burst_seconds": [
+   974.51,
+   974.99
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "47a3930de63a7ff3cd8c127b4f248eae468ac7c9a7da8ae627ced39757a0a49e"
+ },
+ "b2-0976.81": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   46882080,
+   46914720
+  ],
+  "burst_seconds": [
+   976.81,
+   977.29
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "b775ca4cf58c04d654c2b34e6a06f822d2bccc0088b5bb8e6b2a9e5178cd4e43"
+ },
+ "b2-0979.46": {
+  "source": "working/varac-on-air/bench2/3c/gate1/audio/20261021-034030-chat-g1/chat-g1__b2a.wav",
+  "samples": [
+   47009280,
+   47041920
+  ],
+  "burst_seconds": [
+   979.46,
+   979.94
+  ],
+  "description": "bench 2 3c gate 1, stock B (WI9YZA) to kestrel",
+  "rate": 48000,
+  "sha256": "f33b32afa45b05384e1705297c5fcc337f01e89631a89dec3b5afb546030f82a"
+ },
+ "r3c-l13-close": {
+  "source": "working/varac-on-air/bench3/r3c/gate3-answerer/audio/20261021-042958-chat-cleantx-ans/chat-cleantx-ans__b2a.wav",
+  "samples": [
+   1720320,
+   1968000
+  ],
+  "window_seconds": [
+   35.84,
+   41.0
+  ],
+  "description": "stock's single-frame L13 last over 35.935-39.755 and the quiet behind it",
+  "rate": 48000,
+  "sha256": "20213f301c52d29dcb214c014dce1a700bd3228244ce09d7d54482f1aecfed5c"
+ },
+ "r3c-queries": {
+  "source": "working/varac-on-air/bench3/r3c/gate3-answerer/audio/20261021-042958-chat-cleantx-ans/chat-cleantx-ans__b2a.wav",
+  "samples": [
+   1982400,
+   2428800
+  ],
+  "window_seconds": [
+   41.3,
+   50.6
+  ],
+  "description": "stock's 8-, 16- and 32-symbol queries behind its unanswered last over",
+  "rate": 48000,
+  "sha256": "e8608f567ff65290aa8e1e3b9fe112455deda8912d10d8ecc48e3ff06adc16f7"
+ },
+ "r4-l13-handover": {
+  "source": "working/varac-on-air/bench3/r4/gate3-answerer/audio/20261021-061050-chat-cleantx-ans/chat-cleantx-ans__b2a.wav",
+  "samples": [
+   21763200,
+   22041600
+  ],
+  "window_seconds": [
+   453.4,
+   459.2
+  ],
+  "description": "stock L13 last over 453.515-457.335, our frame 1 gap, its 11-symbol hand-over at 458.205",
+  "rate": 48000,
+  "sha256": "44d992adf1f71465016f8e82be35bba4b2d5535aca28bcae2f86d0c77599d7fa"
+ },
+ "r4-timeout-ident": {
+  "source": "working/varac-on-air/bench3/r4/gate3-answerer/audio/20261021-061050-chat-cleantx-ans/chat-cleantx-ans__b2a.wav",
+  "samples": [
+   24864000,
+   25041600
+  ],
+  "window_seconds": [
+   518.0,
+   521.7
+  ],
+  "description": "stock caller timeout: CW ident only, 518.205-521.450",
+  "rate": 48000,
+  "sha256": "262812b4a97701a5bcdbbf7c3847ba250f79252d0919e51334077717ade75577"
+ },
+ "af39-cq500-answer": {
+  "source": "working/varac-on-air/bench3/af39/cq500-kestrel-cqs/b2a.wav",
+  "samples": [
+   1699200,
+   3086400
+  ],
+  "window_seconds": [
+   35.4,
+   64.3
+  ],
+  "description": "af39 CQ 500, kestrel answers: stock CR 35.665, link-setup, f20 43.441, 17-symbol request 44.465, long request 51.030, DATA L4 53.116 and L5 58.039, release 63.057-63.788 whose first tone reads one bin high",
+  "rate": 48000,
+  "sha256": "86f4eb484cc9ec69796466fd8f08532032823bc7209d69552377d4ca44ef1efe"
+ }
+}

@@ -240,22 +240,18 @@ def test_purgebuffer_empties_the_buffer_without_ending_the_session(server):
         c.close()
 
 
-def test_a_new_host_displaces_the_previous_one_and_keeps_its_session(server):
-    """One host per socket (spec §1). The incumbent's socket is closed on arrival
-    of a replacement, and when that abandoned socket finally unwinds it must not
-    run the host-link failsafe over the newcomer's live session."""
+def test_a_second_attachment_cannot_adopt_the_incumbents_contact(server):
+    """Neither half of a live application attachment may be replaced."""
     srv, cport, dport = server
     first = _connected_client(cport, dport)
     try:
         second = Client("127.0.0.1", cport, dport)
         try:
-            assert first.eof.wait(2.0), "the incumbent connection stayed open"
-            time.sleep(0.2)                      # let the displaced handler unwind
-
+            assert second.eof.wait(2.0), "the competing attachment was not rejected"
+            assert not first.eof.is_set()
             assert srv.modem.connected
-            second.send("STATE")
-            assert second.wait_line("STATE") == "STATE ISS"
-            assert not any(ln.startswith("DISCONNECTED") for ln in second.lines)
+            first.send("STATE")
+            assert first.wait_line("STATE") == "STATE ISS"
         finally:
             second.close()
     finally:
@@ -269,7 +265,10 @@ def test_a_dropped_data_socket_ends_the_session(server):
     c = _connected_client(cport, dport)
     try:
         c.data.close()
-        assert c.wait_present("DISCONNECTED") == "DISCONNECTED"
-        assert c.wait_present("NEWSTATE DISC ") == "NEWSTATE DISC "
+        assert c.eof.wait(2.0), "data loss did not close the command half"
+        deadline = time.monotonic() + 2
+        while srv.modem.connected and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert not srv.modem.connected
     finally:
         c.close()

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import threading
 import time
+import sys
 from dataclasses import dataclass
 
 import numpy as np
@@ -49,7 +50,8 @@ from hfmodem.core.config import StationConfig
 from hfmodem.core.ptt import PttError, RtsPtt
 from hfmodem.core.rates import CARD_RATE_HZ
 from hfmodem.core.rigs import RIGS, resolve_rig
-from hfmodem.core.rig import Cat, Rig, RigError, unkey_on_signal
+from hfmodem.core.rig import Rig, RigError, unkey_on_signal
+from hfmodem.station.process import cat_backend, cat_driver
 
 #: How long each stream is listened to before its level is believed.
 DWELL_S = 2.0
@@ -141,6 +143,8 @@ class Preflight:
 
     def __init__(self, cfg: StationConfig) -> None:
         self.cfg = cfg
+        self.cancelled = lambda: False
+        self.cancel_event = threading.Event()
         self.lines: list[Line] = []
         self.tap: StreamLane | None = None
         # Held on the instance, not in `run`'s frame: `_rig` keys inside the arm
@@ -163,7 +167,10 @@ class Preflight:
                 if self.rig is not None:
                     self.rig.close()
                 if audio is not None:
-                    audio.close()
+                    try:
+                        audio.close()
+                    except Exception as exc:
+                        print(f"!! audio close: {exc}", file=sys.stderr)
         return self.verdict()
 
     def say(self, name: str, verdict: str, detail: str, note: str = "") -> None:
@@ -319,7 +326,9 @@ class Preflight:
         """
         cfg = self.cfg
         wire = (f"{cfg.rig.ptt.backend.upper()} on {cfg.rig.ptt.port}, "
-                f"CAT via rigctld at {cfg.rig.host}:{cfg.rig.port}")
+                + (f"CAT on {cfg.resolved_profile.get('cat_port')}"
+                   if cat_backend(cfg.rig.cat) == "serial"
+                   else f"CAT via rigctld at {cfg.rig.host}:{cfg.rig.port}"))
         rig = None
         try:
             # The constructors are inside the block on purpose. All three are
@@ -327,7 +336,7 @@ class Preflight:
             # surfacing at construction must be a line that could not be
             # measured, not the end of the run.
             rig = self.rig = Rig(
-                model=cfg.rig.model, cat=Cat(cfg.rig.host, cfg.rig.port),
+                model=cfg.rig.model, cat=cat_driver(cfg),
                 ptt=RtsPtt(cfg.rig.ptt.port), profile=cfg.profile,
                 control=cfg.control, mycall=cfg.station.mycall,
                 transmit=cfg.station.transmit, max_key_s=cfg.rig.max_key_s)
@@ -352,11 +361,12 @@ class Preflight:
         note = " ".join(report.notes)
         if report.ptt_proven:
             self.say("keying", OK, detail, note)
-        elif not rig.cat.trusted or not rig.cat.ptt_readable:
-            # Two ways for the readback to be worth nothing. The daemon serves `t`
-            # from its own cache, so "the radio says down" is its memory of our own
-            # last command; or it has no PTT of its own to report, which is the
-            # configuration this station requires and the one it runs. Neither is
+        elif not rig.cat.cache_free or not rig.cat.reads_ptt:
+            # Two ways for the readback to be worth nothing. A rigctld that kept
+            # its cache serves `t` from it, so "the radio says down" is its memory
+            # of our own last command; or the CAT backend has no PTT to report: a
+            # daemon with no PTT of its own, which is the configuration a rigctld
+            # station requires, or a radio that would not answer `TX;`. Neither is
             # evidence either way, and calling either a failure would be as wrong
             # as calling it a pass. The keying measurement below is what can tell.
             self.say("keying", UNKNOWN, detail, note)
@@ -380,6 +390,8 @@ class Preflight:
         recovery: list[float] = []
         try:
             for _ in range(KEYINGS):
+                if self.cancelled():
+                    raise RigError("ownership cancelled by STOP")
                 # A dead stream and a quiet band are the same picture from here,
                 # and one of them makes every number below a fiction.
                 audio.alive()
@@ -388,6 +400,10 @@ class Preflight:
                 recovery.append(r)
                 if rig.retired:
                     raise RigError(f"the rig retired: {rig.retired_why}")
+                if rig.line_state != "low":
+                    raise RigError(f"the keying line is {rig.line_state} after the "
+                                   "preflight unkey; the rig refuses every key until "
+                                   "it reads low")
         except (AudioError, RigError, PttError) as exc:
             for name in ("PTT actuation", "T/R recovery"):
                 self.say(name, STOP, f"after {len(recovery)} of {KEYINGS} keyings",
@@ -447,6 +463,10 @@ class Preflight:
         `Rig.unkey` is careful about, for the same reason: a window where the
         line is up and no timer is scheduled has nothing left to bring it down.
         """
+        if self.cancelled():
+            raise RigError("ownership cancelled by STOP")
+        if rig.line_state != "low":
+            raise RigError(f"keying line is {rig.line_state}")
         deadman = threading.Timer(
             HOLD_S + DEADMAN_SLACK_S, rig.panic_unkey,
             args=(f"preflight held the key past {HOLD_S + DEADMAN_SLACK_S:.2f} s",))
@@ -454,13 +474,17 @@ class Preflight:
         deadman.start()
         try:
             rig.ptt.assert_(True)
-            time.sleep(HOLD_S)
+            if self.cancel_event.wait(HOLD_S) or self.cancelled():
+                raise RigError("ownership cancelled by STOP")
         finally:
             try:
                 rig.ptt.assert_(False)
-                if rig.ptt.sense() is True:
+                state = rig.ptt.sense()
+                if state is True:
                     rig.panic_unkey("the keying line reads high after the preflight "
                                     "deassert")
+                else:
+                    rig.line_state = "low" if state is False else "unconfirmed"
             except PttError as exc:
                 rig.panic_unkey(f"the keying line refused to deassert: {exc}")
             finally:

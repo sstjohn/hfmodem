@@ -22,6 +22,8 @@ refused on a transmit path.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import queue
 import signal
 import sys
@@ -32,6 +34,23 @@ DEVICE_HELP = "capture input: a name as `--list-devices` prints it, or its index
 
 
 def main(argv: list[str] | None = None) -> int:
+    from hfmodem.core import claim
+
+    # The raw PCM pipe must never contain status text. The parent consumes this
+    # separate acknowledgement and forwards it only after the device opened.
+    fd = int(os.environ.get("HFMODEM_CAPTURE_CLAIM_FD", "9"))
+    acknowledgement = int(os.environ["HFMODEM_CAPTURE_ACK_FD"])
+    admission = claim.inherited(fd, launch=True)
+    with os.fdopen(acknowledgement, "w") as status:
+        try:
+            return capture(argv, admission, status)
+        finally:
+            if admission.fd is not None:
+                admission.failed()
+                print("CLAIM NOT ADMITTED capture open failed", file=status, flush=True)
+
+
+def capture(argv, admission, status) -> int:
     import sounddevice as sd
     from hfmodem.core.devices import find_device
 
@@ -52,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     out = sys.stdout.buffer
     with sd.RawInputStream(device=device, channels=1, samplerate=FS,
                            dtype="int16", callback=on_block):
+        with contextlib.redirect_stdout(status):
+            admission.opened()
         while not stop.is_set():
             try:
                 pcm = blocks.get(timeout=0.2)

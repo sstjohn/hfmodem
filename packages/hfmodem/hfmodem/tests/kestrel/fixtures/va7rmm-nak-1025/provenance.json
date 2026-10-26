@@ -1,0 +1,10 @@
+{
+  "source": "operator-data/working/vara-chat/sessions/20261025T195004202082Z/receive.wav",
+  "start_sample": 14404096,
+  "end_sample": 14494720,
+  "sample_rate": 48000,
+  "caller": "VA7RMM",
+  "called": "W9SSJ",
+  "kind": "SESSION_OVER_NAK",
+  "sha256": "e7ad6627ee2dab16dab94e95bcd9c67f4b967bc76b296dc59a75ec6a59bcd73a"
+}

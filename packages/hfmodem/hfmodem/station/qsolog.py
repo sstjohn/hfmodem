@@ -14,12 +14,79 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
+from typing import get_args, get_type_hints
 import re
+import tempfile
 
 _TAG = re.compile(r'<([^:<>]+)(?::(\d+)(?::[^>]*)?)?>')
 HEADER = 'hfmodem QSO log\n<ADIF_VER:5>3.1.4<PROGRAMID:7>hfmodem<EOH>\n'
+
+
+class SessionRecords:
+    def __init__(self, directory):
+        self.directory = Path(directory)
+
+    def read(self, *, warning=None):
+        from .sessions import Session
+        types = get_type_hints(Session)
+        records = []
+        for path in sorted(self.directory.glob('*.json')):
+            try:
+                text = path.read_text(encoding='utf-8')
+            except OSError as exc:
+                if warning is not None:
+                    warning(f'{path.name}: unreadable record skipped: {exc}')
+                continue
+            try:
+                record = json.loads(text)
+                session = Session(**record)
+                for field, annotation in types.items():
+                    allowed = ((list, tuple) if field == 'authority' else
+                               get_args(annotation) or (annotation,))
+                    if type(getattr(session, field)) not in allowed:
+                        raise ValueError(f'invalid session field: {field}')
+                if (record['id'] != path.stem or record['state'] not in
+                        ('starting', 'running', 'stopping', 'ended')
+                        or not isinstance(record['authority'], (list, tuple))):
+                    raise ValueError('invalid session record')
+            except (ValueError, TypeError, KeyError) as exc:
+                try:
+                    path.replace(path.with_name(path.name + '.corrupt'))
+                    detail = f'corrupt record moved aside: {exc}'
+                except OSError as stuck:
+                    detail = f'corrupt record skipped: {exc}; not moved aside: {stuck}'
+                if warning is not None:
+                    warning(f'{path.name}: {detail}')
+                continue
+            records.append(record)
+        return records
+
+    def write(self, record):
+        name = record['id']
+        if not re.fullmatch(r'[a-zA-Z0-9_-]+', name):
+            raise ValueError('invalid session id')
+        self.directory.mkdir(parents=True, exist_ok=True)
+        spare = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                             dir=self.directory, suffix='.tmp', delete=False) as out:
+                spare = Path(out.name)
+                json.dump(record, out, ensure_ascii=False)
+                out.write('\n')
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(spare, self.directory / f'{name}.json')
+            fd = os.open(self.directory, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        finally:
+            if spare is not None:
+                spare.unlink(missing_ok=True)
 
 
 def read_adif(text: str) -> list[dict[str, str]]:

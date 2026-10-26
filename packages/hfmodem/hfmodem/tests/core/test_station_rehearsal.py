@@ -33,6 +33,9 @@ Two properties of a real card matter to the timing and are modelled exactly:
 from __future__ import annotations
 
 import sys
+import os
+import hashlib
+from pathlib import Path
 import threading
 import time
 
@@ -47,6 +50,7 @@ from hfmodem.core.regulatory.part97 import Part97
 from hfmodem.core.rig import Cat, Rig
 from hfmodem.station.arbiter import LIVE, Identity, Refused, TxArbiter, TxRequest
 from hfmodem.tests.core.fakerig import FakePtt, FakeRigctld
+from hfmodem.tests.core.rehearsal_witness import Witness
 
 MYCALL = "W9SSJ"
 BENCH = Unregulated(because="dress rehearsal, no radio")
@@ -119,7 +123,7 @@ class FakeCard:
 
     def Stream(self, *, callback, blocksize=BLOCK, **kw):
         self.blocksize = blocksize
-        self._cb = callback
+        self._cb = self.witness.callback(callback) if getattr(self, "witness", None) and self.witness.enabled else callback
         return self
 
     def start(self) -> None:
@@ -242,7 +246,7 @@ class Bench:
 
 
 @pytest.fixture
-def bench(monkeypatch):
+def bench(monkeypatch, request):
     """The real transmit path, opened the way `station/process.py` opens it."""
     built: list[Bench] = []
 
@@ -251,26 +255,42 @@ def bench(monkeypatch):
         monkeypatch.setitem(sys.modules, "sounddevice", card)
         sa = StationAudio(input_device="fake-in", output_device="fake-out",
                           blocksize=BLOCK)
+        witness = Witness(os.environ.get("HFMODEM_REHEARSAL_WITNESS") == "on", card, sa)
+        card.witness = witness
         sa.open()
         daemon = FakeRigctld(freq=7_100_000)
         ptt = TimedPtt()
         rig = Rig(model="ft891", cat=Cat("127.0.0.1", daemon.port), ptt=ptt,
                   profile=profile or BENCH, control=Control.LOCAL, mycall=MYCALL,
                   transmit=True)
-        rig.cat.open()
-        rig._armed = True
-        rig._dial_hz = daemon.freq
+        rig.arm(prove_ptt=False)
         arb = TxArbiter(sa, rig, identity=Identity(MYCALL, interval_s=600.0),
                         drive=DRIVE, settle_s=SETTLE_S)
         b = Bench(card, sa, rig, ptt, arb, daemon)
+        b.witness = witness
+        if witness.enabled:
+            sa.arm_burst = witness.wrap(sa.arm_burst, "arm")
+            sa.wait_until = witness.wrap(sa.wait_until, "wait")
+            rig.key = witness.wrap(rig.key, "key")
+            rig.cat.command = witness.wrap(rig.cat.command, "cat")
         built.append(b)
         return b
 
     yield build
     for b in built:
-        b.rig.close()
-        b.audio.close()
-        b.daemon.close()
+        try:
+            b.rig.close()
+        finally:
+            try:
+                b.audio.close()
+            finally:
+                try:
+                    b.daemon.close()
+                finally:
+                    destination = os.environ.get("HFMODEM_QUALIFICATION_OBSERVATIONS")
+                    if destination:
+                        name = hashlib.sha256(request.node.nodeid.encode()).hexdigest()
+                        b.witness.flush(Path(destination) / f"station-{name}-{built.index(b)}.json", b)
 
 
 def tone(hz: float, secs: float, rate: int = FS, amp: float = 1.0) -> np.ndarray:
@@ -300,6 +320,7 @@ def amplitude_at(x: np.ndarray, hz: float, rate: int = FS) -> float:
     pytest.param(None, SETTLE_S - _KEY_COST_S, SETTLE_S + 0.002,
                  id="as-soon-as-possible"),
 ])
+@pytest.mark.wall_clock
 def test_the_key_brackets_the_burst_at_both_edges(bench, ahead, lead_lo, lead_hi):
     """Both edges, against the transport, for the two shapes a burst arrives in.
 
@@ -371,6 +392,7 @@ def test_the_key_brackets_the_burst_at_both_edges(bench, ahead, lead_lo, lead_hi
 
 # -- the identification --------------------------------------------------------
 
+@pytest.mark.wall_clock
 def test_the_identification_reaches_the_card_as_audio(bench):
     """A callsign nobody transmitted looks exactly like the incident it explains.
 
@@ -409,6 +431,7 @@ def test_the_identification_reaches_the_card_as_audio(bench):
         f"{hold - want:.3f} s of it carrying nothing")
 
 
+@pytest.mark.wall_clock
 def test_the_identification_is_keyed_before_its_first_element(bench):
     """A callsign missing its first element is not a shortened identification.
 
@@ -529,7 +552,7 @@ def test_a_refused_burst_never_reaches_the_keying_line(bench):
                                emission=centred(7_100_000, 4000.0)))
     time.sleep(0.05)
 
-    assert b.ptt.edges == [], f"a refused burst keyed the transmitter: {b.ptt.edges}"
+    assert not any(on for _, on in b.ptt.edges), f"a refused burst keyed the transmitter: {b.ptt.edges}"
     assert b.ptt.line is False
     written = float(np.abs(b.card.written).max())
     assert written == 0.0, (

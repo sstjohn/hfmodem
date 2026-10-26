@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: CC-BY-4.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Binary FSK: the naval broadcast (STANAG 4481) and MIL-STD-188-110B 5.1
 
 `hfmodem.bateleur.fsk` sends and receives binary FSK as STANAG 4481

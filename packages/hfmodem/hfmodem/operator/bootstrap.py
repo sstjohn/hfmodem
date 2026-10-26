@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Run the same reviewed console from a checkout or an installed wheel."""
 from __future__ import annotations
 
@@ -47,13 +49,16 @@ def tools_root():
     return root, True
 
 
+def installed_data():
+    return Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'hfmodem'
+
+
 def environment(root, installed):
     os.environ['HFMODEM_PYTHON'] = sys.executable
     if installed:
         os.environ['HFMODEM_OPERATOR_INSTALLED'] = '1'
-        data = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'hfmodem'
         config = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'hfmodem'
-        os.environ.setdefault('HFMODEM_DATA_DIR', str(data))
+        os.environ.setdefault('HFMODEM_DATA_DIR', str(installed_data()))
         os.environ.setdefault('HFMODEM_STATION', str(config / 'station.toml'))
     elif (root / 'station.toml').is_file():
         os.environ.setdefault('HFMODEM_STATION', str(root / 'station.toml'))
@@ -88,3 +93,16 @@ def winlink(argv=None):
     except (ValueError, OSError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
+
+
+def face():
+    try:
+        root, installed = tools_root()
+    except RuntimeError:
+        return None
+    spec = importlib.util.spec_from_file_location('desk.face', root / 'tools/desk/face.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    data = installed_data() if installed else root / 'operator-data'
+    module.data_root = Path(os.environ.get('HFMODEM_DATA_DIR', data)).expanduser().resolve()
+    return module

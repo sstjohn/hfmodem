@@ -10,10 +10,13 @@ import re
 import select
 import socket
 import threading
+import time
 
 MAX_LINE = 4096
 MAX_PENDING = 64
 MAX_OUTPUT = 256 * 1024
+MAX_DELIVERY = 8 * 1024 * 1024
+STALL_S = 2.0
 _request = threading.local()
 
 
@@ -65,6 +68,15 @@ class Opening:
         return data
 
 
+def join_threads(threads, deadline):
+    threads = tuple(t for t in threads if t is not None)
+    current = threading.current_thread()
+    for thread in threads:
+        if thread is not current:
+            thread.join(max(0.0, deadline - time.monotonic()))
+    return all(not thread.is_alive() for thread in threads)
+
+
 class Connection:
     """One writer owns the socket; producers wait for output capacity."""
 
@@ -73,7 +85,7 @@ class Connection:
         self._opening = Opening(line=line, line_limit=line_limit)
         self._input = bytearray()
         sock.settimeout(0.5)
-        if nodelay:
+        if nodelay and getattr(sock, 'family', socket.AF_INET) in (socket.AF_INET, socket.AF_INET6):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.closed = False
         self._bytes = 0
@@ -81,18 +93,22 @@ class Connection:
         self._drained = threading.Condition(self._lock)
         self._send_lock = threading.Lock()
         self._delivery = deque()
+        self._delivery_bytes = 0
         self._delivering = False
         self._close_lock = threading.Lock()
         self._closing = False
         self._q = queue.Queue(maxsize=MAX_PENDING)
+        self._ready = threading.Event()
+        self._opening_thread = None
         self._writer = threading.Thread(target=self._write, daemon=True, name="host-writer")
         self._writer.start()
         self._delivery_thread = threading.Thread(target=self._deliver, daemon=True,
                                                  name="host-delivery")
         self._delivery_thread.start()
-        self._ready = threading.Event()
         if eager:
-            threading.Thread(target=self._read_opening, daemon=True, name="host-opening").start()
+            self._opening_thread = threading.Thread(target=self._read_opening, daemon=True,
+                                                     name="host-opening")
+            self._opening_thread.start()
         else:
             self._ready.set()
 
@@ -101,6 +117,15 @@ class Connection:
 
     def settimeout(self, value):
         self.sock.settimeout(0.5 if value is None else min(0.5, max(0.01, value)))
+
+    def join_workers(self, timeout=2.):
+        """Verify retirement before a supervisor releases this attachment."""
+        deadline = time.monotonic()+timeout
+        for worker in (self._writer, self._delivery_thread, self._opening_thread):
+            if worker is not None and worker is not threading.current_thread():
+                worker.join(max(0., deadline-time.monotonic()))
+                if worker.is_alive():
+                    raise RuntimeError('host socket worker did not retire')
 
     def _read_opening(self):
         try:
@@ -158,16 +183,39 @@ class Connection:
         self._sendall(data, draining=False)
 
     def send_later(self, data):
-        """Hand off modem output without waiting for a client's socket.
+        """Retain received bursts through short host stalls without blocking the modem."""
+        data = bytes(data)
+        with self._drained:
+            if self.closed or self._closing:
+                return
+            stalled = self._delivery_bytes + len(data) > MAX_DELIVERY
+            if not stalled:
+                self._delivery.append(data)
+                self._delivery_bytes += len(data)
+                self._drained.notify_all()
+        if stalled:
+            self.cancel()
 
-        The backlog must retain received data while the client is stalled;
-        applying its backpressure to reception would lose incoming samples.
+    def send_bounded(self, data):
+        """Nonblocking modem output with explicit attachment failure on overflow.
+
+        Existing send_later callers retain their own policy. Legacy dual-socket
+        modem hosts use this bounded policy so stopped consumers cannot grow
+        memory indefinitely or block a receive/ACK clock.
         """
         data = bytes(data)
         with self._drained:
-            if not self.closed and not self._closing:
+            if self.closed or self._closing:
+                return False
+            overflow = (self._delivery_bytes + self._bytes + len(data) > MAX_OUTPUT
+                        or len(self._delivery) >= MAX_PENDING)
+            if not overflow:
                 self._delivery.append(data)
+                self._delivery_bytes += len(data)
                 self._drained.notify_all()
+                return True
+        self.close(discard=True)
+        return False
 
     def _deliver(self):
         while True:
@@ -176,27 +224,42 @@ class Connection:
                 if self.closed:
                     return
                 data = self._delivery.popleft()
+                self._delivery_bytes -= len(data)
                 self._delivering = True
             try:
                 self._sendall(data, draining=True)
             finally:
                 with self._drained:
+                    self._delivery_bytes -= len(data)
                     self._delivering = False
                     self._drained.notify_all()
 
     def _sendall(self, data, *, draining):
         data = memoryview(bytes(data))
-        with self._send_lock:
+        deadline = time.monotonic() + STALL_S
+        if not self._send_lock.acquire(timeout=STALL_S):
+            self.cancel()
+            return
+        stalled = False
+        try:
             for start in range(0, len(data), MAX_OUTPUT):
                 chunk = bytes(data[start:start + MAX_OUTPUT])
                 with self._drained:
-                    self._drained.wait_for(
+                    ready = self._drained.wait_for(
                         lambda: self.closed or (self._closing and not draining)
-                        or (not self._q.full() and self._bytes + len(chunk) <= MAX_OUTPUT))
+                        or (not self._q.full() and self._bytes + len(chunk) <= MAX_OUTPUT),
+                        timeout=max(0, deadline - time.monotonic()))
+                    if not ready:
+                        stalled = True
+                        break
                     if self.closed or (self._closing and not draining):
                         return
                     self._q.put_nowait(chunk)
                     self._bytes += len(chunk)
+        finally:
+            self._send_lock.release()
+            if stalled:
+                self.cancel()
 
     def _write(self):
         while not self.closed:
@@ -207,15 +270,20 @@ class Connection:
             with self._drained:
                 self._drained.notify_all()
             view = memoryview(data)
+            deadline = time.monotonic() + STALL_S
             try:
                 while view and not self.closed:
                     try:
                         sent = self.sock.send(view)
                     except (socket.timeout, BlockingIOError):
+                        if time.monotonic() >= deadline:
+                            self.cancel()
+                            return
                         continue
                     if not sent:
                         raise ConnectionResetError("host socket stopped writing")
                     view = view[sent:]
+                    deadline = time.monotonic() + STALL_S
             except OSError:
                 self.close()
                 return
@@ -241,24 +309,33 @@ class Connection:
         else:
             self.sock.shutdown(how)
 
-    def close(self):
-        if not self._close_lock.acquire(blocking=False):
-            return
-        try:
+    def close(self, *, discard=False):
+        if not discard:
+            self._drain_output()
+        self.cancel()
+
+    def cancel(self):
+        with self._drained:
             if self.closed:
                 return
-            self._drain_output()
-            with self._drained:
-                self.closed = True
-                self._delivery.clear()
-                self._drained.notify_all()
-            try:
-                self.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            self.sock.close()
-        finally:
-            self._close_lock.release()
+            self.closed = True
+            self._delivery.clear()
+            self._delivery_bytes = 0
+            self._drained.notify_all()
+        self._ready.set()
+        try:
+            self._q.put_nowait(b"")
+        except queue.Full:
+            pass
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.sock.close()
+
+    def join(self, timeout: float) -> bool:
+        return join_threads((self._writer, self._delivery_thread, self._opening_thread),
+                            time.monotonic() + timeout)
 
 
 def posted(post, fn, timeout=5.0, *, request=None):

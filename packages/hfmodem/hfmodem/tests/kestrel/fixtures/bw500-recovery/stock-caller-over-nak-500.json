@@ -1,0 +1,111 @@
+{
+  "name": "stock-caller-over-nak-500 (semantics assigned from observed effect only)",
+  "what": "The 32-symbol single-tone session frame a stock VARA HF 4.9.0 CALLER keys at BW500 after it failed the responder's DATA over, in answer to the responder's session-responder-idle. The responder answered it by re-sending the unacknowledged bytes from speed level 1 and climbing (1 -> 2 -> 4).",
+  "provenance": {
+    "run": "working/vara-evening-en63bc-0910/analysis/stock500-recovery/runs/20260911T053604Z-500-fault-rms0.7",
+    "cable": "a2b.wav (BlackHole 16ch ch0, stock A -> stock B)",
+    "burst_samples": [
+      833517,
+      899918
+    ],
+    "burst_s": [
+      17.365,
+      18.748
+    ],
+    "slice_samples": [
+      828717,
+      904718
+    ],
+    "slice_pad_samples": 4800,
+    "slice_sha256": "4eda797008e5d7968cc5476e32777253e7b745245ffb89c9e6fb59012fb90dee",
+    "witness_run": "working/vara-evening-en63bc-0910/analysis/stock500-recovery/runs/20260911T053812Z-500-fault-rms0.7",
+    "witness_burst_s": [
+      17.398,
+      18.781
+    ],
+    "witness_tones_identical": true
+  },
+  "link": {
+    "caller": "W9SSJ",
+    "called": "KC9GHZ",
+    "bw": "500",
+    "keyed_by_fit": "KC9GHZ (called)"
+  },
+  "waveform": {
+    "symbols": 32,
+    "symbol_samples": 2048,
+    "preamble": [
+      74
+    ],
+    "payload_symbols": 31,
+    "tones": [
+      74,
+      68,
+      58,
+      50,
+      64,
+      70,
+      58,
+      58,
+      56,
+      68,
+      56,
+      52,
+      60,
+      74,
+      52,
+      50,
+      68,
+      58,
+      72,
+      58,
+      56,
+      56,
+      76,
+      54,
+      50,
+      72,
+      74,
+      52,
+      60,
+      68,
+      64,
+      58
+    ],
+    "duration_s": 1.383,
+    "alphabet": "BW500_TONES (base 50, one parity)"
+  },
+  "generator_fit": {
+    "states": [
+      "0x499ff4"
+    ],
+    "fits": [
+      {
+        "callsign": "KC9GHZ",
+        "seed_off": 60,
+        "preadv": 1117,
+        "position": 18,
+        "matched": 31,
+        "of": 31,
+        "known_as": null
+      }
+    ]
+  },
+  "timing_s": {
+    "corrupted_over": [
+      9.951,
+      14.241
+    ],
+    "responder_idle": [
+      15.746,
+      17.123
+    ],
+    "this_frame": [
+      17.365,
+      18.748
+    ],
+    "caller_silent_in_turnaround_s": 1.505,
+    "idle_end_to_frame_start_s": 0.242
+  },
+  "not_in_production": "vara_frames.BURSTS holds no (60, 1117) descriptor; nothing added by this experiment."
+}

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """A Trimode banner that ends without a SID expires the mail stage; one that
 carries the SID reaches its turn. Frames are the new P3 payloads of the arms,
 one per 1.25 s cycle, the idle tail continued in the gateway's own rotation."""

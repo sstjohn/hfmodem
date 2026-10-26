@@ -501,6 +501,20 @@ def connect_response(bw: str = "2300", level: int = 4) -> BurstKind:
         kind, preadv=kind.preadv - (4 - level) * lattice_step(kind))
 
 
+@lru_cache(maxsize=None)
+def chat_setup_response(bw: str = "2300", level: int = 4) -> BurstKind:
+    """A CHAT ON answerer's connect answer at ``bw``: the connect-response
+    payload offering setup speed ``level`` behind one preamble tone, 16 symbols
+    against 23.
+
+    Stock 4.9.0 pairs, 2026-10-18 at BW500 (289/721, the BW500 offer's own
+    stream) and 2026-10-22 at BW2300 and BW2750 (bench 3 `s2s-2300` 4.950 s and
+    `s2s-2750` 4.950 s, each read by our caller as the bandwidth's level-4 offer
+    at lattice frame 17, 15/15)."""
+    return replace(connect_response(bw, level), name="session-chat-setup-response",
+                   preamble=(62,))
+
+
 #: The alphabet a station running at BW draws its payload tones from. The
 #: bandwidth changes the alphabet and nothing else about a session burst
 #: [spec 04 §4.2.1], which is what lets one table of descriptors serve them all.
@@ -609,9 +623,9 @@ def lead_state(caller: str, responder: bool, bw: str) -> int:
     return _answer_frame(caller, _CONTROL_SEED[responder], bw, 1)[1]
 
 
-@lru_cache(maxsize=1024)
-def _answer_frame(callsign: str, seed_off: int, bw: str,
-                  idx: int) -> tuple[tuple[Pair, ...], int]:
+def _answer_draws(callsign: str, seed_off: int, bw: str):
+    """The answer stream of ``callsign`` at ``seed_off``: one ``(pa, pb, da, db)``
+    per pair, and the generator state behind it, without end."""
     cs = normalize_callsign(callsign)
     alpha = ALPHABETS[str(bw)]
     crc = crc16_genibus(cs.encode("ascii"))
@@ -623,16 +637,43 @@ def _answer_frame(callsign: str, seed_off: int, bw: str,
         s = _lcg(s)
         return (s * n) >> 24
 
-    for _ in range(idx + 1):
-        tail = []
-        for k in range(7):
-            pa = draw(alpha.n_p)
-            while (pb := draw(alpha.n_p)) == pa:
-                pass
-            da, db = draw(7), draw(7)
-            base = alpha.base + alpha.parity(k, 1)
-            tail.append(tuple(sorted((base + 14 * pa + 2 * da, base + 14 * pb + 2 * db))))
-    return tuple(tail), s
+    while True:
+        pa = draw(alpha.n_p)
+        while (pb := draw(alpha.n_p)) == pa:
+            pass
+        da, db = draw(7), draw(7)
+        yield (pa, pb, da, db), s
+
+
+@lru_cache(maxsize=1024)
+def answer_pairs(callsign: str, seed_off: int, bw: str, start: int, n: int = 7) -> tuple[Pair, ...]:
+    """``n`` pairs of the answer stream from pair ``start``, as a burst keys them:
+    the draws are the stream's, the parity is the burst position's.
+
+    Frame-aligned starts give the frames; the idle handbacks start mid-frame
+    [_IDLE_ANSWER_PAIR], and on the two-parity alphabets their pairs read one bin
+    off at every odd offset until the parity follows the burst (bench 3 s2s-2750
+    79.80 s, pair 141: 7/7 so, 1/7 spliced from the frames)."""
+    alpha = ALPHABETS[str(bw)]
+    draws = _answer_draws(callsign, seed_off, bw)
+    for _ in range(start):
+        next(draws)
+    pairs = []
+    for k in range(n):
+        (pa, pb, da, db), _ = next(draws)
+        base = alpha.base + alpha.parity(k, 1)
+        pairs.append(tuple(sorted((base + 14 * pa + 2 * da, base + 14 * pb + 2 * db))))
+    return tuple(pairs)
+
+
+@lru_cache(maxsize=1024)
+def _answer_frame(callsign: str, seed_off: int, bw: str,
+                  idx: int) -> tuple[tuple[Pair, ...], int]:
+    draws = _answer_draws(callsign, seed_off, bw)
+    for _ in range(7 * idx + 6):
+        next(draws)
+    _, s = next(draws)
+    return answer_pairs(callsign, seed_off, bw, 7 * idx), s
 
 
 def _answers(called: str, bw: str, idx: int) -> tuple:
@@ -654,6 +695,19 @@ def over_continue_down(called: str, bw: str) -> tuple:
 def over_continue_frames(called: str, bw: str, frames) -> dict[int, tuple]:
     """``{frame: (caller's, responder's)}`` continues at the given frames."""
     return {idx: _answers(called, bw, idx) for idx in frames}
+
+
+def receiver_disconnect(called: str, bw: str) -> tuple:
+    """Called receiver's eight-symbol close, answer stream frame 2.
+
+    Two independent stock 4.9.0 virtual-cable contacts on 20 October match all
+    eight pairs before closing CW at BW500, for W9SSJ-15 and W9SSJ-13; at BW2300
+    the same frame answered our caller's poll 7/7 ahead of the ident (bench 3
+    `cq2300-stock-cqs`, 66.58 s, 2026-10-22). This is distinct from the called
+    sender's 32-symbol SESSION_DISCONNECT_REQ_RESPONDER. The caller's
+    receiver-close form remains unqualified.
+    """
+    return _answers(called, bw, 2)[1]
 
 
 def nak(called: str, bw: str) -> tuple:
@@ -683,6 +737,71 @@ def turn_grant(called: str, bw: str) -> tuple:
     frame 13, keyed to the CALLED station. Behind a turn-request of the caller's,
     and unasked behind the caller's answer to the last over of a delivery."""
     return CONNECTED_ACK_PREAMBLE + answer_tail(called, _ANSWER_SEED[1], bw, 13)
+
+
+def answer_query(called: str, bw: str) -> tuple:
+    """The answerer's eight-symbol query behind an unanswered over of its own,
+    responder answer-stream frame 11 (BW500 erasure bench, 2026-10-18)."""
+    return _answers(called, bw, 11)[1]
+
+
+#: Where on the called station's answer streams the 11-symbol idle handback
+#: starts, ``(responder's, caller's)`` pair, by bandwidth. The phase is the
+#: bandwidth's and the role's, not a frame boundary: BW500 11/11 at L6 and twice
+#: at L13 (stock pairs of 2026-10-18; pair 137 reads 6/11 for the responder's),
+#: BW2300 and BW2750 three answerer handbacks and one caller handback each behind
+#: level-5 overs (bench 3 `s2s-2300`, `s2s-2750`, 2026-10-22; the next phase
+#: either side scores under 1.9 against 2.6-3.2).
+_IDLE_ANSWER_PAIR = {"500": (136, 137), "2300": (140, 140), "2750": (139, 141)}
+
+
+def _idle_answer(called: str, seed: int, bw: str, pair: int) -> tuple:
+    return CONNECTED_ACK_PREAMBLE + answer_pairs(called, seed, bw, pair)
+
+
+def responder_post_delivery_idle(called: str, bw: str) -> tuple:
+    """The answerer's reply to the caller's frame-1 final ACK of a delivery whose
+    last over was above the base level: seven pairs of the called station's
+    responder answer stream from the bandwidth's pair  [_IDLE_ANSWER_PAIR]."""
+    return _idle_answer(called, _ANSWER_SEED[1], bw, _IDLE_ANSWER_PAIR[str(bw)][0])
+
+
+def caller_turn_grant(called: str, bw: str) -> tuple:
+    """The caller's frame-13 handover, measured at BW500 after a high-speed final
+    DATA over and behind the answerer's short close ask (item7, 2026-10-18)."""
+    return CONNECTED_ACK_PREAMBLE + answer_tail(called, _ANSWER_SEED[0], bw, 13)
+
+
+def responder_recovery_confirmation(called: str, bw: str) -> tuple:
+    """BW500 stock 4.9.0 confirms a repeated final DATA ACK at pair 135.
+
+    N5YYF stock/stock lost-ACK bench, 2026-10-25: all eleven pairs match.
+    This confirms delivery; a separate turn request and grant follow it.
+    """
+    if bw != '500':
+        raise NotImplementedError('recovery confirmation measured only at BW500')
+    return _idle_answer(called, _ANSWER_SEED[1], bw, 135)
+
+
+def responder_idle_answer(called: str, bw: str) -> tuple:
+    """BW500 reply to the caller's control-frame-1 idle poll.
+
+    Three independent stock-interface calls (2026-10-20), including a held-out
+    callsign distinguishing draw offsets from pair offsets, select seven pairs
+    starting at pair 137 of the called station's responder answer stream. This
+    is not aligned to the seven-pair frames used by continue and turn-grant.
+    """
+    if bw != '500':
+        raise NotImplementedError('responder idle answer measured only at BW500')
+    return _idle_answer(called, _ANSWER_SEED[1], bw, 137)
+
+
+def caller_idle_answer(called: str, bw: str) -> tuple:
+    """The caller's answer stream's seven pairs from the bandwidth's pair: a
+    stock CHAT ON caller's answer to the frame-1 acknowledgement of a delivery
+    that closed above the base level (2026-10-18 data runs, 11/11 on four BW500
+    tapes; one each at BW2300 and BW2750 on 2026-10-22)  [_IDLE_ANSWER_PAIR]."""
+    return _idle_answer(called, _ANSWER_SEED[0], bw, _IDLE_ANSWER_PAIR[str(bw)][1])
 
 
 def over_continue_state(called: str, level: int, field: int) -> tuple | None:
@@ -971,6 +1090,13 @@ SESSION_RETRY_QUERY_ANSWER_B = BurstKind(
 # occurrence with silence.
 SESSION_TURN_REQUEST_RESPONDER = BurstKind(
     "session-turn-request-responder", (74,), 31, 1078, 1, 1, keyed_by="caller")
+# Frame 1 of that stream, the responder's counterpart of SESSION_TURN_IDLE: it
+# took the hand-over and holds the turn with nothing to send. Stock keys it
+# 0.08-0.17 s behind the release or the 32-symbol confirm and every 3.17 s after
+# until something asks; an unread hand-over draws the turn-request again instead.
+# 109 keyings in 3258 cable files, 32/32 each, none past frame 1.
+SESSION_TURN_IDLE_RESPONDER = BurstKind(
+    "session-turn-idle-responder", (74,), 31, 1078, 63, 1, keyed_by="caller")
 
 # What the responder keys on its own cadence between finishing a DATA over and
 # its peer's answer to it — the same slot SESSION_RESPONDER_IDLE was read in,
@@ -1182,6 +1308,28 @@ SESSION_RESPONDER_OVER_ANSWER = BurstKind(
 SESSION_TURN_RELEASE = BurstKind(
     "session-turn-release", (62, 67), 15, 61, 391, 1)
 
+# BW500 CHAT ON answering profile, stock 4.9.0 pairs of 2026-10-18 for two
+# callsign pairs: the answerer's
+# 16-symbol connect answer, the 851/1079 short requests, and the f20 member
+# of each role's release family, which hands over a turn with nothing in it.
+SESSION_CHAT_SETUP_RESPONSE = BurstKind(
+    "session-chat-setup-response", (62,), 15, 289, 721)
+SESSION_TURN_REQUEST_SHORT = BurstKind(
+    "session-turn-request-short", (62, 67), 15, 851, 1, keyed_by="caller")
+SESSION_TURN_REQUEST_RESPONDER_SHORT = BurstKind(
+    "session-turn-request-responder-short", (62, 67), 15, 1079, 1, keyed_by="caller")
+SESSION_TURN_IDLE_SHORT = BurstKind(
+    "session-turn-idle-short", (62, 67), 15, 61, 601, 1)
+# Stock's answerer acknowledges a link-setup whose greeting ask is below level 4
+# with this frame, not the 11-symbol control burst: the frame behind its short
+# turn-request on its 1079 stream, keyed to the caller. Bench 3 af547a830,
+# 2026-10-23, asks at 3 and 2 under noise: 15 of 15 summed over six repeats each,
+# keyed every 3.25 s while the caller's confirm did not come.
+SESSION_CONNECTED_ACK_SHORT = BurstKind(
+    "session-connected-ack-short", (62, 67), 15, 1079, 31, keyed_by="caller")
+SESSION_TURN_IDLE_RESPONDER_SHORT = BurstKind(
+    "session-turn-idle-responder-short", (62, 67), 15, 289, 601, 1)
+
 # The responder's counterpart is SESSION_TURN_RELEASE_RESPONDER above: the same
 # preamble and the same lattice position, keyed with the responder's SEED_OFF.
 
@@ -1209,6 +1357,13 @@ SESSION_DISCONNECT_REQ = BurstKind(
 # payload tones keyed to the called station, immediately ahead of its CW ident.
 SESSION_DISCONNECT_REQ_RESPONDER = BurstKind(
     "session-disconnect-request-responder", (74,), 31, 288, 125, 1)
+# Its 16-symbol form, 289/61 at position 2 of the short lattice as 288/125 is on
+# the long one, keyed to the called station. Stock's CHAT ON answerer closed
+# with it in its own turn, behind our f13 release, then keyed its CW ident:
+# bench 2 gate 5a contact 2 on both candidates (2026-10-21, b2a 168.45 and
+# 168.51 s), 16 of 16.
+SESSION_DISCONNECT_REQ_RESPONDER_SHORT = BurstKind(
+    "session-disconnect-request-responder-short", (62,), 15, 289, 61)
 
 # The 16-symbol burst that same loopback close was read as ending on. Nothing
 # answered the close above — on the 2026-08-26 bench, or against a stock 4.9.0 on
@@ -1244,6 +1399,7 @@ BURSTS = {b.name: b for b in (CR, CR500, CR2750, CONNECT_RESPONSE,
                               SESSION_DRAINED, SESSION_DRAINED_RESPONDER,
                               SESSION_TURN_RELEASE_RESPONDER,
                               SESSION_TURN_REQUEST_RESPONDER,
+                              SESSION_TURN_IDLE_RESPONDER,
                               SESSION_RESPONDER_OVER_IDLE,
                               SESSION_RESPONDER_OVER_ANSWER,
                               SESSION_OVER_NAK_RESPONDER,

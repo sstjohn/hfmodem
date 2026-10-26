@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """`console rtty qso`: the RTTY terminal on the station rig, and its record. The
 launcher's output goes to arm.log and nowhere else, because the terminal owns /dev/tty."""
 from __future__ import annotations
@@ -9,7 +11,7 @@ import json
 import os
 from pathlib import Path
 import queue
-import signal
+import re
 import subprocess
 import threading
 from types import SimpleNamespace
@@ -28,6 +30,8 @@ ARM_LOG_LINES = 10000
 #: What the RTTY path prints about the keying line at its end: the keyer handing
 #: the line back (read LOW, or not), and `prove_unkeyed` reading the receiver.
 VERDICTS = ('keying line handed back', 'receiver rms', 'CANNOT PROVE PTT IS DOWN', 'PTT VERDICT')
+#: A session's band change, as its terminal says it in arm.log.
+BAND_LINE = re.compile(r'BAND (\d+) m (\d+) Hz')
 
 
 def parser():
@@ -106,6 +110,7 @@ class Launcher:
 
     def __init__(self, process, sink):
         self.process, self.sink, self.verdicts = process, sink, []
+        self.moved = lambda band, dial: None
         self.lost, self.trouble = 0, None
         self._lines = queue.Queue(ARM_LOG_LINES)
         self._writer = threading.Thread(target=self._write, daemon=True)
@@ -128,13 +133,20 @@ class Launcher:
         self.trouble = self.trouble or f'{type(exc).__name__}: {exc}'
 
     def read(self):
-        for line in self.process.stdout:
-            if is_verdict(line):
-                self.verdicts.append(line.strip())
-            try:
-                self._lines.put_nowait(line)
-            except queue.Full:
-                self._lose(OSError('arm.log fell behind'))
+        return arm.pump(self.process, self, self)
+
+    def write(self, line):
+        if is_verdict(line):
+            self.verdicts.append(line.strip())
+        elif band := BAND_LINE.fullmatch(line.strip()):
+            self.moved(int(band[1]), int(band[2]))
+        try:
+            self._lines.put_nowait(line)
+        except queue.Full:
+            self._lose(OSError('arm.log fell behind'))
+
+    def feed(self, line):
+        return ()
 
     def finish(self, timeout=5):
         """End the writer, waiting at most `timeout`; True when arm.log is closed."""
@@ -149,13 +161,18 @@ class Launcher:
         """Stop a launcher still up (its trap halts the terminal, whose TERM
         unkeys), read it to the end and wait for it; None when it never finished."""
         if self.process.poll() is None:
-            self.process.terminate()
-        reader = threading.Thread(target=self.read, daemon=True)
+            self.process._claim_child.terminate()
+        def drain():
+            try:
+                self.read()
+            except (OSError, RuntimeError, ValueError) as error:
+                self._lose(error, lines=0)
+        reader = threading.Thread(target=drain, daemon=True)
         reader.start()
         try:
             code = self.process.wait(timeout=STOP_S)
         except subprocess.TimeoutExpired:
-            self.process.kill()
+            claim.end_child(self.process)
             return None
         reader.join(timeout=5)
         return code
@@ -167,6 +184,7 @@ class Launcher:
     def tell(self):
         """The keying-line verdict, said the moment the launcher has settled and
         before anything that touches the disk."""
+        self.reported = True
         print(f'  keying line: {self.verdict}' if self.verdict else
               '  keying line: confirmation unavailable -- check the transmitter.', flush=True)
 
@@ -176,113 +194,186 @@ class Launcher:
         return None
 
 
-def record(plan, directory, start, held, stop):
-    start(plan, directory, say=lambda line: tell(directory, line), spawned=held.append, stop=stop)
+def record(plan, directory, start, spawned, stop, **where):
+    start(plan, directory, say=lambda line: tell(directory, line), spawned=spawned, stop=stop, **where)
 
 
-def fly(plan):
+def end_recorder(process):
+    """Retire an owned recorder, including one that exited during placement."""
+    if process.poll() is not None:
+        return
+    if not hasattr(process, '_claim_child'):
+        try:
+            claim.remember(process)
+        except claim.hardware.ClaimError:
+            # Placement can reap a failed recorder between poll and identity.
+            # A live but unidentifiable process must still fail closed.
+            if process.poll() is None:
+                raise
+            return
+    claim.end_child(process)
+
+
+class Witness:
+    """One worker owns initial placement and every later replacement in order.
+
+    The log reader only queues a move, so a slow witness search never holds up
+    terminal output or shutdown. The shared stop event cancels placement at exit.
+    """
+    def __init__(self, directory, held, stop):
+        self.directory, self.held, self.stop = directory, held, stop
+        self.moves, self.current = queue.Queue(), []
+
+    def move(self, plan, *, stem='witness'):
+        self.moves.put((plan, stem))
+
+    def spawned(self, process):
+        self.held.append(process)
+        self.current.append(process)
+
+    def run(self):
+        while not self.stop.is_set():
+            try:
+                plan, stem = self.moves.get(timeout=.1)
+            except queue.Empty:
+                continue
+            if self.stop.is_set():
+                break
+            try:
+                for old in self.current:
+                    end_recorder(old)
+                self.current.clear()
+                station.place_kiwi(plan, self.directory, spawned=self.spawned, stop=self.stop,
+                                   say=lambda line: tell(self.directory, line), stem=stem)
+            except Exception as error:
+                tell(self.directory, f'NO WITNESS: replacement failed: {error}')
+
+
+def fly(plan, *, holds=None, header=None):
     directory = Path(plan['directory'])
-    with claim.lease(HOLDS):
-        read = plan['dial_hz'] or station.cat('f', selection=station.selection_for_plan(plan))
-        dial = int(read) if str(read or '').isdigit() else None
-        plan = dict(plan, dial_hz=dial, started_utc=datetime.now(timezone.utc).isoformat(),
-                    readings=station.check_rig(dict(plan, dial_hz=dial or 0)))
+    with claim.lease(holds or HOLDS, env=plan.get('env')):
+        held, recorders, stop = [], [], threading.Event()
+        launcher = sink = owner = admission = process = None
+        code = None
+        plan = dict(plan, started_utc=datetime.now(timezone.utc).isoformat())
         directory.mkdir(parents=True)
         record_path = directory / 'provenance.json'
-        record_path.write_text(json.dumps(plan, indent=2) + '\n')
-        for line in station.spell_environment(plan['readings'],
-                                              selection=station.selection_for_plan(plan)):
-            print(line, flush=True)
-        print(arm.spelled(plan), flush=True)
-        starts = [station.start_tap]
-        if plan['adjustments']['kiwi'] is not None:
-            if dial:
-                starts.append(station.place_kiwi)
-            else:
-                tell(directory, 'NO WITNESS: the rig gave no dial to place it on')
-        held, recorders, stop, code = [], [], threading.Event(), None
-        launcher = sink = interrupt = owner = None
-        interrupted = False
-
-        def operator_stop(_signum, _frame):
-            nonlocal interrupted
-            interrupted = True
-            # Popen must finish handing us the child before an interrupt can
-            # unwind: otherwise a newly spawned launcher would have no owner.
-            if launcher is not None:
-                raise KeyboardInterrupt
-
         try:
-            for start in starts:
+            read = plan['dial_hz'] or station.cat('f', selection=station.selection_for_plan(plan))
+            dial = int(read) if str(read or '').isdigit() else None
+            plan.update(dial_hz=dial, readings=station.check_rig(dict(plan, dial_hz=dial or 0)))
+            record_path.write_text(json.dumps(plan, indent=2) + '\n')
+            selection = station.selection_for_plan(plan)
+            preflight = [*station.spell_environment(plan['readings'], selection=selection),
+                         arm.spelled(plan)]
+            loud = station.codec_warning(plan['readings'], selection=selection)
+            print('\n'.join(filter(None, [header(plan), loud])) if header else '\n'.join(preflight),
+                  flush=True)
+            def start(begin, spawned, plan=plan, **where):
                 recorders.append(threading.Thread(target=record,
-                                                  args=(plan, directory, start, held, stop),
-                                                  daemon=True))
+                    args=(plan, directory, begin, spawned, stop), kwargs=where, daemon=True))
                 recorders[-1].start()
+
+            witness = Witness(directory, held, stop)
+            if plan['adjustments']['kiwi'] is not None:
+                recorders.append(threading.Thread(target=witness.run, daemon=True))
+                recorders[-1].start()
+
+            def moved(band, dial):
+                plan.setdefault('bands', []).append(dict(band_m=band, dial_hz=dial,
+                                                         utc=datetime.now(timezone.utc).isoformat()))
+                if plan['adjustments']['kiwi'] is not None:
+                    witness.move(dict(plan, band_m=band, dial_hz=dial),
+                                 stem=f'witness-{len(plan["bands"])}-{band}m')
+
+            start(station.start_tap, held.append)
+            if plan['adjustments']['kiwi'] is not None:
+                if dial:
+                    witness.move(plan)
+                else:
+                    tell(directory, 'NO WITNESS: the rig gave no dial to place it on')
             sink = (directory / 'arm.log').open('w')
-            # A stop directed only to the console must end the launcher too.
-            interrupt = signal.signal(signal.SIGINT, operator_stop)
-            # The terminal watches the read end: it reaches EOF the moment this
-            # process is gone, however it went, reaped or not.
+            if header:
+                sink.write('\n'.join(preflight) + '\n')
+            admission = claim.hardware.inherited(9, launch=True)
             heard, owner = owner_pipe()
             try:
-                process = subprocess.Popen(
-                    plan['command'], cwd=station.ROOT, pass_fds=(heard,),
-                    env=dict(os.environ, **plan['env'], HFMODEM_OWNER_FD=str(heard)),
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                with claim.defer_interrupts():
+                    process = claim.remember(subprocess.Popen(
+                        plan['command'], cwd=station.ROOT, pass_fds=(9, heard),
+                        env=dict(os.environ, **plan['env'], HFMODEM_OWNER_FD=str(heard)),
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True))
+                    process._claim_admission = admission
             finally:
                 os.close(heard)
             try:
                 launcher, sink = Launcher(process, sink), None
-                if interrupted:
-                    raise KeyboardInterrupt
-                launcher.read()
-                code = process.wait()
+                launcher.moved = moved
+                code = launcher.read()
             except BaseException:
-                # Further interrupts must not cut short unkeying and its verdict.
-                signal.signal(signal.SIGINT, lambda *_: None)
-                code = launcher.stop()
+                with claim.uninterrupted():
+                    if launcher is not None:
+                        code = launcher.stop()
                 raise
             finally:
-                launcher.tell()
+                if launcher is not None:
+                    launcher.tell()
         finally:
-            if owner is not None:
-                os.close(owner)
-            if interrupt is not None:
-                signal.signal(signal.SIGINT, interrupt)
-            if sink is not None:
-                sink.close()
-            if launcher is not None:
-                if not launcher.finish():
-                    plan['arm_log_incomplete'] = True
-                    print('  arm.log writer did not finish; its end may be missing.', flush=True)
-                if lost := launcher.losses():
-                    plan['arm_log_lost'] = lost
-                    print(f'  arm.log is missing {lost["lines"]} launcher line(s)'
-                          + (f' ({lost["first_error"]})' if lost['first_error'] else '')
-                          + '.', flush=True)
-            stop.set()
-            for thread in recorders:
-                thread.join(timeout=5)
-            for recorder in held:
-                if recorder.poll() is None:
-                    recorder.terminate()
-                    recorder.wait(timeout=60)
-            try:
-                plan['readings_at_end'] = station.read_environment(
-                    selection=station.selection_for_plan(plan))
-            except Exception as trouble:
-                plan['readings_at_end'] = dict(error=f'{type(trouble).__name__}: {trouble}')
-            plan.update(ended_utc=datetime.now(timezone.utc).isoformat(), returncode=code,
-                        verdict=dict(line=(launcher and launcher.verdict)
-                                     or 'no keying-line verdict from the launcher'))
-            try:
-                record_path.write_text(json.dumps(plan, indent=2) + '\n')
-            except OSError as trouble:
-                print(f'  provenance.json was not written at the end: {trouble}', flush=True)
+            with claim.uninterrupted(), arm._preserve_primary_failure():
+                if owner is not None:
+                    os.close(owner)
+                try:
+                    if process is not None:
+                        if launcher is None and sink is not None:
+                            launcher, sink = Launcher(process, sink), None
+                        if process.poll() is None and launcher is not None:
+                            code = launcher.stop()
+                        claim.end_child(process)
+                        if launcher is not None and not getattr(launcher, 'reported', False):
+                            launcher.tell()
+                finally:
+                    if admission is not None:
+                        admission.failed()
+                if sink is not None:
+                    sink.close()
+                if launcher is not None:
+                    if not launcher.finish():
+                        plan['arm_log_incomplete'] = True
+                        print('  arm.log writer did not finish; its end may be missing.', flush=True)
+                    if lost := launcher.losses():
+                        plan['arm_log_lost'] = lost
+                        print(f'  arm.log is missing {lost["lines"]} launcher line(s)'
+                              + (f' ({lost["first_error"]})' if lost['first_error'] else '')
+                              + '.', flush=True)
+                stop.set()
+                for thread in recorders:
+                    thread.join(timeout=5)
+                for recorder in held:
+                    end_recorder(recorder)
+                if any(thread.is_alive() for thread in recorders):
+                    raise RuntimeError('recorder startup did not stop; cleanup incomplete')
+                claim.end_children(allow_cleanup=True)
+                inherited = arm.cleanup_result(''.join(getattr(process, '_cleanup_lines', [])), code)
+                plan['cleanup'] = inherited if inherited['complete'] else arm.bring_down(directory, env=plan['env'])
+                if code == 0 and not plan['cleanup']['complete']:
+                    code = 1
+                try:
+                    plan['readings_at_end'] = station.read_environment(selection=station.selection_for_plan(plan))
+                except Exception as trouble:
+                    plan['readings_at_end'] = dict(error=f'{type(trouble).__name__}: {trouble}')
+                    plan['console finalization failed'] = str(trouble)
+                plan.update(ended_utc=datetime.now(timezone.utc).isoformat(), returncode=code,
+                    verdict=dict(line=(launcher and launcher.verdict) or 'no keying-line verdict from the launcher'))
+                try:
+                    record_path.write_text(json.dumps(plan, indent=2) + '\n')
+                except OSError as trouble:
+                    print(f'  console finalization failed: provenance.json was not written at the end: {trouble}', flush=True)
         status = directory / 'recorders.log'
         if status.is_file():
             print(status.read_text().rstrip(), flush=True)
         print(f'  {plan["arm"]}: exit {code}\n  {directory}', flush=True)
+        for line in arm.faults(directory, code):
+            print('  ' + line, flush=True)
         return code
 
 

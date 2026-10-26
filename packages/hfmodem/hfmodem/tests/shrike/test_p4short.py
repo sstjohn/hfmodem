@@ -12,7 +12,7 @@ from hfmodem.shrike import p4frame, p4rx, p4short
 
 @pytest.fixture(scope='module')
 def recordings():
-    path = Path(__file__).parent / 'fixtures/p4-short/audio.npz'
+    path = Path(__file__).parent / 'fixtures/sigidwiki/p4-short/audio.npz'
     assert hashlib.sha256(path.read_bytes()).hexdigest() == (
         'a8d4bb98eff20c5fe75597d6759b0596f2f30039fbae0b95138e9242c5d102bf')
     with np.load(path, allow_pickle=False) as source:

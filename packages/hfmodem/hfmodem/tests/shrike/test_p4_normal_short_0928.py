@@ -373,7 +373,10 @@ def test_hold_reader_preserves_recorded_long_and_chirp():
     assert records[-1].observation.kind == Kind.LONG
     records = r.read_window(audio[:round(4.40*fs)], 0, whole=True)
     assert records[-1].observation.kind == Kind.LONG
-    with np.load(FX.parent/'p4-chirps/audio.npz') as fixture:
+    chirps = FX.parent/'sigidwiki/p4-chirps/audio.npz'
+    if not chirps.exists():
+        pytest.skip(f"{chirps} is absent")
+    with np.load(chirps) as fixture:
         fs = int(fixture['fs'])
         for row, field in zip(fixture['audio'], REAL_FIELDS):
             r = P4Receiver(fs, admitted=True, chirp=True)

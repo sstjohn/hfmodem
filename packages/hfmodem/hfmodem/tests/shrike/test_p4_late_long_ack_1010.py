@@ -806,16 +806,60 @@ def test_b1_grant_answering_accepted_packet_defers_by_incoming_cadence():
 
 def test_b1_grant_answering_accepted_long_defers_by_long_cadence():
     from hfmodem.tests.shrike.test_p4turn import propose_ack
-    m, _ = held_machine()
-    grant = propose_ack(m, accepted(FS, b'', 0x40))
-    assert (grant.kind, grant.state, grant.status, grant.payload) == (
-        Kind.BODY, p4turn.State.ISS_GRANT, 0x40, b'')
+    # Historical node name retained. GRANT-BOUNDARY-DESIGN-1012 section 1
+    # and DESIGN A rule 1 require a policy WORD for this empty LONG invitation.
+    m, delivered = held_machine()
+    answer = propose_ack(m, accepted(FS, b'', 0x40))
+    assert (answer.kind, answer.state, answer.word, answer.status, answer.payload,
+            answer.stream_sample) == (Kind.WORD, p4turn.State.IRS_ANSWER,
+                                      'X27', 0, b'', 211200)
+    assert (answer.accepted_target, answer.current_slot, answer.current_slot_accepted,
+            answer.ack_identity) == (FS, FS, True, (0x40, b''))
+    transaction = m._accepted_proposal
+    assert transaction[0] is answer and transaction[1] == FS
+    admitted = transaction[2]['body']
+    assert admitted.kind == Kind.LONG and admitted.frame.data == b''
+    source = m.adapter.result
+    epoch = m._receive_epoch, m._receive_active, m._receive_boundary
+    root = transaction[2]['source_root']
+    assert root is None and answer.source_root is None
+    assert answer.receive_epoch == epoch[0] == transaction[2]['receive_epoch']
+    held = m._held_answer
+    accounting = (m.adapter.last, m.adapter.last_credit, dict(m.adapter._receipts),
+                  m.adapter._active, m.adapter._covered, m._receipt)
+    outbox = m.outbox.queued, m.outbox.inflight, m.outbox.arq.tx_acked_bytes
+    assert outbox == (False, b'', 0) and not delivered
     m.refused('deadline')
     assert m._next is None and m._refused_due is None
-    assert m._deferred[0] == FS and m._deferred[1]['due'] == grant.stream_sample+180000
-    repeated = m.decide(grant.stream_sample+180000-m.lead)
-    assert (repeated.status, repeated.payload, repeated.stream_sample) == (
-        0x40, b'', grant.stream_sample+180000)
+    assert m._deferred[0] == FS
+    assert m._deferred[1]['due'] == 391200 == answer.stream_sample+180000
+    assert m._deferred[1]['body'] is admitted
+    assert m._deferred[1]['receive_epoch'] == epoch[0]
+    assert m._deferred[1]['source_root'] is root and m.adapter.result is source
+    repeated = m.decide(391200-m.lead)
+    assert (repeated.kind, repeated.state, repeated.word, repeated.status,
+            repeated.payload, repeated.stream_sample) == (
+        Kind.WORD, p4turn.State.IRS_ANSWER, 'X27', 0, b'', 391200)
+    assert (repeated.accepted_target, repeated.current_slot,
+            repeated.current_slot_accepted, repeated.ack_identity,
+            repeated.receive_epoch, repeated.source_root) == (
+        FS, 228000, False, (0x40, b''), epoch[0], root)
+    assert m._accepted_proposal[0] is repeated
+    assert m._accepted_proposal[2]['body'] is admitted
+    assert m.adapter.result is source and m._held_answer is held
+    assert m.can_key(repeated)
+    actual = m.keyed(repeated.stream_sample)
+    assert actual is m.last is m._emissions[391200]
+    assert actual.kind == Kind.WORD and actual.stream_sample == 391200
+    assert (m._receive_epoch, m._receive_active, m._receive_boundary) == epoch
+    assert m.adapter.result is source
+    assert (m.adapter.last, m.adapter.last_credit, m.adapter._receipts,
+            m.adapter._active, m.adapter._covered, m._receipt) == accounting
+    assert (m.outbox.queued, m.outbox.inflight, m.outbox.arq.tx_acked_bytes) == outbox
+    assert m.grants == m.breakins == 0 and not delivered
+    assert all(p.kind == Kind.WORD for p in m._emissions.values())
+    assert not any(e['event'] in ('turn', 'handback-offer', 'data-reply-ack')
+                   for e in m.link_events)
 
 
 @pytest.mark.parametrize('case', ['unanswered grant', 'data'])

@@ -15,6 +15,7 @@ the environment variable that would turn it on.
   corpus     HFMODEM_CORPUS   the off-air recordings
   ardopcf    ARDOPCF          a built ardopcf to cross-decode against
   hardware   HFMODEM_AUDIO    a sound card, or HFMODEM_RIG for a transmitter
+             or the one variable a test names, hardware(opt_in=...)
   wheel      -                always runs; builds a real wheel, a few seconds
 
 `hardware` covers tests that need the machine to themselves as much as ones that
@@ -28,10 +29,36 @@ import os
 
 import pytest
 
+from hfmodem.tests.hermetic import station_kept_out  # noqa: F401  (an autouse fixture)
+
 _GATES = {
     "corpus": ("HFMODEM_CORPUS", "the off-air corpus"),
     "ardopcf": ("ARDOPCF", "a built ardopcf binary"),
 }
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    if (item.get_closest_marker("wall_clock") is None
+            or os.environ.get("HFMODEM_QUALIFICATION_PRIORITY_ADVISED") == "1"):
+        return
+    try:
+        nice = os.getpriority(os.PRIO_PROCESS, 0)
+    except (AttributeError, OSError):
+        nice = None
+    if nice is None or nice > 0:
+        reporter = item.config.pluginmanager.getplugin("terminalreporter")
+        message = (f"WARNING: wall_clock {item.nodeid}: actual nice={nice}; "
+                   "relaunch the split coordinator from a normal-priority shell (nice 0). "
+                   "Continuing without elevation.")
+        capture = item.config.pluginmanager.getplugin("capturemanager")
+        from contextlib import nullcontext
+        with capture.global_and_fixture_disabled() if capture else nullcontext():
+            if reporter is not None:
+                reporter.write_line(message, yellow=True)
+            else:
+                import sys
+                print(message, file=sys.stderr)
 
 
 def pytest_collection_modifyitems(config, items):
@@ -42,7 +69,15 @@ def pytest_collection_modifyitems(config, items):
             if name in item.keywords and not os.environ.get(var):
                 item.add_marker(pytest.mark.skip(
                     reason=f"set {var} to point at {what}"))
-        if "hardware" in item.keywords and not (audio or rig):
+        hardware = item.get_closest_marker("hardware")
+        if hardware is None:
+            continue
+        # A test that names its own variable runs on that alone: the real keying
+        # line is not the sound card, and arming one must not arm the other.
+        own = hardware.kwargs.get("opt_in")
+        if own and not os.environ.get(own):
+            item.add_marker(pytest.mark.skip(reason=f"set {own} to run this against the station"))
+        elif not own and not (audio or rig):
             item.add_marker(pytest.mark.skip(
                 reason="set HFMODEM_AUDIO=1 (sound card, and the machine to "
                        "itself) or HFMODEM_RIG=1 (transmitter)"))

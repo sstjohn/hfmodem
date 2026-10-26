@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """THE LIVE VIEW: a contact on the terminal, the telemetry in the transcript.
 
 An arm writes one stream and two things read it. The transcripts -- the `tee`

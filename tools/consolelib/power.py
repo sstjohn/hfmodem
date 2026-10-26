@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Mains to the transceiver, on the station's own smartplug.
 
 WHY THE STATION HAS A POWER SWITCH AT ALL. The ATU hunting a match throws enough
@@ -47,7 +49,6 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 from .operator import data_root, settings
-CACHED = data_root() / '.plug-address'
 
 ALIAS = None
 MAC = None
@@ -174,7 +175,7 @@ def broadcast(timeout=3.0, alias=ALIAS, mac=MAC):
     return found
 
 
-def find(alias=ALIAS, mac=MAC, cache=CACHED):
+def find(alias=ALIAS, mac=MAC, cache=None):
     """The plug, by who it says it is and never by where it was last seen.
 
     The cached address is tried first because it is one round trip against the
@@ -195,6 +196,7 @@ def find(alias=ALIAS, mac=MAC, cache=CACHED):
             or not 0 <= values[0] < values[1] < values[2]):
         raise ValueError('Configure measured power limits: 0 <= zero_w < idle_w < carrier_w; nothing contacted.')
     ZERO_W, IDLE_W, CARRIER_W = values
+    cache = cache or data_root() / '.plug-address'
     remembered = cache.read_text().strip() if cache.is_file() else ''
     if remembered:
         plug = Plug(remembered)

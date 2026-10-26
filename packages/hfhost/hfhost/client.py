@@ -127,14 +127,32 @@ class ModemClient:
     # -- attach / detach ---------------------------------------------------
 
     def attach(self, timeout: float | None = None) -> None:
+        """Obtain an acknowledged attachment within one shared deadline.
+
+        TCP connect alone can succeed while a prior probe's host session is
+        retiring. The server refuses that overlapping pair; retry only after
+        the failed pair has been closed, without extending the attach budget.
+        """
+        deadline = time.monotonic() + (self.attach_timeout_s if timeout is None
+                                       else timeout)
+        while True:
+            try:
+                self._attach_once(max(0., deadline - time.monotonic()))
+                return
+            except AttachError as exc:
+                remaining = deadline - time.monotonic()
+                if not isinstance(exc.__cause__, (ModemError, TimeoutError)) or remaining <= 0:
+                    raise
+                time.sleep(min(.05, remaining))
+
+    def _attach_once(self, timeout: float) -> None:
         """Atomically connect both sockets, start readers, replay desired
         state. On any failure both sockets are closed — never a half-attach.
 
         Held across replay by _attaching (never by _life, which the reader
         threads need to detach) so that a concurrent caller seeing attached=True
         also sees the desired state landed, not MYCALL/BW still in flight."""
-        deadline = time.monotonic() + (self.attach_timeout_s if timeout is None
-                                       else timeout)
+        deadline = time.monotonic() + timeout
         with self._attaching:
             with self._life:
                 if self._closed:
@@ -167,7 +185,14 @@ class ModemClient:
                                      daemon=True).start()
             self.transcript.state(self.name, "attached")
             try:
-                self.replay(timeout=max(deadline - time.monotonic(), 1.0))
+                # VERSION does not alter configuration. Even an empty desired
+                # replay needs a round trip before attachment is ready.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"{self.name}: attach deadline exhausted")
+                if not self._acknowledge_attachment(remaining):
+                    raise AttachError(f"{self.name}: attachment not acknowledged")
+                self.replay(_deadline=deadline)
             except (ModemError, TimeoutError) as exc:
                 self._detach(gen, f"replay failed: {exc}", deliberate=True)
                 self.attach_failures += 1
@@ -175,6 +200,30 @@ class ModemClient:
             self.attach_failures = 0
         if self.on_attach:
             self.on_attach(self)
+
+    def _acknowledge_attachment(self, timeout: float) -> bool:
+        """Prove a round trip without grading the target's VERSION grammar.
+
+        A target without VERSION support may answer WRONG. That still proves
+        this pair was admitted; conformance owns the version-shape verdict.
+        """
+        q = self.subscribe()
+        try:
+            self._send_cmd("VERSION")
+            deadline = time.monotonic() + timeout
+            while (remaining := deadline - time.monotonic()) > 0:
+                try:
+                    item = q.get(timeout=remaining)
+                except queue.Empty:
+                    return False
+                if item is _DETACHED:
+                    return False
+                if (item.kind in (REPLY_OK, REPLY_WRONG)
+                        or item.kind == NOTIFICATION and item.name == "VERSION"):
+                    return True
+            return False
+        finally:
+            self.unsubscribe(q)
 
     def _dial(self, port: int, deadline: float) -> socket.socket:
         remaining = deadline - time.monotonic()
@@ -338,7 +387,7 @@ class ModemClient:
         self._desired[slot] = text
         return self.command(text) if self.attached else None
 
-    def replay(self, timeout: float = 5.0) -> None:
+    def replay(self, timeout: float = 5.0, *, _deadline: float | None = None) -> None:
         """Reissue all recorded desired state; attach() ends with this. A
         WRONG is transcribed as an error, not fatal — the responder's retry
         loop must not spin forever on a modem that rejects one setting."""
@@ -346,7 +395,10 @@ class ModemClient:
             text = self._desired.get(slot)
             if text is None:
                 continue
-            line = self.command(text, timeout)
+            remaining = timeout if _deadline is None else _deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"{self.name}: replay deadline exhausted")
+            line = self.command(text, remaining)
             if line.kind == REPLY_WRONG:
                 self.transcript.error(self.name, f"replay rejected: {text}")
 

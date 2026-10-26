@@ -23,6 +23,7 @@ from hfmodem.core.audio import ReplayAudio, StationAudio
 from hfmodem.core.ptt import Attempt, Keyer as RealKeyer
 from hfmodem.lanner import qso, rtty
 from hfmodem.station.qsolog import QsoLog
+from hfmodem.tests import fakeclaim
 
 FS = card.CARD_RATE_HZ
 LAT = 1152
@@ -90,6 +91,20 @@ class Line:
     def drive(self, on, timeout=None, *, confirm_silence=True):
         self.up = on
         return Attempt('confirmed', state=on, state_read=True)
+
+    def arm(self):
+        pass
+
+    def sense(self):
+        return self.up
+
+    def release(self):
+        return not self.up
+
+
+def armed(keyer):
+    keyer.arm()
+    return keyer
 
 
 class Stalled(io.StringIO):
@@ -360,6 +375,7 @@ def test_the_session_records_a_transcript_and_both_sides_of_the_capture(bench, t
     run(loop, session, 6, until=lambda: session.state == 'rx')
     run(loop, session, 0.5)
     session.close()
+    session.finish()
     transcript = (tmp_path / 'transcript.txt').read_text()
     assert 'TX TEST DE W9SSJ' in transcript
     assert 'mark RF 14082295 Hz on dial 14080000' in transcript and 'drive 0.500' in transcript
@@ -615,7 +631,7 @@ def _held_key_up(session):
             stuck.set()
             gate.wait(5)
 
-    session.keyer = RealKeyer(line, log)
+    session.keyer = armed(RealKeyer(line, log))
     session.type('E')
     keying = threading.Thread(target=session.key)
     keying.start()
@@ -675,7 +691,7 @@ def test_a_stalled_stdout_holds_neither_keying_nor_the_recording(bench, tmp_path
     out = Stalled()
     loop, keyer, session, _ = bench(out=out)
     line = Line()
-    session.keyer = RealKeyer(line, session.say, session.alarm)
+    session.keyer = armed(RealKeyer(line, session.say, session.alarm))
     try:
         for ch in 'TEST DE W9SSJ':
             session.type(ch)
@@ -781,7 +797,7 @@ def test_a_signal_that_lands_during_key_up_leaves_ptt_down_and_rx(bench):
                 raise SystemExit(143)
             return up
 
-    session.keyer = Interrupted(line, session.say)
+    session.keyer = armed(Interrupted(line, session.say))
     session.type('E')
     with pytest.raises(SystemExit):
         session.key()
@@ -854,7 +870,7 @@ class Flaky(Line):
 def test_a_key_up_whose_rollback_will_not_read_down_stays_unconfirmed_until_it_does(bench):
     loop, keyer, session, out = bench()
     line = Flaky(stuck=2)
-    session.keyer = RealKeyer(line, session.say, session.alarm)
+    session.keyer = armed(RealKeyer(line, session.say, session.alarm))
     session.type('E')
     session.key()
     assert line.up and session.state == 'rx' and session.ptt_unconfirmed
@@ -868,7 +884,7 @@ def test_a_key_up_whose_rollback_will_not_read_down_stays_unconfirmed_until_it_d
 def test_close_retries_a_line_that_did_not_read_down(bench):
     loop, keyer, session, out = bench()
     line = Flaky(stuck=2)
-    session.keyer = RealKeyer(line, session.say, session.alarm)
+    session.keyer = armed(RealKeyer(line, session.say, session.alarm))
     session.type('E')
     session.key()
     assert line.up
@@ -1110,6 +1126,7 @@ def whole(tmp_path, monkeypatch):
             return len(text)
 
     monkeypatch.setattr(fakes, 'Keyer', Line)
+    fakeclaim.install(monkeypatch, order)
     monkeypatch.setattr(terminal, 'claim_tty', io.StringIO)
     monkeypatch.setattr(sys, 'stderr', Said())
     monkeypatch.setattr(sys, '__stdout__', Said())
@@ -1134,6 +1151,8 @@ def test_main_halts_on_a_screen_failure_and_speaks_only_after_the_hand_back(whol
 
     code, order = whole(broken)
     assert code == 1
+    assert order[0] == 'inherited' and order.index('opened') < order.index('key up')
+    assert order[-1] == 'failed'
     assert order.index('key down') < order.index('hand back')
     spoken = [i for i, done in enumerate(order) if done.startswith('said')]
     assert spoken and min(spoken) > order.index('hand back')

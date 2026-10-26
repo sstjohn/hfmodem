@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Two third-party N9VC PACTOR-4 links, read where they sit in the passband.
 
 N9VC is a BPQ32 node. On the 08-02 K5DAT-13 recording its link runs 400 Hz up

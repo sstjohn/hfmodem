@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: CC-BY-4.0 */
+/* SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) */
 /* Embedded inspector: the same evidence and controls, in the desk theme. */
 :root[data-theme=light]{color-scheme:light;--bg:#f5f5ed;--panel:#fffef7;--line:#9aa58b;--muted:#485140;--ink:#202b19;--accent:#325828}
 :root[data-theme=light] button,:root[data-theme=light] select,:root[data-theme=light] input,:root[data-theme=light] #events button,:root[data-theme=light] #ladder button{background:#f0f2e7;color:var(--ink);border-color:var(--line)}

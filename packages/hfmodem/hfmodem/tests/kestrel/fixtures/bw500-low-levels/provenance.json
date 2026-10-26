@@ -1,0 +1,183 @@
+{
+ "bw500-level1-arm1": {
+  "source": "working/vara-evening-en63bc-0910/analysis/stock500-recovery/runs/20260911T053604Z-500-fault-rms0.7/capture/b2a.wav",
+  "source_sha256": "a13fc1dbe275ba94ea1cf546c704d7526cbf34d3bd1968d4da684e571f42638d",
+  "cable": "b2a (stock B responder -> stock A caller, BlackHole 64ch)",
+  "slice_samples": [
+   894366,
+   1162535
+  ],
+  "burst_samples_in_slice": [
+   4800,
+   263369
+  ],
+  "burst_samples_in_source": [
+   899166,
+   1157735
+  ],
+  "rate": 48000,
+  "dtype": "int16 (float32 x 32767, rounded)",
+  "host_log": "BITRATE (1) 18 bps TX",
+  "expected_payload_hex": "524d53205472696d6f",
+  "expected_marker": "0x99",
+  "record": 0,
+  "host_bitrate": 1,
+  "bps": 18,
+  "columns": 124,
+  "column_samples": 2048,
+  "lead": 2,
+  "bins": "54..74 of a 2048-DFT, stride 2 mod 21",
+  "payload": 9,
+  "greeting_bytes": [
+   0,
+   9
+  ],
+  "sha256": "df1a22c065afccf01daa6e342590c1f7c251c197c5b09816c909aa0f6d69f311"
+ },
+ "bw500-level1-arm2": {
+  "source": "working/vara-evening-en63bc-0910/analysis/stock500-recovery/runs/20260911T053812Z-500-fault-rms0.7/capture/b2a.wav",
+  "source_sha256": "af26520655e24a5c925acd635019fc8a1b23541164df71052ecb500140acb02f",
+  "cable": "b2a (stock B responder -> stock A caller, BlackHole 64ch)",
+  "slice_samples": [
+   896011,
+   1164166
+  ],
+  "burst_samples_in_slice": [
+   4800,
+   263355
+  ],
+  "burst_samples_in_source": [
+   900811,
+   1159366
+  ],
+  "rate": 48000,
+  "dtype": "int16 (float32 x 32767, rounded)",
+  "host_log": "BITRATE (1) 18 bps TX",
+  "expected_payload_hex": "524d53205472696d6f",
+  "expected_marker": "0x99",
+  "record": 0,
+  "host_bitrate": 1,
+  "bps": 18,
+  "columns": 124,
+  "column_samples": 2048,
+  "lead": 2,
+  "bins": "54..74 of a 2048-DFT, stride 2 mod 21",
+  "payload": 9,
+  "greeting_bytes": [
+   0,
+   9
+  ],
+  "sha256": "e596bb2fc1a1b37be65e7f2e2ef95d1d8ef00ca1ed66af12a77a4dad202522a3"
+ },
+ "bw500-level2-arm1": {
+  "source": "working/vara-evening-en63bc-0910/analysis/stock500-recovery/runs/20260911T053604Z-500-fault-rms0.7/capture/b2a.wav",
+  "source_sha256": "a13fc1dbe275ba94ea1cf546c704d7526cbf34d3bd1968d4da684e571f42638d",
+  "cable": "b2a (stock B responder -> stock A caller, BlackHole 64ch)",
+  "slice_samples": [
+   1185419,
+   1433160
+  ],
+  "burst_samples_in_slice": [
+   4800,
+   242941
+  ],
+  "burst_samples_in_source": [
+   1190219,
+   1428360
+  ],
+  "rate": 48000,
+  "dtype": "int16 (float32 x 32767, rounded)",
+  "host_log": "BITRATE (2) 41 bps TX",
+  "expected_payload_hex": "646520312e342e332e302057616473776f7274682049",
+  "expected_marker": "0x99",
+  "record": 1,
+  "host_bitrate": 2,
+  "bps": 41,
+  "columns": 228,
+  "column_samples": 1024,
+  "lead": 4,
+  "bins": "27..37 of a 1024-DFT, stride 1 mod 11",
+  "payload": 22,
+  "greeting_bytes": [
+   9,
+   31
+  ],
+  "sha256": "407cddd522840044094d9a47cd1a7a9752801ce1fb1f89ec9d981d4601c48ce3"
+ },
+ "bw500-level2-arm2": {
+  "source": "working/vara-evening-en63bc-0910/analysis/stock500-recovery/runs/20260911T053812Z-500-fault-rms0.7/capture/b2a.wav",
+  "source_sha256": "af26520655e24a5c925acd635019fc8a1b23541164df71052ecb500140acb02f",
+  "cable": "b2a (stock B responder -> stock A caller, BlackHole 64ch)",
+  "slice_samples": [
+   1186808,
+   1434531
+  ],
+  "burst_samples_in_slice": [
+   4800,
+   242923
+  ],
+  "burst_samples_in_source": [
+   1191608,
+   1429731
+  ],
+  "rate": 48000,
+  "dtype": "int16 (float32 x 32767, rounded)",
+  "host_log": "BITRATE (2) 41 bps TX",
+  "expected_payload_hex": "646520312e342e332e302057616473776f7274682049",
+  "expected_marker": "0x99",
+  "record": 1,
+  "host_bitrate": 2,
+  "bps": 41,
+  "columns": 228,
+  "column_samples": 1024,
+  "lead": 4,
+  "bins": "27..37 of a 1024-DFT, stride 1 mod 11",
+  "payload": 22,
+  "greeting_bytes": [
+   9,
+   31
+  ],
+  "sha256": "990e7298553ac88a763debd8e9564a3ef074047405a2e1a0f2bec3f26d82a911"
+ },
+ "bw500-level1-two-frames": {
+  "source": "working/vara-evening-en63bc-0910/analysis/stock500-chain/runs/20260911T064131Z-500-greeting/cables/20260911T064131Z-500-greeting__b2a.wav",
+  "source_sha256": "28c99ba96e245af7543c52904c1c05fe19392a43b7ecd4fdb2d1d903c7354e1d",
+  "cable": "b2a (stock B responder -> our caller, BlackHole 16ch; stock500-chain greeting-fault arm)",
+  "slice_samples": [
+   5039712,
+   5562711
+  ],
+  "burst_samples_in_slice": [
+   4800,
+   518199
+  ],
+  "burst_samples_in_source": [
+   5044512,
+   5557911
+  ],
+  "rate": 48000,
+  "dtype": "int16 (float32 x 32767, rounded)",
+  "host_log": "BITRATE (1) 18 bps TX, twice at one PTT; BUFFER 171 before, 162 and 153 after",
+  "expected_payload_hex": "323520666565742077697468203530207761",
+  "expected_marker": "0x99",
+  "record": 0,
+  "host_bitrate": 1,
+  "bps": 18,
+  "frames": 2,
+  "burst_columns": 1002,
+  "columns": 124,
+  "column_samples": 2048,
+  "lead": 2,
+  "frame_columns": [
+   2,
+   126
+  ],
+  "bins": "54..74 of a 2048-DFT, stride 2 mod 21",
+  "payload": 9,
+  "greeting_bytes": [
+   54,
+   72
+  ],
+  "sha256": "49362d3b65662df303afd84932f2685d772c047985a6a7c209d876538613029f"
+ }
+}

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 let waveforms={};
 export function setWaveforms(catalog){waveforms=catalog;}
 export function waveformRows(protocol,bw){return Object.values(waveforms).filter(r=>protocol==='VARA'?r.protocol==='VARA'&&r.bandwidth_hz===bw:r.protocol.startsWith(protocol)).sort((a,b)=>a.protocol.localeCompare(b.protocol)||a.level-b.level);}
@@ -104,8 +106,10 @@ export function evidenceClass(e) {
 }
 export function evidenceAvailable(e,time){return (e.available_at_s ?? e.t1 ?? Infinity)<=time;}
 export function directionLabel(e,manifest={}) {
-  if(localTx(e)||e.direction==='tx')return `Local TX · ${manifest.caller||'caller'}`;
-  if(e.direction==='rx')return `RX · ${manifest.called||manifest.call||'other station'}${/assumed/.test(e.attribution||'')?' (assumed)':''}`;
+  const local=manifest.local_role==='called'?manifest.called:manifest.caller;
+  const peer=manifest.local_role==='called'?manifest.caller:manifest.called;
+  if(localTx(e)||e.direction==='tx')return `Local TX · ${local||'caller'}`;
+  if(e.direction==='rx')return `RX · ${peer||manifest.call||'other station'}${/assumed/.test(e.attribution||'')?' (assumed)':''}`;
   return 'Unattributed signal';
 }
 export function playbackSummary(events,time) {

@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: CC-BY-4.0 */
+/* SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) */
 :root{color-scheme:light;--bg:#f2f1eb;--panel:#fafaf5;--soft:#eaece3;--ink:#242b27;--dim:#5c695d;--line:#d3d8cc;--accent:#344e3c;--rx:#176e62;--tx:#71588d;--warning:#805810;--danger:#aa3c2c;--shadow:0 3px 16px #23312508}
 .logbook-desk{margin:0 20px 14px;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:var(--panel)}.logbook-desk iframe{display:block;border:0;width:100%;height:calc(100vh - 285px);min-height:500px;background:var(--panel)}
 @media(max-width:630px){.logbook-desk{margin:0 10px 14px}.logbook-desk iframe{height:760px}.profiles button{padding-inline:9px!important}}
