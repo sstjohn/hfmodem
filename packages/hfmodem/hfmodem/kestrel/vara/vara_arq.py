@@ -2969,7 +2969,7 @@ class VaraStationHandshake:
         # of 2026-09-23, where on clean ones it keys the 17-symbol release. Stock
         # A answered nothing after our 17-symbol release at record 0.
         low = self.bw == "500" and self._rec500 < _phy.base_level(self.bw)
-        answerer = self.role == 'responder' and (self.bw == '500' or self._chat_profile)
+        answerer = self.role == 'responder'
         # Under CHAT ON a stock caller hands back an empty turn, behind the
         # peer's frame-1 answer, with the f20 member  [phase-census 2026-10-18].
         # That is true below the base record too: a stock-negotiated record-2
@@ -4748,8 +4748,7 @@ class VaraStationHandshake:
         # set either way; a request waits for a quiet channel and is keyed there
         # [see _ask_for_turn], which is where a real VARA's 0.17 s ask was
         # measured: the turnaround the burst under it opens [see _ask_if_owed].
-        if (self.role == 'responder' and (self.bw == '500' or self._chat_profile)
-                and self.turn != _TURN_OURS):
+        if self.role == 'responder' and self.turn != _TURN_OURS:
             if self._released_form is not None and self.turn == _TURN_PEER:
                 self._ask_answerer_turn()
             return
@@ -7205,10 +7204,18 @@ class VaraStationHandshake:
             answer = OVER_CONTINUE_SHORT
         if answer == OVER_CONTINUE_BURST and self._tx_over_continue():
             return OVER_CONTINUE_BURST
+        # Generated continues use the same role split as the two-tone answer
+        # stream: caller 60/61, responder 288/289. The established solicited
+        # intermediate ACK (SESSION_INTERMEDIATE_QUERY_ANSWER) is the responder's
+        # 32-symbol frame at this same position; the handshake ACK is separate.
+        role_offset = 228 if self.role == 'responder' else 0
+        short = replace(VF.SESSION_OVER_RESPONSE_SHORT,
+                        seed_off=VF.SESSION_OVER_RESPONSE_SHORT.seed_off + role_offset)
         if (answer == OVER_CONTINUE_SHORT
-                and self._send_burst(VF.SESSION_OVER_RESPONSE_SHORT)):
+                and self._send_burst(short)):
             return OVER_CONTINUE_SHORT
-        kind = VF.SESSION_OVER_RESPONSE
+        kind = replace(VF.SESSION_OVER_RESPONSE,
+                       seed_off=VF.SESSION_OVER_RESPONSE.seed_off + role_offset)
         if self._link_high_speed:
             kind = replace(kind, preadv=1 + 62 * self._irs_step())
         if self._send_burst(kind):
@@ -7867,8 +7874,7 @@ class VaraStationHandshake:
         if self.state is not VaraState.CONNECTED or self._pair_pending_500():
             return
         if self.role == "responder":
-            if self.bw == "500" or self._chat_profile:
-                self._answerer_tick()
+            self._answerer_tick()
             return
         if self.role != "initiator":
             return
@@ -8154,7 +8160,9 @@ class VaraStationHandshake:
             return False
         self.peer_high_speed = marked
         self.state = VaraState.CONNECTED
-        self._awaiting_caller_confirm = self.bw == '500' and not self._chat_profile
+        # The caller's confirmation grants the initial answering turn at
+        # every HF bandwidth. CONNECTED-time host writes must wait for it.
+        self._awaiting_caller_confirm = not self._chat_profile
         self._initial_answer_turn = False
         self._released_form = None
         self._progressed()
@@ -9043,8 +9051,7 @@ class VaraStationHandshake:
         if self.bw == '500' and self._awaiting_link_setup():
             self._stream_link_setup_500()
             return
-        if (self.state == VaraState.CONNECTED and self.role == 'responder'
-                and (self.bw == '500' or self._chat_profile)):
+        if self.state == VaraState.CONNECTED and self.role == 'responder':
             self._stream_owns_responder_control = True
             self._stream_owns_over = True
             if (self._ask_owed and self._released_form is not None and self._txq
@@ -9056,7 +9063,7 @@ class VaraStationHandshake:
                 self._stream_over_500(samples)
             else:
                 # The wide bandwidths' over finder, as the caller runs it; a
-                # CHAT ON answerer at BW2300 or BW2750 had no reader for the
+                # answerer at BW2300 or BW2750 had no reader for the
                 # caller's overs at all before 2026-10-22 (bench 3 x2300).
                 self._stream_over(samples)
                 self._release_held_answer(len(samples))
@@ -9955,9 +9962,10 @@ class VaraStationHandshake:
         their heads cut away — so what was missing was never the recogniser or the
         changeover blackout in front of it. It was that nothing ever ran it.
 
-        Bounded to the window it is asked in: the turn is `_TURN_ASKED` only
-        between a request of ours and its answer, which is where a gateway's grant
-        can be, so the search neither runs nor can accept anywhere else.
+        Bounded to the window it is asked in: `_TURN_ASKED` marks a DATA
+        request, and `_close_asked_at` marks a close request that preserves the
+        peer's poll cadence. Both solicit the same named grant; without either
+        request the search neither runs nor can accept.
 
         AND BOUNDED IN AGE. The last-symbol guard below asks whether the frame had
         closed; it cannot ask whether it had closed RECENTLY, and a buffer that
@@ -9973,7 +9981,10 @@ class VaraStationHandshake:
         it read, which were named 0.00-0.37 s behind the newest audio they were
         found in.
         """
-        if self.turn != _TURN_ASKED:
+        # Closing asks through the peer's poll cadence without changing the DATA
+        # turn state. Its named grant is nevertheless solicited: declining the
+        # 32-symbol form here loses it while the 11-symbol grant still closes.
+        if self.turn != _TURN_ASKED and self._close_asked_at is None:
             self._reset_grant_search()
             return False
         self._grant_buf = np.concatenate(
@@ -10296,7 +10307,7 @@ class VaraStationHandshake:
         return True
 
     def _stream_responder_control(self, samples) -> bool:
-        """BW500 caller confirms/keepalives, independent of the energy gate.
+        """Caller confirms/keepalives, independent of the energy gate.
 
         The stock responder answers a confirm with its caller-keyed control
         frame 0, and the long followup/keepalives with frame 1. The transport's
@@ -10586,7 +10597,7 @@ class VaraStationHandshake:
         long = kind in _RESPONDER_CONFIRM_LONG_500.values() or kind is VF.SESSION_KEEPALIVE_A
         if self._awaiting_caller_confirm and (short and self._txq or long):
             self.turn = _TURN_OURS
-            self._initial_answer_turn = True
+            self._initial_answer_turn = self.bw == '500'
             self._owe_nothing()
             if self._txq:
                 self._tx_data_over()
@@ -10594,6 +10605,11 @@ class VaraStationHandshake:
                     self._awaiting_caller_confirm = False
                 return
             self._awaiting_caller_confirm = False
+            # An empty initial turn is held and polled, just like a later
+            # handover. The peer answers this IDLE before a new host write
+            # can ask with BREAK; sending DATA now collides with that answer.
+            self._hold_idle()
+            return
         self._tx_control_burst(0 if kind in _RESPONDER_CONFIRM_START_500 else 1)
 
     def _stream_answer(self, samples) -> bool:
@@ -12070,7 +12086,8 @@ class VaraStationHandshake:
         # take a grant out of a 32-symbol answer still arriving and key the over
         # across the peer's tail.
         if (self.state == VaraState.CONNECTED and self.role == "initiator"
-                and self.turn == _TURN_ASKED and len(samples) >= _SESSION_NEED
+                and (self.turn == _TURN_ASKED or self._close_asked_at is not None)
+                and len(samples) >= _SESSION_NEED
                 and self._peer_drained(samples)):
             self._close_echo_window()
             self._turn_granted(samples, VF.SESSION_DRAINED_RESPONDER.name)
@@ -12508,9 +12525,9 @@ class VaraStationHandshake:
         if ((kind in _CONFIRM_START or kind is VF.SESSION_KEEPALIVE_A
              or kind is VF.SESSION_KEEPALIVE_B and self._stream_owns_responder_control)
                 and self.state == VaraState.CONNECTED and self.role == "responder"):
+            if self._stream_owns_responder_control:
+                return
             if self.bw == '500' or self._chat_profile:
-                if self._stream_owns_responder_control:
-                    return
                 recognized = next((k for k in (*_CONFIRM_START, VF.SESSION_KEEPALIVE_A,
                                                VF.SESSION_KEEPALIVE_B)
                                    if self._matches(tones, self.called, k)), None)

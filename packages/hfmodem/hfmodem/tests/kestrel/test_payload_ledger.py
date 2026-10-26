@@ -3,6 +3,7 @@
 """VARA original-byte disposition, distinct from wire-container BUFFER."""
 import socket
 
+import numpy as np
 import pytest
 
 from hfmodem.kestrel.arq import phy
@@ -11,6 +12,7 @@ from hfmodem.kestrel.vara import vara_arq as A, compression as C
 from hfmodem.kestrel.vara.ledger import PayloadLedger
 from hfmodem.tests.kestrel.test_compression import IO, station
 from hfmodem.tests.kestrel.test_vara_host_modem import Observer, runtime_class
+from hfmodem.tests.kestrel.test_data_over_gate import _connected
 
 
 def test_plain_and_atomic_container_credit_and_retirement():
@@ -28,6 +30,62 @@ def test_plain_and_atomic_container_credit_and_retirement():
     assert ledger.confirmed == 165 and ledger.discarded == 6
     assert ledger.retire() == b''
     assert ledger.last_unconfirmed == b'unsent'
+
+
+def test_excess_settlement_is_rejected_without_changing_credit():
+    ledger = PayloadLedger()
+    ledger.queue(b'wire', b'original', atomic=True)
+    with pytest.raises(ValueError, match='exceeds admitted'):
+        ledger.settle(5)
+    assert ledger.accepted == ledger.pending == 8
+    assert ledger.confirmed == ledger.wire_confirmed == 0
+    assert ledger.wire_pending == 4 and ledger.unconfirmed == b'original'
+    assert ledger.settle(4) == b'original'
+    with pytest.raises(ValueError, match='exceeds admitted'):
+        ledger.settle(1)
+    assert ledger.confirmed == ledger.accepted == 8
+    assert ledger.wire_pending == ledger.pending == 0
+
+
+@pytest.mark.parametrize('role', ['initiator', 'responder'])
+@pytest.mark.parametrize('mode', ['OFF', 'TEXT'])
+def test_bw500_w1aw_final_close_credits_exactly_the_admitted_payload(
+        monkeypatch, role, mode):
+    hs, _ = _connected(bw='500', role=role)
+    hs.caller, hs.called = 'W1AW', 'W9SSJ'
+    hs._start_compression(mode)
+    hs.turn = A._TURN_OURS
+    hs._link_high_speed = False
+    emitted = []
+    monkeypatch.setattr(hs, '_render_over',
+                        lambda bodies, *args: emitted.append(tuple(bodies)) or np.zeros(10))
+    monkeypatch.setattr(hs, '_release_turn', lambda idle=False: True)
+    original = bytes(range(256))
+    hs.send(original)
+    received = bytearray()
+    sizes = []
+    for _ in range(6):
+        assert hs._tx_pending is not None
+        bodies = emitted[-1]
+        carried = b''.join(hs._tx_payload(body) for body in bodies)
+        received += carried
+        sizes.append(len(carried))
+        assert hs.pending_bytes == len(original)-hs.payload_ledger.confirmed
+        assert hs.payload_ledger.confirmed < len(received)
+        hs._took_control_burst(continue_reply=True)
+        assert hs.payload_ledger.confirmed == len(received)
+        assert hs.payload_ledger.pending == len(original)-len(received)
+    assert sizes == [43, 43, 43, 43, 43, 41]
+    assert bodies[0][-3:] == b'\x14\x04\x82'
+    assert bytes(received) == original
+    assert hs._tx_pending is None
+    assert hs.payload_ledger.confirmed == hs.payload_ledger.accepted == 256
+    assert hs.payload_ledger.wire_pending == hs.pending_bytes == 0
+    # A repeated/spurious control with no outstanding over cannot credit again.
+    hs._took_control_burst()
+    hs._took_control_burst(idle=True)
+    assert hs.payload_ledger.confirmed == hs.payload_ledger.accepted == 256
+    assert hs.payload_ledger.wire_pending == hs.pending_bytes == 0
 
 
 def test_negotiation_reframes_without_admitting_or_confirming_again():

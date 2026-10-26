@@ -382,7 +382,11 @@ def vara_payload(body: bytes, length: int | None = None,
     # field is the short end's own, not payload. Stock closed a greeting at
     # record 0 on 2026-09-23 as `0\rF> 56\r` then 04 0b, and read whole the
     # 0x04 reached the host as the head of the next message.
-    if full[-1] & 3 in (2, 3) and key & 3 != 1 and 1 <= full[-2] <= max(TOP.values()):
+    # These explicit terminal kinds are independent of the caller CRC's low
+    # bits. Only the kind-01 full/overlapping-CRC form above is ambiguous.
+    # In particular, a near-full W1AW close has no room for its kind-01 CRC;
+    # counting its delimiter/level as payload overstates the local host debt.
+    if full[-1] & 3 in (2, 3) and 1 <= full[-2] <= max(TOP.values()):
         # Low bits 11: the payload runs to the level byte. 10 with the trailer
         # cut to its first byte: that byte is the trailer's, not payload.
         if full[-1] & 3 == 2 and b[-2] == _VARA_TRAILER:

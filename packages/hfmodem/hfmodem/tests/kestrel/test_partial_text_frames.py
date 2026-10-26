@@ -6,6 +6,29 @@ import pytest
 from hfmodem.kestrel.arq import phy
 
 
+@pytest.mark.parametrize('marker_kind', range(4))
+@pytest.mark.parametrize('body_len', [10, 44, 90])
+@pytest.mark.parametrize('spare', [1, 2, 3, 4])
+def test_near_capacity_plain_body_roundtrip_for_every_caller_marker_kind(
+        marker_kind, body_len, spare):
+    caller = next(f'N0T{i}' for i in range(1000)
+                  if phy.crc16_genibus(f'N0T{i}'.encode()) >> 8 & 3 == marker_kind)
+    payload = b'X' * (body_len-spare)
+    body = phy.vara_body(payload, caller, body_len=body_len, tail=0x89)
+    assert phy.vara_payload(body, caller=caller, body_len=body_len) == payload
+    assert phy.over_is_last(body, caller) == (spare != 1)
+
+
+def test_kind_01_overlapping_crc_keeps_its_existing_interpretation():
+    caller = 'W1AW'
+    key = phy.crc16_genibus(caller.encode()) >> 8
+    assert key & 3 == 1
+    payload = b'X' * 42
+    body = payload + bytes([0x14, key])
+    assert phy.vara_payload(body, caller=caller, body_len=44) == payload
+    assert not phy.over_is_last(body, caller)
+
+
 @pytest.mark.parametrize('caller', ['W9SSJ-14', 'W9SSJ-12', 'W9SSJ-10'])
 @pytest.mark.parametrize('field', [0xa0, 0xa4, 0xb4])
 def test_single_byte_text_trailer_is_not_payload_or_a_terminal_over(caller, field):

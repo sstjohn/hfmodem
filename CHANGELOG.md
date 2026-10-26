@@ -2,6 +2,13 @@
 <!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Changelog
 
+## 0.3.1 — 2026-10-26
+
+- Fixed near-capacity payload accounting when closing a Kestrel contact.
+- Recognized solicited long grants while closing a VARA contact.
+- Fixed role-correct continuation for generated responder DATA packets.
+- Corrected wideband confirmation and empty-turn sequencing.
+
 ## 0.3.0 — 2026-10-25
 
 Changes since 0.2.1:
@@ -24,11 +31,9 @@ Changes since 0.2.1:
   compression and legacy `COMPRESSION ON`.
 - Added supervised Windows TCP and serial adapters for station hosts.
 - Improved PACTOR session timing and delivery accounting.
-<!-- site:omit:start -->
 - Added a public PACTOR-4 protocol guide and exact C2 PRNG description.
 - Improved partial experimental PACTOR-4 reception and turn handling.
   On-air PACTOR-4 mail transfer remains unproven.
-<!-- site:omit:end -->
 - Added station-service ownership controls and native Yaesu CAT support.
   Transmit operation requires a separate PTT line; `--ptt-type` was removed.
 - Added console attach, own and release commands, station session records,
@@ -60,9 +65,7 @@ Changes since 0.1.0:
 - Added experimental MIL-STD and STANAG waveforms, the STANAG 5066 link layer,
   2G ALE and HF selcall, with station interfaces and monitoring tools.
 - Added lanner for Baudot RTTY, SITOR mode B and NAVTEX encoding and decoding.
-<!-- site:omit:start -->
 - Expanded PACTOR-4 decoding and offline validation.
-<!-- site:omit:end -->
 - Added Yaesu FTDX10 rig and audio profiles while retaining FT-891 support.
   Improved station controls, audio handling, monitoring and diagnostics.
 - Released the station console and operator tools, with distinct receive-only
@@ -72,9 +75,7 @@ Changes since 0.1.0:
   native text-message sending and an offline received-mail reader.
 - Added successful PACTOR-3, VARA and ARDOP replay examples to the project site.
   Improved decoded-byte displays, audio alignment and sender-coloured waterfalls.
-<!-- site:omit:start -->
 - Replaced expanded PACTOR-4 permutation tables with compact reconstruction data.
-<!-- site:omit:end -->
 - Updated documentation and protocol guides, expanded regression coverage,
   and made numerous reliability improvements and bug fixes.
 
