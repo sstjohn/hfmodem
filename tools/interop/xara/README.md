@@ -6,7 +6,7 @@
 This source validation kit connects the real Kestrel host/runtime and unchanged
 Xara station through generated PCM. It checks exact payloads in both directions
 and orderly disconnect without a radio, sound device, CAT, socket server or VM.
-Xara is an independent peer, not a VARA conformance oracle.
+Xara is an independent peer; these checks do not establish VARA conformance.
 
 The kit is included in the complete source release. It also runs from a Git
 checkout. A wheel-only installation does not contain this source tool. Nothing

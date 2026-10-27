@@ -3,7 +3,7 @@
 # Implementation evidence
 
 Results for hfmodem's data, linking and text modes.
-PACTOR-1/2/3 and VARA are beta. ARDOP, voice and CW are alpha. PACTOR-4 and all other modes are experimental.
+PACTOR-1/2/3 and VARA are beta. ARDOP, Lanner’s RTTY/SITOR-B/NAVTEX modes, voice and CW are alpha. PACTOR-4 and all other modes are experimental.
 RF reception, gateway transfers, independent bench decodes and simulations
 are identified separately.
 

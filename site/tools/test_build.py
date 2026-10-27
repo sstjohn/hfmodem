@@ -300,16 +300,16 @@ class SiteBuild(unittest.TestCase):
         text = (build.ROOT / 'site/index.html').read_text()
         modes = text.split('<section id="modes"', 1)[1].split('</section>', 1)[0]
         results = text.split('<section id="results"', 1)[1].split('</section>', 1)[0]
-        self.assertIn('PACTOR-1/2/3 and VARA are beta. ARDOP, voice and CW are alpha. PACTOR-4 and all other modes are experimental.', modes)
+        self.assertIn('PACTOR-1/2/3 and VARA are beta. ARDOP, Lanner’s RTTY/SITOR-B/NAVTEX modes, voice and CW are alpha. PACTOR-4 and all other modes are experimental.', modes)
         for bird in ('shrike', 'kestrel'):
             self.assertIn(bird+' · beta', modes)
-        for bird in ('besra', 'macagua + merlin'):
+        for bird in ('besra', 'lanner', 'macagua + merlin'):
             self.assertIn(bird+' · alpha', modes)
         comparison = (build.ROOT / 'docs/viz/flock-compared.html').read_text()
         self.assertIn('shrike · beta · P4 experimental', comparison)
         self.assertIn('kestrel · beta', comparison)
         self.assertIn('besra · alpha', comparison)
-        for bird in ('sabir', 'brubru', 'bateleur', 'lanner'):
+        for bird in ('sabir', 'brubru', 'bateleur'):
             self.assertIn(bird+' · experimental', modes)
         for name in ('Robust Packet', 'STANAG', 'RTTY', 'SITOR', 'NAVTEX'):
             self.assertNotIn(name, results)

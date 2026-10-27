@@ -130,6 +130,33 @@ def test_confirmation_progress_renews_liveness_without_extending_sample_budget()
                            clock=lambda: state['wall'], sleep=tick)
 
 
+@pytest.mark.parametrize('outcome', ['slow-wall', 'stalled-bytes', 'sample-overrun'])
+def test_incoming_script_uses_radio_budget_and_byte_progress(outcome):
+    state = {'wall': 0., 'samples': 0, 'bytes': 0}
+    def tick(seconds):
+        state['wall'] += 10
+        state['samples'] += 100
+        if outcome != 'stalled-bytes':
+            state['bytes'] += 1
+    def receive():
+        return await_confirmation(lambda: state['bytes'] == 7,
+            lambda: (state['bytes'],), lambda: state['samples'],
+            699 if outcome == 'sample-overrun' else 700,
+            clock=lambda: state['wall'], sleep=tick)
+    if outcome == 'slow-wall':
+        # CPU scheduling can stretch a finite virtual waveform past the former
+        # 60-second total wall deadline without a missing byte or radio overrun.
+        assert receive() == (700, 70.)
+    else:
+        reason = 'no byte progress' if outcome == 'stalled-bytes' else 'sample-clock budget'
+        with pytest.raises(AssertionError, match=reason):
+            receive()
+        if outcome == 'stalled-bytes':
+            assert state['samples'] < 700 and state['wall'] == 20
+        else:
+            assert state['bytes'] == 7 and state['samples'] == 700
+
+
 def test_retirement_watchdog_allows_terminal_silence_but_rejects_a_stall():
     from hfmodem.core import cwid
     budget = retirement_sample_budget(cwid.duration('N0CALL', 14))
@@ -653,7 +680,9 @@ def test_all_byte_values_cross_native_incoming_packets_and_real_pty_once(running
                     packet_count=number % 4, invert=not slot % 2,
                     lead_s=0, tail_s=0)))
                 slot += 1
-        at = station.audio.samples + 24000
+        receive_start = station.audio.samples
+        at = receive_start + 24000
+        script_end = at + slot * 60000
         retirement = {'armed': False, 'at': None}
         def source(first, count):
             if retirement['armed'] and retirement['at'] is None and not runtime.active:
@@ -677,7 +706,14 @@ def test_all_byte_values_cross_native_incoming_packets_and_real_pty_once(running
                 links.append(reply.text)
             assert runtime.failure is None and station.audio.failure is None
             return len(received) >= len(original)
-        eventually(poll, timeout=60)
+        # The demand-paced waveform has finite radio time, independent of CI
+        # CPU scheduling. Include its final duplicate's complete raster slot;
+        # only new decoded bytes renew the existing wall-liveness watchdog.
+        used, elapsed = await_confirmation(
+            poll, lambda: (len(received),), lambda: station.audio.samples,
+            script_end - receive_start, start_samples=receive_start)
+        print(f'incoming delivery: samples={used}/{script_end - receive_start}, '
+              f'wall={elapsed:.3f}s; wall no-byte-progress watchdog=15s')
         assert bytes(received) == original
         assert links == ['(31) CONNECTED to N0DX']
         assert runtime.host.arq.dxcall == 'N0DX' and runtime.host._link_up

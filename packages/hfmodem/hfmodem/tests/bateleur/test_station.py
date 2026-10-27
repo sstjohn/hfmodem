@@ -75,18 +75,24 @@ class _Client:
         except socket.timeout:
             pass
 
-    def wait(self, pred, timeout=30.0, pump=None):
+    def wait(self, pred, timeout=30.0, pump=None, received_bytes=None):
         t0 = time.monotonic()
+        matched = None
         while time.monotonic() - t0 < timeout:
-            if pump:
+            if pump and matched is None:
                 pump()
             self.pull()
-            got = self.lines()
-            for i, ln in enumerate(got):
-                self.seen.append(ln)
-                if pred(ln):
-                    self._queue = got[i + 1:] + self._queue    # read, not yet waited on
-                    return ln
+            if matched is None:
+                got = self.lines()
+                for i, ln in enumerate(got):
+                    self.seen.append(ln)
+                    if pred(ln):
+                        self._queue = got[i + 1:] + self._queue    # read, not yet waited on
+                        matched = ln
+                        break
+            if matched is not None and (received_bytes is None
+                                        or len(self.received) >= received_bytes):
+                return matched
         raise AssertionError(f"timed out; heard {self.seen}")
 
     def settle(self, seconds=0.3):
@@ -99,6 +105,42 @@ class _Client:
     def close(self):
         self.cmd.close()
         self.data.close()
+
+
+@pytest.mark.parametrize('stalled', [False, True])
+def test_receive_end_waits_for_data_within_the_original_deadline(monkeypatch, stalled):
+    from types import SimpleNamespace
+    import sys
+    clock = SimpleNamespace(now=0., pumps=0, command_reads=0)
+    monkeypatch.setattr(sys.modules[__name__], 'time',
+                        SimpleNamespace(monotonic=lambda: clock.now))
+    app = _Client.__new__(_Client)
+    app.received, app.seen, app._queue = b'', [], []
+
+    def pull():
+        clock.now += 1
+        app.received = b'head' if clock.now == 1 or stalled else b'headtail'
+
+    def lines():
+        clock.command_reads += 1
+        return ['RX END LOST']
+
+    def pump():
+        clock.pumps += 1
+
+    app.pull, app.lines = pull, lines
+    if stalled:
+        with pytest.raises(AssertionError, match='timed out'):
+            app.wait(lambda ln: ln == 'RX END LOST', timeout=3,
+                     pump=pump, received_bytes=8)
+        assert clock.now == 3  # END does not start a second timeout.
+        assert app.received == b'head'
+    else:
+        assert app.wait(lambda ln: ln == 'RX END LOST', timeout=3,
+                        pump=pump, received_bytes=8) == 'RX END LOST'
+        assert clock.now == 2 and app.received == b'headtail'
+    assert clock.pumps == clock.command_reads == 1
+    assert app.seen == ['RX END LOST']
 
 
 def _cfg(**over):
@@ -362,8 +404,10 @@ def test_fsk_through_the_station_to_the_host_port():
             if not st.replay_exhausted():
                 st._tick()
         app.wait(lambda ln: ln.startswith("RX START FSK 75W/1700"), pump=pump)
-        app.wait(lambda ln: ln.startswith("RX END LOST"), pump=pump)
-        app.settle()
+        # Command and data sockets have independent asynchronous writers.
+        app.wait(lambda ln: ln.startswith("RX END LOST"), pump=pump,
+                 received_bytes=len(MSG))
+        app.settle()  # Preserve the post-delivery window for surplus bytes.
         assert app.received == MSG
         app.close()
     finally:

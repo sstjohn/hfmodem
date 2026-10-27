@@ -2,6 +2,14 @@
 <!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Changelog
 
+## 0.3.4 — 2026-10-26
+
+- Corrected CI fixture timing and asynchronous payload waits, and clarified
+  the Xara source-kit documentation.
+- Corrected PACTOR replay controls and the homepage exchange diagram against
+  retained recordings.
+- Updated Lanner’s RTTY, SITOR-B and NAVTEX maturity labels to alpha.
+
 ## 0.3.2 — 2026-10-26
 
 - Added an opt-in Xara validation source kit with explicit peer selection and

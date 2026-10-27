@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Exact slot-13 recording: the level-3 over was swallowed by a guessed pair."""
 import hashlib
+import itertools
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 from scipy.io import wavfile
@@ -12,13 +14,18 @@ from hfmodem.contact import slots as S
 from hfmodem.core.wav import source
 
 
-def test_slot13_recording_recovers_all_three_fragments_once():
+def test_slot13_recording_recovers_all_three_fragments_once(monkeypatch):
     root = Path(__file__).parent / 'fixtures/varac-observed-pairs-1025'
     facts = json.loads((root / 'provenance.json').read_text())
     path = root / 'slot13.flac'
     assert hashlib.sha256(path.read_bytes()).hexdigest() == facts['flac_sha256']
     fs, x = wavfile.read(source(path))
     assert fs == S.FS == facts['sample_rate']
+    # This checks decoded recording content, independently of host CPU contention.
+    # Charge each high-speed read 20 ms against the unchanged elapsed-time budget;
+    # its debt and expiry behavior are checked separately with a controlled clock.
+    clock = itertools.count(step=.02)
+    monkeypatch.setattr(S, 'time', SimpleNamespace(monotonic=lambda: next(clock)))
     monitor = S.SlotMonitor(14_107_250, 14_105_000, passband=(1250, 1750))
     found = []
     # Enough trailing silence to settle a possible partner; no EOF-only decoder.
@@ -27,7 +34,7 @@ def test_slot13_recording_recovers_all_three_fragments_once():
         found += monitor.feed(x[i:i + 4800])
     said = [item[2] for item in found if item[0] == 'qso' and item[1] == 13]
     assert [s.text for s in said if s.kind == 'text'] == facts['expected_text']
-    assert not any(s.kind == 'coverage' for s in said)
+    assert [s.text for s in said if s.kind == 'coverage'] == []
     receiver = monitor._channels[0].frames
     assert receiver.overflows == receiver.expired == 0
 

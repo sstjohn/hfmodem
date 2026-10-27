@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hfmodem"
-version = "0.3.2"
+version = "0.3.4"
 maintainers = [{ email = "hfmodem@ssj.lol" }]
 description = "Experimental HF modems, receive monitors and shared radio station tools."
 # Inline, not a file path: this package directory carries no README.md, and
