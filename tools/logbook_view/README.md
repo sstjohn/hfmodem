@@ -26,6 +26,13 @@ filters. Static exports include the summary script.
 
 ## QSO rehear inspector
 
+The waterfall Frequency selector switches between the full retained spectrum
+and the nominal signal band centered at 1500 Hz. New artifacts retain 0–6000 Hz
+to include receiver audio above 3 kHz; older artifacts show their stored extent.
+This display range does not assert the radio’s filter width. Packet timing and
+the dBFS scale stay fixed when zooming.
+
+
 The station service includes the logbook and VARA, PACTOR and ARDOP replay inspector
 on its configured port (8737 by default). The desk itself opens no radio devices.
 

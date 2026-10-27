@@ -2,6 +2,15 @@
 <!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Changelog
 
+## 0.3.2 — 2026-10-26
+
+- Added an opt-in Xara validation source kit with explicit peer selection and
+  recorded source/build provenance; normal builds and tests do not fetch Xara.
+- Refreshed the site’s PACTOR and VARA evidence, added a VarAC BBS replay, and
+  improved replay spectrum views and navigation.
+- Updated release-test fixtures for current VARA handshakes, portable terminal
+  editing, and deterministic station timing.
+
 ## 0.3.1 — 2026-10-26
 
 - Fixed near-capacity payload accounting when closing a Kestrel contact.

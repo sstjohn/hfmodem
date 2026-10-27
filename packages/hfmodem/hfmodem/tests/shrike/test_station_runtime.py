@@ -193,34 +193,123 @@ def test_retirement_milestones_cannot_renew_the_wall_watchdog_forever():
 
 
 class Card(Capture):
-    """An advancing indexed card; no owner-side clock advancement."""
+    """Independent waveform feeder with bounded virtual capture lookahead.
+
+    Decoder CPU time is not simulated radio time. Keep at most one block ahead
+    of the native reader, except for an explicit settle/DAC wait. The feeder
+    remains the only clock producer; neither path invents samples or replies.
+    """
     def __init__(self):
         super().__init__()
         self.condition = threading.Condition()
         self.halt = threading.Event()
         self.failure = None
         self.source = lambda at, count: np.zeros(count, np.float32)
+        self._wait_targets = {}
 
     def wait_until(self, index, **options):
-        while self.samples < index:
+        def check():
             if options.get('cancelled') is not None and options['cancelled']():
                 raise BurstInvalidated('cancelled')
             if options.get('deadline') is not None and time.monotonic() >= options['deadline']:
                 raise BurstInvalidated('deadline')
+        if self.samples < index:
+            check()
+        token = object()
+        with self.condition:
+            self._wait_targets[token] = index
+        try:
+            while self.samples < index:
+                check()
+                with self.condition:
+                    self.condition.wait(.002)
+        finally:
             with self.condition:
-                self.condition.wait(.002)
+                del self._wait_targets[token]
+
+    def advance(self, link, runtime):
+        with self.condition:
+            port = runtime._port
+            if port is not None and not port.closed:
+                limit = max([port.pos + 128, *self._wait_targets.values()])
+                if self.samples >= limit:
+                    return False
+            at = self.samples
+            block = self.source(at, 128)
+            self.samples += 128
+            link.lane.push(Block(0., at, block))
+            self.condition.notify_all()
+        runtime.pump()
+        return True
 
     def run(self, link, runtime):
         try:
             while not self.halt.wait(.002):
-                with self.condition:
-                    at = self.samples
-                    self.samples += 128
-                    link.lane.push(Block(0., at, self.source(at, 128)))
-                    self.condition.notify_all()
-                runtime.pump()
+                self.advance(link, runtime)
         except BaseException as exc:
             self.failure = exc
+
+
+def test_virtual_card_pauses_at_one_queued_block_until_reader_advances():
+    card = Card()
+    port = SimpleNamespace(pos=0, closed=False)
+    frames = []
+    runtime = SimpleNamespace(_port=port, pump=lambda: None)
+    link = SimpleNamespace(lane=SimpleNamespace(push=frames.append))
+    assert card.advance(link, runtime)
+    for _ in range(10):
+        assert not card.advance(link, runtime)
+    assert card.samples == 128 and len(frames) == 1
+    port.pos = 128
+    assert card.advance(link, runtime)
+    assert card.samples == 256 and len(frames) == 2
+    assert [frame.n0 for frame in frames] == [0, 128]
+
+
+def test_virtual_card_stalled_owner_still_expires_wall_watchdog():
+    card = Card()
+    runtime = SimpleNamespace(_port=SimpleNamespace(pos=0, closed=False), pump=lambda: None)
+    link = SimpleNamespace(lane=SimpleNamespace(push=lambda block: None))
+    assert card.advance(link, runtime)
+    wall = [0.]
+    def tick(seconds):
+        wall[0] += 5
+        assert not card.advance(link, runtime)
+    with pytest.raises(AssertionError, match='no byte progress'):
+        await_confirmation(lambda: False, lambda: (0, 0), lambda: card.samples,
+                           54 * 60000, clock=lambda: wall[0], sleep=tick)
+    assert wall[0] == 15 and card.samples == 128
+
+
+@pytest.mark.parametrize('failure', [None, 'cancelled', 'deadline'])
+def test_virtual_card_explicit_wait_and_stalled_owner(failure):
+    card = Card()
+    port = SimpleNamespace(pos=0, closed=False)
+    frames = []
+    runtime = SimpleNamespace(_port=port, pump=lambda: None)
+    link = SimpleNamespace(lane=SimpleNamespace(push=frames.append))
+    # Exercise the real independent feeder, including its bounded stopped-owner
+    # behavior. A wait requests capture; it never advances the clock itself.
+    feeder = threading.Thread(target=card.run, args=(link, runtime), daemon=True)
+    feeder.start()
+    try:
+        eventually(lambda: card.samples == 128)
+        if failure is None:
+            card.wait_until(384, deadline=time.monotonic() + 1)
+            assert card.samples == 384
+        else:
+            options = ({'cancelled': lambda: True} if failure == 'cancelled'
+                       else {'deadline': time.monotonic() - 1})
+            with pytest.raises(BurstInvalidated, match=failure):
+                card.wait_until(384, **options)
+            assert card.samples == 128
+        assert not card._wait_targets
+        assert not card.advance(link, runtime)
+        assert len(frames) * 128 == card.samples and card.failure is None
+    finally:
+        card.halt.set()
+        feeder.join(1)
+        assert not feeder.is_alive()
 
 
 class Client:

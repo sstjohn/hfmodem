@@ -159,3 +159,21 @@ test('anatomy follows section boundaries and supports open live intervals',async
  assert.equal(packetAnatomy({t0:2,t1:null},10).current.label,'Packet interval');
  assert.match(packetAnatomy({t0:0,t1:1},0).parts[0].basis,/not retained/);
 });
+
+import {frequencyView} from './link_state.mjs';
+import {frequencyView as publicFrequencyView} from '../../site/js/examples/link-state.js';
+test('frequency view crops nominal signal bands and respects retained spectrum limits',()=>{
+ for(const view of [frequencyView,publicFrequencyView]){
+  const manifest={bw_hz:500,waterfall:{bins:513,hz_per_bin:11.71875}};
+  assert.equal(view(manifest).high,6000);
+  const narrow=view(manifest,'signal');
+  assert.equal(narrow.low,1250);assert.equal(narrow.high,1750);
+  // The 1500 Hz bin remains exactly in the center of the cropped raster.
+  const pixel=513-1-1500/11.71875+.5;
+  assert.ok(Math.abs((pixel-narrow.sourceTop)/narrow.sourceHeight-.5)<1e-10);
+  assert.equal(view({...manifest,bw_hz:200},'signal').low,1400);
+  assert.equal(view({...manifest,bw_hz:2400},'signal').high,2700);
+  assert.equal(view({...manifest,waterfall:{bins:257,hz_per_bin:11.71875}}).high,3000);
+  assert.equal(view({...manifest,bw_hz:null},'signal').high,6000);
+ }
+});

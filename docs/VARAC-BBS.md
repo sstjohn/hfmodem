@@ -90,5 +90,10 @@ The [regression fixture](../packages/hfmodem/hfmodem/tests/contact/fixtures/kq4q
 received chunk boundaries and offer. Tests cover real-capture replay, client/server
 application round trip, arbitrary fragmentation, trailing chat, checksum/GZIP
 failures, expansion bounds, cancellation, disconnect, stale readiness, export
-path restrictions, configuration, and non-overwriting save behavior. Live RF
-interoperability of the new automatic receiver and sender remains to be tested.
+path restrictions, configuration, and non-overwriting save behavior. A later contact on October 25 demonstrates the automatic receiver: at
+21:35:04 UTC it saved the same 2,516-byte bulletin and queued `<SFOK>`. The
+[recorded BBS exchange](../site/examples/varac-bbs/index.html) includes a
+CRC-valid decode of that local reply, the offer, and received frames through L11.
+This is a transfer excerpt; it does not show connection or session close, or
+establish reception of the completion reply at the peer. Live RF interoperability
+of the directory sender remains to be tested.

@@ -3,9 +3,17 @@
 import assert from 'node:assert/strict';
 export async function checkInspectors(page, baseURL) {
  const checked=[];
- for(const route of ['vara-send','vara-receive','pactor3-send','pactor3-receive','ardop-send','ardop-receive']){
+ for(const route of ['vara-send','vara-receive','pactor3-send','pactor3-receive','ardop-send','ardop-receive','varac-bbs']){
   await page.goto(new URL(`examples/${route}/`,baseURL).href);
   await page.locator('#workspace').waitFor({state:'visible'});
+  const spectrum=await page.locator('#waterfall').getAttribute('data-frequency-high');
+  const geometry=await page.evaluate(async()=>await(await fetch('./manifest.json')).json());
+  assert.equal(Number(spectrum),(geometry.waterfall.bins-1)*geometry.waterfall.hz_per_bin);
+  await page.locator('#frequencyRange').selectOption('signal');
+  await page.waitForFunction(()=>document.getElementById('waterfall-text').textContent.includes('nominal signal band'));
+  assert.equal(Number(await page.locator('#waterfall').getAttribute('data-frequency-low')),1500-geometry.bw_hz/2);
+  await page.locator('#frequencyRange').selectOption('full');
+  await page.waitForFunction(()=>document.getElementById('waterfall-text').textContent.includes('full retained spectrum'));
   await page.locator('.skip').press('Tab');
   await page.getByRole('link',{name:'Skip to content',exact:true}).press('Enter');
   assert.equal(await page.evaluate(()=>document.activeElement.id),'main',route+' skip focus');

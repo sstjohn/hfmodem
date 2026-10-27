@@ -316,12 +316,18 @@ def test_the_terminal_edits_recalls_and_keeps_the_typed_line_under_screen_lines(
         screen, seen = b'', 0
         def until(text):
             nonlocal screen, seen
+            alternatives = text if isinstance(text, tuple) else (text,)
             deadline = time.monotonic() + 10
-            while (found := screen.find(text, seen)) < 0:
+            while True:
+                found = [(screen.find(candidate, seen), candidate) for candidate in alternatives]
+                found = [(index, candidate) for index, candidate in found if index >= 0]
+                if found:
+                    index, candidate = min(found)
+                    seen = index + len(candidate)
+                    return
                 assert time.monotonic() < deadline, screen
                 if select.select([master], [], [], .1)[0]:
                     screen += os.read(master, 4096)
-            seen = found + len(text)
         for wait, keys in steps:
             until(wait)
             time.sleep(.2)  # a ^D typed ahead between lines meets the cooked tty and is lost
@@ -335,8 +341,10 @@ def test_the_terminal_edits_recalls_and_keeps_the_typed_line_under_screen_lines(
                           (b"got 'Xabc\\n'", b'\x1b[A\r'), (b"got 'Xabc\\n'", b'\x04'))
     assert log == b'to arm.log\n'
     assert history.read_text().splitlines()[-2:] == ['later', 'Xabc']
-    session((b'> ', b'\x1b[A\r'), (b"got 'Xabc\\n'", b'\x12'), (b'bck:', b'lat'),
-            (b'bck:la', b'\r'), (b'> ', b'\r'), (b'heard', b'\x04'))
+    screen, _ = session((b'> ', b'\x1b[A\r'), (b"got 'Xabc\\n'", b'\x12'),
+                        ((b'bck:', b'(reverse-i-search)'), b'lat'),
+                        ((b'bck:la', b'lat'), b'\r'), (b'> ', b'\r'),
+                        (b'heard', b'\x04'))
 
 
 HELD_BUSY_CHILD = '''

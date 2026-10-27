@@ -8,6 +8,7 @@ The external recording corpus and private station logs are not part of the relea
 
 | Record | Result | Included material |
 |---|---|---|
+| [VarAC BBS: KQ4QWH](../site/examples/varac-bbs/index.html) | 2,516-byte bulletin validated and saved; BW500 receive through L11; local completion reply decoded | 118 s receiver excerpt, shared packet inspector, file and audio hashes |
 | [VarAC reception, 24 October](varac-receive-1024/README.md) | Passive BW500 receive at L5, L6 and L7; stations unidentified | 125 s FLAC, provenance, CRC-valid frame hashes |
 | [KB8AY, 18 September](vara-mail-0918/README.md) | VARA mail accepted; destination receipt reported by the operator | Rig speaker WAV and provenance |
 | [VARA send: NS0A](../site/examples/vara-send/index.html) | L9 acknowledged transmit; destination receipt confirmed | Monitor audio, packet replay, session record |

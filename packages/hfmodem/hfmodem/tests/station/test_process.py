@@ -181,6 +181,9 @@ def test_external_down_during_own(station, monkeypatch):
 @pytest.mark.parametrize('receive', [False, True])
 def test_inode_recheck_releases_with_reason(station, receive):
     station.own(receive=receive)
+    # Use an exact synthetic epoch: (real_monotonic + 60) - real_monotonic
+    # can round below 60 and leave the periodic check not yet due.
+    station._last_inode_check = 0.0
     old = claim.claim_path().with_name('old-claim')
     claim.claim_path().rename(old)
     claim.claim_path().touch()
@@ -718,6 +721,7 @@ def test_teardown_failure_still_closes_every_device(station, part):
 
 def test_inode_release_with_unconfirmed_line_stays_failed(station, monkeypatch):
     station.own()
+    station._last_inode_check = 0.0
     monkeypatch.setattr(station.rig.ptt, 'release', lambda: None)
     monkeypatch.setattr(claim, 'check_inode', lambda held: (_ for _ in ()).throw(claim.ClaimError('changed inode')))
     station.check_claim(now=station._last_inode_check + 60)
@@ -728,6 +732,7 @@ def test_inode_release_with_unconfirmed_line_stays_failed(station, monkeypatch):
 
 def test_inode_release_transition_race_is_retried(station, monkeypatch):
     station.own()
+    station._last_inode_check = 0.0
     monkeypatch.setattr(claim, 'check_inode', lambda held: (_ for _ in ()).throw(claim.ClaimError('changed inode')))
     release = station.release
     calls = []
@@ -1186,6 +1191,7 @@ def test_stop_at_release_tail_does_not_cancel_reown(station, monkeypatch):
 
 def test_failed_claim_is_not_torn_down_again(station, monkeypatch):
     station.own()
+    station._last_inode_check = 0.0
     station.rig.ptt.release = lambda: None
     monkeypatch.setattr(claim, 'check_inode', lambda held: (_ for _ in ()).throw(claim.ClaimError('changed')))
     now = station._last_inode_check + 60

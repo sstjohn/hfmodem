@@ -76,12 +76,19 @@ class _Link:
         self.received, self.read_levels = bytearray(), []
         self.overs, self.ruin = 0, ruin
 
-    def connect(self):
+    def connect(self, greeting):
+        # Queue the host greeting at CONNECTED, before the caller's waveform
+        # confirmation grants the responder its initial sending turn.
+        self.callee.io.connected = lambda *args: self.callee.send(greeting)
         self.callee.listen(True)
         self.caller.originate("KB8AY")
         while self.to_callee or self.to_caller:
             if self.to_callee:
-                self.callee.on_rx_audio(self.to_callee.pop(0))
+                x = self.to_callee.pop(0)
+                if self.callee.state == VA.VaraState.CONNECTED:
+                    self.callee_hears(x)
+                else:
+                    self.callee.on_rx_audio(x)
             else:
                 self.caller_hears(self.to_caller.pop(0))
 
@@ -124,6 +131,13 @@ class _Link:
 
     def callee_hears(self, x):
         cs = self.callee
+        if cs._awaiting_caller_confirm:
+            # Wide responder confirmations are owned by the stream reader.
+            audio = np.concatenate([np.zeros(FS // 10), x, np.zeros(FS // 2)])
+            for i in range(0, len(audio), POLL):
+                _Clock.t += POLL / FS
+                cs.on_rx_stream(audio[i:i + POLL])
+            return
         if len(x) >= VA._DATA_OVER_MIN:
             read = self._read(x)
             assert read is not None and not read.lost
@@ -192,15 +206,19 @@ def _session(high_speed, size, ruin=None):
     rng = np.random.default_rng(1)
     greeting, upload = (rng.integers(0, 256, size, dtype=np.uint8).tobytes() for _ in "ab")
     link = _Link(high_speed, ruin)
-    link.connect()
+    deliver = link.caller.io.data
+    def host_reply(payload):
+        deliver(payload)
+        # Reply when the complete greeting reaches the host, before an empty
+        # turn would be returned. This finite waveform loop has no idle ticker.
+        if sum(map(len, link.caller.io.host)) == len(greeting):
+            link.caller.send(upload)
+    link.caller.io.data = host_reply
+    link.connect(greeting)
     assert link.caller.state == link.callee.state == VA.VaraState.CONNECTED
-    link.callee.turn = VA._TURN_OURS
-    link.callee.send(greeting)
-    link.run()
-    link.caller.send(upload)
     link.run()
     assert b"".join(link.caller.io.host) == greeting
-    assert bytes(link.received) == upload
+    assert bytes(link.received) == upload, '\n'.join(link.caller.io.msgs + link.callee.io.msgs)
     return link
 
 

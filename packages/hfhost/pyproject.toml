@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hfhost"
-version = "0.3.1"
+version = "0.3.2"
 description = "Host clients for HF modems, including VARA-style TCP and Sabir framed CBOR"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE", "NOTICE"]

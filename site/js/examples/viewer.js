@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
-import {setWaveforms,waveformRows,linkState,radioMode,packetAt,packetProgress,symbolVisible,exchangeNote,evidenceClass,evidenceAvailable,directionLabel,playbackSummary,matchesEvent,byteRecords,hexDump,readableBytes,trafficBytes,exchangeRows,packetAnatomy} from './link-state.js';
+import {frequencyView,setWaveforms,waveformRows,linkState,radioMode,packetAt,packetProgress,symbolVisible,exchangeNote,evidenceClass,evidenceAvailable,directionLabel,playbackSummary,matchesEvent,byteRecords,hexDump,readableBytes,trafficBytes,exchangeRows,packetAnatomy} from './link-state.js?v=frequency-1026-1';
 import {installDeskEmbedding} from './desk-embed.mjs';
 const $ = id => document.getElementById(id);
 const state = {time:0, playing:false, selected:null, loop:null, events:[], cache:new Map(), tiles:new Map(), generation:0, eventPage:0};
@@ -92,7 +92,7 @@ function sessionOverview(){
  $('waterfallPeer').textContent=`${manifest.called||manifest.call||'Peer'} · RX`;
  $('sessionOutcome').textContent=manifest.comparison?.original_summary||'Original session outcome not stored in this replay.';
  const session=manifest.session||{};
- $('sessionFacts').textContent=[`${manifest.caller||'Local station'} → ${manifest.called||manifest.call} · local station is the caller`,session.dial_hz!=null?`${(session.dial_hz/1e6).toFixed(4)} MHz dial`:null,session.tx_w!=null?`${session.tx_w} W configured`:null,manifest.bw_hz?`${manifest.bw_hz} Hz bandwidth`:null,`${manifest.sources?.length||1} recording sources`,`${seconds(manifest.duration_s)} primary recording`,'Mail delivery comes from the original session log; replay CRCs do not establish delivery.'].filter(Boolean).join(' · ');
+ $('sessionFacts').textContent=[`${manifest.caller||'Local station'} → ${manifest.called||manifest.call} · local station is the caller`,session.dial_hz!=null?`${(session.dial_hz/1e6).toFixed(4)} MHz dial`:null,session.tx_w!=null?`${session.tx_w} W configured`:null,manifest.bw_hz?`${manifest.bw_hz} Hz bandwidth`:null,`${manifest.sources?.length||1} recording sources`,`${seconds(manifest.duration_s)} primary recording`,manifest.outcome_note||'Mail delivery comes from the original session log; replay CRCs do not establish delivery.'].filter(Boolean).join(' · ');
 }
 function timeline(){
 const [c,w,h]=context('timeline'),duration=manifest.duration_s||1,left=82,pw=w-left;
@@ -103,19 +103,21 @@ if((e.evidence_type==='ptt'||e.kind==='PTT / transmit')){c.strokeStyle='#9a88cb'
 if(state.selected===e){c.globalAlpha=1;c.strokeStyle='#ffce64';c.lineWidth=2;c.strokeRect(x-1,10+lane*25,ww+2,22);}}
 c.globalAlpha=1;c.lineWidth=1;const [lo,hi]=view();c.strokeStyle='#a9bed877';c.strokeRect(left+lo/duration*pw,3,(hi-lo)/duration*pw,88);c.fillStyle='#ffffff';c.fillRect(left+state.time/duration*pw,0,1,h);
 }
-async function waterfall(generation){const [lo,hi]=view(),wf=manifest.waterfall;const tiles=wf.tiles.filter(t=>(t.first+t.rows)*wf.hop_s>=lo&&t.first*wf.hop_s<=hi);const results=await Promise.all(tiles.map(t=>memo(state.tiles,t.file,async()=>{const r=await fetch(base+t.file);if(!r.ok)throw Error('Waterfall tile unavailable');const bytes=decodeRaster((await r.json()).raster_base64);if(bytes.length!==t.rows*wf.bins)throw Error('Invalid waterfall tile');const img=new ImageData(t.rows,wf.bins);for(let row=0;row<t.rows;row++)for(let bin=0;bin<wf.bins;bin++){const v=bytes[row*wf.bins+bin]/255;const i=((wf.bins-1-bin)*t.rows+row)*4;const rgb=window.HFSignalPalette?.rgb(v)||[Math.min(255,Math.max(0,(v-.45)*400)),Math.min(255,v*v*360),Math.min(255,20+v*220)];[img.data[i],img.data[i+1],img.data[i+2]]=rgb;img.data[i+3]=255;}const tile=document.createElement('canvas');tile.width=t.rows;tile.height=wf.bins;tile.getContext('2d').putImageData(img,0,0);tile.values=bytes;return tile;},16)));
+async function waterfall(generation){const [lo,hi]=view(),wf=manifest.waterfall,frequency=frequencyView(manifest,$('frequencyRange').value);const tiles=wf.tiles.filter(t=>(t.first+t.rows)*wf.hop_s>=lo&&t.first*wf.hop_s<=hi);const results=await Promise.all(tiles.map(t=>memo(state.tiles,t.file,async()=>{const r=await fetch(base+t.file);if(!r.ok)throw Error('Waterfall tile unavailable');const bytes=decodeRaster((await r.json()).raster_base64);if(bytes.length!==t.rows*wf.bins)throw Error('Invalid waterfall tile');const img=new ImageData(t.rows,wf.bins);for(let row=0;row<t.rows;row++)for(let bin=0;bin<wf.bins;bin++){const v=bytes[row*wf.bins+bin]/255;const i=((wf.bins-1-bin)*t.rows+row)*4;const rgb=window.HFSignalPalette?.rgb(v)||[Math.min(255,Math.max(0,(v-.45)*400)),Math.min(255,v*v*360),Math.min(255,20+v*220)];[img.data[i],img.data[i+1],img.data[i+2]]=rgb;img.data[i+3]=255;}const tile=document.createElement('canvas');tile.width=t.rows;tile.height=wf.bins;tile.getContext('2d').putImageData(img,0,0);tile.values=bytes;return tile;},16)));
 if(generation!==state.generation)return;
+$('waterfall').dataset.frequencyLow=frequency.low;$('waterfall').dataset.frequencyHigh=frequency.high;
+$('waterfall-text').textContent=`${frequency.low}–${frequency.high} Hz audio · fixed −100 to 0 dBFS scale · ${$('frequencyRange').value==='signal'?'nominal signal band, centered at '+(manifest.audio_center_hz??1500)+' Hz':'full retained spectrum; receiver filtering is visible in the recording'} · outlines identify the sender; brightness shows recorded power.`;
 if($('waterfall-values').open){
  const lines=['Time seconds | strongest bin Hz | dBFS'];
  for(let i=0;i<tiles.length;i++){const tile=tiles[i],bytes=results[i].values;
   for(let row=0;row<tile.rows;row++){const time=(tile.first+row)*wf.hop_s;if(time<lo||time>hi)continue;
-   let peak=0;for(let bin=1;bin<wf.bins;bin++)if(bytes[row*wf.bins+bin]>bytes[row*wf.bins+peak])peak=bin;
+   let peak=frequency.firstBin;for(let bin=frequency.firstBin+1;bin<=frequency.lastBin;bin++)if(bytes[row*wf.bins+bin]>bytes[row*wf.bins+peak])peak=bin;
    lines.push(`${time.toFixed(2)} | ${(peak*wf.hz_per_bin).toFixed(2)} | ${(wf.db_min+bytes[row*wf.bins+peak]/255*(wf.db_max-wf.db_min)).toFixed(2)}`);
   }
  }
  const text=lines.join('\n');if($('waterfall-peaks').textContent!==text)$('waterfall-peaks').textContent=text;
 }
-const [c,w,h]=context('waterfall');const left=48,top=12,pw=w-left-8,ph=h-38;c.save();c.beginPath();c.rect(left,top,pw,ph);c.clip();tiles.forEach((t,i)=>{c.drawImage(results[i],left+(t.first*wf.hop_s-lo)/(hi-lo)*pw,top,t.rows*wf.hop_s/(hi-lo)*pw,ph);});
+const [c,w,h]=context('waterfall');const left=48,top=12,pw=w-left-8,ph=h-38;c.save();c.beginPath();c.rect(left,top,pw,ph);c.clip();tiles.forEach((t,i)=>{c.drawImage(results[i],0,frequency.sourceTop,t.rows,frequency.sourceHeight,left+(t.first*wf.hop_s-lo)/(hi-lo)*pw,top,t.rows*wf.hop_s/(hi-lo)*pw,ph);});
 for(const e of state.events){
  if(e.timestamp_only||e.t1<=e.t0)continue;
  const start=e.burst_t0??e.t0,end=e.burst_t1??e.t1;
@@ -134,7 +136,7 @@ c.lineWidth=6;c.strokeStyle='#080b10';c.strokeRect(x0,top+2,x1-x0,ph-4);
 c.lineWidth=2;c.strokeStyle='#ffce64';c.strokeRect(x0,top+2,x1-x0,ph-4);
 for(const x of [x0,x1]){c.fillStyle='#ffce64';c.beginPath();c.moveTo(x-6,top);c.lineTo(x+6,top);c.lineTo(x,top+10);c.closePath();c.fill();}
 const text=eventLabel(state.selected);c.font='bold 10px system-ui';const tw=c.measureText(text).width+14,bx=Math.max(left+4,Math.min(x0+6,left+pw-tw-4));c.fillStyle='#ffce64';c.fillRect(bx,top+12,tw,20);c.fillStyle='#131924';c.fillText(text,bx+7,top+26);
-}else{c.fillStyle='#fff';c.fillRect(left+(state.time-lo)/(hi-lo)*pw,top,1,ph);}c.lineWidth=1;c.restore();c.font='10px monospace';c.fillStyle='#9dacbf';for(let k=0;k<=3;k++)c.fillText(`${3-k}k`,8,top+k*ph/3+4);for(let k=0;k<=4;k++)c.fillText(`${(lo+(hi-lo)*k/4).toFixed(1)}s`,left+k*pw/4-12,h-8);}
+}else{c.fillStyle='#fff';c.fillRect(left+(state.time-lo)/(hi-lo)*pw,top,1,ph);}c.lineWidth=1;c.restore();c.font='10px monospace';c.fillStyle='#9dacbf';for(let k=0;k<=4;k++)c.fillText(`${Math.round(frequency.high-(frequency.high-frequency.low)*k/4)}`,4,top+k*ph/4+4);for(let k=0;k<=4;k++)c.fillText(`${(lo+(hi-lo)*k/4).toFixed(1)}s`,left+k*pw/4-12,h-8);}
 function sourceName(id){const s=manifest.sources?.find(s=>s.id===id);return {'rig rx':'Receiver input','rig tap':'TX monitor tap','sdr witness':'SDR witness'}[s?.kind]||s?.kind||'Recording';}
 function jsonCached(file){return memo(state.cache,file,()=>json(base+file),48);}
 function plotConstellation(canvas,data,whole=!!state.selected,window=null,carrier='all'){
@@ -271,6 +273,7 @@ function showAnatomy(e){
 }
 function draw(){if(!manifest)return;const gen=++state.generation;showLinkState();timeline();const e=state.selected||packetAt(state.events,state.time);packetCaption(e);details(state.selected||e);showBytes(e);showExchange();showAnatomy(e);Promise.all([waterfall(gen),cloud(e,gen),comparisons(e,gen)]).then(()=>{if(gen===state.generation&&state.plotLoadError){state.plotLoadError=false;$('notice').textContent=(manifest.sources||[]).filter(s=>s.offset_s===null).map(s=>`${sourceName(s.id)} is unaligned. ${s.alignment}`).join('\n');}}).catch(error=>{if(gen!==state.generation)return;state.plotLoadError=true;$('notice').textContent=`${error.message}. The affected plot retains its last loaded view. Seek again to retry.`;});}
 async function load(index){stop();state.loop=null;state.generation++;const a=artifacts[index];manifest=a.manifest;base=a.base;state.cache.clear();state.tiles.clear();state.events=await json(manifest.events);clearSelection();setTime(0);$('seek').max=manifest.duration_s;$('title').textContent=`${manifest.call} · ${manifest.protocol}${manifest.protocol==='VARA'?' BW'+manifest.bw_hz:''}`;$('subtitle').textContent=`${manifest.started_utc} · ${manifest.recording.kind} · ${seconds(manifest.duration_s)}`;$('audio').src=manifest.sources.find(s=>s.url)?.url||'';$('badge').textContent=manifest.protocol;
+const frequency=frequencyView(manifest);$('frequencyRange').replaceChildren(new Option(`Full recording · 0–${frequency.maximum} Hz`,'full'),...(frequency.expected?[new Option(`Expected signal · ${manifest.bw_hz} Hz`,'signal')]:[]));
 const rows=waveformRows(manifest.protocol,manifest.bw_hz);$('modeGuide').closest('table').hidden=!rows.length;$('modeGuide').replaceChildren(...rows.map(r=>{const tr=document.createElement('tr');for(const value of [`${r.protocol} ${r.protocol==='VARA'?'L':'SL'}${r.level}`,`${r.family} · ${r.modulation}`,`${r.carrier_count}`]){const td=document.createElement('td');td.textContent=value;tr.append(td);}return tr;}));
 $('listenSource').replaceChildren(...(manifest.sources||[{id:'rx',kind:manifest.recording.kind,url:manifest.recording.url,offset_s:0}]).filter(s=>s.offset_s!==null&&s.url).map(s=>new Option(sourceName(s.id),s.id)));
 $('sourcekind').textContent=({'rig rx':'Waterfall & RX: rig receiver input.','rig tap':'Source: rig monitor tap.','sdr witness':'Source: remote SDR witness.'})[manifest.recording.kind]||manifest.recording.kind;
@@ -284,7 +287,7 @@ $('eventsPrevious').onclick=()=>{if($('eventsPrevious').getAttribute('aria-disab
 $('replayFrame').onclick=()=>{if(state.loop){state.loop=null;stop();draw();return;}const e=state.currentPacket;if(!e)return;state.loop=e;setTime(Math.max(0,e.t0-.15));play();};
 $('play').onclick=()=>state.playing?stop():play();$('follow').onclick=play;
 $('seek').oninput=()=>{stop();state.loop=null;clearSelection();setTime(+$('seek').value);$('audio').currentTime=Math.max(0,state.time+audioOffset());draw();};
-for(const id of ['span','cloud','carrier','window','signalMode','signalSource','compare','byteMode','exchangeScope'])$(id).onchange=draw;
+for(const id of ['frequencyRange','span','cloud','carrier','window','signalMode','signalSource','compare','byteMode','exchangeScope'])$(id).onchange=draw;
 $('speed').onchange=()=>{$('audio').playbackRate=+$('speed').value;$('audio').preservesPitch=false;};
 $('listenSource').onchange=()=>{syncAudio();if(state.playing&&$('listen').checked)play();};
 $('listen').onchange=()=>{if(state.preparing)stop();else if(state.playing)play();else $('audio').pause();};
@@ -314,6 +317,8 @@ try {
  setWaveforms(await json('../waveforms.json'));
  artifacts=[{manifest:await json('./manifest.json'),base:'./data/'}];
  await load(0);
+ const start=Number(new URLSearchParams(location.search).get('t'));
+ if(Number.isFinite(start)&&start>0){setTime(start);draw();}
 } catch(e) { $('notice').textContent=e.message; }
 
 installDeskEmbedding(stop,()=>{state.tiles.clear();toneTiles=new WeakMap();draw()});

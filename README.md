@@ -142,6 +142,16 @@ The [operator guide](docs/CONSOLE.md) covers named gateways, sending mail,
 monitoring and the logbook. Installation time depends on downloads and system
 dependencies; making a contact also depends on the channel and propagation.
 
+## Offline validation against Xara
+
+The complete source release includes an explicitly invoked
+[Kestrel/Xara validation kit](tools/interop/xara/README.md). Its quickstart creates
+a clean Python environment, fetches the tested Xara version on request, and
+exchanges exact payloads through generated PCM without hardware or station setup.
+The kit also accepts an explicit tag, commit hash or HEAD for peer comparisons.
+It is a source-release tool, not an installed wheel command; normal installation,
+builds and tests do not fetch Xara or Rust or run interoperability checks.
+
 ## Developing from a checkout
 
 ```sh

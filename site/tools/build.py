@@ -89,17 +89,13 @@ MOVED = {f'docs/protocols/{name}': f'docs/implementation/{name}' for name in (
 
 def write_page(path, text, home='./', *, homepage=False, secret_door=True):
     # The warning also reaches guides opened directly rather than via the home page.
-    # Replace any older notice, so only the homepage carries the demonstration.
+    # Replace any older notice with the current warning.
     text = re.sub(r'<aside class="release-notice"[^>]*>[\s\S]*?</aside>', '', text)
     text = re.sub(r'<p class="release-demonstration">[\s\S]*?</p>', '', text)
     notice = NOTICE
     if homepage:
         notice = notice.replace('</strong>', ' Do not rely on it for any purpose, '
                                 'especially emergency communications.</strong>')
-        demonstration = ('<p>Recorded Winlink mail transfers used '
-                         '<a href="examples/pactor3-send/">PACTOR-3</a> and '
-                         '<a href="examples/vara-send/">VARA HF</a>.</p>')
-        notice = notice.replace('</aside>', demonstration + '</aside>')
     if 'class="release-notice"' not in text:
         if re.search(r'<body\b[^>]*>', text):
             text = re.sub(r'(<body\b[^>]*>)', r'\1' + notice, text, count=1)

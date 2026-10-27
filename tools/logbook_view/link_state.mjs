@@ -178,3 +178,19 @@ export function packetAnatomy(event,time) {
   const position=Math.round((time-event.t0)*1e9)/1e9;
   return {parts,current:parts.find(p=>p.start_s<=position&&(p.end_s==null||position<p.end_s))||null,progress:packetProgress(event,time)};
 }
+
+// Frequency bounds come from retained FFT bins, never a presumed radio filter.
+export function frequencyView(manifest, mode='full') {
+ const wf=manifest.waterfall, maximum=(wf.bins-1)*wf.hz_per_bin;
+ const center=manifest.audio_center_hz??1500, width=Number(manifest.bw_hz);
+ const expected=Number.isFinite(width)&&width>0;
+ const low=mode==='signal'&&expected?Math.max(0,center-width/2):0;
+ const high=mode==='signal'&&expected?Math.min(maximum,center+width/2):maximum;
+ if(high<=low)return frequencyView(manifest,'full');
+ // Pixel edges are half a bin beyond the bin centers. Keep the axis calibrated.
+ return {low,high,maximum,expected,
+  sourceTop:wf.bins-.5-high/wf.hz_per_bin,
+  sourceHeight:(high-low)/wf.hz_per_bin,
+  firstBin:Math.max(0,Math.ceil(low/wf.hz_per_bin)),
+  lastBin:Math.min(wf.bins-1,Math.floor(high/wf.hz_per_bin))};
+}

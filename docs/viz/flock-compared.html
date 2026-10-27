@@ -316,13 +316,13 @@ html{scroll-padding-top:170px}
   <div class="sechead">
     <span class="n">IMPLEMENTATIONS</span>
     <h2>Mode implementations</h2>
-    <p>The mode implementations share hfmodem’s audio, station and host infrastructure.</p>
+    <p>The mode implementations share hfmodem’s audio, station and host infrastructure. PACTOR-1/2/3 and VARA are beta. ARDOP, voice and CW are alpha. PACTOR-4 and all other modes are experimental.</p>
   </div>
 
   <div class="grid cols4">
     <div class="pcard" style="--hue:var(--shrike)">
       <h3>PACTOR</h3>
-      <div class="sub">shrike</div>
+      <div class="sub">shrike · beta · P4 experimental</div>
       <p style="font-size:.9rem;margin:0 0 12px">Shrike provides PACTOR-1 link entry and data exchange, with PACTOR-2/3 waveform and control implementations. ITU-R M.1798 describes the PACTOR-3 carrier grid and timing. PACTOR-4 support is partial and experimental; <a href="../STATUS.md#pactor-4">on-air mail transfer remains unproven</a>.</p>
       <dl>
         <dt>spec</dt><dd>ITU-R M.1798 <span class="cls pub">○</span></dd>
@@ -332,7 +332,7 @@ html{scroll-padding-top:170px}
     </div>
 <div class="pcard" style="--hue:var(--kestrel)">
       <h3>VARA</h3>
-      <div class="sub">kestrel</div>
+      <div class="sub">kestrel · beta</div>
       <p style="font-size:.9rem;margin:0 0 12px">Kestrel provides VARA link entry, coded data frames and session control.</p>
       <dl>
         <dt>spec</dt><dd>implementation tables</dd>
@@ -342,7 +342,7 @@ html{scroll-padding-top:170px}
     </div>
 <div class="pcard" style="--hue:var(--besra)">
       <h3>ARDOP</h3>
-      <div class="sub">besra</div>
+      <div class="sub">besra · alpha</div>
       <p style="font-size:.9rem;margin:0 0 12px">Besra implements ARDOP framing, modulation and link control. Codec tests cross-decode with ardopcf.</p>
       <dl>
         <dt>spec</dt><dd>published + source <span class="cls pub">○</span></dd>

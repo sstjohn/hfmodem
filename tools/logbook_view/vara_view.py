@@ -41,7 +41,7 @@ from hfmodem.kestrel.arq.phy import _tone_burst
 
 SCHEMA = 1
 FS = 48000
-NFFT, HOP, BINS, TILE_ROWS = 4096, 2400, 257, 256
+NFFT, HOP, BINS, TILE_ROWS = 4096, 2400, 513, 256
 MAX_SECONDS = 1800
 MAX_EVENTS = 10000
 

@@ -16,6 +16,8 @@ import re
 class RecordingHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header('Accept-Ranges', 'bytes')
+        # This server previews files edited in place; cached modules can mix revisions.
+        self.send_header('Cache-Control', 'no-store')
         super().end_headers()
 
     def send_head(self):

@@ -95,7 +95,7 @@ class SiteBuild(unittest.TestCase):
             pages = list(root.rglob('*.html'))
             primary = {('docs/'+name) for name, _, _ in build.DOCUMENTS} | {('docs/viz/'+name) for name in build.ROUTES}
             rendered = {source for source in build.REFERENCE_FILES - primary if not source.endswith('.z')}
-            self.assertEqual(len(pages), 30 + len(rendered) + len(build.MOVED))
+            self.assertEqual(len(pages), 31 + len(rendered) + len(build.MOVED))
             for page in pages:
                 parsed = Links(page.read_text())
                 for href in parsed.hrefs + parsed.assets:
@@ -225,9 +225,7 @@ class SiteBuild(unittest.TestCase):
                 notice = re.search(r'<aside class="release-notice"[^>]*>(.*?)</aside>', text, re.S)[1]
                 if page == root / 'index.html':
                     self.assertIn('especially emergency communications.</strong></p>', notice)
-                    self.assertIn('<p>Recorded Winlink mail transfers used', notice)
-                    self.assertIn('href="examples/pactor3-send/">PACTOR-3</a>', notice)
-                    self.assertIn('href="examples/vara-send/">VARA HF</a>', notice)
+                    self.assertNotIn('Recorded Winlink mail transfers used', notice)
                 else:
                     self.assertNotIn('Do not rely on it', notice)
                     self.assertNotIn('Recorded Winlink mail transfers used', text)
@@ -298,13 +296,19 @@ class SiteBuild(unittest.TestCase):
                 self.assertEqual((root / build.reference_route(source)).read_bytes(),
                                  (build.ROOT / source).read_bytes())
 
-    def test_alpha_modes_and_experimental_inventory_are_separate_from_rf_results(self):
+    def test_mode_maturity_labels_are_separate_from_rf_results(self):
         text = (build.ROOT / 'site/index.html').read_text()
         modes = text.split('<section id="modes"', 1)[1].split('</section>', 1)[0]
         results = text.split('<section id="results"', 1)[1].split('</section>', 1)[0]
-        self.assertIn('PACTOR-1/2/3, VARA and ARDOP are alpha. PACTOR-4 and all other modes are experimental.', modes)
-        for bird in ('shrike', 'kestrel', 'besra'):
+        self.assertIn('PACTOR-1/2/3 and VARA are beta. ARDOP, voice and CW are alpha. PACTOR-4 and all other modes are experimental.', modes)
+        for bird in ('shrike', 'kestrel'):
+            self.assertIn(bird+' · beta', modes)
+        for bird in ('besra', 'macagua + merlin'):
             self.assertIn(bird+' · alpha', modes)
+        comparison = (build.ROOT / 'docs/viz/flock-compared.html').read_text()
+        self.assertIn('shrike · beta · P4 experimental', comparison)
+        self.assertIn('kestrel · beta', comparison)
+        self.assertIn('besra · alpha', comparison)
         for bird in ('sabir', 'brubru', 'bateleur', 'lanner'):
             self.assertIn(bird+' · experimental', modes)
         for name in ('Robust Packet', 'STANAG', 'RTTY', 'SITOR', 'NAVTEX'):
@@ -356,7 +360,7 @@ class SiteBuild(unittest.TestCase):
             text = (page / name).read_text()
             for private in ('/Users/', '/file/', 'working/', '/api/'):
                 self.assertNotIn(private, text)
-        self.assertIn('href="examples/varac-receive/"', (build.ROOT / 'site/index.html').read_text())
+        self.assertIn('href="varac-receive/"', (build.ROOT / 'site/examples/index.html').read_text())
         self.assertIn('evidence/README.md', build.REFERENCE_FILES)
         self.assertEqual(build.link('../site/examples/varac-receive/index.html',
                                     'evidence/README.md', 'reference/evidence/index.html'),
@@ -375,13 +379,14 @@ class SiteBuild(unittest.TestCase):
                     yield from references(item)
 
         for route in ('pactor3-send', 'pactor3-receive', 'vara-send', 'vara-receive',
-                      'ardop-send', 'ardop-receive'):
+                      'ardop-send', 'ardop-receive', 'varac-bbs'):
             page = build.ROOT / 'site/examples' / route
             data = page / 'data'
             manifest = json.loads((page / 'manifest.json').read_text())
             role = route.rsplit('-', 1)[1]
             self.assertEqual(manifest['example_role'], role)
-            self.assertGreater(manifest['session']['mail']['sent' if role == 'send' else 'received'], 0)
+            if role != 'bbs':
+                self.assertGreater(manifest['session']['mail']['sent' if role == 'send' else 'received'], 0)
             events = json.loads((page / manifest['events']).read_text())
             self.assertTrue(events)
             self.assertTrue(manifest['qso_only'])
@@ -417,6 +422,50 @@ class SiteBuild(unittest.TestCase):
                 for private in ('/Users/', '/file/', '/api/inspect', 'working/', 'captures/'):
                     self.assertNotIn(private, text, (path, private))
 
+    def test_replay_modules_share_an_explicit_asset_revision(self):
+        script = (build.ROOT / 'site/js/examples/viewer.js').read_text()
+        revision = re.search(r"from './link-state\.js\?v=([^']+)'", script).group(1)
+        for page in (build.ROOT / 'site/examples').glob('*/index.html'):
+            html = page.read_text()
+            if 'id="workspace"' in html:
+                self.assertIn(f'viewer.js?v={revision}', html, page)
+
+    def test_preview_disables_cache_for_in_place_rebuilds(self):
+        import io
+        from preview import RecordingHandler
+        handler = object.__new__(RecordingHandler)
+        handler.request_version = 'HTTP/1.1'
+        handler.wfile = io.BytesIO()
+        handler.end_headers()
+        headers = handler.wfile.getvalue()
+        self.assertIn(b'Cache-Control: no-store', headers)
+        self.assertIn(b'Accept-Ranges: bytes', headers)
+
+    def test_bbs_transfer_provenance_and_evidence_navigation(self):
+        page = build.ROOT / 'site/examples/varac-bbs'
+        proof = json.loads((page / 'provenance.json').read_text())
+        manifest = json.loads((page / 'manifest.json').read_text())
+        events = json.loads((page / 'events.json').read_text())
+        self.assertEqual(proof['last_sample'] - proof['first_sample'], 118 * 48000)
+        self.assertEqual(hashlib.sha256((page / proof['audio']).read_bytes()).hexdigest(), proof['audio_sha256'])
+        self.assertEqual(proof['download']['size'], 2516)
+        self.assertEqual(proof['download']['sha256'], '44c36a9969d42021d608be4eee4b61db5ef7c9c8762e07405728d41ce45497b1')
+        reply = next(e for e in events if e['id'] == proof['download']['completion_reply_event'])
+        self.assertEqual(reply['direction'], 'tx')
+        self.assertEqual(reply['status'], 'CRC pass')
+        self.assertTrue(any(b'<SFOK>' in bytes.fromhex(p['hex']) for p in reply['payloads']))
+        self.assertTrue(any(e.get('level') == 11 and e['direction'] == 'rx' and e['status'] == 'CRC pass' for e in events))
+        self.assertIn('File completion', manifest['outcome_note'])
+        self.assertIn('approximate', proof['timing_basis'])
+        home = (build.ROOT / 'site/index.html').read_text()
+        index = (build.ROOT / 'site/examples/index.html').read_text()
+        self.assertNotIn('PACTOR-1 timing', home)
+        self.assertNotIn('examples/varac-receive/', home)
+        self.assertIn('examples/varac-bbs/', home)
+        for heading in ('vara', 'pactor', 'ardop'):
+            self.assertIn(f'id="{heading}"', index)
+        self.assertIn('../../js/examples/viewer.js', (page / 'index.html').read_text())
+
     def test_curated_logbook_roles_speeds_and_legacy_routes(self):
         expected = {'vara-send': ('L9', 'NS0A', 9),
                     'vara-receive': ('L4', 'N5TW', 4),
@@ -431,7 +480,7 @@ class SiteBuild(unittest.TestCase):
         home = (build.ROOT / 'site/index.html').read_text()
         for route, (speed, peer, level) in expected.items():
             self.assertIn(f'href="../{route}/"', logbook)
-            self.assertIn(f'href="examples/{route}/"', home)
+            self.assertIn(f'href="{route}/"', (examples / 'index.html').read_text())
             m = json.loads((examples / route / 'manifest.json').read_text())
             role = route.rsplit('-', 1)[1]
             self.assertEqual(m['session']['speed']['acknowledged' if role == 'send' else 'decoded'], speed)

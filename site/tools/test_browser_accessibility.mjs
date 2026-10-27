@@ -8,22 +8,12 @@ export async function checkGuides(page, baseURL) {
   for (const width of [1280, 320]) {
     await page.setViewportSize({width, height:900});
     const layout = await page.evaluate(() => {
-      const notice = document.querySelector('.release-notice p + p');
-      const plain = notice.cloneNode(true);
-      for (const link of plain.querySelectorAll('a')) link.replaceWith(document.createTextNode(link.textContent));
-      plain.setAttribute('aria-hidden', 'true');
-      Object.assign(plain.style, {position:'absolute', visibility:'hidden', width:notice.getBoundingClientRect().width+'px'});
-      notice.parentElement.append(plain);
-      const noticeHeight = notice.getBoundingClientRect().height;
-      const plainHeight = plain.getBoundingClientRect().height;
-      plain.remove();
       const paragraphs = [...document.querySelectorAll('#run .workbench > div > p')];
-      return {noticeHeight, plainHeight,
+      return {
         sizes:paragraphs.map(p=>getComputedStyle(p).fontSize),
         gaps:paragraphs.slice(1).map((p,i)=>p.getBoundingClientRect().top-paragraphs[i].getBoundingClientRect().bottom),
         installFirst:!!(document.querySelector('#run').compareDocumentPosition(document.querySelector('#operate')) & Node.DOCUMENT_POSITION_FOLLOWING)};
     });
-    assert.ok(Math.abs(layout.noticeHeight-layout.plainHeight)<=1, 'Protocol links flow like ordinary sentence text');
     assert.equal(new Set(layout.sizes).size, 1, 'Setup explanation uses consistent paragraph typography');
     assert.ok(layout.gaps.every(gap=>gap>=20), 'Setup paragraphs have visible separation');
     assert.ok(layout.installFirst, 'Installation precedes commands that require hfmodem');
