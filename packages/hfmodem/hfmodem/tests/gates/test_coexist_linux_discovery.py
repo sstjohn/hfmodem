@@ -342,8 +342,8 @@ def test_persistent_exit_flag_never_establishes_absence_and_has_check_limit(tmp_
 def test_exit_confirmation_identity_deadline_does_not_reset(tmp_path, monkeypatch):
     directory = make_proc(tmp_path)
     terminal_sequence(monkeypatch, directory, [exit_stat()])
-    ticks = iter([0, 5_000_000])
-    monkeypatch.setattr(observer.time, 'monotonic_ns', lambda: next(ticks, 5_000_000))
+    ticks = iter([0, observer.IDENTITY_DEADLINE_NS])
+    monkeypatch.setattr(observer.time, 'monotonic_ns', lambda: next(ticks, observer.IDENTITY_DEADLINE_NS))
     budget = observer._ExitConfirmationBudget()
     for _ in range(2):
         assert not observer._linux_terminal(directory, '10', (os.getuid(),) * 4,
@@ -356,9 +356,9 @@ def test_capture_exit_confirmation_deadline_cannot_reset_for_new_pids(monkeypatc
     monkeypatch.setattr(observer.time, 'monotonic_ns', lambda: now[0])
     budget = observer._ExitConfirmationBudget()
     for index in range(7):
-        now[0] = index * 4_000_000
+        now[0] = index * (observer.CAPTURE_DEADLINE_NS // 7)
         assert budget.allow(Path(str(index + 1)), '10', (501,) * 4)
-    now[0] = 25_000_000
+    now[0] = observer.CAPTURE_DEADLINE_NS
     assert not budget.allow(Path('99'), '10', (501,) * 4)
     assert budget.checks == 7
 
@@ -458,7 +458,7 @@ def test_exiting_identity_gets_scheduler_turn_before_confirmation_budget_is_spen
     budget = observer._ExitConfirmationBudget()
     assert observer._linux_terminal(directory, '10', (os.getuid(),) * 4,
                                     denied=PermissionError('exiting'), budget=budget)
-    assert sleeps == [.001]
+    assert sleeps == [observer.YIELD_S]
     assert budget.checks == 2  # R/UID/R, scheduler turn, then stable Z/UID/Z
 
 
@@ -474,7 +474,7 @@ def test_exit_confirmation_yield_is_clipped_and_expiry_never_establishes_absence
         if path == directory / 'stat':
             reads[0] += 1
             if reads[0] == 3:
-                now[0] = 4_500_000  # only0.5ms remains in the original5ms budget
+                now[0] = observer.IDENTITY_DEADLINE_NS - 500_000  # 0.5 ms of the identity budget left
             return exit_stat(state='Z' if sleeps else 'R')
         return read(path, *args, **kwargs)
 

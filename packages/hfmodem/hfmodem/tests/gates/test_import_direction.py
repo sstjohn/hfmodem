@@ -1,45 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""Which way imports are allowed to point, asserted rather than remembered.
-
-Four rules, and each one is load-bearing for a different reason:
-
-  * **hfhost imports nothing from here, and nothing outside the standard
-    library.** It has to run on a machine with a commercial modem and no numpy,
-    and its independence from these implementations is the entire reason
-    creance's grading means anything — a client written from the same source as
-    the server grades nothing. This is checked against the built wheel too
-    (`test_packaging.py`); here it is checked against the tree, because a
-    violation should fail the moment it is written rather than at build time.
-
-  * **creance imports no modem**, with one carve-out named below.
-
-  * **No protocol imports another protocol.** They are four normative answers to
-    the same question, not four layers.
-
-  * **Shipping code imports nothing from `working/` or `tools/`.** Neither is in
-    any wheel, so an import that crosses that line produces a distribution that
-    installs and then fails on first use.
-
-The carve-out: `creance/monitor/runners/` holds the processes the monitor spawns
-— decode adapters that turn audio into detection JSON, and the PortAudio capture
-that turns a sound card into that audio. Those necessarily import a decoder or
-the modems' device table. They are not on the conformance-grading path — grading
-goes through `hfhost.Link` over a socket — so the independence argument is
-untouched. Naming
-the exception here is the point: an unnamed exception is indistinguishable from a
-rule nobody enforces.
-
-One piece of debt the carve-out currently covers, recorded so it is not mistaken
-for a design: `p4_runner.py` reads its PACTOR-4 chirp acquisition out of
-`tools/corpuslib/detector.py`, so it needs a source tree and cannot run from an
-installed wheel. The acquisition belongs in the package.
-"""
+"""Static import boundaries for all three distributions."""
 from __future__ import annotations
 
 import ast
 import sys
+from importlib.util import resolve_name
 from pathlib import Path
 
 import pytest
@@ -47,10 +14,212 @@ import pytest
 REPO = Path(__file__).resolve().parents[5]
 PACKAGES = REPO / "packages"
 
-PROTOCOLS = {"brubru", "shrike", "kestrel", "besra", "sabir", "lanner", "bateleur"}
+LAYERS = {
+    0: {"core", "ax25"},
+    1: {"brubru", "shrike", "kestrel", "besra", "sabir", "lanner", "bateleur",
+        "macagua", "merlin"},
+    2: {"station", "monitor"},
+    3: {"contact", "winlink"},
+    4: {"bbs", "operator", "cli", "__main__"},
+}
 
-# creance/monitor/runners/ — decode adapters, not the grading path.
 CREANCE_MODEM_CARVE_OUT = "creance/monitor/runners"
+PRIVATE_ROOTS = {"tools", "working", "tests"} | {
+    p.stem for p in (REPO / "tools").glob("*")
+    if p.suffix == ".py" or p.is_dir() and p.name != "__pycache__"
+}
+ALLOWLIST = frozenset("""creance.monitor.runners.p4_runner -> corpuslib
+hfmodem.besra.arq.modem -> hfmodem.besra.host.modem_core
+hfmodem.besra.arq.modem -> hfmodem.besra.host.protocol
+hfmodem.besra.arq.session -> hfmodem.besra.host.protocol
+hfmodem.besra.host.run_server -> hfmodem.winlink
+hfmodem.besra.host.run_server -> hfmodem.winlink.message
+hfmodem.besra.sim.echo -> hfmodem.besra.host.modem_core
+hfmodem.contact.varac -> hfmodem.bbs.frontends.varac
+hfmodem.core.config -> hfmodem.winlink.session
+hfmodem.kestrel.arq.modem -> hfmodem.kestrel.host.modem_core
+hfmodem.kestrel.arq.run_pair -> hfmodem.kestrel.host.server
+hfmodem.kestrel.host.vara_modem -> hfmodem.contact.broadcast
+hfmodem.kestrel.rx.broadcast -> hfmodem.contact.broadcast
+hfmodem.lanner.qso -> hfmodem.station.qsolog
+hfmodem.macagua.chain -> hfmodem.contact.audio
+hfmodem.macagua.phonetics -> hfmodem.contact.calls
+hfmodem.macagua.script -> hfmodem.contact.facts
+hfmodem.macagua.speech -> hfmodem.contact.language
+hfmodem.merlin.modem -> hfmodem.contact.audio
+hfmodem.merlin.modem -> hfmodem.contact.calls
+hfmodem.merlin.modem -> hfmodem.contact.frame
+hfmodem.merlin.modem -> hfmodem.monitor.cw
+hfmodem.merlin.script -> hfmodem.contact.calls
+hfmodem.merlin.script -> hfmodem.contact.facts
+hfmodem.operator.bootstrap -> consolelib.onboarding
+hfmodem.sabir.sim.m4 -> hfmodem.sabir.host
+hfmodem.sabir.sim.m4 -> hfmodem.sabir.host.hostlink
+hfmodem.sabir.sim.m4 -> hfmodem.sabir.host.messages
+hfmodem.shrike.onair -> hfmodem.winlink
+hfmodem.shrike.onair -> hfmodem.winlink.session
+hfmodem.shrike.p3progress -> hfmodem.winlink.session
+hfmodem.shrike.ptc -> hfmodem.winlink
+hfmodem.shrike.traffic -> hfmodem.winlink
+hfmodem.station.mail -> hfmodem.winlink""".splitlines())
+
+
+def _module(path, root):
+    parts = path.relative_to(root.parent).with_suffix("").parts
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _targets(source, module, is_package, modules):
+    package = module if is_package else module.rpartition(".")[0]
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            yield from (alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            name = "." * node.level + (node.module or "")
+            target = resolve_name(name, package) if node.level else name
+            for alias in node.names:
+                candidate = target + "." + alias.name
+                yield candidate if candidate in modules else target
+
+
+def _import_graph(roots):
+    modules = {_module(path, root): path for root in roots for path in _sources(root)}
+    edges = set()
+    for module, path in modules.items():
+        if "tests" in module.split("."):
+            continue
+        for target in _targets(path.read_text(encoding="utf-8"), module,
+                               path.name == "__init__.py", modules):
+            if target != module:
+                edges.add((module, target))
+    return edges
+
+
+def _layer(module):
+    parts = module.split(".")
+    if len(parts) == 1:
+        return 4
+    for level, names in LAYERS.items():
+        if parts[1] in names:
+            if level == 1 and ("host" in parts[2:] or parts[-1] in {
+                    "station_io", "station_runtime"}):
+                return 2
+            return level
+    raise AssertionError(f"Assign a layer to {module}")
+
+
+def _violation(source, target):
+    src, dst = source.split("."), target.split(".")
+    if dst[0] in PRIVATE_ROOTS or "tests" in dst:
+        return True
+    if src[0] == "hfhost":
+        return dst[0] != "hfhost" and dst[0] not in sys.stdlib_module_names
+    if src[0] == "creance":
+        return dst[0] == "hfmodem" and not source.startswith("creance.monitor.runners.")
+    if dst[0] == "creance":
+        return True
+    if dst[0] == "hfhost":
+        return False
+    if dst[0] != "hfmodem":
+        return False
+    source_layer, target_layer = _layer(source), _layer(target)
+    if source_layer < target_layer:
+        return True
+    families = LAYERS[1]
+    return (len(src) > 1 and len(dst) > 1 and src[1] in families
+            and dst[1] in families and src[1] != dst[1])
+
+
+def test_import_layers():
+    roots = [PACKAGES / name / name for name in ("hfmodem", "hfhost", "creance")]
+    for root in roots:
+        if root.name == "hfmodem":
+            for path in _sources(root):
+                if "tests" not in path.relative_to(root).parts:
+                    _layer(_module(path, root))
+    violations = {f"{source} -> {target}" for source, target in _import_graph(roots)
+                  if _violation(source, target)}
+    allowed = ALLOWLIST
+    assert not violations - allowed, "New import violations:\n" + "\n".join(sorted(violations - allowed))
+    assert not allowed - violations, "Remove resolved allowances:\n" + "\n".join(sorted(allowed - violations))
+
+
+@pytest.mark.parametrize("module, source, target", [
+    ("hfmodem.core.example", "import os, hfmodem.contact.frame", "hfmodem.contact.frame"),
+    ("hfmodem.core.example", "from ..contact import frame", "hfmodem.contact.frame"),
+    ("hfmodem.core.example", "from hfmodem import contact", "hfmodem.contact"),
+    ("hfmodem.core.example", "from .. import contact", "hfmodem.contact"),
+    ("hfmodem.core.example", "def f():\n    from ..contact.frame import Over", "hfmodem.contact.frame"),
+    ("hfmodem.core.example", "if TYPE_CHECKING:\n    import hfmodem.station", "hfmodem.station"),
+    ("hfmodem.core.example", "from ..contact import *", "hfmodem.contact"),
+    ("hfmodem.core.regulatory.example", "from ...contact.frame import Over", "hfmodem.contact.frame"),
+    ("hfmodem.shrike.host.example", "from ...contact import frame", "hfmodem.contact.frame"),
+    ("hfmodem.shrike.example", "from ..kestrel import phy", "hfmodem.kestrel.phy"),
+    ("hfmodem.ax25.example", "from ..station import arbiter", "hfmodem.station.arbiter"),
+    ("hfmodem.contact.example", "from ..bbs import service", "hfmodem.bbs.service"),
+    ("hfmodem.station.example", "from ..contact import frame", "hfmodem.contact.frame"),
+    ("hfmodem.bbs.example", "import hfmodem.tests.fixture", "hfmodem.tests.fixture"),
+    ("hfmodem.bbs.example", "from ..tests import fixture", "hfmodem.tests.fixture"),
+    ("hfmodem.bbs.example", "import tools.consolelib", "tools.consolelib"),
+    ("hfmodem.bbs.example", "import consolelib", "consolelib"),
+    ("hfhost.example", "from hfmodem.core import config", "hfmodem.core.config"),
+    ("creance.example", "from hfmodem.core import config", "hfmodem.core.config"),
+    ("creance.monitor.runners.example", "import tools.private", "tools.private"),
+])
+def test_new_import_violation_is_rejected(module, source, target, tmp_path, monkeypatch):
+    from hfmodem.tests.gates import test_import_direction as gate
+
+    for name, content in ((module, source), (target, "")):
+        if name.split(".")[0] not in {"hfmodem", "hfhost", "creance"}:
+            continue
+        path = tmp_path / name.split(".")[0] / (name.replace(".", "/") + ".py")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    monkeypatch.setattr(gate, "PACKAGES", tmp_path)
+    monkeypatch.setattr(gate, "ALLOWLIST", set())
+    with pytest.raises(AssertionError, match="New import violations"):
+        gate.test_import_layers()
+    monkeypatch.setattr(gate, "ALLOWLIST", {f"{module} -> {target}"})
+    gate.test_import_layers()
+    path = tmp_path / module.split(".")[0] / (module.replace(".", "/") + ".py")
+    path.write_text("")
+    with pytest.raises(AssertionError, match="Remove resolved allowances"):
+        gate.test_import_layers()
+
+
+@pytest.mark.parametrize("source, target", [
+    ("hfmodem.shrike.phy", "hfmodem.core.crc"),
+    ("hfmodem.shrike.host.server", "hfmodem.shrike.phy"),
+    ("hfmodem.station.service", "hfmodem.shrike.station_runtime"),
+    ("hfmodem.contact.runtime", "hfmodem.station.client"),
+    ("hfmodem.bbs.service", "hfmodem.contact.runtime"),
+    ("creance.monitor.runners.example", "hfmodem.shrike.phy"),
+    ("creance.conformance", "hfhost.link"),
+    ("hfmodem.core.config", "hfhost.config"),
+    ("hfhost.link", "socket"),
+])
+def test_intended_import_direction(source, target):
+    assert not _violation(source, target)
+
+
+def test_package_initializer_resolves_relative_and_lazy_imports(tmp_path):
+    root = tmp_path / "hfmodem"
+    source = root / "core/regulatory/__init__.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def f():\n    from ...contact import frame, runtime\n")
+    for name in ("frame", "runtime"):
+        target = root / f"contact/{name}.py"
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("")
+    assert _import_graph([root]) == {
+        ("hfmodem.core.regulatory", "hfmodem.contact.frame"),
+        ("hfmodem.core.regulatory", "hfmodem.contact.runtime"),
+    }
+
+
+def test_new_package_needs_a_layer():
+    with pytest.raises(AssertionError, match="Assign a layer"):
+        _layer("hfmodem.new_package.nested.module")
 
 
 def _imports(path: Path) -> set[str]:
@@ -70,7 +239,7 @@ def _sources(pkg: Path) -> list[Path]:
 
 
 def test_hfhost_imports_nothing_but_the_standard_library():
-    banned = {"hfmodem", "creance"} | PROTOCOLS
+    banned = {"hfmodem", "creance"}
     offences = []
     for f in _sources(PACKAGES / "hfhost" / "hfhost"):
         for name in _imports(f):
@@ -79,73 +248,6 @@ def test_hfhost_imports_nothing_but_the_standard_library():
     assert not offences, (
         "hfhost has to run beside a commercial modem on a machine with no numpy:\n  "
         + "\n  ".join(offences))
-
-
-def test_creance_imports_no_modem_outside_the_runners():
-    offences = []
-    for f in _sources(PACKAGES / "creance" / "creance"):
-        rel = f.relative_to(PACKAGES / "creance").as_posix()
-        if rel.startswith(CREANCE_MODEM_CARVE_OUT):
-            continue
-        for name in _imports(f):
-            if name in PROTOCOLS or name == "hfmodem":
-                offences.append(f"{rel} imports {name}")
-    assert not offences, (
-        "creance grades a modem through its host interface, not by importing it. "
-        f"The only exception is {CREANCE_MODEM_CARVE_OUT}/:\n  " + "\n  ".join(offences))
-
-
-@pytest.mark.parametrize("protocol", sorted(PROTOCOLS))
-def test_no_protocol_imports_another(protocol):
-    """Absolute *and* relative.
-
-    A text search for `hfmodem.<other>` misses `from ...kestrel.coding.crc import
-    crc16_genibus` in a sabir module, which imports perfectly well — an audit
-    constructed exactly that and the gate stayed green. The risk is new: before the
-    merge these were separate distributions and a relative cross-import could not
-    be written at all.
-    """
-    others = PROTOCOLS - {protocol}
-    root = PACKAGES / "hfmodem" / "hfmodem" / protocol
-    pkg_parts = ("hfmodem", protocol)
-    offences = []
-    for f in _sources(root):
-        tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
-        here = list(f.relative_to(PACKAGES / "hfmodem" / "hfmodem").parts[1:-1])
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
-                if node.level == 0:
-                    target = (node.module or "").split(".")
-                else:
-                    # `from ...x import y` climbs `level - 1` packages from here.
-                    base = list(pkg_parts) + here
-                    up = node.level - 1
-                    base = base[:len(base) - up] if up <= len(base) else []
-                    target = base + (node.module or "").split(".")
-            elif isinstance(node, ast.Import):
-                target = node.names[0].name.split(".")
-            else:
-                continue
-            for other in others:
-                if other in target and "hfmodem" in target:
-                    offences.append(f"{f.relative_to(REPO)} reaches {other}")
-    assert not offences, (
-        "four protocols, four normative answers — not four layers:\n  "
-        + "\n  ".join(sorted(set(offences))))
-
-
-def test_core_imports_no_protocol():
-    """`core` is what is true of the radio rather than of a waveform. The moment
-    it knows a protocol's name, every protocol inherits that protocol's choices."""
-    core = PACKAGES / "hfmodem" / "hfmodem" / "core"
-    if not core.is_dir():
-        pytest.skip("core/ is not extracted yet")
-    offences = [
-        f"{f.relative_to(REPO)} names hfmodem.{p}"
-        for f in _sources(core) for p in PROTOCOLS
-        if f"hfmodem.{p}" in f.read_text(encoding="utf-8")
-    ]
-    assert not offences, "\n  ".join(offences)
 
 
 def _operator_resource(rel, value):
@@ -274,49 +376,6 @@ def test_nothing_shipping_points_at_the_repositories_this_was_merged_from():
     assert not offences, (
         "the merged-from repositories are archives, not dependencies:\n  "
         + "\n  ".join(sorted(set(offences))))
-
-
-def test_ax25_imports_no_protocol_or_station():
-    from importlib.util import resolve_name
-
-    root = PACKAGES / "hfmodem" / "hfmodem"
-    banned = PROTOCOLS | {"station"}
-    offences = []
-    for path in _sources(root / "ax25"):
-        package = "hfmodem." + ".".join(path.relative_to(root).parts[:-1])
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.Import):
-                targets = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                name = "." * node.level + (node.module or "")
-                target = resolve_name(name, package) if node.level else name
-                targets = [target, *(target + "." + a.name for a in node.names)]
-            else:
-                continue
-            for target in targets:
-                parts = target.split(".")
-                if len(parts) > 1 and parts[0] == "hfmodem" and parts[1] in banned:
-                    offences.append(f"{path.relative_to(root)} imports {target}")
-    assert not offences, "\n".join(offences)
-
-
-def test_brubru_does_not_import_station():
-    from importlib.util import resolve_name
-
-    root = PACKAGES / 'hfmodem' / 'hfmodem'
-    for path in _sources(root / 'brubru'):
-        package = 'hfmodem.' + '.'.join(path.relative_to(root).parts[:-1])
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.Import):
-                targets = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                target = (resolve_name('.' * node.level + (node.module or ''), package)
-                          if node.level else node.module or '')
-                targets = [target, *(target + '.' + a.name for a in node.names)]
-            else:
-                continue
-            assert not any(t == 'hfmodem.station' or t.startswith('hfmodem.station.')
-                           for t in targets), str(path)
 
 
 def test_station_client_imports_only_stdlib_and_wire():

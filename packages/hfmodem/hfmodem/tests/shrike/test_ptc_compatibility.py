@@ -4,7 +4,8 @@
 import pytest
 
 from hfhost import ptc
-from hfmodem.shrike import hostmode, compress
+from hfmodem.shrike import compress
+from hfmodem.core import hostmode
 from hfmodem.shrike.arq import State, IRS, _Packet
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.shrike.spec import Protocol

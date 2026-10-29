@@ -148,7 +148,7 @@ def test_old_link_invitation_not_replayed_and_missing_adapter_never_tunes():
     assert 'modem-owner' in d.kinds('error')[-1]['text']
 
 
-def test_cancel_after_owner_completed_keeps_actual_dial_and_notifies_once():
+def test_cancel_after_owner_completed_keeps_actual_dial_and_notifies_once(tools):
     from types import SimpleNamespace as NS
     from hfmodem.kestrel.host.audio_runtime import RetuneRequest
     from varac_chat import received_retune_adapter

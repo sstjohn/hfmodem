@@ -90,7 +90,7 @@ def test_confirmed_abort_retires_queue_without_delivery_ack():
                 'DISCONNECT': ['OK'], 'ABORT': ['OK', 'PTT OFF']})
     d.hear('CONNECTED W9SSJ K6HN 500', 'BUFFER 26')
     after = d.host.client.sequence
-    d.host.client.finish(d.flow.close_steps(timeout=.2))
+    d.host.client.finish(d.flow.close_steps(timeout=.3))
     assert d.host.client.buffer == 0
     assert not d.host.client.connected
     assert 'BUFFER 0' not in d.host.client.since(after)

@@ -255,7 +255,7 @@ def test_a_cq_dropped_as_busy_goes_once_the_host_reports_clear_long_enough():
 def test_initialization_leaves_the_host_not_listening_and_reporting_cqs():
     host = Host(replies={'VERSION': ['VERSION test-host']})
     host.client.initialize('w9ssj')
-    assert host.sent == ['LISTEN OFF', 'PUBLIC ON', 'CWID ON', 'COMPRESSION TEXT',
+    assert host.sent == ['LISTEN OFF', 'PUBLIC ON', 'CWID OFF', 'COMPRESSION TEXT',
                          'MYCALL W9SSJ', 'BW500', 'VERSION', 'CHAT ON', 'LISTEN OFF']
     host.lines('CQFRAME WI9YZA-15 500')
     host.client.poll()
@@ -542,7 +542,7 @@ class Desk:
                                   'DISCONNECT': ['OK', 'DISCONNECTED'], **replies}, kiss=kiss)
         self.host.data.respond = lambda data: self.host.lines('BUFFER 0')
         self.host.client.initialize('W9SSJ', bw)
-        self.tunes, self.said, self.events, self.armed = [], [], [], []
+        self.tunes, self.said, self.events, self.armed, self.ids = [], [], [], [], []
         self.line = False
         self.flow = v.Flow(self.host.client, self.tunes.append, profile={'LOC': loc} if loc else None)
         def retune(target, generation):
@@ -554,12 +554,16 @@ class Desk:
         self.session = v.Session(self.host.client, self.flow, say=self.said.append, mailbox=self.mailbox,
                                  emit=lambda kind, **record: self.events.append(dict(kind=kind, **record)),
                                  arm=self.armed.append, line_state=lambda: self.line,
-                                 bandwidth=bw, wait_seconds=.5)
+                                 bandwidth=bw, wait_seconds=.5, identify=self.identify)
         def event(item):
             self.host.events.append(item)
             self.session.handle(item)
         self.host.client.event = event
         self.session.monitor()
+
+    def identify(self, bandwidth, after_peer):
+        self.ids.append(dict(bw=bandwidth, after_peer=after_peer, dial=self.flow.dial,
+                             ptt=self.host.client.ptt, sent=len(self.sent)))
 
     def hear(self, *lines):
         self.host.lines(*lines)
@@ -714,6 +718,17 @@ def test_busy_slot_sends_no_cq_and_picks_the_next_free_slot_by_default():
     assert not any(line.startswith('CQFRAME') for line in desk.sent)
 
 
+@pytest.mark.parametrize('mine,peer', [('W9SSJ', 'W9SSJ-1'), ('W9SSJ-1', 'W9SSJ'),
+                                       ('X-W9SSJ', 'W9SSJ')])
+@pytest.mark.parametrize('incoming', [False, True])
+def test_connected_peer_keeps_its_full_call(mine, peer, incoming):
+    desk = Desk()
+    desk.host.client.mycall = mine
+    caller, called = (peer, mine) if incoming else (mine, peer)
+    desk.hear(f'CONNECTED {caller} {called} 500')
+    assert desk.session.peer == peer
+
+
 def test_call_uses_the_peers_heard_bandwidth_or_the_sessions():
     desk = Desk(**{'CONNECT W9SSJ WE3MAY': ['OK', 'CONNECTED W9SSJ WE3MAY 2300'],
                    'CONNECT W9SSJ K7QB': ['OK', 'CONNECTED W9SSJ K7QB 500']})
@@ -750,7 +765,7 @@ def test_auto_off_stops_answering_but_keeps_the_heard_list():
     desk = Desk()
     desk.do('/auto off')
     assert desk.sent[-1] == 'LISTEN OFF' and desk.armed == [True, False]
-    assert desk.legacy_said[-1] == 'monitoring 14105.000 kHz at 500 Hz, auto-answer off'
+    assert desk.legacy_said[-1] == 'monitoring 14105.000 kHz at 500 Hz, auto-answer off (/auto on to answer)'
     desk.hear('SN 3.0', 'CQFRAME K7QB-2 500')
     assert len(desk.session.heard) == 1
     desk.do('/auto on')
@@ -828,7 +843,7 @@ def test_a_link_up_refuses_a_second_call_and_quit_closes_without_more_text():
     desk = Desk(**{'CONNECT W9SSJ K7QB': ['OK', 'CONNECTED W9SSJ K7QB 500']})
     desk.do('/call K7QB 2')
     desk.do('/cq 1')
-    assert desk.legacy_said[-1] == 'error: a link is up; /bye first'
+    assert desk.legacy_said[-1] == 'error: linked with K7QB; /bye first'
     assert desk.do('/tag NAME Saul') and desk.texts[-1] == '11 <NAME:Saul>'
     assert not desk.do('/quit')
     desk.session.quit()
@@ -918,15 +933,17 @@ def test_an_incoming_connect_during_the_slot_wait_is_taken():
     assert desk.do('hello') and desk.texts[-1] == '6 hello\n'
 
 
-def test_quit_during_a_cq_waits_for_the_frame_then_leaves():
+def test_quit_during_a_cq_aborts_without_another_frame_or_retune():
     desk = Desk(**{FRAME: keyed_frame})
     desk.session.command('/cq 1')
     desk.drive(until=lambda: desk.sent.count(FRAME) == 1)
+    tunes = desk.tunes[:]
     assert not desk.session.command('/quit')
     desk.host.lines('PTT OFF', 'CANCELPENDING')
     desk.session.quit()
     assert desk.session.steps is None and desk.tunes[-1] == 14_105_000
-    assert desk.sent.count(FRAME) == 1 and desk.flow.state == v.State.RETURNED
+    assert desk.sent.count(FRAME) == 1 and desk.tunes == tunes
+    assert desk.sent[-5:] == ['LISTEN OFF', 'CLEANTXBUFFER', 'DISCONNECT', 'VERSION', 'ABORT']
 
 
 def test_stop_during_a_connect_attempt_aborts_and_returns():
@@ -1261,7 +1278,7 @@ def test_beacon_off_sends_no_more():
     wait(desk, 60 * 60)
     assert desk.sent.count(BEACON) == 1
     desk.do('/auto off')
-    assert desk.legacy_said[-1] == 'monitoring 14105.000 kHz at 500 Hz, auto-answer off'
+    assert desk.legacy_said[-1] == 'monitoring 14105.000 kHz at 500 Hz, auto-answer off (/auto on to answer)'
 
 
 def test_a_connect_after_a_beacon_is_taken_on_the_calling_frequency():
@@ -1280,21 +1297,28 @@ def test_a_connect_after_a_beacon_is_taken_on_the_calling_frequency():
 
 # -- away and VMail ------------------------------------------------------------------
 
-def test_away_greets_a_caller_takes_the_vmail_acknowledges_and_closes(tmp_path):
+def test_away_greets_a_caller_keeps_receiving_until_absolute_deadline(tmp_path):
     desk = Desk(mailbox=tmp_path)
     assert desk.do('/away Gone to the shed')
-    assert desk.legacy_said[-1] == ('away: a caller gets <AWAY> and "Gone to the shed", may leave a VMail, and is '
-                             'closed after it or at 5 min; /back returns')
+    assert desk.legacy_said[-1] == ('away: a caller gets <AWAY> and "Gone to the shed", may leave VMails, and is '
+                             'closed at 5 min from connection; /back returns')
     desk.hear('SN -5.0', 'CONNECTED KB6CIO W9SSJ 500')
-    assert desk.texts == ['24 <AWAY>\r\nGone to the shed'] and desk.tunes == []
+    assert desk.texts == ['5 <AWQ>'] and desk.tunes == []
+    desk.receive('de KB6CIO <R-05>')
+    assert desk.texts[1:] == ['24 <AWAY>\r\nGone to the shed'] and desk.tunes == []
     assert desk.legacy_said[-1] == 'away greeting sent to KB6CIO'
     vmail_arrives(desk)
     desk.drive()
     body = VMAIL_021[VMAIL_021.index('<MSG:') + 5:-1]
-    assert desk.texts[1:] == ['5 <SMR>', '8 73<DISC>']
+    assert desk.texts[2:] == ['5 <SMR>']
+    assert desk.host.client.connected
+    desk.host.now = desk.session._linked_at + v.AWAY_LINK_S
+    desk.tick()
+    desk.drive()
+    assert desk.texts[2:] == ['5 <SMR>', '8 73<DISC>']
     assert desk.sent[-2:] == ['DISCONNECT', 'LISTEN CQ'] and desk.tunes == []
     assert desk.legacy_said[-3:] == [
-        f'VMail 1 from KB6CIO: RE: Exploring New Paths - 2 ({len(body)} characters); /vmail 1 reads it',
+        'away link at 5 min; closing',
         'KB6CIO disconnected; keying line reads LOW',
         'monitoring 14105.000 kHz at 500 Hz, auto-answer on']
     assert not any(line.startswith('error') for line in desk.said)
@@ -1349,29 +1373,31 @@ def test_vmail_send_composes_to_a_line_of_dot_and_the_peers_smr_confirms(tmp_pat
 
 def test_a_command_while_composing_drops_the_vmail_and_a_vmail_needs_a_link(tmp_path):
     desk = answered(mailbox=tmp_path)
-    assert desk.do('/vmail send Hi') and desk.do('a line') and desk.do('/heard')
-    assert desk.legacy_said[-2] == 'VMail dropped' and desk.legacy_said[-1].startswith('  1  N0XYZ')
+    assert desk.do('/vmail send Hi') and desk.do('a line') and desk.do('/bogus')
+    assert desk.legacy_said[-2] == 'VMail dropped' and desk.legacy_said[-1].startswith('commands: ')
     assert desk.session.compose is None
     assert desk.do('.') and desk.texts[-1] == '2 .\n'
     assert desk.do('/vmail send a>b') and desk.legacy_said[-1].startswith('error: A VMail needs a one-line subject')
     assert desk.do('/vmail 1') and desk.legacy_said[-1] == 'error: no VMails yet'
     assert desk.do('/bye')
     assert desk.do('/vmail send Hi')
-    assert desk.legacy_said[-1] == 'error: a VMail goes to the linked station; /call or /answer first'
+    assert desk.legacy_said[-1] == 'error: usage: /vmail park CALL SUBJECT (or send CALL SUBJECT while unlinked)'
 
 
-def test_a_long_vmail_warns_and_is_sent(tmp_path):
+def test_a_long_vmail_is_refused_before_custody_or_transmission(tmp_path):
     desk = answered(mailbox=tmp_path)
     desk.do('/vmail send Long')
     desk.do('x' * v.VMAIL_MAX)
     desk.do('.')
-    assert desk.legacy_said[-2] == f'VarAC caps a VMail at {v.VMAIL_MAX} characters; this one is {v.VMAIL_MAX + 20}'
-    assert desk.texts[-1].endswith('x>')
+    assert '500-character admission limit' in desk.legacy_said[-1]
+    assert not any('<SM>' in text for text in desk.texts)
+    assert not desk.session.parking.store.records
 
 
 def test_an_away_link_without_a_vmail_closes_at_five_minutes(tmp_path):
     desk = Desk(mailbox=tmp_path)
     desk.do('/away')
+    desk.flow.dial = v.slot_frequency(20, 3)
     desk.hear('SN 1.0', 'CONNECTED KQ4QWH W9SSJ 500')
     assert desk.texts == [f'{len(v.DEFAULT_AWAY) + 8} <AWAY>\r\n{v.DEFAULT_AWAY}']
     desk.receive('hello?')
@@ -1383,7 +1409,7 @@ def test_an_away_link_without_a_vmail_closes_at_five_minutes(tmp_path):
     desk.tick()
     desk.drive()
     assert 'away link at 5 min; closing' in desk.said and desk.texts[-1] == '8 73<DISC>'
-    assert desk.sent[-2:] == ['DISCONNECT', 'LISTEN CQ']
+    assert 'DISCONNECT' in desk.sent and desk.sent[-1] == 'LISTEN CQ'
     assert desk.do('/back') and desk.legacy_said[-1] == 'back; 0 new VMails'
 
 
@@ -1463,6 +1489,15 @@ def test_an_advanced_beacon_is_heard_with_its_locator_and_answered_on_the_callin
     assert desk.sent[-2:] == ['LISTEN OFF', 'CONNECT W9SSJ KG9B'] and desk.tunes == []
 
 
+def test_an_advanced_beacon_with_a_lowercase_subsquare_is_heard(monkeypatch):
+    monkeypatch.setattr(v.time, "time", lambda: 1700000000)
+    desk = Desk(kiss=True)
+    desk.hear('SN 4.0')
+    kiss_arrives(desk, '20OFN35flVA2OPS      ')
+    heard = desk.kinds('heard')[-1]
+    assert (heard['call'], heard['grid'], heard['beacon']) == ('VA2OPS', 'FN35FL', True)
+
+
 def test_a_beacon_goes_out_as_the_kiss_frame_when_the_host_and_profile_allow():
     desk = Desk(kiss=True, loc='EN63bc')
     desk.do('/beacon')
@@ -1525,3 +1560,123 @@ def test_a_beacon_status_letter_reads_as_the_services_it_announces():
 
 def test_the_beacon_letter_follows_the_services_we_announce():
     assert [v.status_letter(s) for s in (None, 'V', 'VE', 'VEB', 'VEAB')] == ['A', 'A', 'C', 'K', 'O']
+
+
+# -- the closing CW ID -----------------------------------------------------------------
+
+def test_a_contact_we_close_identifies_once_on_its_slot_before_returning():
+    desk = answered()
+    desk.hear('PTT ON', 'PTT OFF')
+    assert desk.ids == []
+    desk.do('/bye')
+    desk.tick()
+    assert desk.ids == [dict(bw=500, after_peer=False, dial=14_106_500, ptt=False,
+                             sent=desk.sent.index('DISCONNECT') + 1)]
+    assert desk.tunes == [14_106_500, 14_105_000] and desk.legacy_said[-1].startswith('monitoring')
+    desk.tick()
+    assert len(desk.ids) == 1
+
+
+@pytest.mark.parametrize('bw', v.BANDWIDTHS)
+def test_a_contact_the_peer_closes_identifies_after_the_peers_ident_at_its_width(bw):
+    desk = Desk(**{'CONNECT W9SSJ K7QB': ['OK', f'CONNECTED W9SSJ K7QB {bw}']})
+    desk.hear('SN 11.0', f'CQFRAME K7QB-2 {bw}')
+    desk.do('/answer 1')
+    desk.hear('PTT ON', 'PTT OFF', 'DISCONNECTED')
+    assert [(i['bw'], i['after_peer'], i['dial']) for i in desk.ids] == [(bw, True, 14_103_500)]
+    assert 'DISCONNECT' not in desk.sent and desk.host.client.bandwidth == 500
+
+
+def test_a_link_lost_with_the_key_down_identifies_when_the_key_lifts():
+    desk = answered()
+    desk.hear('PTT ON', 'DISCONNECTED')
+    assert desk.ids == []
+    desk.hear('PTT OFF')
+    assert [(i['after_peer'], i['ptt']) for i in desk.ids] == [(True, False)]
+
+
+def test_an_unanswered_cq_identifies_after_the_cycle_and_a_busy_slot_does_not():
+    desk = Desk(**{'CQFRAME W9SSJ-14 500': CQ_DONE})
+    desk.do('/cq 14')
+    assert desk.legacy_said[-2] == 'no answer on slot 14'
+    assert [(i['bw'], i['after_peer']) for i in desk.ids] == [(500, False)]
+    assert desk.sent[desk.ids[0]['sent'] - 1] == 'LISTEN OFF'
+    assert desk.ids[0]['sent'] > desk.sent.index('CQFRAME W9SSJ-14 500')
+    desk.flow.occupied = lambda: True
+    desk.do('/cq 1')
+    assert desk.legacy_said[-2] == 'slot 1 is busy; no CQ sent' and len(desk.ids) == 1
+
+
+def test_cq_repeat_identifies_after_every_unanswered_cycle_before_listening():
+    desk = Desk(**{FRAME: CQ_DONE})
+    desk.session.command('/cq 1 repeat')
+    desk.drive(until=lambda: desk.sent.count(FRAME) == 6)
+    assert len(desk.ids) == 2
+    for at in (i['sent'] for i in desk.ids):
+        assert desk.sent[at - 1] == 'LISTEN OFF' and desk.sent[at] == 'LISTEN CQ'
+    desk.session.command('/stop')
+    desk.drive()
+    assert len(desk.ids) == 3 and desk.legacy_said[-1].startswith('monitoring')
+
+
+@pytest.mark.parametrize('reply', [['OK', 'PTT ON', 'PTT OFF', 'DISCONNECTED'], ['OK', 'PTT ON']])
+def test_a_failed_or_stopped_call_identifies(reply):
+    desk = Desk(**{'CONNECT W9SSJ K7QB': reply})
+    desk.session.command('/call K7QB 2')
+    if 'DISCONNECTED' not in reply:
+        desk.drive(until=lambda: desk.flow.state == v.State.CONNECTING)
+        desk.session.command('/stop')
+        desk.drive(until=lambda: 'ABORT' in desk.sent)
+        desk.hear('PTT OFF')
+    desk.drive()
+    desk.tick()
+    assert [(i['dial'], i['after_peer']) for i in desk.ids] == [
+        (14_103_500 if 'DISCONNECTED' in reply else 14_105_000, False)]
+    assert desk.legacy_said[-1].startswith('monitoring')
+
+
+def test_quit_reports_unsent_ident_only_when_something_went_out_since_the_last_id():
+    desk = Desk()
+    desk.session.quit()
+    assert desk.ids == []
+    desk = answered()
+    desk.hear('PTT ON', 'PTT OFF')
+    assert not desk.do('/quit')
+    desk.session.quit()
+    assert desk.ids == [] and 'DISCONNECT' in desk.sent
+    assert sum('send W9SSJ by hand' in line for line in desk.said) == 1
+
+
+def test_quit_reports_unsent_ident_when_the_goodbye_fails():
+    desk = answered()
+    desk.host.replies['DISCONNECT'] = ['WRONG']
+    desk.hear('PTT ON', 'PTT OFF')
+    desk.session.quit()
+    assert desk.ids == [] and 'ABORT' in desk.sent
+    assert sum('send W9SSJ by hand' in line for line in desk.said) == 1
+
+
+def test_operator_close_cancels_scheduled_beacons_before_identification():
+    desk = answered()
+    desk.session.set_beacon(1)
+    desk.hear('PTT ON', 'PTT OFF')
+    desk.do('/bye')
+    desk.tick()
+    assert len(desk.ids) == 1
+    assert desk.session.beacon is None and not desk.session._beacon_now
+    before = list(desk.sent)
+    desk.host.now += 120
+    desk.tick()
+    assert desk.sent == before and desk.sent[-1] == 'LISTEN CQ'
+
+
+def test_ident_unkey_failure_never_returns_to_monitoring():
+    desk = answered()
+    def identify(bw, after_peer):
+        desk.line = True
+    desk.session.keyer = identify
+    desk.hear('PTT ON', 'PTT OFF')
+    with pytest.raises(v.HostError, match='HIGH after identification'):
+        desk.do('/bye')
+    assert desk.sent[-1] == 'DISCONNECT'
+    assert desk.session._closing and desk.session._close_failed is not None

@@ -342,7 +342,7 @@ def test_radio_wiring_through_rigctld(monkeypatch):
         modem.stop()
 
 
-def test_the_default_is_to_record():
+def test_the_default_is_to_record(monkeypatch, tmp_path):
     """A --radio run that nobody asked to record still records. On 2026-07-30 this
     path logged two frame detections on a live channel and kept no audio, so neither
     could be shown to be a signal rather than the noise floor. Recording is what
@@ -350,9 +350,12 @@ def test_the_default_is_to_record():
     depending on the operator remembering a flag."""
     from hfmodem.besra.host import run_server
 
-    assert run_server.RECORD_DIR.parts[-2:] == ("logs", "onair")
+    monkeypatch.setenv("HFMODEM_DATA_DIR", str(tmp_path))
     on_air = ["--radio", "ft891", "--rigctld", "127.0.0.1:4532", "--channel", "7103500"]
-    assert run_server.parser().parse_args(on_air).record == run_server.RECORD_DIR
+    assert run_server.parser().parse_args(on_air).record == tmp_path / "logs" / "onair"
+    monkeypatch.delenv("HFMODEM_DATA_DIR")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert run_server.parser().parse_args(on_air).record == tmp_path / "xdg/hfmodem/logs/onair"
     assert run_server.parser().parse_args(on_air + ["--no-record"]).record is None
 
     text = subprocess.run(

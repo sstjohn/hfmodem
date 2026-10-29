@@ -136,6 +136,7 @@ def station(options=None, *, transmitter=True):
     cfg = SimpleNamespace(protocols={'rpr': SimpleNamespace(options=options or {})},
                           rig=SimpleNamespace(max_key_s=40, power_w=1,
                                               ptt=SimpleNamespace(settle_s=0.04)))
+    cfg.declared_power_w = cfg.rig.power_w
     st = SimpleNamespace(cfg=cfg, audio=audio, rig=rig,
                          arbiter=TxArbiter(audio, rig) if rig else None)
     st.link = RprLink(st)

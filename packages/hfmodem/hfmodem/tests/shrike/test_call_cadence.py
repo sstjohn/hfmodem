@@ -15,7 +15,11 @@ SLOT_N = round(1.25 * onair.FS)
 class _Clock(_Bench):
     def __init__(self):
         super().__init__(seconds=60)
-        self.closed = False
+        self.opened = self.closed = False
+
+    def open(self):
+        self.opened = True
+        return self
 
     def close(self):
         self.closed = True
@@ -27,7 +31,7 @@ def session(tmp_path, monkeypatch, *argv, answer_from=None):
     monkeypatch.setattr(onair.ota, 'Rig', lambda *a, **kw: _Rig())
     monkeypatch.setattr(onair.ota, 'ptt_device', lambda *a, **kw: None)
     monkeypatch.setattr(onair, 'find_device', lambda *a, **kw: 0)
-    monkeypatch.setattr(onair, '_LiveInput', lambda *a, **kw: clock)
+    monkeypatch.setattr(onair, '_LiveInput', lambda *a, **kw: clock.open())
     monkeypatch.setattr(onair, '_save_capture_async', lambda *a, **kw: None)
     emit = onair.RadioTx._tx
 

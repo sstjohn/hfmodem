@@ -108,7 +108,7 @@ def test_lazy_spectra_match_eager_across_gaps_wrap_and_rebuild(offset):
             begin = max(0, start - 12000)
             view = lazy.view(begin, start + len(raw))
             slots = lazy.interval(view.first, view.stop)
-            for attr in ('bins', 'clear', 'residual', 'power', 'denominator', 'live'):
+            for attr in ('bins', 'clear', 'residual', 'power', 'pair_floor', 'denominator', 'live'):
                 np.testing.assert_array_equal(getattr(lazy, attr)[slots], getattr(eager, attr)[slots])
     assert lazy.transforms < eager.transforms // 3
     assert lazy.fft_rows < eager.fft_rows // 3
@@ -119,7 +119,7 @@ def test_lazy_spectra_match_eager_across_gaps_wrap_and_rebuild(offset):
     assert eager.fft_rows > eager_fft_rows
     view = lazy.view(len(x) - 12000, len(x))
     slots = lazy.interval(view.first, view.stop)
-    for attr in ('bins', 'clear', 'residual', 'power', 'denominator', 'live'):
+    for attr in ('bins', 'clear', 'residual', 'power', 'pair_floor', 'denominator', 'live'):
         np.testing.assert_array_equal(getattr(lazy, attr)[slots], getattr(eager, attr)[slots])
     assert lazy.fft_rows < eager.fft_rows // 3
 

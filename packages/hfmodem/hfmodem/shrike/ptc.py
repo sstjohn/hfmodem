@@ -15,7 +15,7 @@ There are two layers here and they are separate on purpose:
   * a **terminal-mode command interpreter** -- the ``cmd:`` prompt. Every client
     configures the modem here (MYCALL, PTCHN, tone/mode settings) and then sends
     ``JHOST4`` to hand over to
-  * **CRC hostmode** (shrike.hostmode), where one reserved channel -- the PTCHN
+  * **CRC hostmode** (core.hostmode), where one reserved channel -- the PTCHN
     channel, default 4 -- *is* the PACTOR link. Connect, disconnect, data both
     ways and link state all ride that channel; channel 254 carries the status
     bytes and 255 is the extended poll.
@@ -48,9 +48,11 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
-from . import compress, hostmode, host_cwid, p1rx, pactor1, placement, spec
-from .arq import (CS_ACK, CS_BREAKIN, CS_REQUEST, CS_SPEED_UP, IRS, ISS, LADDERS,
-                  P1_SPEED_LEVEL, P3_CS6_HOLD_REPEATS, REFUSED, ArqIO, PactorArq, State)
+from . import compress, host_cwid, p1rx, pactor1, placement, spec
+from hfmodem.core import hostmode
+from .arq import (CS_ACK, CS_BREAKIN, CS_REQUEST, CS_SPEED_UP, ENTRY_GRANT_CYCLES,
+                  IRS, ISS, LADDERS, P1_SPEED_LEVEL, P3_CS6_HOLD_REPEATS, REFUSED,
+                  SEQ_MOD, ArqIO, PactorArq, State)
 from .p4host import P4LateFrame
 from .spec import Protocol
 
@@ -151,6 +153,18 @@ only with PACTOR-2 -- 83 of those offering PACTOR-2 and nothing else above
 PACTOR-1. That is what the flag is for, and it is a third of the network."""
 
 
+ANNOUNCE_6A9_CYCLES = 3
+"""Consecutive `0x6A9` answers to our first packet before it is resent as
+plain PACTOR-1.
+
+Of the four values bits 4-5 can take, only `0x01` has ever been acknowledged;
+`0x11` drew `0x6A9` fifteen cycles running with the counter frozen
+(pactor-capability.md section 5). A callee capped at PACTOR-2 is predicted to
+answer our `0x31` the same way, and every one of those cycles charges the retry
+budget, so without this the link was torn down at cycle 9 where a PACTOR-1-only
+caller, which never sets the bits, would have carried it."""
+
+
 GRANT_ENTRY_SL = 1
 """The speed level the PACTOR-3 phase opens at when the peer GRANTED it.
 
@@ -166,6 +180,25 @@ commands a change or `ArqConfig.traffic_sl` explicitly overrides it.
 An UNINVITED upgrade still opens at `entry_sl`, because there is nobody known to
 be listening for the entry packet and level 3 is the level an independent monitor
 acquires cold."""
+
+
+P1_STATUS_P2 = 0x10
+P1_STATUS_P3 = 0x20
+"""Status bits 4 and 5 of a caller's PACTOR-1 data packet, read as the called
+station reads them. Both set (0x35 DL6MAA, 0x31 W4DNA) draws `0x59A`; bit 4
+alone (0x11) draws `0x6A9`; neither draws an ordinary acknowledgement -- the
+2x2 in docs/protocols/pactor/pactor-capability.md sec 5."""
+
+GRANT_BUDGET = ENTRY_GRANT_CYCLES + 1
+"""Grants one PACTOR-1 phase may key before the called station acknowledges
+in PACTOR-1 instead.
+
+A grant acknowledges the packet it answers, but a caller that will not take it
+reads it as nothing and repeats, so a grant held forever freezes the link --
+the frozen counter every gateway on record shows a declining announcer. No
+recording shows a stock station giving up, so the bound is our own caller's:
+the first grant plus the `ENTRY_GRANT_CYCLES` repeats its entry campaign
+spends before it returns to PACTOR-1 for the rest of the contact."""
 
 
 P1_HISPEED_RETRIES = 4
@@ -365,6 +398,17 @@ class PtcHost(ArqIO):
         self.p2_announcement_end: int | None = None
         # MYLevel-2 policy: P1 setup/fallback, experimental 0x6A9 -> P2,
         # and no P3 grants, unsolicited upgrades, or follows.
+        self.p2_grant_6a9 = False
+        """Read `0x6A9` after our `0x31` as the peer granting PACTOR-2.
+
+        OFF until a stock PACTOR-1-to-PACTOR-2 entry is on tape: the reading is
+        the two-bit-ceiling hypothesis, and nothing has graded it. On, the word
+        caps this contact at PACTOR-2 and enters it as `pactor2_only` does,
+        with that entry's bounded budget and fall back to PACTOR-1."""
+        self._p2_ceiling_from_grant = False
+        self._announce_6a9 = 0
+        self._announcement_withdrawn = False
+        self._announcement_answered = False
         self.stay_in_pactor1 = False
         """Hold the link in PACTOR-1, whatever it could be upgraded to.
 
@@ -464,6 +508,13 @@ class PtcHost(ArqIO):
         DBPSK on both carriers, with the nine-pulse frame marker in front of it
         naming its own level and length.
         """
+        self.grant_pactor2 = False
+        """As the called station, answer a PACTOR-2 announcement with `0x6A9`.
+
+        OFF: a stock gateway sends that word to a bit-4-only announcement, but
+        no recording holds the PACTOR-2 entry a caller keys after it. See
+        `_read_announcement`; `0x59A` for PACTOR-3 needs no flag.
+        """
         self.p1_grant_only = False
         """Refuse the UNINVITED upgrade, so a grant is the only door into PACTOR-3.
 
@@ -481,6 +532,12 @@ class PtcHost(ArqIO):
         self._grant_taken = False
         self._entry_grant = None
         self._grant_pending = False
+        # The called station's half: the word replacing our next PACTOR-1
+        # acknowledgement, and how many this PACTOR-1 phase has keyed.
+        self._grant_word = None
+        self._grants_keyed = 0
+        self._grant_counter = 0
+        self._grant_keyed = False
         # An UNINVITED PACTOR-3 phase is open and nothing has come back from it.
         # The granted half of the same state is `arq.entry_pending`, which stays
         # off this door: that flag holds the buffer back and routes the render
@@ -798,7 +855,10 @@ class PtcHost(ArqIO):
         entry has its own one-bit announcement; do not turn an ordinary P3
         announcement into a P2 offer unless that entry path is actually armed.
         Arms without a host ceiling retain their existing wire experiment.
+        A withdrawn announcement (`_withdraw_announcement`) announces nothing.
         """
+        if self._announcement_withdrawn:
+            return 0
         if 'MYLEVEL' not in self.settings:
             return requested
         if not self.allows_protocol(Protocol.PACTOR2):
@@ -808,6 +868,35 @@ class PtcHost(ArqIO):
         if not self.allows_protocol(Protocol.PACTOR3):
             return 0
         return requested
+
+    def _announcing(self) -> bool:
+        """The caller's first packet is still unanswered: nothing acknowledged
+        or granted on this contact. Silence never withdraws it -- that is the
+        `0x21` cell, which we never send, and a late `0x59A` can still land in
+        those cycles (WS8EOC, 2026-09-11)."""
+        return (self.protocol is Protocol.PACTOR1 and self.arq.role == ISS
+                and not self.arq.answering and self.arq.state == State.CONNECTED
+                and not self.arq.acked and not self._announcement_answered)
+
+    def _note_announcement_refused(self, ev) -> None:
+        if ev.kind != 'unassigned' or ev.spare != pactor1.CS_6A9:
+            self._announce_6a9 = 0
+            return
+        if self._announcement_withdrawn or not self._announcing():
+            return
+        self._announce_6a9 += 1
+        if self._announce_6a9 >= ANNOUNCE_6A9_CYCLES:
+            # A peer that can read PACTOR-3 grants it with 0x59A; this one did
+            # not, so no uninvited PACTOR-3 follows the plain resend either.
+            self._ruled_out.add(Protocol.PACTOR3)
+            self._withdraw_announcement(f"{self._announce_6a9} x 0x6A9 with the counter frozen")
+
+    def _withdraw_announcement(self, why: str) -> None:
+        """Clear status bits 4-5 for the rest of the contact. `0x01` is the one
+        announcement ever acknowledged, so the link carries on in PACTOR-1."""
+        self._announcement_withdrawn = True
+        self.log(f"announcement withdrawn ({why}): the repeat goes out as plain "
+                 "PACTOR-1 (0x01 at counter 1) and the link stays in PACTOR-1")
 
     def _retire_entry_listen(self) -> None:
         """Release only the retired entry window, before any synchronous TX."""
@@ -990,6 +1079,7 @@ class PtcHost(ArqIO):
             # that declines to rule the target out is saying the evidence was
             # about the channel; the peer's next grant is new evidence.
             self._grant_taken = False
+            self._grants_keyed = 0
         self.protocol = Protocol.PACTOR1
         self.arq.cycle_long = False          # PACTOR-1 has no long cycle
         self._entry_grant = None
@@ -1000,6 +1090,7 @@ class PtcHost(ArqIO):
         # acknowledged it -- that is why we are here -- so it goes back rather
         # than out again at 8 bytes a cycle with nothing in it.
         self._uninvited_entry = False
+        self._grant_word = None
         if self.arq.entry_pending:
             self.arq.requeue_inflight()
             self.arq.entry_pending = False
@@ -1173,7 +1264,9 @@ class PtcHost(ArqIO):
         wrong. The line says that, because it is the only place the session gets
         told where to look.
         """
-        experimental = self.p1_6a9 or self.pactor2_only
+        p2_grant = (self.p2_grant_6a9 and not self.pactor2_only
+                    and ev.spare == pactor1.CS_6A9)
+        experimental = self.p1_6a9 or self.pactor2_only or p2_grant
         target = Protocol.PACTOR2 if experimental else Protocol.PACTOR3
         if not self.allows_protocol(target):
             return
@@ -1202,6 +1295,11 @@ class PtcHost(ArqIO):
                      "no new entry and the goodbye deadline is unchanged")
             return
         self._grant_taken = self._grant_pending = True
+        self._announcement_answered = True
+        if p2_grant:
+            self.pactor2_only = self._p2_ceiling_from_grant = True
+            self.log("0x6A9 to our announcement read as a PACTOR-2 grant "
+                     "(--p2-6a9-grant): this contact is capped at PACTOR-2")
         self._retire_entry_listen()
         if not experimental and ev.protocol == Protocol.PACTOR1:
             self._entry_grant = (expected, getattr(ev, 'sense', None),
@@ -1225,7 +1323,127 @@ class PtcHost(ArqIO):
         # is for.
         self._phase_power(Protocol.PACTOR2 if self.pactor2_only else Protocol.PACTOR3,
                           f"the peer's {trigger}")
+        # The grant settles the packet in flight, so PACTOR-1's alternation
+        # moves as an acknowledgement would have moved it: to the codeword the
+        # called station keys for that counter (`_p1_cs_for`). Left on the one
+        # before, the called station's next acknowledgement after a failed entry
+        # -- CS1 for counter 2, behind a granted counter 1 -- read as a repeat
+        # request, and the PACTOR-1 link never advanced again.
+        packet = self.arq._inflight
+        if packet is not None:
+            self._last_rx_cs = self._prev_rx_cs = (
+                pactor1.CS_ACK_B if packet.seq & 1 else pactor1.CS_ACK_A)
         self.arq.on_rx_grant()
+
+    def _read_announcement(self, status: int) -> None:
+        """As the called station, decide what answers the caller's PACTOR-1 packet.
+
+        THE CALLED STATION COMMANDS THE UPGRADE (pactor3.md sec 17.1): the
+        caller's announcement sets status bits 4 and 5, and `0x59A` goes back in
+        the slot its acknowledgement would take, at the acknowledgement's own
+        timing -- 1030.8 ms after the caller's slot boundary, the same as CS1
+        (pactor1-control-signals.md sec 3). The answer is what the caller asks
+        for, capped by what this station allows:
+
+            caller asks 3 (both bits), we allow 3              -> 0x59A
+            caller asks 2 (bit 4 alone), or 3 with us capped
+            at 2, and `grant_pactor2`                          -> 0x6A9
+            anything else                                      -> acknowledgement
+
+        Bit 4 alone draws `0x6A9` from a stock gateway (KB5LZK, 2026-08-30,
+        fifteen cycles running), but no recording holds the PACTOR-2 entry that
+        should follow it, so that row is off by default. Bit 5 alone drew
+        silence there; silence would freeze the link, so it gets the ordinary
+        acknowledgement a clear status byte does.
+
+        A CRC-valid packet re-decides it, so a caller that stops announcing is
+        acknowledged at once, and so is one past `GRANT_BUDGET`.
+        """
+        granted = {pactor1.CS_59A: Protocol.PACTOR3,
+                   pactor1.CS_6A9: Protocol.PACTOR2}.get(self._grant_word)
+        if (granted is not None and self._grants_keyed
+                and status & spec.STATUS_SEQ != self._grant_counter):
+            # A NEW PACTOR-1 packet behind our grant: the caller took the grant
+            # as the acknowledgement it is, tried the entry, and is back. That
+            # is its answer for this link, as it is when we are the caller
+            # (`_fall_back_to_pactor1`).
+            self._ruled_out.add(granted)
+            self.log(f"caller back in PACTOR-1 after our grant -> {granted} "
+                     f"ruled out for this link")
+        word = None
+        if (self.arq.answering and self.arq.role == IRS
+                and self.arq.state == State.CONNECTED
+                and self.protocol is Protocol.PACTOR1 and not self.stay_in_pactor1
+                and not status & (spec.STATUS_CHANGEOVER | spec.STATUS_QRT)
+                and status & P1_STATUS_P2):
+            asks = 3 if status & P1_STATUS_P3 else 2
+            allows = (3 if self._grantable(Protocol.PACTOR3) and not self.pactor2_only
+                      else 2 if self._grantable(Protocol.PACTOR2) else 1)
+            level = min(asks, allows)
+            if level == 3:
+                word = pactor1.CS_59A
+            elif level == 2 and self.grant_pactor2:
+                word = pactor1.CS_6A9
+        if word is not None and self._grants_keyed >= GRANT_BUDGET:
+            word = self._grant_spent()
+        self._grant_word = word
+        self._grant_counter = status & spec.STATUS_SEQ
+
+    def _grantable(self, protocol: Protocol) -> bool:
+        """Allowed, and not already contradicted on this link: a caller that
+        came back from it in PACTOR-1 has answered the question a grant asks."""
+        return self.allows_protocol(protocol) and protocol not in self._ruled_out
+
+    def _grant_spent(self) -> None:
+        if self._grant_word is not None:
+            self.log(f"{self._grants_keyed} grants and no entry packet read "
+                     f"-> acknowledging in PACTOR-1")
+        self._grant_word = None
+
+    def _grant_for(self, index: int) -> int:
+        """The PACTOR-1 codeword to key: the grant where an acknowledgement or a
+        repeat request would go, while one is owed.
+
+        The request is the held acknowledgement, and the held grant is what a
+        stock called station keys every cycle it waits for the entry packet
+        (pactor3.md sec 17.1, "A station waiting for an entry packet repeats the
+        word once a cycle") -- so a cycle in which the entry did not decode keys
+        the grant again, which is the repeat request in this phase."""
+        self._grant_keyed = False
+        if (self._grant_word is None or index not in (pactor1.CS_ACK_A, pactor1.CS_ACK_B)
+                or not self.arq.answering or self.arq.role != IRS
+                or self.arq.state != State.CONNECTED
+                or self.protocol is not Protocol.PACTOR1):
+            return index
+        if self._grants_keyed >= GRANT_BUDGET:
+            self._grant_spent()
+            return index
+        self._grants_keyed += 1
+        self._grant_keyed = True
+        name = "0x59A" if self._grant_word == pactor1.CS_59A else "0x6A9"
+        self.log(f"{name} grant keyed ({self._grants_keyed} this phase) -> "
+                 f"entry packet due in the caller's next slot")
+        return self._grant_word
+
+    def awaiting_granted_entry(self) -> bool:
+        """Whether the codeword just keyed was a grant: a cycle behind it that
+        read nothing is the caller keying the entry packet we commanded, which
+        a PACTOR-1 receiver cannot read before its key (`arq` asks, before it
+        charges the cycle as silence). `GRANT_BUDGET` bounds it."""
+        return self._grant_keyed and self._grant_word is not None
+
+    def _granted_entry(self, ev) -> bool:
+        """The packet is the entry our grant commanded: the protocol the word
+        granted, and the counter after the announcement's -- DL6MAA's 0x35
+        announcement (counter 1) is followed by its entry at 0x1a (counter 2).
+        Nothing else lifts the rule that a lone speed-level-1 frame may not move
+        the link. The slot is not checked: this layer has no clock."""
+        granted = {pactor1.CS_59A: Protocol.PACTOR3,
+                   pactor1.CS_6A9: Protocol.PACTOR2}.get(self._grant_word)
+        return (granted is not None and self._grants_keyed > 0
+                and ev.protocol == granted
+                and ev.packet[1] & spec.STATUS_SEQ
+                == (self._grant_counter + 1) % SEQ_MOD)
 
     def take_robust_answer(self) -> None:
         """Take the answer to our Robust Connect as a grant: PACTOR-3 entry next.
@@ -1459,6 +1677,8 @@ class PtcHost(ArqIO):
         # Anything the front end reports is a signal on the channel that is not
         # noise, which is what the status byte's Channel-Busy means [6.90].
         self.busy_until = time.monotonic() + BUSY_HOLD_S
+        if ev.kind == 'cs':
+            self._note_announcement_refused(ev)
         if ev.kind in ("cs", "packet") and self.arq.state == State.CONNECTING \
                 and ev.protocol != Protocol.PACTOR1:
             # NOT AN ANSWER TO OUR CALL, whatever it decoded to. Every PACTOR-2
@@ -1661,11 +1881,22 @@ class PtcHost(ArqIO):
             # arms on a nine-pulse codeword at 0.94 of its ceiling and the level
             # is read off that marker, so a level-1 PACTOR-2 frame is anchored
             # where a level-1 PACTOR-3 one is precisely not.
+            #
+            # AND NOT THE ENTRY PACKET WE GRANTED. A blind scan did not find
+            # that one: we commanded it in the previous slot, and level 1 is
+            # what the caller keys there.
+            if ok and ev.protocol == Protocol.PACTOR1 and not ev.breakin:
+                self._read_announcement(status)
+            granted = ok and ev.protocol != Protocol.PACTOR1 and self._granted_entry(ev)
             if ok and (self.arq.state == State.CONNECTED
                        or (ev.breakin and self.arq.state == State.DISCONNECTING)) \
-                    and (sl != 1 or ev.breakin
+                    and (sl != 1 or ev.breakin or granted
                          or ev.protocol != Protocol.PACTOR3):
                 self._follow_peer(ev.protocol, breakin=ev.breakin)
+                if self._grant_word is not None and self.protocol is not Protocol.PACTOR1:
+                    if granted:
+                        self.log(f"granted entry read -> link in {self.protocol}")
+                    self._grant_word, self._grants_keyed = None, 0
             # The same spend a bare CS3 makes above: a break-in IS the answer to
             # the entry packet in both reference recordings, and reading the rest
             # of the packet must not cost the link what reading only its head
@@ -1725,6 +1956,7 @@ class PtcHost(ArqIO):
                         and getattr(self, '_entry_reply_current', True),
                         reply_token=getattr(self, '_entry_reply_token', None))
                 self._take_grant(ev)
+                self._note_announcement_refused(ev)
                 # AND IT IS THE PEER BEING THE IRS. Twelve bits at zero errors
                 # in the slot the receiving station owes us is that station
                 # answering, whatever the word means -- so it refutes the
@@ -2837,7 +3069,7 @@ class PtcHost(ArqIO):
         if not hasattr(self.peer, "send_p1_cs"):
             return self.peer.send_cs(cs_index)
         elif self.protocol is Protocol.PACTOR1:
-            return self.peer.send_p1_cs(self._p1_cs_for(cs_index))
+            return self.peer.send_p1_cs(self._grant_for(self._p1_cs_for(cs_index)))
         elif self.protocol is Protocol.PACTOR2 \
                 and hasattr(self.peer, "send_p2_cs"):
             return self.peer.send_p2_cs(self._counter_cs_for(cs_index))
@@ -3525,9 +3757,14 @@ class PtcHost(ArqIO):
         # Hostmode clients reuse this object when calling the next gateway.
         self._grant_taken = self._grant_pending = False
         self._entry_grant = None
+        self._grant_word, self._grants_keyed, self._grant_keyed = None, 0, False
         self._retire_entry_listen()
         self._p2_setup_acked = False
         self.p2_announcement_end = None
+        if self._p2_ceiling_from_grant:
+            self.pactor2_only = self._p2_ceiling_from_grant = False
+        self._announce_6a9 = 0
+        self._announcement_withdrawn = self._announcement_answered = False
         self._uninvited_entry = False
         self._hispeed_tries = 0
         self._p1_header_inverted = False

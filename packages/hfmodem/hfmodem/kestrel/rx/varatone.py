@@ -45,8 +45,12 @@ GRAY = np.array([0, 1, 3, 2])
 #: Increment per on-air bit pair, MSB first: LUT column 1, the QPSK Gray column.
 POINTS = tablegen.constellation_lut()[1::6][:4]
 _SPEC = {2300: "bw2300", 2750: "bw2750", 500: "bw500"}
-_PN = (tablegen.whitener() & 1).astype(int)
 _LLR_CAP = 20.0
+
+
+@cache
+def _pn():
+    return (tablegen.whitener() & 1).astype(int)
 
 
 @dataclass(frozen=True)
@@ -97,7 +101,7 @@ class ToneRecord:
 
     @property
     def nsym(self) -> int:
-        return C0 + 1 + self.ndata + len(self.pilots[0])
+        return C0 + 1 + self.ndata + tablegen._TONE[_SPEC[self.bw], self.rec][1]
 
     @property
     def taps(self) -> np.ndarray:
@@ -159,7 +163,7 @@ def onair_bits(frame: bytes, rec: ToneRecord) -> np.ndarray:
     bits = np.unpackbits(np.frombuffer(frame, np.uint8)).astype(int)
     info = np.zeros(rec.n_info, int)
     info[:len(bits)] = bits[:rec.n_info]
-    return turbo.encode(info ^ _PN[:rec.n_info], perm=p2)[p1]
+    return turbo.encode(info ^ _pn()[:rec.n_info], perm=p2)[p1]
 
 
 def crc_ok(frame: bytes) -> bool:
@@ -298,7 +302,7 @@ def decode_frame(llr: np.ndarray, rec: ToneRecord) -> bytes:
     lc[p1] = llr
 
     def frame(bits):
-        return np.packbits((bits ^ _PN[:rec.n_info]).astype(np.uint8)).tobytes()[:rec.frame_bytes]
+        return np.packbits((bits ^ _pn()[:rec.n_info]).astype(np.uint8)).tobytes()[:rec.frame_bytes]
 
     return frame(turbo.decode_from_coded_llr(lc, rec.n_info, iters=12, perm=p2,
                                              check=lambda b: crc_ok(frame(b))))

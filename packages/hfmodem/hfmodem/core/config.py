@@ -24,8 +24,9 @@ import os
 import sys
 import tomllib
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from hfhost.config import ConfigError, build_section, choice
 
@@ -98,6 +99,10 @@ class Ptt:
     settle_s: float = 0.04
 
 
+#: The TUNE carrier's RF power when the station file names none.
+TUNE_POWER_W = 10.0
+
+
 @dataclass(frozen=True, slots=True)
 class Rig:
     model: str = ""
@@ -115,6 +120,11 @@ class Rig:
     #: for segments with a specific power ceiling. Without this setting there
     #: was no way to supply power, so the profile refused every protocol on 30 m.
     power_w: float | None = None
+    #: The most RF power, in watts, anything here sets the rig to. A request above it
+    #: sets this instead and says so; a rig found above it at session start is lowered.
+    power_clamp_w: float | None = None
+    #: The RF power of a TUNE carrier, held to `power_clamp_w` like any other.
+    tune_power_w: float = TUNE_POWER_W
     #: The receiver's audio passband, lo and hi Hz: what a monitor on this rig
     #: can hear, read off its SSB filter. Nothing sends it to the radio.
     filter_hz: tuple[int, int] = (300, 2900)
@@ -276,6 +286,15 @@ class Desk:
 
 
 @dataclass(frozen=True, slots=True)
+class BBSReference:
+    config: str = ""
+
+    def __post_init__(self):
+        if not isinstance(self.config, str) or '\x00' in self.config:
+            raise ConfigError('[bbs] config must be a path string without NUL')
+
+
+@dataclass(frozen=True, slots=True)
 class StationConfig:
     station: Station
     rig: Rig
@@ -290,6 +309,7 @@ class StationConfig:
     voice: Voice = field(default_factory=Voice)
     models: Models = field(default_factory=Models)
     desk: Desk = field(default_factory=Desk)
+    bbs: BBSReference = field(default_factory=BBSReference)
 
     def require_audio(self, operation: str, *, input=False, output=False,
                       drive=False, floor=False, preset="", drive_override=None) -> None:
@@ -319,6 +339,18 @@ class StationConfig:
     @property
     def profile(self) -> Profile:
         return profile(self.station.regulatory, **self.station.regulatory_settings)
+
+    @property
+    def full_scale_w(self) -> float:
+        """The watts RFPOWER 1.0 stands for: `[rig] max_watts`, else the rig profile's, else 100."""
+        return self.rig.max_watts or self.resolved_profile.get("max_watts") or 100.0
+
+    @property
+    def declared_power_w(self) -> float | None:
+        """`[rig] power_w` held to the clamp: the power this station sets and declares."""
+        if self.rig.power_w is None:
+            return None
+        return clamp_power(self.rig.power_w, self.rig.power_clamp_w, "")[0]
 
     @property
     def listens(self) -> bool:
@@ -357,6 +389,39 @@ def station_profile() -> Profile | None:
         return load(path).profile
     except (OSError, ValueError) as exc:
         raise ConfigError(f"{STATION_ENV} names {path}: {exc}") from exc
+
+
+def clamp_power(watts: float, clamp_w: float | None, what: str) -> tuple[float, str]:
+    """`watts` held to the station's power clamp, and the warning to show when that
+    lowered it; an empty warning when it did not."""
+    if clamp_w is None or watts <= clamp_w:
+        return watts, ""
+    return clamp_w, (f"warning: {what} asks {watts:g} W, above the {clamp_w:g} W station clamp "
+                     f"([rig] power_clamp_w); setting {clamp_w:g} W")
+
+
+class PowerLimits(NamedTuple):
+    full_scale_w: float
+    clamp_w: float | None
+    tune_w: float
+    tune_carrier: bool
+
+
+def power_limits() -> PowerLimits:
+    """The named station file's RFPOWER full scale, power clamp and TUNE carrier, for
+    tools that hold no station file of their own. No file: the selected rig's profile."""
+    path = os.environ.get(STATION_ENV)
+    if not path:
+        from .rigs import RIGS, resolve_rig
+        profile = RIGS[resolve_rig()]
+        return PowerLimits(profile.get("max_watts") or 100.0, None, TUNE_POWER_W,
+                           profile["tune_carrier"])
+    try:
+        cfg = load(path)
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"{STATION_ENV} names {path}: {exc}") from exc
+    return PowerLimits(cfg.full_scale_w, cfg.rig.power_clamp_w, cfg.rig.tune_power_w,
+                       cfg.resolved_profile.get("tune_carrier", True))
 
 
 def tx_drive(override: float | None = None) -> float:
@@ -602,7 +667,7 @@ def parse(raw: dict, *, rig_name=None, environ=None) -> StationConfig:
     if raw.get("schema") != SCHEMA:
         raise ConfigError(f"schema must be {SCHEMA} (got {raw.get('schema')!r})")
     body = {k: v for k, v in raw.items() if k != "schema"}
-    unknown = sorted(set(body) - {"station", "rig", "audio", "protocols", "logging", "voice", "models", "desk"})
+    unknown = sorted(set(body) - {"station", "rig", "audio", "protocols", "logging", "voice", "models", "desk", "bbs"})
     if unknown:
         raise ConfigError(f"unknown top-level table(s) {', '.join(unknown)}")
 
@@ -706,8 +771,14 @@ def parse(raw: dict, *, rig_name=None, environ=None) -> StationConfig:
     models = build_section(Models, dict(body.get("models", {})), "[models]")
     cfg = StationConfig(station, rig, audio, protocols, selected_name, rig_source, chain,
                         selected, sources, calibration, voice, models,
-                        build_section(Desk, dict(body.get("desk", {})), "[desk]"))
+                        build_section(Desk, dict(body.get("desk", {})), "[desk]"),
+                        build_section(BBSReference, dict(body.get("bbs", {})), "[bbs]"))
     _validate(cfg)
+    floor = selected.get("min_watts")
+    if cfg.rig.power_clamp_w is not None and floor and cfg.rig.power_clamp_w < floor:
+        warn_config(f"[rig] power_clamp_w {cfg.rig.power_clamp_w:g} W is below the "
+                    f"{cfg.selected_rig.upper()}'s {floor:g} W minimum; clamping at {floor:g} W")
+        cfg = replace(cfg, rig=replace(cfg.rig, power_clamp_w=float(floor)))
     return cfg
 
 

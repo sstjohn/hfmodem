@@ -28,11 +28,12 @@ def arguments(launch, tmp_path, *extra):
 def test_the_launcher_takes_a_band_a_bandwidth_and_a_profile(launch, tmp_path):
     args = arguments(launch, tmp_path)
     assert args.band == 20 and args.bw == 500
+    assert arguments(launch, tmp_path, '--dial', '14106000').dial == 14_106_000
     launch.validate(arguments(launch, tmp_path, '--bw', '2750', '--name', 'Saul', '--services', 'VE'))
     with pytest.raises(ValueError):
         launch.validate(arguments(launch, tmp_path, '--name', 'Saul><DISC>'))
     for words in (['--band', '99'], ['--bw', '1000'], ['--action', 'listen'], ['--slot', '1'],
-                  ['--execute'], ['--dial', '14105000']):
+                  ['--execute']):
         with pytest.raises(SystemExit):
             arguments(launch, tmp_path, *words)
 
@@ -162,9 +163,11 @@ def test_session_on_fakes_stops_host_before_retiring_keyer(launch, monkeypatch, 
     monkeypatch.setattr(varac.time, "time", lambda: 1700000000)
     from hfmodem.core import config
     order, events = [], []
-    args = arguments(launch, tmp_path, *(['--bw', str(bw)] if bw else []))
+    args = arguments(launch, tmp_path, '--mycall', 'X-W9SSJ', '--idcall', 'W9SSJ',
+                     *(['--bw', str(bw)] if bw else []))
+    launch.validate(args)
     monkeypatch.setattr(launch, 'tune', lambda rig, hz, *_: order.append('tune ' + str(hz)))
-    rig = SimpleNamespace(retired=False, shutdown=lambda: order.append('unkey'), armed=False,
+    rig = SimpleNamespace(retired=False, shutdown=lambda: order.append('unkey'), armed=False, power_w=lambda w=None: None,
                           line_state=lambda: False)
     admission = SimpleNamespace(opened=lambda: order.append('admitted'))
     class Tty(io.StringIO):
@@ -186,7 +189,9 @@ def test_session_on_fakes_stops_host_before_retiring_keyer(launch, monkeypatch, 
         assert transport is audio
         try:
             yield SimpleNamespace(server=SimpleNamespace(cmd_port=100, data_port=101),
-                                  runtime=SimpleNamespace())
+                                  runtime=SimpleNamespace(),
+                                  identify_steps=lambda call, bw, after_peer, say:
+                                      order.append(f'identify {call} BW{bw} after_peer={after_peer}'))
         finally:
             order.append('host closed')
     monkeypatch.setattr(launch, 'Host', host)
@@ -224,15 +229,21 @@ def test_session_on_fakes_stops_host_before_retiring_keyer(launch, monkeypatch, 
     def terminal(session, tty):
         order.append('terminal')
         assert session.auto and rig.armed is True
+        client.event(Event('host', 'PTT ON'))
+        list(session._identify_steps())
         raise KeyboardInterrupt
     monkeypatch.setattr(launch, 'terminal', terminal)
     with pytest.raises(KeyboardInterrupt):
         launch.run(args, rig, admission)
     assert order == ['admitted', 'initialize', f'BW{bw or 500}', 'LISTEN CQ', 'terminal',
+                     f'identify W9SSJ BW{bw or 500} after_peer=False',
                      'client closed', 'host closed', 'unkey']
     transcript = (tmp_path / 'host.jsonl').read_text()
     assert '<UNKNOWN>café' in transcript and 'CQFRAME WI9YZA-15 500' in transcript
     screen = tty.getvalue().splitlines()
+    assert screen.pop(0) == ('VMail parking on; relay notices on; 0 pending; expiry 30 days; '
+                             'limits 100/destination, 1000 total; '
+                             'notices deferred: /band ready required each session')
     assert screen.pop(0) == 'PSKReporter off'
     assert screen[0].startswith('commands: /status, /help [bbs|email], /answer N, /cq [SLOT] [repeat], /call CALL [SLOT|cf]')
     assert screen[1:] == ['  1  WI9YZA   slot 15  14108.750 kHz   500 Hz  SN +11.0  2023-11-14 22:13:20Z',
@@ -300,6 +311,7 @@ with ExitStack() as held:
 '''
 
 
+@pytest.mark.realtime
 def test_the_terminal_edits_recalls_and_keeps_the_typed_line_under_screen_lines(tools, tmp_path):
     import fcntl, os, pty, select, subprocess, sys, termios, time
     history = tmp_path / 'history'
@@ -343,8 +355,8 @@ def test_the_terminal_edits_recalls_and_keeps_the_typed_line_under_screen_lines(
     assert history.read_text().splitlines()[-2:] == ['later', 'Xabc']
     screen, _ = session((b'> ', b'\x1b[A\r'), (b"got 'Xabc\\n'", b'\x12'),
                         ((b'bck:', b'(reverse-i-search)'), b'lat'),
-                        ((b'bck:la', b'lat'), b'\r'), (b'> ', b'\r'),
-                        (b'heard', b'\x04'))
+                        (b'later', b'\x05\r'), (b'heard', b'\x04'))
+    assert history.read_text().splitlines()[-1] == 'later'
 
 
 HELD_BUSY_CHILD = '''
@@ -380,7 +392,7 @@ config.tx_drive = lambda: .4
 varac_chat.tune = lambda *a, **k: None
 args = varac_chat.parser().parse_args(['--mycall', 'W9SSJ', '--band', '40', '--session', str(session),
     '--expect-model', 'fake', '--ptt-device', 'unused', '--tx-device', 'unused', '--rx-device', 'unused'])
-rig = SimpleNamespace(retired=False, shutdown=lambda: None, armed=False, line_state=lambda: None,
+rig = SimpleNamespace(retired=False, shutdown=lambda: None, armed=False, line_state=lambda: None, power_w=lambda w=None: None,
                       meter_reports=queue.SimpleQueue(), keyed=False)
 varac_chat.run(args, rig, SimpleNamespace(opened=lambda: None))
 '''
@@ -426,11 +438,13 @@ def held_busy(tools, tmp_path):
         child.wait(timeout=10)
 
 
+@pytest.mark.realtime
 def test_the_line_answers_within_a_second_while_the_host_holds_busy(held_busy):
     held_busy.typed(b'/help\r')
     held_busy.until(b'commands: /status, /help [bbs|email], /answer N', 1)
 
 
+@pytest.mark.realtime
 def test_quit_returns_at_once_and_the_recording_is_stored_after_it(held_busy):
     # 20261023T155947666857Z: /quit after six hours, then /help and /? unanswered while the
     # 2.2 GB receive.wav went to FLAC, until a Ctrl-C left it a WAV.
@@ -458,10 +472,10 @@ def test_the_session_commands_are_the_terminals_help_line():
         '/clear', '/auto on|off', '/beacon [MINUTES|now|force|off]',
         '/beacon hop BANDS [every MINUTES]', '/beacon hop auto [BANDS] [every MINUTES]',
         '/beacon hop status', '/band N', '/band ready|unready',
-        '/away [MESSAGE]', '/back', '/vmail [N | send SUBJECT | pending | collect CALL | dismiss CALL]',
+        '/away [MESSAGE]', '/back', '/vmail [N | send SUBJECT | send CALL SUBJECT (offline) | park CALL SUBJECT | parked [N] | cancel N | parking on|off | relay on|off | notify CALL | pending | collect CALL | dismiss CALL]',
         '/email send TO_EMAIL REPLY_EMAIL SUBJECT', '/bbs list|get N|request N|capture',
         '/inquire heard', '/pskreporter [status|off]', '/all [cf|slot N|TEXT|status|off]',
-        '/verbose [on|off]', '/quit')
+        '/verbose [on|off]', '/power [WATTS]', '/quit')
 
 
 def rigctld(script):
@@ -554,6 +568,7 @@ def test_a_transmission_logs_its_peak_power_and_alc(tools, monkeypatch):
     import time
     import vara_rig_bridge
     monkeypatch.setattr(vara_rig_bridge, 'METER_PERIOD_S', 30.0)
+    monkeypatch.setattr(vara_rig_bridge, 'MIN_METERED_KEY_S', 0.0)
     address, heard = rigctld(['42.5\n', '0.31\n'])
     said = []
     rig = keyable(vara_rig_bridge, monkeypatch, address, said)
@@ -605,7 +620,7 @@ def test_the_session_writes_each_transmissions_meters_to_its_events(launch, tmp_
     args = arguments(launch, tmp_path)
     reports = queue.SimpleQueue()
     reports.put(dict(peak_watts=38.0, peak_alc=0.4, reads=20, seconds=5.4, unread=None))
-    rig = SimpleNamespace(retired=False, shutdown=lambda: None, armed=False, line_state=lambda: False,
+    rig = SimpleNamespace(retired=False, shutdown=lambda: None, armed=False, line_state=lambda: False, power_w=lambda w=None: None,
                           meter_reports=reports)
     monkeypatch.setattr(launch, 'tune', lambda *a: None)
     monkeypatch.setattr(launch, 'Terminal', lambda held, history: io.StringIO())
@@ -744,3 +759,220 @@ def test_bbs_directory_and_disable_flags(launch, tmp_path):
     args = arguments(launch, tmp_path, '--bbs-directory', str(tmp_path / 'public'))
     assert args.bbs_directory == str(tmp_path / 'public') and not args.no_bbs
     assert arguments(launch, tmp_path, '--no-bbs').no_bbs
+
+
+def test_interactive_bbs_flags_are_independent_of_native_files(launch, tmp_path):
+    args = arguments(launch, tmp_path, '--bbs-config', str(tmp_path / 'bbs.toml'), '--no-bbs')
+    assert args.bbs_config == tmp_path / 'bbs.toml'
+    assert args.no_bbs and not args.no_bbs_service
+    args = arguments(launch, tmp_path, '--no-bbs-service', '--bbs-directory', str(tmp_path))
+    assert args.no_bbs_service and not args.no_bbs
+
+
+def test_invalid_interactive_bbs_stops_before_claimed_radio_main(launch, tmp_path, monkeypatch):
+    monkeypatch.setattr(launch, 'validate', lambda args: None)
+    monkeypatch.setattr(launch, 'claimed_main', lambda *args: pytest.fail('radio path entered'))
+    argv = ['--mycall', 'W9SSJ', '--band', '20', '--session', str(tmp_path),
+            '--expect-model', 'fake', '--ptt-device', 'unused', '--tx-device', 'unused',
+            '--rx-device', 'unused', '--bbs-config', str(tmp_path / 'missing.toml')]
+    with pytest.raises(FileNotFoundError):
+        launch.main(argv)
+
+
+def test_native_bbs_page_resets_color_before_restoring_edited_line(launch):
+    tty = object.__new__(launch.Terminal)
+    tty.screen = io.StringIO()
+    tty.editing = True
+    tty.edit = SimpleNamespace(get_line_buffer=lambda: 'look')
+    tty.write_bbs('\x1b[31mWest of House\x1b[0m')
+    result = tty.screen.getvalue()
+    assert result.startswith('\r\x1b[K\x1b[0m')
+    assert result.endswith('\x1b[0m\n> look')
+    assert 'CALL:' not in result
+
+
+def test_station_bbs_is_opened_before_radio_and_disable_wins(launch, tmp_path, monkeypatch):
+    from hfmodem.bbs import config as board_config, service
+    from hfmodem.contact import bbs_server
+    from contextlib import contextmanager
+    monkeypatch.setattr(launch, 'validate', lambda args: None)
+    board = tmp_path / 'board.toml'
+    monkeypatch.setattr(board_config, 'configured_path', lambda override: board)
+    monkeypatch.setattr(bbs_server, 'configured_directory', lambda _: None)
+    calls = []
+    sentinel = object()
+
+    @contextmanager
+    def opened(path, **kwargs):
+        calls.append(path)
+        yield sentinel
+
+    monkeypatch.setattr(service, 'open_service', opened)
+    monkeypatch.setattr(launch, 'claimed_main', lambda args, active: calls.append(active) or 0)
+    argv = ['--mycall', 'W9SSJ', '--band', '20', '--session', str(tmp_path),
+            '--expect-model', 'fake', '--ptt-device', 'unused', '--tx-device', 'unused',
+            '--rx-device', 'unused']
+    assert launch.main(argv) == 0
+    assert calls == [board, sentinel]
+    calls.clear()
+    assert launch.main(argv + ['--no-bbs-service']) == 0
+    assert calls == [None]
+
+
+class Keyed:
+    """An audio transport that keys and plays what it is given, after one data burst."""
+
+    def __init__(self, receiving=()):
+        self.burst_level = (.1, .5)
+        self.bursts_sent = 0
+        self.played, self.keyed = [], []
+        self._receiving = iter(receiving)
+
+    @property
+    def receiving(self):
+        return next(self._receiving, False)
+
+    def key(self, on):
+        self.keyed.append(on)
+
+    def tx(self, audio, drive, *, identification=False, cancelled=None):
+        assert identification
+        self.played.append(audio)
+        self.bursts_sent += 1
+
+
+def chat_host(launch, transport, step=lambda: None):
+    return launch.Host(transport, runtime_factory=lambda _: SimpleNamespace(modem=None, step=step))
+
+
+@pytest.mark.parametrize('bw', [500, 2300, 2750])
+def test_the_chat_host_keys_the_idcall_in_audio_cw_at_the_channel_centre(launch, tools, bw):
+    import numpy as np
+    from hfmodem.core import cwid
+    from hfmodem.core.occupied import occupied_hz
+    args = arguments(launch, None, '--mycall', 'X-W9SSJ', '--idcall', 'W9SSJ')
+    launch.validate(args)
+    assert args.identity.cw_call == 'W9SSJ'
+    transport = Keyed()
+    said = []
+    chat_host(launch, transport).identify(args.identity.cw_call, bw, say=said.append)
+    assert said == [] and transport.keyed == [True, False]
+    expected = cwid.audio('W9SSJ', fs=48000, tone_hz=sum(occupied_hz('vara', bw)) / 2)
+    assert np.array_equal(transport.played[0], expected)
+
+
+def test_an_identification_that_cannot_go_out_says_send_it_by_hand(launch, tools):
+    transport = Keyed()
+    transport.burst_level = None
+    said = []
+    chat_host(launch, transport).identify('W9SSJ', 500, say=said.append)
+    assert transport.played == [] and len(said) == 1
+    assert said[0].startswith('  !! IDENTIFICATION NOT CONFIRMED (')
+    assert said[0].endswith(') -- send W9SSJ by hand')
+
+
+def test_after_the_peers_close_its_ident_ends_first_but_never_holds_ours_for_long(launch, tools, monkeypatch):
+    import time
+    monkeypatch.setattr(launch, 'PEER_IDENT_GAP_S', 0.0)
+    transport = Keyed(receiving=[True] * 3)
+    chat_host(launch, transport).identify('W9SSJ', 500, after_peer=True, say=pytest.fail)
+    assert next(transport._receiving, None) is None and transport.played
+    monkeypatch.setattr(launch, 'PEER_IDENT_S', 0.2)
+    transport = Keyed(receiving=iter(lambda: True, None))
+    start = time.monotonic()
+    chat_host(launch, transport).identify('W9SSJ', 500, after_peer=True, say=pytest.fail)
+    assert time.monotonic() - start < 1 and transport.played
+    transport = Keyed(receiving=iter(lambda: pytest.fail('our own close waits on nobody'), None))
+    chat_host(launch, transport).identify('W9SSJ', 500, say=pytest.fail)
+    assert transport.played
+
+
+def test_the_modem_does_not_step_while_the_id_keys(launch, tools, monkeypatch):
+    import kestrel_connect
+    import time
+    steps = []
+    host = chat_host(launch, Keyed(), step=lambda: steps.append(time.sleep(.001)))
+    host.thread.start()
+    try:
+        while len(steps) < 3:
+            time.sleep(.001)
+        def identify(io, call, bw, say, **kwargs):
+            before = len(steps)
+            time.sleep(.05)
+            assert len(steps) == before
+        monkeypatch.setattr(kestrel_connect, 'identify', identify)
+        host.identify('W9SSJ', 500)
+        ran = len(steps)
+        while len(steps) == ran:
+            time.sleep(.001)
+    finally:
+        host.stop.set()
+        host.thread.join(5)
+    assert host.error is None
+
+
+def test_quit_during_ident_unkeys_within_quit_bound(launch, tools):
+    import time
+    from hfmodem.tests.contact.test_varac import answered
+
+    playing = threading.Event()
+    transport = Keyed()
+    def tx(audio, drive, *, identification=False, cancelled=None):
+        assert identification and cancelled is not None
+        playing.set()
+        assert cancelled.wait(5), 'quit did not cancel identification'
+        raise InterruptedError('identification cancelled')
+    transport.tx = tx
+    host = chat_host(launch, transport)
+    desk = answered()
+    desk.session.keyer = lambda bw, peer: host.identify_steps('W9SSJ', bw, peer, desk.said.append)
+    desk.hear('PTT ON', 'PTT OFF')
+    desk.session.command('/bye')
+    end = time.monotonic() + 2
+    while not playing.is_set() and time.monotonic() < end:
+        desk.tick()
+        time.sleep(.001)
+    assert playing.is_set() and transport.keyed == [True]
+    start = time.monotonic()
+    assert desk.session.command('/quit') is False
+    desk.session.quit()
+    assert time.monotonic() - start < 1
+    assert transport.keyed == [True, False]
+    assert any('send W9SSJ by hand' in line for line in desk.said)
+    assert desk.sent[-1] == 'LISTEN OFF'
+    assert desk.session.steps is None
+
+
+def test_ident_has_a_deadline_even_when_audio_never_finishes(launch, tools, monkeypatch):
+    import time
+    monkeypatch.setattr(launch, 'IDENT_TIMEOUT_S', .05)
+    transport = Keyed()
+    said = []
+    def tx(audio, drive, *, identification=False, cancelled=None):
+        assert cancelled.wait(2)
+        raise InterruptedError('identification cancelled')
+    transport.tx = tx
+    host = chat_host(launch, transport)
+    start = time.monotonic()
+    for _ in host.identify_steps('W9SSJ', 500, say=said.append):
+        time.sleep(.001)
+    assert time.monotonic() - start < 1
+    assert transport.keyed == [True, False]
+    assert len(said) == 1 and 'send W9SSJ by hand' in said[0]
+
+
+def test_cancelled_audio_wait_is_bounded_even_if_the_driver_stalls(tools, monkeypatch):
+    import sys
+    import time
+    import kestrel_connect
+    cancelled, release = threading.Event(), threading.Event()
+    cancelled.set()
+    monkeypatch.setattr(kestrel_connect, '_wedged', None)
+    monkeypatch.setitem(sys.modules, 'sounddevice', SimpleNamespace(_exit_handler=lambda: None))
+    start = time.monotonic()
+    try:
+        with pytest.raises(kestrel_connect.AudioWedged):
+            kestrel_connect._bounded(30, release.wait, cancelled=cancelled)
+        assert time.monotonic() - start < 1
+    finally:
+        release.set()

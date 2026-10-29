@@ -9,7 +9,6 @@ import hashlib
 import json
 import re
 import importlib.util
-import tomllib
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -152,6 +151,12 @@ class SiteBuild(unittest.TestCase):
             reference = root / build.reference_route('docs/protocols/pactor/pactor4-prng.md')
             self.assertTrue(reference.is_file())
             self.assertIn('67108862', reference.read_text())
+            for source, text in (
+                    ('docs/protocols/pactor/implementation-constants.md', 'PACTOR-4: two convolutional components'),
+                    ('docs/protocols/table-derivations.md', 'PACTOR-4 C2 and higher normal-long geometry'),
+                    ('CHANGELOG.md', 'On-air PACTOR-4 mail transfer remains unproven.')):
+                self.assertIn(text, (root / build.reference_route(source)).read_text(), source)
+            self.assertIn('PACTOR-4 recognition is experimental.', (root / 'monitor/index.html').read_text())
 
     def test_operator_guides_render_code_and_local_navigation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -237,7 +242,7 @@ class SiteBuild(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('site_public_manifest', manifest.with_name('build.py'))
         publisher = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(publisher)
-        man = tomllib.loads(manifest.read_text())
+        man = publisher.load()
         selected = publisher.expand(man)
         self.assertFalse(publisher.denied(man, selected))
         selected = {p.relative_to(build.ROOT).as_posix() for p in selected}
@@ -280,8 +285,8 @@ class SiteBuild(unittest.TestCase):
         self.assertIn('data-fig="mfsk.stride"', vara)
         self.assertIn('data-fig="mfsk.hop"', vara)
         self.assertNotIn('p4', pf)
-        hidden = (build.ROOT / 'docs/viz/pactor4-explained.html').read_text()
-        p4 = json.loads(re.search(r'const GUIDE_FACTS = (.*?);', hidden)[1])
+        pactor4 = (build.ROOT / 'docs/viz/pactor4-explained.html').read_text()
+        p4 = json.loads(re.search(r'const GUIDE_FACTS = (.*?);', pactor4)[1])
         self.assertEqual(len(p4['c2_sizes']), 13)
         self.assertEqual(p4['c2_1160_corrections'], 22)
         self.assertNotIn('Full-frame interleaver geometry remains unresolved', pactor)
@@ -447,7 +452,11 @@ class SiteBuild(unittest.TestCase):
         manifest = json.loads((page / 'manifest.json').read_text())
         events = json.loads((page / 'events.json').read_text())
         self.assertEqual(proof['last_sample'] - proof['first_sample'], 118 * 48000)
-        self.assertEqual(hashlib.sha256((page / proof['audio']).read_bytes()).hexdigest(), proof['audio_sha256'])
+        self.assertFalse(proof['audio_available'])
+        self.assertNotIn('audio', proof)
+        self.assertIsNone(manifest['recording']['url'])
+        self.assertTrue(all(not s['audio_available'] and s['url'] is None
+                            for s in manifest['sources']))
         self.assertEqual(proof['download']['size'], 2516)
         self.assertEqual(proof['download']['sha256'], '44c36a9969d42021d608be4eee4b61db5ef7c9c8762e07405728d41ce45497b1')
         reply = next(e for e in events if e['id'] == proof['download']['completion_reply_event'])
@@ -538,11 +547,6 @@ class SiteBuild(unittest.TestCase):
                 self.assertIn('END was not confirmed', m['comparison']['original_summary'])
                 self.assertEqual(m['session']['mail']['received'], 0)
 
-    def test_public_markdown_preserves_text_outside_omissions(self):
-        source = ('# Public\n\n<!-- site:omit:start -->\n'
-                  'Private section\n<!-- site:omit:end -->\n\nVisible tail')
-        self.assertEqual(build.public_markdown(source), '# Public\n\n\nVisible tail')
-
     def test_public_markdown_drops_comment_lines_outside_code(self):
         source = ('<!-- SPDX-License-Identifier: AGPL-3.0-only -->\n# Public\n\n'
                   '```html\n<!-- kept -->\n```')
@@ -557,16 +561,9 @@ class SiteBuild(unittest.TestCase):
                 text = re.sub(r'<!--.*?-->|<pre\b.*?</pre>', '', page.read_text(), flags=re.S)
                 self.assertNotIn('SPDX-License-Identifier', text, page.relative_to(root))
 
-    def test_public_markdown_rejects_broken_boundaries(self):
-        for source in ('<!-- site:omit:end -->', '<!-- site:omit:start -->',
-                       '<!-- site:omit:start -->\n<!-- site:omit:start -->'):
-            with self.subTest(source=source), self.assertRaises(ValueError):
-                build.public_markdown(source)
-
-    def test_headings_render_after_omission_filtering(self):
+    def test_headings_render_after_comment_filtering(self):
         for blank in ('\n', '\n\n', '\n \n\t\n'):
-            source = ('# Public\n' + blank + '<!-- site:omit:start -->\n'
-                      'Private section\n<!-- site:omit:end -->\n' + blank +
+            source = ('# Public\n' + blank + '<!-- note -->\n' + blank +
                       '## Running hfmodem\n\nVisible tail')
             with self.subTest(blank=blank):
                 self.assertEqual(

@@ -279,12 +279,88 @@ def test_generic_keeps_operator_mode_ptt_and_audio():
     ("rig", "dial_max_age_s", float("nan")), ("rig", "dial_max_age_s", float("inf")),
     ("rig", "dial_max_age_s", True), ("rig", "dial_max_age_s", "30"),
     ("rig", "max_watts", -1), ("rig", "max_watts", True),
+    ("rig", "power_clamp_w", 0), ("rig", "power_clamp_w", -25), ("rig", "power_clamp_w", True),
+    ("rig", "power_clamp_w", "25"), ("rig", "power_clamp_w", float("inf")),
 ])
 def test_invalid_station_rig_fields(section, key, value):
     raw = base()
     raw[section][key] = value
     with pytest.raises(ConfigError, match=key):
         config.parse(raw, environ={})
+
+
+def test_power_clamp_is_read_from_the_rig_table():
+    raw = base()
+    assert config.parse(raw, environ={}).rig.power_clamp_w is None
+    raw["rig"]["power_clamp_w"] = 25
+    assert config.parse(raw, environ={}).rig.power_clamp_w == 25
+
+
+@pytest.mark.parametrize("watts, clamp, held, warned", [
+    (60, 25, 25, "warning: /power asks 60 W, above the 25 W station clamp ([rig] power_clamp_w); "
+                 "setting 25 W"),
+    (25, 25, 25, ""), (20, 50, 20, ""), (100, None, 100, ""),
+])
+def test_clamp_power_holds_and_names_both_figures(watts, clamp, held, warned):
+    assert config.clamp_power(watts, clamp, "/power") == (held, warned)
+
+
+def test_power_limits_follow_the_named_station_file(tmp_path, monkeypatch):
+    monkeypatch.delenv(config.STATION_ENV, raising=False)
+    monkeypatch.delenv("HFMODEM_RIG", raising=False)
+    assert config.power_limits() == (100, None, 10, True)
+    monkeypatch.setenv("HFMODEM_RIG", "ftdx10")
+    assert config.power_limits().tune_carrier is False
+    monkeypatch.delenv("HFMODEM_RIG")
+    path = tmp_path / "station.toml"
+    path.write_text(EXAMPLE.read_text(encoding="utf-8").replace(
+        "[rig]\n", "[rig]\npower_clamp_w = 50\nmax_watts = 200\ntune_power_w = 20\n", 1))
+    monkeypatch.setenv(config.STATION_ENV, str(path))
+    assert config.power_limits() == (200, 50, 20, True)
+
+
+def test_tune_power_defaults_to_ten_watts_and_must_be_positive():
+    raw = base()
+    assert config.parse(raw, environ={}).rig.tune_power_w == 10
+    raw["rig"]["tune_power_w"] = 0
+    with pytest.raises(ConfigError, match="tune_power_w"):
+        config.parse(raw, environ={})
+
+
+def test_every_rig_profile_says_whether_a_tune_carrier_helps():
+    from hfmodem.core.rigs import RIGS
+    assert {name: profile["tune_carrier"] for name, profile in RIGS.items()} == dict(
+        generic=True, ft891=True, ftdx10=False, g90=True, x6100=True)
+    raw = base()
+    raw["rig"]["profiles"] = {"ft891": {"tune_carrier": False}}
+    assert config.parse(raw, environ={}).resolved_profile["tune_carrier"] is False
+
+
+def test_the_full_scale_is_the_station_files_then_the_rigs():
+    raw = base()
+    assert config.parse(raw, environ={}).full_scale_w == 100
+    raw["rig"]["max_watts"] = 200
+    assert config.parse(raw, environ={}).full_scale_w == 200
+
+
+def test_a_clamp_below_the_rigs_minimum_is_held_at_the_minimum(capsys):
+    raw = base()
+    raw["rig"]["power_clamp_w"] = 2
+    assert config.parse(raw, environ={}).rig.power_clamp_w == 5
+    assert "power_clamp_w 2 W is below the FT891's 5 W minimum; clamping at 5 W" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("power, clamp, declared", [(100, 50, 50), (20, 50, 20), (100, None, 100),
+                                                     (None, 50, None)])
+def test_the_declared_power_is_held_to_the_clamp(power, clamp, declared):
+    raw = base()
+    for key, value in (("power_w", power), ("power_clamp_w", clamp)):
+        if value is not None:
+            raw["rig"][key] = value
+    cfg = config.parse(raw, environ={})
+    assert cfg.declared_power_w == declared
+    from hfmodem.contact.facts import facts_from
+    assert facts_from(cfg)["power"] == ("" if declared is None else f"{declared:g} watts")
 
 
 def test_no_cat_requires_receive_only():

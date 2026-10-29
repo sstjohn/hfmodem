@@ -106,6 +106,7 @@
   "docs/viz/pactor-explained.html",
   "docs/viz/sabir-explained.html",
   "docs/viz/vara-explained.html",
+  "packages/hfmodem/hfmodem/tests/shrike/test_p4_k4spb_1027.py",
   "packages/hfmodem/hfmodem/ax25/frame.py",
   "packages/hfmodem/hfmodem/ax25/kiss.py",
   "packages/hfmodem/hfmodem/bateleur/fec.py",
@@ -213,6 +214,10 @@
   "tools/consolelib/monitor_modes.py",
   "tools/logbook_view/README.md",
   "evidence/README.md",
+  "evidence/pactor3-ve1yz-0924/README.md",
+  "evidence/pactor3-ws8eoc-1003/README.md",
+  "evidence/pactor4-k4spb-1027/README.md",
+  "evidence/pactor4-ve3kpg-0929/README.md",
   "evidence/varac-receive-1024/README.md",
   "evidence/vara-mail-0918/README.md",
   "docs/protocols/pactor/pactor4-prng.md"

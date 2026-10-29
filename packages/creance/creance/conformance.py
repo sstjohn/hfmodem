@@ -719,7 +719,9 @@ class _Collector:
         self._thread.start()
 
     def _run(self) -> None:
-        while not self._stop.is_set():
+        # A stop drains what the client already published: PTT OFF and DISCONNECTED
+        # can be queued when the caller sees the link drop.
+        while not (self._stop.is_set() and self._q.empty()):
             try:
                 item = self._q.get(timeout=0.1)
             except queue.Empty:

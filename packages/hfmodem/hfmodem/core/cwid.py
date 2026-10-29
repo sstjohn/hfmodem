@@ -27,6 +27,7 @@ would put two identifications on the air for one.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import partial
 
 import numpy as np
 
@@ -61,21 +62,20 @@ RAMP_S = 0.005
 
 
 @contextmanager
-def confirming(mycall: str):
+def confirming(mycall: str, say=partial(print, flush=True)):
     """Around a closing identification: any way it fails to go out tells the
     operator to send it by hand, and an interrupt or exit still ends the run."""
     try:
         yield
     except BaseException as exc:
-        unsent(mycall, repr(exc))
+        unsent(mycall, repr(exc), say)
         if not isinstance(exc, Exception):
             raise
 
 
-def unsent(mycall: str, why: str) -> None:
+def unsent(mycall: str, why: str, say=partial(print, flush=True)) -> None:
     """Tell the operator the closing identification did not go out."""
-    print(f"  !! IDENTIFICATION NOT CONFIRMED ({why}) -- send {mycall.upper()} by hand",
-          flush=True)
+    say(f"  !! IDENTIFICATION NOT CONFIRMED ({why}) -- send {mycall.upper()} by hand")
 
 
 def dit_seconds(wpm: float) -> float:

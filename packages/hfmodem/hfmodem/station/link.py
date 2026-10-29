@@ -151,7 +151,7 @@ class ProtocolLink:
                 audio=np.asarray(audio), rate=self.waveform.rate,
                 emission=self.waveform.emission(
                     self.station.rig.dial(),
-                    power_w=power_w if power_w is not None else self.station.cfg.rig.power_w),
+                    power_w=power_w if power_w is not None else self.station.cfg.declared_power_w),
                 at=at, responding=responding,
                 settle_s=self.station.cfg.rig.ptt.settle_s, on_ptt=on_ptt, gain=gain)
             end = arb.submit(req)
@@ -1079,7 +1079,7 @@ class RprLink(ProtocolLink):
                     self._condition.wait(0.02)
                 continue
             req = TxRequest(LIVE, request.identifier, "rpr", burst.audio, 9600,
-                            self.waveform.emission(rig.dial(), power_w=self.station.cfg.rig.power_w),
+                            self.waveform.emission(rig.dial(), power_w=self.station.cfg.declared_power_w),
                             settle_s=settle, state=request.state,
                             eligible=lambda: request.channel_epoch == arbiter.receive_boundary[0]
                                              and self._eligible(),

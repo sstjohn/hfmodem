@@ -4,7 +4,7 @@
 import time
 from types import SimpleNamespace
 
-from hfmodem.shrike import hostmode as hm
+from hfmodem.core import hostmode as hm
 from hfmodem.brubru.host.runtime import PacketRuntime
 from hfmodem.tests.brubru.test_connected_hosts import Link, wait
 from hfmodem.tests.core.test_managed_host import Client, SECRET, header, read

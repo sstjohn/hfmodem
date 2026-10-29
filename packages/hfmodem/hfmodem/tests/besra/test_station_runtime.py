@@ -38,7 +38,7 @@ def station():
     sent = []
     st = SimpleNamespace(audio=SimpleNamespace(samples=0),
                          rig=SimpleNamespace(dial=lambda: 7100000),
-                         cfg=SimpleNamespace(rig=SimpleNamespace(
+                         cfg=SimpleNamespace(declared_power_w=10, rig=SimpleNamespace(
                              power_w=10, ptt=SimpleNamespace(settle_s=0))),
                          arbiter=None)
     st.arbiter = TxArbiter(st.audio, st.rig)

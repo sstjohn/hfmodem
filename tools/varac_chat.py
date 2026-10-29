@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
+from functools import partial
 import io
 import json
 import os
@@ -28,12 +29,15 @@ def parser():
                    help='the digital call, as the fly path takes it: a tactical call such as X-W9SSJ is fine')
     p.add_argument('--idcall', help='CW call for the closing ID; default IDCALL, [station] idcall, then --mycall')
     p.add_argument('--band', type=int, choices=tuple(CALLING_HZ), required=True)
+    p.add_argument('--dial', type=int, help="this session's calling frequency in place of the band's")
     p.add_argument('--bw', type=int, choices=BANDWIDTHS, default=DEFAULT_BW,
                    help=f'VARA bandwidth for monitoring, /cq and /call (default {DEFAULT_BW})')
     for field in ('name', 'qth', 'loc', 'services'):
         p.add_argument('--' + field)
     p.add_argument('--bbs-directory', help='serve this directory and advertise BBS; overrides station.toml')
     p.add_argument('--no-bbs', action='store_true', help='disable the configured BBS export')
+    p.add_argument('--bbs-config', type=Path, help='shared BBS config; overrides station.toml [bbs] config')
+    p.add_argument('--no-bbs-service', action='store_true', help='disable interactive BBS service')
     p.add_argument('--pskreporter', action='store_true',
                    help='opt in to public PSKReporter CQ/beacon uploads; requires --loc GRID')
     p.add_argument('--monitor-wide', action='store_true',
@@ -60,6 +64,9 @@ def validate(args):
         from hfmodem.station.pskreporter import Config
         Config(args.mycall, args.loc or '', enabled=True)
     args.identity = identification.resolve(args.mycall, args.idcall)
+    if args.dial is not None:
+        # Every calling-frequency decision reads this table, so the session moves as one.
+        CALLING_HZ[args.band] = args.dial
     args.identity.announce()
     for field in ('name', 'qth', 'loc', 'services'):
         value = getattr(args, field, None)
@@ -84,6 +91,13 @@ def chat_server():
     return ChatServer
 
 
+#: How long a peer's closing ident may hold ours back. Stock keys its ident 0.09 s
+#: behind its close and holds it 3.25 s for a six-letter call at 28 WPM.
+PEER_IDENT_S = 8.0
+PEER_IDENT_GAP_S = 0.5
+IDENT_TIMEOUT_S = 20.0
+
+
 class Host:
     def __init__(self, transport, *, runtime_factory=None, server_factory=None):
         from kestrel_host import AudioHostRuntime
@@ -92,13 +106,18 @@ class Host:
         self.server_factory = server_factory or chat_server()
         self.server = None
         self.stop = threading.Event()
+        self.lock = threading.Lock()
+        self.stepping = threading.Event()
+        self.stepping.set()
         self.error = None
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self):
         try:
             while not self.stop.is_set():
-                self.runtime.step()
+                with self.lock:
+                    self.runtime.step()
+                self.stepping.wait()
         except BaseException as error:
             self.error = error
             self.stop.set()
@@ -120,26 +139,73 @@ class Host:
             raise
         return self
 
+    def identify(self, call, bandwidth, after_peer=False, say=print, *, cancelled=None):
+        import kestrel_connect
+        cancelled = cancelled or threading.Event()
+        self.stepping.clear()
+        try:
+            with self.lock:
+                if after_peer:
+                    start = time.monotonic()
+                    while (time.monotonic() - start < PEER_IDENT_GAP_S
+                           or self.transport.receiving and time.monotonic() - start < PEER_IDENT_S):
+                        if cancelled.wait(.05):
+                            break
+                if cancelled.is_set():
+                    from hfmodem.core.cwid import unsent
+                    unsent(call, 'identification cancelled', say)
+                else:
+                    kestrel_connect.identify(self.transport, call, bandwidth, say, cancelled=cancelled)
+                    if kestrel_connect._wedged is not None:
+                        raise kestrel_connect._wedged
+        finally:
+            self.stepping.set()
+
+    def identify_steps(self, call, bandwidth, after_peer=False, say=print):
+        cancelled = threading.Event()
+        failures = []
+        def identify():
+            try:
+                self.identify(call, bandwidth, after_peer, say, cancelled=cancelled)
+            except BaseException as error:
+                self.stop.set()
+                failures.append(error)
+        worker = threading.Thread(target=identify, daemon=True)
+        worker.start()
+        end = time.monotonic() + IDENT_TIMEOUT_S
+        try:
+            while worker.is_alive() and time.monotonic() < end:
+                yield .05
+        finally:
+            cancelled.set()
+            worker.join(3)
+            if worker.is_alive():
+                self.stop.set()
+                raise HostError('CW identification did not stop')
+            if failures:
+                raise HostError(f'CW identification failed: {failures[0]}') from failures[0]
+
     def check(self):
         if self.error is not None:
             raise HostError(f'Kestrel host stopped: {self.error}') from self.error
 
     def close(self):
         self.stop.set()
+        self.stepping.set()
         try:
-            if self.server is not None:
-                self.server.stop()
-        finally:
             if self.thread.ident is not None:
                 self.thread.join(timeout=10)
+            if self.thread.is_alive():
+                raise HostError('Kestrel runtime did not stop')
             try:
-                if self.thread.is_alive():
-                    raise HostError('Kestrel runtime did not stop')
+                if self.server is not None:
+                    self.server.stop()
+            finally:
                 if self.runtime.modem:
                     self.runtime.modem.stop()
                     self.runtime.modem.poll()
-            finally:
-                self.transport.stop()
+        finally:
+            self.transport.stop()
 
     def __exit__(self, *exc):
         self.close()
@@ -260,6 +326,10 @@ class Terminal:
             text = '\r\x1b[K' + text + self.PROMPT + ('' if typed.endswith('\n') else typed)
         self.screen.write(text)
 
+    def write_bbs(self, text):
+        """Render a filtered BBS page without a callsign prefix or styled editor."""
+        self.write('\x1b[0m' + text + '\x1b[0m\n')
+
     def flush(self):
         self.screen.flush()
 
@@ -272,7 +342,7 @@ class Diagnostics:
         self.dropped = 0
 
     def put(self, kind, **details):
-        if kind == 'link_recovery':
+        if kind in ('link_recovery', 'capture_rate'):
             # Keep recovery/closing notices despite a flood of verbose frames.
             # If the operator thread stalls, retain the newest bounded history.
             try:
@@ -337,14 +407,14 @@ def terminal(session, tty):
             raise
 
 
-def received_retune_adapter(runtime, client, tuner, unkeyed, *, completed=None):
+def received_retune_adapter(runtime, client, tuner, unkeyed, *, completed=None, quitting=lambda: False):
     """Bridge cooperative application work to the sole modem owner's boundary."""
     def retune_steps(target, generation):
         modem = runtime.modem
         if modem is None:
             raise HostError('Receiver retune has no modem owner')
         valid = lambda: (client.link_generation == generation
-                         and client.connected and not client.closed)
+                         and client.connected and not client.closed and not quitting())
         try:
             request = runtime.request_retune(
                 lambda: tuner(target), modem=modem, station=modem.station,
@@ -361,9 +431,7 @@ def received_retune_adapter(runtime, client, tuner, unkeyed, *, completed=None):
             if request.cancelled:
                 raise HostError('Receiver retune cancelled')
         finally:
-            request.cancel()
-            # cancel() waits for an executing owner transaction. A completed
-            # move remains real even if /stop arrives before the next app tick.
+            request.cancel(timeout=.1 if quitting() else -1)
             if request.done and not request.cancelled and request.error is None:
                 if completed is not None:
                     completed(target)
@@ -379,20 +447,22 @@ def close_reporter(reporter, say, emit):
         "Server receipt is unconfirmed.")
 
 
-def run(args, rig, admission):
-    import numpy as np
-    from hfmodem.contact.slots import SlotWatch
-    from hfmodem.core import config
-    from kestrel_connect import AudioVaraIO
-
-    offset = dial_offset(args)
-
+def run(args, rig, admission, bbs_service=None):
     with ExitStack() as held:
+        held.callback(rig.shutdown)
+        import numpy as np
+        from hfmodem.contact.slots import SlotWatch
+        from hfmodem.core import config, identification
+        idcall = identification.resolve(args.mycall, args.idcall).cw_call
+        from kestrel_connect import AudioVaraIO
         from hfmodem.contact.bbs import HostCatalog
         from hfmodem.contact.bbs_server import configured_directory
+
+        offset = dial_offset(args)
+        scale_w, clamp_w = config.power_limits()[:2]
         root = configured_directory('' if args.no_bbs else args.bbs_directory)
-        catalog = None
-        if root:
+        catalog = bbs_service.catalog if bbs_service is not None else None
+        if bbs_service is None and root:
             catalog = HostCatalog()
             held.callback(catalog.close)
             catalog.enable(root)
@@ -419,6 +489,10 @@ def run(args, rig, admission):
 
         def say(text):
             tty.write(text + '\n')
+            tty.flush()
+
+        def bbs_say(text):
+            tty.write_bbs(text)
             tty.flush()
 
         def emit(kind, **record):
@@ -453,7 +527,6 @@ def run(args, rig, admission):
         held.callback(slots.close)
         # Our own transmission comes back through the codec; the watch hears silence then.
         audio.taps.append(lambda frame: slots.put(np.zeros_like(frame) if rig.keyed else frame))
-        held.callback(rig.shutdown)
         host = held.enter_context(Host(audio))
         if offset:
             say(f'monitor-wide: the dial sits {abs(offset)} Hz {"below" if offset < 0 else "above"} '
@@ -492,31 +565,65 @@ def run(args, rig, admission):
             flow.received_retune_steps = received_retune_adapter(
                 host.runtime, client, flow.tuner,
                 lambda: not rig.keyed and rig.line_state() is False,
-                completed=flow.received_tuned)
+                completed=flow.received_tuned, quitting=lambda: session is not None and session._quitting)
             flow.dial = CALLING_HZ[args.band]
+            def report(line):
+                print(line, flush=True)
+                say(line.strip())
+
+            def identify(bandwidth, after_peer):
+                return host.identify_steps(idcall, bandwidth, after_peer, report)
+
             session = Session(client, flow, say=say, emit=emit, arm=lambda on: setattr(rig, 'armed', on),
                               line_state=rig.line_state, bandwidth=args.bw, reporter=reporter,
+                              identify=identify, idcall=idcall, ident_report=report,
+                              power=partial(rig.power_w, scale_w=scale_w), power_clamp_w=clamp_w,
                               caller=lambda: getattr(host.runtime.modem, 'attempt_caller', None),
                               mailbox=Mailbox(args.session.parent.parent / 'vmail'), slots=slots,
                               band_tuner=lambda hz: change_band(rig, hz + offset, args.bw, say),
-                              bbs_catalog=catalog)
-            if catalog is not None:
-                say(f'BBS hosting enabled: {root}; advertised in advanced beacons and opening reports')
+                              bbs_catalog=None if args.no_bbs else catalog,
+                              bbs_core=bbs_service.core if bbs_service is not None else None,
+                              bbs_say=bbs_say,
+                              bbs_reload=bbs_service.reload if bbs_service is not None else None)
+            session.say(session.parking.summary())
+            if catalog is not None and not args.no_bbs:
+                export = bbs_service.config.export_root if bbs_service is not None else root
+                say(f'BBS hosting enabled: {export}; advertised in advanced beacons and opening reports')
+            if bbs_service is not None:
+                say(f'Interactive BBS enabled: {bbs_service.config.title}; peer enters with BBS')
             say('PSKReporter ' + ('on: validated CQ/beacon decodes, five-minute batches; '
                                     '/pskreporter status or off' if reporter is not None else 'off'))
             say('commands: ' + ', '.join(Session.COMMANDS) + '; anything else is sent when linked')
             try:
                 session.monitor()
                 terminal(session, tty)
-            except Exception as error:
-                say(f'error: {error}')
+            except BaseException as error:
+                if isinstance(error, Exception):
+                    say(f'error: {error}')
+                session.identification_unsent()
                 raise
+            finally:
+                session.parking.store.close()
         return 0
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
     validate(args)
+    from hfmodem.bbs.config import configured_path
+    args.bbs_config = None if args.no_bbs_service else configured_path(args.bbs_config)
+    # Validate dependencies and acquire the BBS owner before touching the rig.
+    with ExitStack() as held:
+        service = None
+        if args.bbs_config and not args.no_bbs_service:
+            from hfmodem.bbs.service import open_service
+            from hfmodem.contact.bbs_server import configured_directory
+            legacy = configured_directory(args.bbs_directory)
+            service = held.enter_context(open_service(args.bbs_config, legacy_root=legacy))
+        return claimed_main(args, service)
+
+
+def claimed_main(args, bbs_service=None):
     from hfmodem.core.claim import inherited
     from hfmodem.core.ptt import arming_refusal
     from vara_rig_bridge import Rig, _install_unkey_handlers
@@ -532,7 +639,7 @@ def main(argv=None):
         if args.expect_model.lower() not in model.lower() or not dial.isdigit():
             raise HostError(f'Rig identification failed: {model!r}, dial {dial!r}')
         tune(rig, CALLING_HZ[args.band] + dial_offset(args), args.bw)
-        return run(args, rig, admission)
+        return run(args, rig, admission, bbs_service)
     finally:
         try:
             if rig is not None:
@@ -544,4 +651,5 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    from kestrel_connect import exit_status
+    raise SystemExit(exit_status(main))

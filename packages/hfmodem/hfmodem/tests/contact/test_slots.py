@@ -395,3 +395,103 @@ def test_the_watch_runs_apart_and_reports_its_table():
     finally:
         watch.close()
     assert not watch._process.is_alive()
+
+
+def test_a_connect_request_is_not_credited_to_the_caller_of_an_earlier_link(monkeypatch):
+    import types
+    m = S.SlotMonitor(CF, CF, mycall='W9SSJ')
+    ch = m._channels[0]
+    ev = m._evidence.setdefault(ch.slot, S._Evidence())
+    ch.idles = types.SimpleNamespace(feed=lambda y, calls: [])
+    ch.frames = types.SimpleNamespace(feed=lambda y: [], overflows=0, expired=0)
+    ch.ident = types.SimpleNamespace(push=lambda y: [])
+    queued = []
+    ch.requests = types.SimpleNamespace(push=lambda y: [(0, queued.pop(0))], calls=[])
+    setup = types.SimpleNamespace(is_connect=True, frame_bytes=b'', level=1, crc_ok=True)
+    monkeypatch.setattr(S.B, 'parse_payload', lambda body: None)
+    monkeypatch.setattr(S.UI, 'is_broadcast_frame', lambda frame: False)
+    monkeypatch.setattr(S.VF, 'caller_from_link_setup', lambda body: 'WR9R')
+    m.samples = 100 * S.FS
+    m._frame(ch, ev, setup)
+    assert ev.caller == 'WR9R'
+
+    def request(called):
+        queued.append(types.SimpleNamespace(kind='CR', gateway=called, quality='', info='BW500'))
+        lines = [r[2].text for r in m._read(ch, ev, np.zeros(480))]
+        return lines, m._judge(ch)
+
+    lines, seen = request('W9SSJ-1')
+    assert lines == ['connect request: ? calling W9SSJ-1']
+    assert (seen.caller, seen.called, seen.calls) == ('', 'W9SSJ-1', ('W9SSJ-1',))
+    assert seen.who() == '? ↔ W9SSJ-1'
+    lines, seen = request('WR9R')
+    assert lines == ['connect request: ? calling WR9R']
+    assert seen.who() == '? ↔ WR9R'
+
+
+def sibling_station_on_slot_1():
+    """The shackbook as the Mac heard it on 10-28: W9SSJ's broadcast to ALL, then a CQ
+    and a beacon, on slot 1, 750 Hz below the calling frequency."""
+    from hfmodem.contact.broadcast import Broadcast
+    from hfmodem.kestrel.tx.beacon import synth_beacon
+    from hfmodem.kestrel.tx.broadcast import synth_broadcast
+    from hfmodem.kestrel.tx.cq import synth_cq
+    x = receiver_noise(50)
+    for at, burst in ((5, synth_broadcast(Broadcast(1, 'W9SSJ', 'ALL', b'testing testing'))),
+                      (25, synth_cq('W9SSJ-2', 500)), (38, synth_beacon('20VEN63bbW9SSJ'))):
+        burst = S.shift_burst(burst, 750 - S.CENTRE_HZ)
+        x[at * S.FS:at * S.FS + len(burst)] += 0.3 * burst
+    return x
+
+
+def heard_off_channel(x, mycall):
+    m = S.SlotMonitor(CF, CF, mycall=mycall)
+    found = [r for i in range(0, len(x), 4800) for r in m.feed(x[i:i + 4800])]
+    return m, [(kind, slot, getattr(r, 'source', None) or getattr(r, 'call', None) or r.text)
+               for kind, slot, r in found if kind in ('broadcast', 'cq', 'beacon')]
+
+
+def test_a_station_sharing_our_base_call_is_heard_on_a_neighbour_slot():
+    m, heard = heard_off_channel(sibling_station_on_slot_1(), 'W9SSJ-1')
+    assert heard == [('broadcast', 1, 'W9SSJ'), ('cq', 1, 'W9SSJ-2'), ('beacon', 1, '20VEN63bbW9SSJ')]
+    assert 'W9SSJ' in m.calls and m._cqs[2][0] == 'W9SSJ'
+
+
+def test_a_broadcast_from_exactly_our_call_is_still_not_reported():
+    _, heard = heard_off_channel(sibling_station_on_slot_1(), 'W9SSJ-0')
+    assert ('broadcast', 1, 'W9SSJ') not in heard
+
+
+def test_a_broadcast_reads_through_a_capture_gap_between_its_header_and_body(monkeypatch):
+    import queue
+    from hfmodem.contact.broadcast import Broadcast
+    from hfmodem.kestrel.tx.broadcast import synth_broadcast
+    burst = synth_broadcast(Broadcast(1, 'K1ABC', 'ALL', b'testing testing'))
+    keyed = np.flatnonzero(burst)
+    quiet = int(np.argmax(np.diff(keyed)))
+    x, at = receiver_noise(25), 5 * S.FS
+    x[at:at + len(burst)] += 0.3 * S.shift_burst(burst, 750 - S.CENTRE_HZ)
+    cut, n = at + (keyed[quiet] + keyed[quiet + 1]) // 2, 2400
+    inbox, outbox = queue.Queue(), queue.Queue()
+    for a, b in ((0, cut), (cut + n, len(x))):
+        for i in range(a, b, 4800):
+            inbox.put(x[i:min(i + 4800, b)])
+        if a == 0:
+            inbox.put(('gap', n))
+    inbox.put(None)
+    monkeypatch.setattr(S.os, 'nice', lambda _: None)
+    S._watch(inbox, outbox, CF, CF, {'mycall': 'W9SSJ'})
+    records = [outbox.get_nowait()[1] for _ in range(outbox.qsize())]
+    assert [(r[1], r[2].source) for r in records if r[0] == 'broadcast'] == [(1, 'K1ABC')]
+    assert 'passive audio gap: 0.05 seconds skipped' in [r[2].text for r in records if r[0] == 'qso']
+
+
+@pytest.mark.parametrize('mycall, keyed', [('W9SSJ-1', 'W9SSJ'), ('W9SSJ', '')])
+def test_a_frame_trailer_can_name_a_station_sharing_our_base_call(mycall, keyed):
+    from hfmodem.kestrel.arq import phy
+    from hfmodem.kestrel.coding.crc import crc16_genibus
+    m = S.SlotMonitor(CF, CF, mycall=mycall)
+    m.heard('W9SSJ')
+    ev = S._Evidence()
+    m._keyed(ev, bytes([0x41, phy._VARA_TRAILER, crc16_genibus(b'W9SSJ') >> 8]))
+    assert ev.keyed == keyed

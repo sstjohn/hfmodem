@@ -63,10 +63,17 @@ def child_env(tmp_path):
     (site / "sitecustomize.py").write_text(FAKE_HOME)
     home = tmp_path / "home"
     home.mkdir()
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    ps = binaries / "ps"
+    ps.write_text(f"#!{sys.executable}\nimport sys\n"
+                  "print('Sat Oct 17 12:00:00 2026' if 'lstart=' in sys.argv else 'isolation-test')\n")
+    ps.chmod(0o700)
     touches = tmp_path / "real-touches"
     env = {key: value for key, value in os.environ.items()
            if key not in ("HFMODEM_STATION", "HFMODEM_RIG")}
     env.update(FAKE_HOME=str(home), REAL_TOUCHES=str(touches), HFMODEM_PYTHON=sys.executable,
+               PATH=str(binaries) + os.pathsep + os.environ["PATH"],
                CAT_PORT=str(tmp_path / "no-cat"), PTT_PORT=str(tmp_path / "no-ptt"),
                PYTHONPATH=os.pathsep.join([str(site), str(Path(hfmodem.__file__).parents[1])]))
     yield home, env
@@ -89,9 +96,10 @@ def test_a_child_is_refused_what_it_would_touch_there(child_env, tmp_path):
 
 def test_a_spawned_acquisition_claims_only_the_isolated_state(child_env):
     home, env = child_env
-    out = subprocess.run([sys.executable, "-c", HOLD], env=env, capture_output=True, text=True,
-                         timeout=60, check=True).stdout
-    seen = json.loads(out.splitlines()[-1])
+    result = subprocess.run([sys.executable, "-c", HOLD], env=env, capture_output=True, text=True,
+                            timeout=60)
+    assert result.returncode == 0, result.stderr
+    seen = json.loads(result.stdout.splitlines()[-1])
     isolated = Path(os.environ["HFMODEM_STATE_DIR"]).resolve()
     assert isolated in Path(seen["path"]).resolve().parents
     assert seen["held"].startswith(f"{seen['pid']} ")

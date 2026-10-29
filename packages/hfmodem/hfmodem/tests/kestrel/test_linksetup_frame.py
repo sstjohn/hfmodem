@@ -87,6 +87,16 @@ def test_probe_variants_round_trip(name, body):
     assert bytes(got.frame_bytes) == fr
 
 
+@pytest.mark.parametrize('bw', ['500', '2300', '2750'])
+@pytest.mark.parametrize('level', [1, 2, 3, 4])
+@pytest.mark.parametrize('caller', ['KA1ABCD', 'KA1ABCZ-1', 'KA1ABC9-15', 'W9SSJ-1'])
+def test_setup_preserves_seventh_character_and_ssid(caller, level, bw):
+    frame = link_setup_frame(caller, bw=bw, level=level)
+    assert caller_from_link_setup(frame) == caller
+    assert is_link_setup(frame)
+    assert crc16_genibus(frame[:-2]) == int.from_bytes(frame[-2:], 'big')
+
+
 @requires_bw2300_capture
 def test_linksetup_rides_the_wideband_rec3_burst():
     """§4.2A correction: the first wideband over carries the caller identity.

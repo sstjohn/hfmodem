@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +25,25 @@ def test_station_parser(flags, tmp_path):
 def test_station_stop_parser():
     args = cli.build_parser().parse_args(['station', 'stop', 'station.toml'])
     assert args.file == Path('stop') and args.target == Path('station.toml')
+
+
+def test_station_file_defaults_from_environment(tmp_path, monkeypatch):
+    path = tmp_path / 'env.toml'
+    monkeypatch.setenv('HFMODEM_STATION', str(path))
+    seen = []
+    def refuse(file):
+        seen.append(file)
+        raise OSError('refused')
+    monkeypatch.setattr(service, 'Service', refuse)
+    assert cli.main(['station']) == 2
+    assert seen == [path]
+
+
+def test_version_imports_no_numerics():
+    probe = "import sys; from hfmodem import cli; cli.main(['version']); print(sorted({'numpy', 'scipy'} & set(sys.modules)))"
+    env = {**os.environ, 'PYTHONPATH': os.pathsep.join(sys.path)}
+    out = subprocess.run([sys.executable, '-c', probe], env=env, capture_output=True, text=True, check=True).stdout
+    assert out.splitlines()[-1] == '[]'
 
 
 def test_station_stop_needs_no_control(tmp_path, monkeypatch):

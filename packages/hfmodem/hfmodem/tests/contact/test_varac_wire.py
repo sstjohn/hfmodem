@@ -270,7 +270,7 @@ def test_recorded_farewell_is_delivered_before_host_disconnect(index):
     host.data.respond = lambda data: host.lines('BUFFER 0')
     flow.farewell(MESSAGES[index]['content'].removesuffix('<DISC>'))
     assert host.data.sent == [wire(index)]
-    assert host.sent == ['CLEANTXBUFFER', 'DISCONNECT'] and not host.client.connected
+    assert host.sent == ['LISTEN OFF', 'DISCONNECT'] and not host.client.connected
     assert not tunes
 
 
@@ -402,8 +402,9 @@ def test_only_a_whole_vmail_message_is_a_vmail(text):
     assert v.VMail.parse(text) is None
 
 
-def test_a_vmail_without_a_subject_still_reads_but_is_not_sent():
+def test_a_subjectless_relay_envelope_remains_forwardable():
     assert v.VMail.parse('<SM><MSG:hi>') == v.VMail('', 'hi')
-    for vmail in (v.VMail('', 'hi'), v.VMail('a>b', 'hi'), v.VMail('two\r\nlines', 'hi'), v.VMail('s', 'a<b')):
+    assert v.VMail('', 'hi').wire() == '<SM><SBJ:><MSG:hi>'
+    for vmail in (v.VMail('a>b', 'hi'), v.VMail('two\r\nlines', 'hi'), v.VMail('s', 'a<b')):
         with pytest.raises(ValueError):
             vmail.wire()

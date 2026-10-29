@@ -120,6 +120,26 @@ def test_run_session_unidir_ok(bridge, tmp_path):
     assert bridge.a.wait_command("DISCONNECT", timeout=1.0) is not None
 
 
+def test_a_modem_refusing_one_probe_is_still_reached(bridge, tmp_path, monkeypatch):
+    import hfhost.supervisor as supervisor
+    real, refused = supervisor.probe, []
+
+    def probe(*args, **kwargs):
+        if not refused:
+            refused.append(True)
+            return False
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(supervisor, "probe", probe)
+    cfg = make_config(bridge)
+    th_r, out = start_responder(bridge, tmp_path)
+    drive_connect(bridge)
+    m = run_session(cfg, "a", "K7XYZ", "unidir", {"size": "4k", "payload": "prbs9"},
+                    results_root=tmp_path / "results")
+    th_r.join(15)
+    assert refused and m.outcome == "ok"
+
+
 def test_peer_identity_joins_the_two_sites_records(bridge, tmp_path):
     """Each end records the other's sid and call. Nothing else joins the two
     session.json files: the sites share no clock, so wall times cannot."""

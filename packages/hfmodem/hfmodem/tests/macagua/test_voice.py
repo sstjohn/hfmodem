@@ -17,14 +17,15 @@ from hfmodem.core.rig import KeyToken
 from hfmodem.macagua import script
 from hfmodem.macagua.chain import BLOCK, Segmenter, transmit
 from hfmodem.macagua.phonetics import callsigns
-from hfmodem.macagua.runtime import Session
-from hfmodem.macagua.terminal import Terminal
+from hfmodem.contact.runtime import Session
+from hfmodem.contact.terminal import Terminal
 
 
 def cfg():
+    rig = config.Rig(max_key_s=30)
     return SimpleNamespace(station=config.Station(mycall='W9SSJ', grid='EN63bb'),
-        rig=config.Rig(max_key_s=30), selected_rig='ftdx10', voice=config.Voice(),
-        models=config.Models())
+        rig=rig, selected_rig='ftdx10', voice=config.Voice(),
+        models=config.Models(), declared_power_w=rig.power_w)
 
 
 def test_callsign_cannot_come_from_language_model_alone():

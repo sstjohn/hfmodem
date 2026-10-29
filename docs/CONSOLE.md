@@ -194,6 +194,10 @@ before using `--execute`. Named level presets describe launch parameters;
 verify actual RF output and audio linearity on your own station. An accepted
 command or a local decode does not establish delivery to the far end.
 
+`--power WATTS` sets the radio's RF power at the start of a flight in place of
+the preset's, and every flight and chat session lowers a radio found above
+`[rig] power_clamp_w` to it; see [the station file](CONFIG.md#transmit-power).
+
 ## Station ownership
 
 ```sh
@@ -236,7 +240,7 @@ and `selcall monitor` commands never transmit.
 
 ### VARA chat quickstart
 
-Chat with VarAC peers using hfmodem's Kestrel modem, included in 0.3.0.
+Chat with VarAC peers using hfmodem's Kestrel modem, included in 0.4.0.
 Use Python 3.13 on macOS or Linux and an
 FTDX10 with USB audio, or an FT-891 with an external audio interface.
 
@@ -306,6 +310,7 @@ returns to monitoring when a contact ends. Bandwidths are 500, 2300 and 2750 Hz.
 | `/inquire heard` | Request the connected peer’s last-heard list |
 | `/auto on`, `/auto off` | Enable or disable automatic answers |
 | `/verbose on`, `/verbose off` | Show or hide transmit and receive diagnostics |
+| `/power [WATTS]` | Show or set RF power, held to the station clamp; set after the key drops if transmitting |
 | `/status`, `/help` | Show the current operation or commands |
 | `/bye [text]`, `/quit` | Close the contact or leave the session |
 | `/stop` | Cancel the current operation; abort a connected link and discard unconfirmed text |

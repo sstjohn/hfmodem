@@ -8,8 +8,8 @@ import pytest
 from hfmodem.contact.exchange import Contact
 from hfmodem.contact.frame import Over
 from hfmodem.contact.simulation import TestOptions as SimulationOptions, decision, says_goodbye
-from hfmodem.macagua.runtime import Session
-from hfmodem.macagua.terminal import Terminal
+from hfmodem.contact.runtime import Session
+from hfmodem.contact.terminal import Terminal
 from hfmodem.tests.macagua.test_voice import cfg
 
 
@@ -182,7 +182,7 @@ def test_tiny_model_close_is_rendered_as_template_and_recorded(tmp_path):
     class Speech:
         def request(self, operation, text, path):
             assert 'Seventy three' in text and 'Kilo Delta zero Delta Lima Kilo' in text
-            from hfmodem.macagua.runtime import write_wav
+            from hfmodem.contact.runtime import write_wav
             write_wav(path, np.sin(2 * np.pi * 1000 * np.arange(24000) / 24000), 24000)
             return {}
         def close(self): pass

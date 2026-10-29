@@ -2,7 +2,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Application and modem hosts
 
-Host support in 0.3.0:
+Host support in 0.4.0:
 
 | Mode | Host interfaces | Scope |
 |---|---|---|
@@ -16,8 +16,11 @@ hosts may use loopback. Check the startup report before attaching an application
 See [configuration](CONFIG.md) and [station operation](README-station.md).
 
 VARA defaults to TEXT; legacy `COMPRESSION ON` selects TEXT. Compression changes
-require an idle contact. PTC supports Normal calls and MYLevel 1 or 3; unsupported
-Robust/longpath and AES selections are refused. ARDOP2 is not provided.
+require an idle contact. PTC supports Normal calls and MYLevel 1, 2 or 3. MYLevel 2
+runs the station as a PACTOR-2-only modem: it never announces, grants or follows
+PACTOR-3 or PACTOR-4, and status byte 2 reports level 2 once the link is in
+PACTOR-2. Unsupported Robust/longpath and AES selections are refused. ARDOP2 is
+not provided.
 
 Windows adapters expose the VARA and ARDOP TCP launch contracts and PTC/Tracker
 serial streams. They require a supervised application and an authenticated

@@ -189,7 +189,7 @@ def eligible(peers, cfg, mode, band=None):
             continue
         lo, hi = keyed_hz(mode, str(peer.get('bw_hz', '')))
         try:
-            cfg.profile.check(Emission(peer['dial_hz'], lo, hi, power_w=cfg.rig.power_w), control=cfg.control)
+            cfg.profile.check(Emission(peer['dial_hz'], lo, hi, power_w=cfg.declared_power_w), control=cfg.control)
         except NotPermitted:
             continue
         result.append(peer)
@@ -314,7 +314,7 @@ def winlink(argv=None):
         from hfmodem.operator.bootstrap import console
         return console(words + ['--dry-run'])
     dependencies(args.install_system_deps)
-    print(f'The call will set DATA USB, the radio data-audio route, RTS PTT and {cfg.rig.power_w:g} W RF power.')
+    print(f'The call will set DATA USB, the radio data-audio route, RTS PTT and {cfg.declared_power_w:g} W RF power.')
     if not args.execute and ask('Start this mail call? (y/n)', 'y').lower() not in ('y', 'yes'):
         print('Cancelled; nothing transmitted.')
         return 0

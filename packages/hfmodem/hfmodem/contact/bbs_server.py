@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Opt-in VarAC BBS directory and single-file sender."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import gzip
 import hashlib
@@ -35,6 +36,9 @@ def configured_directory(override=None, *, station_path=None):
 class BBSServer:
     def __init__(self, session, catalog=None):
         self.session, self.catalog = session, catalog
+        self.application_lease = None
+        self._future = None
+        self._executor = None
         self.reset()
         self.advertise()
 
@@ -42,11 +46,14 @@ class BBSServer:
     def active(self):
         return self.phase is not None
 
-    def reset(self):
+    def reset(self, outcome='aborted'):
+        lease, self.application_lease = self.application_lease, None
         self.phase = None
         self.payload = None
         self.generation = self.catalog_generation = self.dial = self.deadline = None
         self.name = None
+        if lease and getattr(self.session, 'bbs', None):
+            self.session.bbs.transfer_done(lease, outcome)
 
     def advertise(self):
         s = self.session
@@ -62,14 +69,83 @@ class BBSServer:
                 and self.catalog is not None and self.catalog_generation == self.catalog.generation)
 
     def tick(self):
+        if self._future is not None and self._future.done():
+            future, self._future = self._future, None
+            if self.phase == 'preparing' and self.valid_link():
+                try:
+                    kind, result = future.result()
+                    if kind == 'directory':
+                        self._directory(result)
+                    else:
+                        lease = self.application_lease
+                        self.offer_snapshot(result, lease=lease)
+                except (ValueError, OSError):
+                    refusal = '<BLJ>' if self.name == '<BLR>' else '<BGJ>'
+                    self.reset('failed')
+                    self.session.client.send_text(refusal)
         if not self.active:
             return
         if not self.valid_link():
             self.reset()
         elif self.session.client.clock() >= self.deadline:
             self.session.say('BBS send timed out; receipt unconfirmed')
-            self.reset()
-            self.session.files.stop('BBS send timeout')
+            leased = bool(self.application_lease)
+            self.reset('failed')
+            if not leased:
+                self.session.files.stop('BBS send timeout')
+        elif self.phase == 'directory':
+            c = self.session.client
+            after = c._sent_after
+            if (not (c.data_writer and c.data_writer.pending) and after is not None
+                    and c.buffer_sequence > after and c.buffer == 0 and not c.ptt and not c.pending):
+                self.reset('complete')
+
+    def _bind(self, generation):
+        s, c = self.session, self.session.client
+        self.generation, self.dial = c.link_generation, s.flow.dial
+        self.catalog_generation = generation
+
+    def _directory(self, entries):
+        rows = []
+        for entry in entries:
+            parse_offer(f'<SF:{entry.name}.VarAC_gzip|0|{"0" * 32}>')
+            date = datetime.fromtimestamp(entry.mtime_ns / 1e9, timezone.utc).date()
+            rows.append(f'{entry.name}|{date}|{entry.size}')
+        message = '<BL:' + '\r\n'.join(rows) + '\r\n>'
+        if not rows or len(message.encode()) > 65536:
+            raise ExportError('Empty or oversized directory')
+        self.session.client.send_text(message)
+        if self.application_lease:
+            self.phase, self.deadline = 'directory', self.session.client.clock() + 60
+        else:
+            self.phase = None
+
+    def offer_snapshot(self, snapshot, lease=None):
+        """Server-side offer for both native BG and shared lobby GET.
+
+        The caller supplies an access-checked immutable catalog snapshot; this
+        never requests a file from the peer. SFOK remains the receipt boundary.
+        """
+        if self.catalog is None or snapshot.generation != self.catalog.generation:
+            raise ExportError('Catalog changed before file offer')
+        name = snapshot.entry.name
+        compressed = gzip.compress(snapshot.data, mtime=0)
+        offer = parse_offer(f'<SF:{name}.VarAC_gzip|{len(compressed)}|'
+                            f'{hashlib.md5(compressed).hexdigest().upper()}>')
+        validate_offer(offer)
+        self.application_lease = lease
+        self.payload = '<SFB>' + base64.b64encode(compressed).decode('ascii')
+        self.name = name
+        self._bind(snapshot.generation)
+        self.deadline, self.phase = self.session.client.clock() + 60, 'offer'
+        self.session.client.send_text(offer.raw)
+
+    def _prepare(self, text, peer):
+        if text == '<BLR>':
+            return 'directory', self.catalog.list_files(peer)
+        if not text.endswith('>'):
+            raise ExportError('Invalid file request')
+        return 'file', self.catalog.read_file(text[4:-1], peer)
 
     def message(self, text):
         s, c = self.session, self.session.client
@@ -83,8 +159,9 @@ class BBSServer:
                 self.reset()
                 return False
             if text in ('<SFFA>', '<SFAB>'):
-                self.reset()
-                s.files.stop('peer refused BBS file')
+                self.reset('refused')
+                if not getattr(s, 'bbs', None) or not s.bbs.active:
+                    s.files.stop('peer refused BBS file')
             elif text == '<SFRD>' and self.phase == 'offer':
                 self.phase = 'receipt'
                 self.deadline = c.clock() + DOWNLOAD_SECONDS
@@ -92,42 +169,37 @@ class BBSServer:
             elif text == '<SFOK>' and self.phase == 'receipt':
                 s.say(f'BBS file receipt confirmed by {s.peer}: {self.name}')
                 s.emit('bbs_served', peer=s.peer, filename=self.name)
-                self.reset()
+                self.reset('complete')
             return True
         from .varac import CALLING_HZ, State
         refusal = '<BLJ>' if text == '<BLR>' else '<BGJ>'
         if (self.catalog is None or self.active or s.files.active or s.steps is not None
-                or s._opening or s.email.waiting or s._vmail_sent
+                or s._opening or s.email.waiting or s.mail_ack.busy or s.parking.active
                 or s.flow.state is not State.CONNECTED or s.flow.dial in CALLING_HZ.values()):
             c.send_text(refusal)
             return True
+        entrance = getattr(s, 'bbs', None)
+        if self._future is not None:
+            c.send_text(refusal)
+            return True
+        lease = entrance.native_file_lease() if entrance else False
+        if lease is None:
+            c.send_text(refusal)
+            return True
+        self.application_lease = lease or None
         try:
-            if text == '<BLR>':
-                entries = self.catalog.list_files(s.peer)
-                rows = []
-                for entry in entries:
-                    parse_offer(f'<SF:{entry.name}.VarAC_gzip|0|{"0" * 32}>')
-                    date = datetime.fromtimestamp(entry.mtime_ns / 1e9, timezone.utc).date()
-                    rows.append(f'{entry.name}|{date}|{entry.size}')
-                message = '<BL:' + '\r\n'.join(rows) + '\r\n>'
-                if not rows or len(message.encode()) > 65536:
-                    raise ExportError('Empty or oversized directory')
-                c.send_text(message)
+            if entrance and entrance.core:
+                if self._executor is None:
+                    self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='bbs-export')
+                self._bind(self.catalog.generation)
+                self.name, self.phase, self.deadline = text, 'preparing', c.clock() + 60
+                self._future = self._executor.submit(self._prepare, text, s.peer)
             else:
-                if not text.endswith('>'):
-                    raise ExportError('Invalid file request')
-                name = text[4:-1]
-                snapshot = self.catalog.read_file(name, s.peer)
-                compressed = gzip.compress(snapshot.data, mtime=0)
-                offer = parse_offer(f'<SF:{name}.VarAC_gzip|{len(compressed)}|'
-                                    f'{hashlib.md5(compressed).hexdigest().upper()}>')
-                validate_offer(offer)
-                self.payload = '<SFB>' + base64.b64encode(compressed).decode('ascii')
-                self.name = name
-                self.generation, self.dial = c.link_generation, s.flow.dial
-                self.catalog_generation = snapshot.generation
-                self.deadline, self.phase = c.clock() + 60, 'offer'
-                c.send_text(offer.raw)
+                kind, result = self._prepare(text, s.peer)
+                if kind == 'directory':
+                    self._directory(result)
+                else:
+                    self.offer_snapshot(result)
         except (ValueError, OSError) as error:
             self.reset()
             s.say(f'BBS request refused: {error}')

@@ -83,13 +83,15 @@ def acquire_header(audio, *, fs: int = 48000, nominal_sample: int,
 
 
 def decode_packet(audio, *, fs: int = 48000, start_sample: int = 0,
-                  frequency_offset: float = 0.0) -> Reception | None:
+                  frequency_offset: float = 0.0, sweep_verified: bool = False) -> Reception | None:
     """Return only a uniquely decoded field; short/noisy/mismatched input is None.
 
     `start_sample` denotes the first sample of the shaped waveform, not its
     pulse peak. Frequency offset is in Hz relative to 550/1530 Hz. Input must
     contain the complete 3307.5 ms packet. Header correlation is an acquisition
     check, not a replacement for CRC or proof of a connected session.
+    ``sweep_verified`` is only for onsets independently admitted by
+    ``acquire_sweep``; it relaxes the damaged marker check, never the CRC.
     """
     raw = np.asarray(audio)
     if (raw.ndim != 1 or np.iscomplexobj(raw)
@@ -141,7 +143,7 @@ def decode_packet(audio, *, fs: int = 48000, start_sample: int = 0,
             correlations.append(float(abs(np.sum(d[:8] * np.exp(-1j * reference)))
                                       / denom) if denom else 0.)
         score = min(correlations)
-        if score < .85:
+        if score < .85 and not sweep_verified:
             continue
         physical = [(d[8:] * np.exp(-3j * np.pi / 4)).real for d in differentials]
         for rank0_upper in (True, False):
@@ -152,6 +154,62 @@ def decode_packet(audio, *, fs: int = 48000, start_sample: int = 0,
             frame = p4frame.decode_field(wire, data_bytes=22)
             if frame is not None:
                 accepted.append(Reception(frame, marker, rank0_upper, score))
+    if sweep_verified:
+        # A damaged marker cannot select between 8/9. They share the payload
+        # geometry: require one unique CRC-valid field and lane order instead.
+        accepted = list({(r.frame.status.byte, r.frame.data, r.rank0_upper): r
+                         for r in sorted(accepted, key=lambda r: r.header_score)}.values())
     if len(accepted) != 1:
         return None
     return accepted[0]
+
+
+def acquire_sweep(audio, *, fs: int = 48000, nominal_sample: int,
+                  frequency_offset: float = 0.) -> Header | None:
+    """Protect a predicted chirp using both swept DBPSK lanes, not its marker.
+
+    Inspect only 810 ms at an already predicted packet onset. Squaring the
+    differential symbols removes DBPSK data signs; both dechirped lanes must
+    retain phase coherence over 27 symbols. This is receive-span evidence,
+    never permission to deliver bytes. The returned marker -1 requires CRC
+    recovery with ``sweep_verified`` and does not establish a header word.
+    """
+    raw = np.asarray(audio)
+    if raw.ndim != 1 or np.iscomplexobj(raw) or not np.all(np.isfinite(raw)):
+        raise ValueError('audio must be a finite real vector')
+    if not isinstance(fs, int) or fs < 8000:
+        raise ValueError('sample rate must be an integer of at least 8000 Hz')
+    if not isinstance(nominal_sample, int) or nominal_sample < 0:
+        raise ValueError('nominal_sample must be a nonnegative integer')
+    if not np.isfinite(frequency_offset):
+        raise ValueError('finite carrier required')
+    end = nominal_sample + round(.810 * fs)
+    if len(raw) < end:
+        return None
+    begin = max(0, nominal_sample-round(.05*fs))
+    x = np.asarray(raw[begin:end], dtype=float)
+    if not np.any(x):
+        return None
+    common = gcd(fs, 8000)
+    if fs != 8000:
+        x = resample_poly(x, 8000//common, fs//common)
+    nominal_s = (nominal_sample-begin)/fs
+    t = np.arange(len(x))/8000-nominal_s
+    sweep_origin = (p4chirp.CHIRP_START_T + (len(p4chirp.QUASI_RRC)-1)/16-.5)*p4chirp.SYMBOL_S
+    phase = .5*p4chirp.CHIRP_HZ_PER_S*np.maximum(t-sweep_origin, 0)**2
+    shifts = np.arange(-32, 33)/8  # One symbol of timing, at 1/8 sample steps.
+    scores = []
+    for tone, delay in ((1530., 0), (550., 4)):
+        baseband = resample_poly(x*np.exp(-2j*np.pi*((tone+frequency_offset)*t+phase)), 1, 15)
+        matched = np.convolve(baseband, p4chirp.QUASI_RRC)
+        locations = nominal_s*(1600/3)+31+delay+8*np.arange(18, 46)
+        indices = locations[None, :]+shifts[:, None]
+        axis = np.arange(len(matched))
+        symbols = np.interp(indices, axis, matched.real)+1j*np.interp(indices, axis, matched.imag)
+        steps = symbols[:, 1:]*symbols[:, :-1].conjugate()
+        scores.append(abs((steps**2).sum(axis=1))/np.maximum((abs(steps)**2).sum(axis=1), 1e-30))
+    score = np.minimum(*scores)
+    best = int(score.argmax())
+    if score[best] < .70:
+        return None
+    return Header(nominal_sample+round(shifts[best]/(1600/3)*fs), -1, float(score[best]))

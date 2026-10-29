@@ -328,6 +328,7 @@ class P4Turn:
         self._train_heads = {}
         self._payload_ladder = self.ladder
         self._unsupported_copies = []
+        self._unsupported_control = None
         self._opening_source = True
         self._opening_prefix = None
         self._opening_negotiated = False
@@ -1446,9 +1447,15 @@ class P4Turn:
             if obs.frame is not None or (obs.kind == Kind.SHORT
                     and obs.value in self.peer_ack and obs.value != 53):
                 self._unsupported_copies.clear()
-            elif (obs.kind == Kind.SHORT and obs.value == 53
+                self._unsupported_control = None
+            elif (obs.kind == Kind.SHORT
+                  and (obs.value == 53 or obs.value not in self.peer_ack)
+                  and obs.value is not None and not obs.weak and not obs.unexpected
                   and not any(abs(obs.stream_sample-at) < self.fs//10
                               for at in self._unsupported_copies)):
+                if self._unsupported_control != obs.value:
+                    self._unsupported_copies.clear()
+                    self._unsupported_control = obs.value
                 self._unsupported_copies.append(obs.stream_sample)
                 self.link_events.append(dict(event='peer-control-no-progress',
                                              at=obs.stream_sample, value=obs.value,
@@ -2317,10 +2324,10 @@ class P4Turn:
                                      kind=pending['body'].kind))
 
     def _long_owns_answer(self, due):
-        """An undecided LONG owns its receive span, ending at its own answer."""
+        """An undecided long packet owns its receive span until its answer."""
         return any(sample not in self._decided
                    and (incoming := pending.get('body')) is not None
-                   and incoming.kind == Kind.LONG
+                   and incoming.kind in (Kind.LONG, Kind.CHIRP)
                    and sample <= due < sample + round(self.t[Kind.LONG] * self.fs)
                    for sample, pending in self.pending.items())
 

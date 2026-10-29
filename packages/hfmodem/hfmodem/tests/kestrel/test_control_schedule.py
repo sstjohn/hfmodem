@@ -11,7 +11,7 @@ from hfmodem.kestrel.rx.bw500_features import FeatureTrack
 @pytest.mark.parametrize('offset', [0., -.49, .23, .31])
 def test_spectra_are_exact_across_fft_batch_partitions(monkeypatch, offset):
     windows = np.random.default_rng(94).normal(0, .01, (257, 256))
-    attributes = ('bins', 'clear', 'residual', 'power', 'denominator', 'live')
+    attributes = ('bins', 'clear', 'residual', 'power', 'pair_floor', 'denominator', 'live')
     expected = ControlSchedule(offset=offset)
     expected.live[:] = False
     expected._spectra(windows, np.arange(len(windows)))
@@ -74,6 +74,8 @@ def test_rows_match_independent_scalar_spectrum_and_raw_power(offset, layout):
         spectrum = abs(np.fft.fft(low[start // 8 + 8:start // 8 + 264] * win)) * 8
         expected_power = spectrum[29:99] ** 2
         np.testing.assert_allclose(schedule.power[slot], expected_power, atol=1e-11, rtol=2e-12)
+        floor = np.partition(schedule.power[slot], 67)[:67].mean() + 1e-30
+        assert schedule.pair_floor[slot] == floor
         np.testing.assert_allclose(schedule.denominator[slot], expected_power.sum(), atol=1e-11)
         mag = spectrum[29:99].copy()
         peaks = []

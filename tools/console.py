@@ -90,6 +90,13 @@ from consolelib import (arm, campaign, claim, fingerprints, logbook, modes, mult
 INTERRUPTED = 130
 
 
+def watts(text):
+    value = float(text)
+    if not 0 < value <= 100:
+        raise argparse.ArgumentTypeError(f'{text} W is not in (0, 100]')
+    return value
+
+
 def fly_arguments(parser, mode, own, flight):
     """Everything that shapes one arm: the substrate's flags, then the mode's own."""
     flight.add_argument('--level', default='current', choices=tuple(mode.levels))
@@ -104,6 +111,9 @@ def fly_arguments(parser, mode, own, flight):
     flight.add_argument('--dry-run', action='store_true', help='print the command and stop')
     flight.add_argument('--prepare-radio', action='store_true',
                         help='apply and verify supported Yaesu data-audio settings and configured RF power before calling')
+    flight.add_argument('--power', type=watts, metavar='W',
+                        help="RF power for this arm, set at its start in place of the preset's; "
+                             'held to [rig] power_clamp_w')
     flight.add_argument('--cwid-optional', action='store_true',
                         help='skip the closing CW ID only when digital and CW callsigns are equal')
     if mode.name in ('pactor', 'vara', 'ardop'):

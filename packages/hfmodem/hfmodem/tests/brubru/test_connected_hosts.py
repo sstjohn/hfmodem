@@ -202,6 +202,15 @@ def test_detach_cancels_pending_physical_request_and_rejects_old_token():
         runtime.stop()
 
 
+def test_a_command_running_past_the_call_timeout_reports_its_result():
+    runtime = PacketRuntime(Link(), mycall='W9SSJ')
+    runtime.start()
+    try:
+        assert runtime._call(lambda: time.sleep(2.2) or 'acted') == 'acted'
+    finally:
+        runtime.stop()
+
+
 def test_agw_real_tcp_enqueue_ack_and_clean_disconnect():
     link = Link()
     runtime = PacketRuntime(link, mycall='W9SSJ')

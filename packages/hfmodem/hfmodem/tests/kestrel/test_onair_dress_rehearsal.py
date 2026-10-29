@@ -1137,6 +1137,8 @@ def test_an_attempt_that_overruns_is_terminated_and_the_transmitter_dropped(
     is about the escalation, not about the clock.
     """
     monkeypatch.setattr(S, "_CHILD_GRACE_S", 1.0)
+    from hfmodem.core import claim
+    monkeypatch.setattr(claim, "audio_nodes", lambda *a, **k: ())
     monkeypatch.setenv("HFMODEM_COEXIST_HARNESS", "1")
     monkeypatch.setenv("HFMODEM_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("RIG_CLAIMED", raising=False)

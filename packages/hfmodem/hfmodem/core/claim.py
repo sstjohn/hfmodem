@@ -100,13 +100,51 @@ def check_inode(descriptor):
     return _check_inode(_fd(descriptor), claim_path())
 
 
-def process_started(pid):
-    result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="],
-                            capture_output=True, text=True, timeout=5)
-    value = "_".join(result.stdout.split())
-    if result.returncode or not value:
+def _linux_process_started(pid, proc=Path("/proc")):
+    try:
+        text = (proc / str(pid) / "stat").read_text(errors="surrogateescape")
+        opening, closing = text.find("("), text.rfind(")")
+        fields = text[closing + 1:].split()
+        if (opening < 1 or closing < opening or text[:opening].strip() != str(pid)
+                or len(fields) <= 19 or not re.fullmatch(r"[0-9]+", fields[19])):
+            raise ValueError
+        boot = (proc / "sys/kernel/random/boot_id").read_text().strip()
+        if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", boot):
+            raise ValueError
+        return f"linux:{boot}:{fields[19]}"
+    except (OSError, ValueError) as exc:
+        raise ClaimError(f"cannot identify pid {pid}: {exc}") from exc
+
+
+def ps_started(pid, lstart=None):
+    """`ps` start time: what process inventories record and compare among themselves.
+    On Linux it moves with clock slew, so a claim holder uses process_started instead."""
+    if lstart is None:
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode:
+            raise ClaimError(f"cannot identify pid {pid}")
+        lstart = result.stdout
+    value = "_".join(lstart.split())
+    if not value:
         raise ClaimError(f"cannot identify pid {pid}")
     return value
+
+
+def process_started(pid):
+    if sys.platform.startswith("linux"):
+        return _linux_process_started(pid)
+    return ps_started(pid)
+
+
+def process_matches(pid, started):
+    current = process_started(pid)
+    if started == current:
+        return True
+    # Existing Linux holders can still carry the pre-upgrade ps timestamp.
+    if current.startswith("linux:") and not started.startswith("linux:"):
+        return started == ps_started(pid)
+    return False
 
 
 def _command(pid):
@@ -673,7 +711,7 @@ def _release(descriptor, *, pid=None, cleanup=False):
             or descriptor.offset() != published.nonce):
         raise ClaimError("release requires the acquired description")
     pid = os.getpid() if pid is None else pid
-    if published.pid != pid or published.started != process_started(pid):
+    if published.pid != pid or not process_matches(pid, published.started):
         raise ClaimError("only the acquirer may release the " + ("mutex" if cleanup else "claim"))
     coexist.checkpoint("before_release")
     os.ftruncate(descriptor.fd, 0)

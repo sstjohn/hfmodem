@@ -44,30 +44,32 @@ class EmailClient:
         self.phase = None
         self.sent_generation = None
 
-    def _guard(self, generation=None):
-        from .varac import CALLING_HZ, HostError, State, TextParser
+    def _guard(self, generation=None, *, owned=False):
+        from .varac import CALLING_HZ, HostError, State, decode_application
         s, c = self.session, self.session.client
         if c.closed or not c.connected or s._closing or s.flow.state is not State.CONNECTED:
             raise HostError('email needs an established link')
         if generation is not None and c.link_generation != generation:
             raise HostError('email link changed; no retry sent')
+        if not owned and c._messages.pending:
+            raise HostError('VMail waits for the incomplete incoming application frame')
+        if not owned and (s.mail_ack.busy or s.parking.active):
+            raise HostError('A VMail acknowledgement owns this link; resolve it or reconnect')
         if s.flow.dial in CALLING_HZ.values():
-            raise HostError('email requires QSY off the calling frequency first')
+            raise HostError('email requires QSY off the calling frequency first; ' + s.qsy_hint())
         ready = any(part.raw in ('<E>', '<EA>') or
                     (re.fullmatch(r'<S:[VEAB]+>', part.raw) and 'E' in part.raw[3:-1])
-                    for seq, text in c.messages if seq > c.link_message_start and not text.startswith('<SM>')
-                    for part in TextParser().feed(text, final=True) if part.tag)
+                    for seq, text in c.messages if seq > c.link_message_start
+                    for part in decode_application(text).parts if part.tag)
         if not ready:
             raise HostError('this link has not advertised email gateway service (<E> or <S:...E...>)')
 
     def command(self, words):
         s = self.session
         if words[:1] == ['send'] and len(words) >= 4:
-            self._guard()
             if self.sent_generation == s.client.link_generation:
                 raise ValueError('one email per link; reconnect before another send to avoid ambiguous late confirmations')
-            if s.steps is not None:
-                raise ValueError('wait for the current exchange before composing email')
+            self._guard()
             email = Email(words[1], words[2], ' '.join(words[3:]))
             email.wire()
             self.phase = None
@@ -97,14 +99,16 @@ class EmailClient:
         self.session._run(self.send_steps(email, generation))
 
     def send_steps(self, email, generation, timeout=120):
-        from .varac import HostError, TextParser
+        from .varac import HostError
         s, c = self.session, self.session.client
         self._guard(generation)
-        after, end = c.message_sequence, c.clock() + timeout
+        end = c.clock() + timeout
+        s.mail_ack.reserve('email', email, self.confirmation)
         self.waiting = True
         self.sent_generation = generation
         self.phase = 'queued; gateway outcome unknown'
-        accepted = delivered = False
+        delivered = False
+        self.results = set()
         try:
             c.send_vmail(email)
             s.emit('email', event='queued', peer=s.peer, recipient=email.recipient,
@@ -112,24 +116,14 @@ class EmailClient:
             s.say('Email queued; awaiting modem delivery and gateway confirmation')
             sent_after = c._sent_after
             while True:
-                self._guard(generation)
-                tags = {part.raw for seq, text in c.messages if seq > after and not text.startswith('<SM>')
-                        for part in TextParser().feed(text, final=True) if part.tag}
-                if tags & {'<EJ>', '<SMF>', '<SMFP>'}:
+                self._guard(generation, owned=True)
+                if self.results & {'EJ', 'SMF', 'SMFP'}:
                     raise HostError('gateway rejected the email/VMail; no automatic retry')
-                if '<SMR>' in tags and not accepted:
-                    accepted = True
-                    self.phase = 'gateway accepted VMail; awaiting email-send confirmation'
-                    s.say('Gateway accepted the VMail; email send is not yet confirmed')
-                    s.emit('email', event='vmail_accepted', peer=s.peer)
                 if not delivered and 'BUFFER 0' in c.since(sent_after) and c.buffer == 0:
                     delivered = True
                     s.say('Modem acknowledged email payload; this does not confirm email delivery')
                     s.emit('email', event='modem_acknowledged', peer=s.peer)
-                if '<ER>' in tags:
-                    self.phase = 'gateway reported email sent; recipient inbox delivery not verified'
-                    s.say(self.phase)
-                    s.emit('email', event='gateway_reported_sent', peer=s.peer, recipient=email.recipient)
+                if 'ER' in self.results:
                     return
                 if c.clock() >= end:
                     raise TimeoutError('email confirmation timed out; outcome unknown, do not blindly resend')
@@ -145,3 +139,26 @@ class EmailClient:
             raise
         finally:
             self.waiting = False
+            if s.mail_ack.kind == 'email' and s.mail_ack.generation == generation:
+                s.mail_ack.interrupt('email wait ended; generation remains reserved')
+
+    def confirmation(self, tag, reason):
+        s = self.session
+        if tag is None:
+            return
+        if tag in self.results:
+            return
+        self.results.add(tag)
+        if tag == 'SMR':
+            if 'ER' not in self.results:
+                self.phase = 'gateway accepted VMail; awaiting email-send confirmation'
+            s.say('Gateway accepted the VMail; email send is not yet confirmed')
+            s.emit('email', event='vmail_accepted', peer=s.peer)
+        elif tag == 'ER':
+            self.phase = 'gateway reported email sent; recipient inbox delivery not verified'
+            s.say(self.phase)
+            s.emit('email', event='gateway_reported_sent', peer=s.peer,
+                   recipient=s.mail_ack.attempt.recipient)
+        else:
+            self.phase = 'gateway rejected the email/VMail; no automatic retry'
+            s.say(self.phase)

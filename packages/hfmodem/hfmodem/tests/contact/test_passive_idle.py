@@ -7,6 +7,7 @@ import hashlib
 import json
 import wave
 from pathlib import Path
+from hfmodem.contact import passive as P
 from hfmodem.contact.passive import IdleReplies
 from hfmodem.contact import slots as S
 from hfmodem.kestrel.vara import vara_frames as VF, vara_mfsk as MK
@@ -22,6 +23,8 @@ def test_recorded_k9aho_idle_is_on_old_cf_after_local_move(center, expected):
         assert (w.getnchannels(), w.getsampwidth(), w.getframerate()) == (1,2,S.FS)
         x = np.frombuffer(w.readframes(w.getnframes()),dtype='<i2').astype(float)/32768
     reader, mixer, found = IdleReplies(), S.Mixer(center), []
+    # The cut ends 0.7 s after the reply; the next search is up to a second on.
+    x = np.r_[x, np.zeros(S.FS)]
     for at in range(0,len(x),4800):
         found += reader.feed(mixer(x[at:at+4800]), ['W9SSJ'])
     assert found == expected
@@ -55,7 +58,7 @@ def test_complete_idle_is_reported_once_and_repeats_are_not_hidden(block):
     for at in range(0, len(x), block):
         found += reader.feed(x[at:at+block], ['W9SSJ'])
     assert found == ['W9SSJ', 'W9SSJ']
-    assert len(reader.raw) <= 2*S.FS
+    assert len(reader.raw) <= P.IDLE_WINDOW
 
 
 @pytest.mark.parametrize('negative', ['unknown-key', 'truncated', 'noise', 'other-control'])
@@ -93,3 +96,25 @@ def test_cf_idle_after_retune_is_a_passive_control_not_chat_or_sender_identity()
     assert controls[0].text == 'idle reply addressed to W9SSJ'
     activity = next(a for a in m.table() if a.slot is None)
     assert activity.state == 'busy' and not activity.calls
+
+
+@pytest.mark.parametrize('lead', range(0, S.FS + 1, S.FS // 8))
+@pytest.mark.parametrize('block', [4800, S.BLOCK])
+def test_an_idle_is_caught_wherever_it_falls_between_scans(lead, block):
+    noise = np.random.default_rng(lead).normal(0, .02, 3 * S.FS)
+    x = np.r_[noise[:S.FS + lead], idle(), noise[S.FS + lead:]]
+    reader, found = IdleReplies(), []
+    for at in range(0, len(x), block):
+        found += reader.feed(x[at:at + block], ['W9SSJ', 'K9AHO'])
+    assert found == ['W9SSJ']
+
+
+def test_the_idle_search_runs_about_once_a_second_of_audio(monkeypatch):
+    from hfmodem.kestrel.vara import vara_arq as VA
+    scans = []
+    track = VA._top3_track
+    monkeypatch.setattr(VA, '_top3_track', lambda *a, **k: scans.append(1) or track(*a, **k))
+    reader, x = IdleReplies(), np.random.default_rng(3).normal(0, .02, 20 * S.FS)
+    for at in range(0, len(x), 4800):
+        reader.feed(x[at:at + 4800], ['W9SSJ'])
+    assert len(scans) <= 20

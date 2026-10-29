@@ -44,7 +44,7 @@ def test_stateful_fade_continues_current_form_without_blind_keys(recorded, capsy
     seam.raster = grid = irs_grid(anchor=0)
     a.cfg.speed_up, a.cfg.repeat_gear = 'hold', 0
     # The prior design observer accidentally used the default long policy.
-    # Preserve its exact outcome separately; it is not actual-arm provenance.
+    # Exercise that policy separately; it is not actual-arm provenance.
     a.cfg.long_cycle = p['long_cycle_enabled'] if original_config else True
     rx.p3_receive_offset_hz, rx._p3_offset_fixed = p['cfo'], True
     rx.sync.packet_level = p['level']
@@ -112,7 +112,13 @@ def test_stateful_fade_continues_current_form_without_blind_keys(recorded, capsy
             assert rows[61]['row'] == 4253554
             assert all(rows[h]['quiet'] for h in (67, 68))
         else:
-            assert all(rows[h]['quiet'] for h in range(61, 69))
+            # The bounded SL1 CRC now proves the current packet even when
+            # the historical long-policy reader did not deliver it. Silence
+            # still closes admission after the following six absent windows.
+            assert rows[61]['source'] == 'tracked SL1 CRC'
+            assert rows[61]['crc_ticks'] == 0 and not rows[61]['quiet']
+            assert not rows[61]['current_crc']
+            assert all(rows[h]['quiet'] for h in (67, 68))
         assert rows[68]['source'] == 'unsupported'
         assert not rows[69]['quiet'] and rows[69]['current_crc']
     else:

@@ -239,7 +239,7 @@ def cleanup_tree(pid, *, group=False):
         return False
     ancestry = parents()
     for row in rows:
-        if hardware.process_started(row.pid) != row.started:
+        if not hardware.process_matches(row.pid, row.started):
             continue
         if group:
             try:

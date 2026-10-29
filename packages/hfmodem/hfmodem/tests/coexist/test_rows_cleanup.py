@@ -107,8 +107,6 @@ def _binary(name):
                 if metadata.exists():
                     fake = json.loads(metadata.read_text())
                     fields[8] = fake.get('command', fields[8])
-                    if fake.get('started'):
-                        fields[3:8] = fake['started'].split('_')
                 print(' '.join(fields))
             return 0
         return subprocess.run(['/bin/ps', *args]).returncode
@@ -1260,14 +1258,16 @@ coexist.checkpoint('holding')
 claim.release(held)
 ''')
         barrier = run.h.reached('holding', quiescent=True)
-        published = (run.root / 'rig.claim').read_text().split()
+        original = (run.root / 'rig.claim').read_text()
+        published = original.split()
         owner, nonce = int(published[0]), int(published[4])
         assert_claim_possession(run.snapshot('identity'), pid=owner,
                                 claim_path=run.root / 'rig.claim', nonce=nonce)
         env = dict(run.env)
         if case == 'reused_pid':
-            (run.root / f'metadata-{owner}.json').write_text(
-                json.dumps(dict(started='Thu_Jan_1_00:00:00_1970')))
+            published[1] = (published[1].rsplit(':', 1)[0] + ':0'
+                            if published[1].startswith('linux:') else 'Thu_Jan_1_00:00:00_1970')
+            (run.root / 'rig.claim').write_text(' '.join(published) + '\n')
         elif case == 'metadata_unreadable':
             env['CLEANUP_DISCOVERY_FAULT'] = 'discovery'
         else:
@@ -1277,7 +1277,7 @@ claim.release(held)
         assert ('publisher pid reused' in output if case == 'reused_pid' else
                 'holds the claim' in output if case == 'helper_pid' else 'NOT CONFIRMED' in output)
         assert owner in run.snapshot('not_signalled').participants
-        (run.root / f'metadata-{owner}.json').unlink(missing_ok=True)
+        (run.root / 'rig.claim').write_text(original)
         run.h.release('holding')
         run.finish(actor)
         assert 'CLEANUP COMPLETE' in run.finish(run.shell())

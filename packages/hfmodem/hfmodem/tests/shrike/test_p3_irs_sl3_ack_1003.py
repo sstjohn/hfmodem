@@ -583,6 +583,8 @@ def test_clean_recorded_receives_unchanged(arm):
     assert digest == PINS['clean_fingerprints'][arm]
 
 
+@pytest.mark.xfail(strict=True, reason='expects the CRC-qualified P3 transmit carrier lock, '
+                   'held back on p3-regression-1028 (working/P3-CARRIER-LOCK-REVIEW-1028.md)')
 @pytest.mark.parametrize('seq,copies', [(0, 30), (1, 35)])
 def test_correct_ack_trains_deliver_once(seq, copies):
     rows = PINS['trains'][str(seq)]
@@ -614,19 +616,21 @@ def test_correct_ack_trains_deliver_once(seq, copies):
         assert control.cs == (arq.CS_REQUEST if seq & 1 else arq.CS_ACK)
     assert len(s.host.peer.sent) == copies and len(deliveries) == 1
     assert len(s.packets) == copies
-    assert s.rx.p3_transmit_offset_hz == -13.
+    # CRC-known fields resolve the acquisition phase alias for transmission.
+    assert s.rx.p3_transmit_offset_hz == pytest.approx(0., abs=1.)
 
 
 @pytest.mark.parametrize('p', PINS['live'], ids=lambda p: str(p['hold']))
-def test_live_sl1_repeats_pay_both_pending_sl2_hypotheses(monkeypatch, p):
+def test_live_sl1_repeats_keep_ack_budget_before_pending_sl2(monkeypatch, p):
     raw = stream('1003-0045')[p['origin']:p['end']]
     assert hashlib.sha256(raw.tobytes()).hexdigest() == p['pcm_sha256']
     s = receiver(p['row'], level=1, hz=-12.9, requested=False)
     s.rx.note_p3_speedup_emitted(1, 2)
     _, trace = budget(s, monkeypatch, 25.)
     onair._scan_frame(s.rx, raw.astype(float) / 32768, p['origin'], tracked_only=True)
-    assert trace == ['sl2_packet_at', 'sl2_packet_at', 'sl1_packet_at']
+    assert trace == ['sl1_packet_at']
     assert s.packets[0].packet[0] == 1
+    assert s.rx.sl2_prekey_expected()
     assert not s.rx.sl3_prekey_expected()
 
 

@@ -72,7 +72,7 @@ def test_list_guard_sends_nothing(state):
     before = desk.texts[:]
     desk.session.command('/bbs list')
     assert desk.texts == before
-    assert desk.said[-1].startswith('error:')
+    assert desk.said[-1].startswith('BBS list queued' if state == 'cf' else 'error:')
 
 
 def test_stop_cancels_wait_but_does_not_claim_request_unsent():
@@ -122,6 +122,7 @@ def test_get_requires_a_current_directory():
 
 def test_explicit_tag_uses_the_same_calling_frequency_guard():
     desk = linked()
+    desk.session.intent = 'call'
     desk.flow.dial = desk.session.calling_hz
     desk.session.command('/tag BLR')
     assert desk.texts == []
@@ -137,13 +138,15 @@ def test_directory_row_limit_and_tag_argument_validation():
     assert 'takes no value' in desk.said[-1]
 
 
+@pytest.mark.parametrize('intent, said', [('call', 'QSY off'), (None, 'BBS list queued')])
 @pytest.mark.parametrize('frequency', v.CALLING_HZ.values())
-def test_list_rejects_every_configured_calling_frequency(frequency):
+def test_list_waits_off_every_configured_calling_frequency(frequency, intent, said):
     desk = linked()
+    desk.session.intent = intent
     desk.flow.dial = frequency
     desk.session.command('/bbs list')
     assert desk.texts == []
-    assert 'QSY off' in desk.said[-1]
+    assert said in desk.said[-1]
 
 
 @pytest.mark.parametrize('ending', ['disconnect', 'eof'])
@@ -168,3 +171,65 @@ def test_incomplete_list_is_retained_but_never_rendered(ending):
     assert not desk.kinds('bbs_directory')
     assert desk.kinds('bbs_incomplete')[-1]['text'] == partial.decode()
     assert not any('files (sizes in bytes)' in line for line in desk.said)
+
+
+def test_mail_transaction_blocks_bbs_client_directory_and_file_offer():
+    from hfmodem.tests.contact.test_varac_cf_qsy import advance_mail, parked
+    desk = linked()
+    parked(desk, 'OH8XAT')
+    advance_mail(desk)
+    assert desk.session.mail_ack.busy
+    before = list(desk.texts)
+    desk.session.command('/bbs list')
+    desk.session.command('/bbs get 1')
+    assert desk.texts == before
+    assert not desk.session._bbs_waiting and not desk.session.files.active
+
+
+@pytest.mark.parametrize('parking', [False, True])
+def test_native_file_owner_refuses_deposit_then_resumes_local_mail(parking):
+    from hfmodem.tests.contact.test_varac_cf_qsy import advance_mail, mail_wires, parked
+    desk = linked()
+    desk.session.files.waiting = True
+    desk.session.files.generation = desk.host.client.link_generation
+    desk.session.parking.store.configure(parking=parking)
+    row = parked(desk, 'OH8XAT')
+    advance_mail(desk)
+    assert not mail_wires(desk)
+    desk.receive('<SM><TO:K1ABC><SBJ:deposit><MSG:must be refused explicitly>')
+    assert ('5 <SMF>' if parking else '6 <SMFP>') in desk.texts
+    assert len(desk.session.parking.store.records) == 1 and not desk.mailbox.entries()
+    desk.session.files.waiting = False
+    advance_mail(desk)
+    assert len(mail_wires(desk)) == 1
+    assert desk.session.parking.store.get(row['id'])['state'] == 'in_flight'
+
+
+def test_binary_transfer_owns_peek_shaped_bytes_until_application_framing_resumes():
+    from types import SimpleNamespace
+    desk = linked()
+    received = []
+    desk.host.client.raw_transfer = SimpleNamespace(raw=lambda direction, data: received.append(data) or True)
+    frame = v.frame_message('<VRP>')
+    for byte in frame:
+        desk.host.data.incoming.append(bytes([byte]))
+        desk.tick()
+    assert b''.join(received) == frame and '6 <VRPJ>' not in desk.texts
+    desk.host.client.raw_transfer = None
+    desk.receive('<VRP>')
+    assert desk.texts.count('6 <VRPJ>') == 1
+
+
+def test_remote_bbs_view_pauses_forwarding_refuses_deposits_and_resumes_on_exit():
+    from hfmodem.tests.contact.test_varac_cf_qsy import advance_mail, mail_wires, parked
+    desk = linked()
+    desk.session.bbs.remote_view = True
+    row = parked(desk, 'OH8XAT')
+    advance_mail(desk)
+    assert not mail_wires(desk)
+    desk.receive('<SM><TO:K1ABC><SBJ:deposit><MSG:remote BBS owns this link>')
+    assert '5 <SMF>' in desk.texts and len(desk.session.parking.store.records) == 1
+    desk.receive('BBS EXIT OK')
+    advance_mail(desk)
+    assert not desk.session.bbs.owned and len(mail_wires(desk)) == 1
+    assert desk.session.parking.store.get(row['id'])['state'] == 'in_flight'

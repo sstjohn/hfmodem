@@ -20,7 +20,7 @@ import threading
 import time
 
 
-SOFTWARE = 'hfmodem 0.3.0-rc0'
+SOFTWARE = 'hfmodem 0.4.0'
 ENDPOINT = ('report.pskreporter.info', 4739)
 INTERVAL = 300.0
 ENTERPRISE = 30351

@@ -46,6 +46,17 @@ def decision_summary(events, heard, fs):
     decisions = [e for e in events if e.get('event') == 'Decision']
     unread = [e for e in decisions if e.get('reason') == 'body unread at decision']
     deferred = [e for e in decisions if e.get('reason') == 'answer deferred']
+    # Refinement can defer an answer after a provisional response was already
+    # selected. The decision then still says "proposal"; the explicit event is
+    # the evidence of deferral. Attach it once to that packet's decision.
+    for event in events:
+        if event.get('event') != 'answer-deferred':
+            continue
+        if any(abs(e['at']-event['at']) < .05*fs for e in unread+deferred):
+            continue
+        decision = next((e for e in decisions if abs(e['at']-event['at']) < .05*fs), None)
+        if decision is not None:
+            deferred.append(decision)
     counts = dict(late_crc_valid=0, other_late_admission=0, never_decoded=0,
                   available_at_decision=0)
     for decision in unread + deferred:
@@ -62,7 +73,7 @@ def decision_summary(events, heard, fs):
                              and (r['word'] != 'Y27' or r.get('extent_s') is not None))
                          or r.get('kind') == 'short' and r.get('value') is not None]
         if any(r['received_at_sample'] <= decision['decision_at'] for r in admitted):
-            category = ('other_late_admission' if decision['reason'] == 'answer deferred'
+            category = ('other_late_admission' if decision in deferred
                         else 'available_at_decision')
         elif crc:
             category = 'late_crc_valid'
@@ -74,4 +85,9 @@ def decision_summary(events, heard, fs):
         counts[category] += 1
     return dict(event='DecodeBudgetSummary', decisions=len(decisions),
                 unread_decisions=len(unread), deferred_decisions=len(deferred),
-                missed_decisions=len(unread)+len(deferred), **counts)
+                missed_decisions=len(unread)+len(deferred),
+                overdue_decisions=sum(e.get('now_sample', e['decision_at']) > e['decision_at']
+                                      for e in decisions),
+                refused_transmissions=sum(e.get('event') == 'Refused' for e in events),
+                deferred_frames=len({e['at'] for e in events if e.get('event') == 'answer-deferred'}),
+                **counts)

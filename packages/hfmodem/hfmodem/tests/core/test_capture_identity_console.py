@@ -109,6 +109,7 @@ def _fake_console_environment(tmp_path, monkeypatch):
     monkeypatch.setattr(arm.claim, 'lease', lambda mode, *, env=None: nullcontext())
     monkeypatch.setattr(arm, 'ready', lambda mode, plan: nullcontext())
     monkeypatch.setattr(arm.claim, 'spacing_note', lambda *a: None)
+    monkeypatch.setattr(arm.station, 'hold_power', lambda plan: None)
     monkeypatch.setattr(arm.station, 'check_rig', lambda *a: {'codec_gain_working_point': {}})
     monkeypatch.setattr(arm.station, 'selection_for_plan', lambda *a: None)
     monkeypatch.setattr(arm.station, 'spell_environment', lambda *a, **k: [])

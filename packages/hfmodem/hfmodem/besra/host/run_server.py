@@ -21,6 +21,7 @@ exits. Same flags as ``shrike.onair`` — one shape for mail on the air.
 from __future__ import annotations
 
 import argparse
+import os
 import threading
 import time
 import sys
@@ -31,10 +32,11 @@ from .modem_core import LoopbackModem
 from .server import HostServer
 from ...core import band, config, cwid, identification, levels, rates
 from ...core.ptt import arming_refusal
+from ...core.paths import installed_data
 from ...winlink import CLIENT_SID
 
-#: Beside every other on-air recording this station makes.
-RECORD_DIR = Path(__file__).resolve().parents[5] / "logs" / "onair"
+def record_dir() -> Path:
+    return Path(os.environ.get("HFMODEM_DATA_DIR") or installed_data()) / "logs" / "onair"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -80,8 +82,8 @@ def parser() -> argparse.ArgumentParser:
     rg.add_argument("--channel", type=int,
                     help="tune to this channel CENTRE (Hz); dial = centre − 1500")
     rg.add_argument("--list-audio", action="store_true", help="list audio devices and exit")
-    rg.add_argument("--record", type=Path, default=RECORD_DIR, metavar="DIR",
-                    help=f"directory for the receive recording (default {RECORD_DIR})")
+    rg.add_argument("--record", type=Path, default=record_dir(), metavar="DIR",
+                    help=f"directory for the receive recording (default {record_dir()})")
     rg.add_argument("--no-record", dest="record", action="store_const", const=None,
                     help="do not record — an on-air attempt nobody recorded cannot be "
                          "diagnosed afterwards, so this is rarely what you want")

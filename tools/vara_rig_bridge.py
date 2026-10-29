@@ -130,6 +130,10 @@ MAX_KEY_S = 25.0
 # where they say nothing, and power was an estimate.
 TX_METERS = ('RFPOWER_METER_WATTS', 'ALC')
 METER_PERIOD_S = 0.25
+# A key-down shorter than this ends inside the rig's power attack at the CAT read
+# cadence: 0.34 s bursts all read ~0.1 W and 11-symbol ones scattered 1.3-22 W
+# on a 50 W station, so their power is unmeasured rather than a number.
+MIN_METERED_KEY_S = 0.5
 
 
 _ID_INTERVAL_S = 600.0            # identification reminder interval
@@ -171,6 +175,7 @@ class Rig:
             self.addr = (host or "127.0.0.1", int(port or 4533))
         self.keyed = False
         self.key_since = 0.0
+        self._unkey_at = 0.0
         self._lock = threading.Lock()     # serialises key-ups; the unkey path never takes it
         self._no_tx = threading.Event()   # set once this rig is being taken down for good
         self._panicked = False
@@ -280,6 +285,17 @@ class Rig:
     def set_mode(self, mode: str, passband: int = 0) -> str:
         return self._cmd(f"M {mode} {int(passband)}\n")
 
+    def power_w(self, watts: float | None = None, scale_w: float = 100.0) -> float | None:
+        """RFPOWER in watts, 1.0 being `scale_w`, read back after setting it to `watts`
+        when given; None when the rig does not answer. The readback is the verdict on
+        the write, so a refused set shows there."""
+        if watts is not None:
+            self._cmd(f"L RFPOWER {watts / scale_w:g}\n", want=64)
+        try:
+            return float(self._cmd("l RFPOWER\n", want=64).split()[0]) * scale_w
+        except (OSError, ValueError, IndexError):
+            return None
+
     # -- PTT -------------------------------------------------------------------
     @property
     def armed(self) -> bool:
@@ -358,6 +374,7 @@ class Rig:
 
     def _unkey(self) -> bool:
         # A signal or watchdog must not wait on the lock held by the stalled key-up.
+        self._unkey_at = time.time()
         self._metering.clear()
         self._unkeyed.set()
         if self._keyer is None:
@@ -460,7 +477,7 @@ class Rig:
         while not self._stop.is_set():
             if not self._metering.wait(0.5):
                 continue
-            started, peaks, reads, unread, this = time.time(), {}, 0, {}, self._key_ups
+            started, peaks, reads, unread, this = self.key_since or time.time(), {}, 0, {}, self._key_ups
             # The count tells a quick unkey and key-up apart, which the flag alone cannot.
             while self._metering.is_set() and self._key_ups == this and not self._stop.is_set():
                 for name in TX_METERS:
@@ -472,12 +489,19 @@ class Rig:
                     peaks[name] = max(value, peaks.get(name, value))
                 reads += 1
                 self._unkeyed.wait(METER_PERIOD_S)
+            ended = self._unkey_at if self._unkey_at >= started else time.time()
+            held = ended - started
             watts, alc = peaks.get('RFPOWER_METER_WATTS'), peaks.get('ALC')
+            short = held < MIN_METERED_KEY_S and 'RFPOWER_METER_WATTS' not in unread
+            if short:
+                watts = None
             report = dict(utc_start=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(started)),
-                          seconds=round(time.time() - started, 1), reads=reads,
-                          peak_watts=watts, peak_alc=alc, unread=unread or None)
-            self.log("TX METERS: peak "
-                     + ("power unread" if watts is None else f"{watts:.1f} W") + ", "
+                          seconds=round(held, 2), reads=reads,
+                          peak_watts=watts, peak_alc=alc, unread=unread or None,
+                          unmeasured=['RFPOWER_METER_WATTS'] if short else None)
+            power = (f"power unmeasured ({held:.2f} s key-down)" if short
+                     else "power unread" if watts is None else f"{watts:.1f} W")
+            self.log("TX METERS: peak " + power + ", "
                      + ("ALC unread" if alc is None else f"ALC {alc:.2f}")
                      + f" over {reads} reads in {report['seconds']:.1f} s"
                      + (f" ({', '.join(f'{k} {v}' for k, v in unread.items())})" if unread else ""))

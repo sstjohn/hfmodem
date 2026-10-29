@@ -235,3 +235,54 @@ def test_retune_discards_old_passband_table_until_worker_confirms_new_one():
     assert watch.table()[0] == []
     watch._out.put((1, ('table', [S.Activity(2, 1500)], 5)))
     assert watch.table()[0][0].slot == 2
+
+
+def test_audio_gap_notes_are_logged_but_not_printed_under_follow_all():
+    d, w = watched()
+    d.do('/follow all')
+    start = len(d.said)
+    for _ in range(5):
+        record(d, w, 1, 'passive audio gap: 0.12 seconds skipped', 'coverage')
+        d.host.now += 2
+    assert not [line for line in d.said[start:] if line.startswith('[') or 'gap' in line]
+    assert not d.session._transcripts.get(1)
+    assert sum(r.get('qso') == 'coverage' for r in d.kinds('slot')) == 5
+    assert v.follow_line(S.Said(1, 0, 'coverage', 'x')) == '[slot 1] coverage: x'
+
+
+def test_heavy_audio_loss_gets_one_summary_per_interval():
+    d, w = watched()
+    d.do('/follow all')
+    start = len(d.said)
+    for _ in range(40):
+        record(d, w, 1, 'passive audio gap: 0.50 seconds skipped', 'coverage')
+        d.host.now += 2
+    summaries = [line for line in d.said[start:] if 'dropping audio' in line]
+    assert len(summaries) == 1 and 'decodes may be missed' in summaries[0]
+    d.host.now += v.COVERAGE_NOTICE_S
+    for _ in range(10):
+        record(d, w, 1, 'passive audio gap: 0.50 seconds skipped', 'coverage')
+        d.host.now += 2
+    assert sum('dropping audio' in line for line in d.said[start:]) == 2
+
+
+def test_light_loss_stays_silent_unless_verbose():
+    d, w = watched()
+    d.do('/follow all')
+    start = len(d.said)
+    record(d, w, 1, 'passive audio gap: 0.12 seconds skipped', 'coverage')
+    assert not any('dropping' in line for line in d.said[start:])
+    d.do('/verbose on')
+    record(d, w, 1, 'passive audio gap: 0.12 seconds skipped', 'coverage')
+    assert any('dropping audio' in line for line in d.said[start:])
+
+
+def test_a_shed_channel_is_said_once_each_way():
+    d, w = watched()
+    d.do('/follow all')
+    start = len(d.said)
+    record(d, w, 11, v.SHED, 'coverage')
+    record(d, w, 11, v.RESUMED, 'coverage')
+    lines = [line for line in d.said[start:] if 'passive follower' in line]
+    assert len(lines) == 2 and lines[0].startswith('[slot 11') and lines[0].endswith(f'coverage: {v.SHED}')
+    assert lines[1].endswith(f'coverage: {v.RESUMED}')

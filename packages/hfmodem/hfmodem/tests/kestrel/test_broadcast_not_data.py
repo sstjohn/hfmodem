@@ -142,3 +142,34 @@ def test_mixed_real_data_and_beacon_cannot_credit_or_change_existing_debt(role, 
     assert not station._peer_data_over_500(np.empty(0), 10.)
     assert _snapshot(station) == before
     assert all(event[0] == 'log' for event in station.io.events)
+
+
+# WB8SKP's two-packet UI broadcast to ALL, heard 2026-10-28 while linked: its
+# last packet arrived without its first and was delivered as session DATA.
+UI_TAIL = '50e9ce63d689143900'
+
+
+@pytest.mark.parametrize('role', ['initiator', 'responder'])
+def test_lone_ui_tail_packet_is_not_delivered_or_answered(role):
+    f = frame(UI_TAIL, 0x08, level=1)
+    assert B.is_broadcast_frame(f)
+    station = _station(role)
+    station._resend_decoded = rx.DecodeResult([f], [f])
+    before = _snapshot(station)
+    assert station._peer_data_over_500(np.empty(0), 2.0) == []
+    assert _snapshot(station) == before
+    assert all(event[0] == 'log' for event in station.io.events)
+
+
+@pytest.mark.parametrize('body', [
+    phy.vara_body(b'PING', 'W9SSJ', body_len=10, level=1),
+    phy.vara_body(b'P' + bytes(6), 'W9SSJ', body_len=10, level=1),
+    phy.vara_body(bytes.fromhex(UI_TAIL), 'W9SSJ', 0x95, body_len=10),
+    bytes.fromhex('50e9ce63d68900391408'),  # stock close, field = caller CRC
+], ids=['short', 'short-zeros', 'full', 'crc-field'])
+def test_session_data_led_by_a_ui_kind_byte_is_still_delivered(body):
+    f = frame(body[:-1], body[-1], level=1)
+    assert not B.is_broadcast_frame(f)
+    station = _station('initiator')
+    station._resend_decoded = rx.DecodeResult([f], [f])
+    assert station._peer_data_over_500(np.empty(0), 2.0) == [body]

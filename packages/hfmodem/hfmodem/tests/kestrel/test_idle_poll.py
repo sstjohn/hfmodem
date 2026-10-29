@@ -89,6 +89,23 @@ def _over(payload: bytes, host: int, field: int) -> np.ndarray:
                               lead=TX.VB6Rnd(4107106))
 
 
+@pytest.mark.parametrize('caller', ['W9SSJ', 'W9SSJ-1', 'X-W9SSJ'])
+def test_chat_receives_data_after_release_without_answering_it_as_a_poll(caller):
+    hs, io = _station('500')
+    hs.caller, hs.called = caller, 'W9SSJ'
+    hs.chat = hs.high_speed = hs._link_high_speed = True
+    hs.turn, hs._released = VA._TURN_PEER, True
+    hs._expect_level, hs._lv_owed = 6, True
+    hs._key(False)
+    payload = b'3 <Q>20 de W9SSJ home, copy\n'
+    body = phy.vara_body(payload, caller, body_len=phy.body_size('500', 6), level=6)
+    audio = VA.OF.data_over_tx(body, level=phy.level_key('500', 6), bw='500',
+                              lead=TX.VB6Rnd(VF.lead_state(caller, True, '500')))
+    _feed(hs, np.r_[np.zeros(24000), audio, np.zeros(24000)])
+    assert io.host == [payload], io.msgs
+    assert not any('poll from' in msg for msg in io.msgs), io.msgs
+
+
 def _grant(bw: str) -> np.ndarray:
     return MK.synth_tone_pairs(VF.turn_grant(CALLED, bw))
 

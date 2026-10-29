@@ -151,6 +151,7 @@ def test_successful_native_run_reports_journal_failure(tmp_path, monkeypatch, jo
     assert onair._CAPTURE_ROOTS[Path(args.outdir)]._status['failed']
 
 
+@pytest.mark.realtime
 def test_actual_native_deferred_work_finishes_only_its_original_capture(tmp_path, monkeypatch):
     """Real queued native jobs stay bound while a second fake native run ends."""
     import hashlib

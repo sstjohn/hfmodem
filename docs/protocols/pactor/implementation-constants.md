@@ -3,10 +3,8 @@
 # PACTOR implementation constants
 
 PACTOR is an **alpha** implementation. PACTOR-3 has successful mail exchanges.
-<!-- site:omit:start -->
 PACTOR-4 is an extension still under development, with narrower recorded and
 live protocol evidence.
-<!-- site:omit:end -->
 A recovered waveform or CRC-clean frame does not, by itself,
 prove a complete interoperable mail session.
 
@@ -45,7 +43,6 @@ not enough to reproduce a packet.
 | Pulses, phases and CS placement | [modem](../../../packages/hfmodem/hfmodem/shrike/modem.py) and [placement.assemble](../../../packages/hfmodem/hfmodem/shrike/placement.py#L589) contain pulse generation, filter law, initial carrier phases, stagger and gain conventions; [placement.control_burst](../../../packages/hfmodem/hfmodem/shrike/placement.py#L958) covers 20-bit two-tone controls. 48 kHz is this implementation’s audio convention. |
 | Source coding and link policy | [compress](../../../packages/hfmodem/hfmodem/shrike/compress.py) contains the full Huffman/reference tables, escapes and run coding; [arq](../../../packages/hfmodem/hfmodem/shrike/arq.py) contains P3 ladder, cycle changes, repeat budgets, changeover and disconnect state machine. Receiver acquisition and decoding are in [p3rx](../../../packages/hfmodem/hfmodem/shrike/p3rx.py). |
 
-<!-- site:omit:start -->
 ## PACTOR-4: two convolutional components, two different permutations
 
 The **convolutional code** is an eight-state recursive systematic constituent,
@@ -111,4 +108,3 @@ new transmission. [P4 framing](pactor4-framing.md) and the
 [implementation status](../../STATUS.md) retain those limits. This map provides
 the constants used by this implementation, rather than asserting a fully closed
 specification of every proprietary PACTOR-4 behavior.
-<!-- site:omit:end -->

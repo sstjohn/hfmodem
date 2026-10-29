@@ -430,6 +430,7 @@ def test_live_sf8_deadline_uses_recorded_driver_reserve(monkeypatch, stall_stage
         assert len(acks) == deliveries
 
 
+@pytest.mark.wall_clock
 def test_live_twelve_sf8_copies_keep_their_own_ack_deadlines(monkeypatch):
     from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
     from hfmodem.tests.shrike.p4_nak_qam_support import neutral_keys

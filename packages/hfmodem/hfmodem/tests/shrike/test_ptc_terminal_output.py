@@ -3,7 +3,7 @@
 """SCS 4.1 TERM 0/1 output and passive serial drain; no RF qualification."""
 import os
 
-from hfmodem.shrike import hostmode as hm
+from hfmodem.core import hostmode as hm
 from hfmodem.shrike.ptc import PtcHost, SimPeer
 from hfmodem.shrike.serial_endpoint import PtcSerialEndpoint
 from .test_ptc_serial_endpoint import read_until

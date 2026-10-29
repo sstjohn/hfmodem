@@ -12,6 +12,8 @@
 #   ./tools/onair.sh power  [7101500]           # no TX: what the transmitter is set to
 #   ./tools/onair.sh preflight                  # keys unmodulated; measures the rig
 #   ./tools/onair.sh pactor WS8EOC [7101500]    # PACTOR-1 connect  (rigctld OFF)
+#   ./tools/onair.sh pactor GW 7101500 --pactor2-only  # as a PACTOR-2-only modem
+#   ./tools/onair.sh pactor-answer 7101500 900 --pactor2-only  # answer, capped at P2
 #   ./tools/onair.sh vara   K9WRA  [7103800]    # VARA connect      (rigctld ON, RTS)
 #   ./tools/onair.sh ardop  NS0A   [7103500] [BW]  # ARDOP connect  (rigctld tunes only)
 #   ./tools/onair.sh ardop-mail GW CENTRE BW --mail-…   # Winlink exchange, ARDOP
@@ -1020,7 +1022,7 @@ nothing after -- '${KEY_ARGS[0]}' would go nowhere"
       --radio "$RIG_NAME" --rigctld 127.0.0.1:4532 \
       --audio-in "$AUDIO" --audio-out "$AUDIO" \
       --channel "$centre" --bandwidth "$bw" \
-      --ptt-device "$PTT_PORT" --line-ptt
+      --ptt-device "$PTT_PORT" --line-ptt --record "$REPO/logs/onair"
   modem=$CLAIM_PID
   trap 'claim_exit $?' EXIT
   # besra is ready when it answers, and a fixed sleep here was ten seconds of a
@@ -1066,7 +1068,7 @@ ardop-mail)  # A whole Winlink exchange over one held ARDOP link: run_server own
       --radio "$RIG_NAME" --rigctld 127.0.0.1:4532 \
       --audio-in "$AUDIO" --audio-out "$AUDIO" \
       --channel "$centre" --bandwidth "$bw" \
-      --ptt-device "$PTT_PORT" --line-ptt \
+      --ptt-device "$PTT_PORT" --line-ptt --record "$REPO/logs/onair" \
       --mycall "$MYCALL" --call "$gw" --transmit ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} || rc=$?
   unkey_and_exit "$rc" "$((centre - 1500))" "besra run_server"
   ;;

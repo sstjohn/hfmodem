@@ -73,7 +73,7 @@ class NativeChild:
             # Signals always revalidate; a failed refresh must discard the cache.
             if refresh_identity or now - self._identity_checked_at >= IDENTITY_CACHE_S:
                 self._identity_checked_at = -math.inf
-                if claim.process_started(self.pid) != self.started:
+                if not claim.process_matches(self.pid, self.started):
                     return False
                 self._identity_checked_at = now
             state = _process_state(self.pid)
@@ -321,7 +321,10 @@ def _output_ready(fd, output, observed):
             info = Path(output).stat()
             current = (info.st_dev, info.st_ino, info.st_size)
             initial = observed.get("file")
-            if initial is None or current[:2] != initial[:2] or current[2] < initial[2]:
+            # An empty file is no baseline: ffmpeg creates the output before writing the
+            # header, and a header is not captured audio.
+            if (initial is None or initial[2] == 0 or current[:2] != initial[:2]
+                    or current[2] < initial[2]):
                 observed["file"] = current
                 return False
             return current[2] > initial[2]

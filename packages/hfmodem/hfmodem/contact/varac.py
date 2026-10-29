@@ -8,19 +8,24 @@ CQ suffix IDs are the production mapping of P1 suffix/physical-slot pairs.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import json
+import os
 from pathlib import Path
 import re
 import select
 import socket
+import tempfile
 import time
+import uuid
 from typing import Callable
 
 from ..ax25 import kiss
 from .beacon_hop import BeaconHop
+from . import mail_storage
+from ..core.config import clamp_power
 
 
 DD = 'https://k0rv.org/wp-content/uploads/2024/02/VarAC_slide_show.pdf'
@@ -64,7 +69,8 @@ TAGS = {
 
 MEASURED = 'P1 transcripts/messages.json'
 VALUE_TAGS = ('NAME', 'QTH', 'LOC', 'EM', 'FC', 'SBJ', 'MSG', 'Q', 'QF', 'S')
-BARE_TAGS = ('AWQ', 'DISC', 'ER', 'INFO', 'QSYR', 'SM', 'SMR', 'TL', 'VSI', 'VW')
+BARE_TAGS = ('AWQ', 'DISC', 'ER', 'INFO', 'QSYR', 'SM', 'SMR', 'TL', 'VSI', 'VW',
+             'SMF', 'SMFP', 'VRPJ')
 TAGS.update({name: Tag(f'<{name}:value>', MEASURED, True) for name in VALUE_TAGS})
 TAGS.update({name: Tag(f'<{name}>', MEASURED, True) for name in BARE_TAGS})
 TAGS['R'] = Tag('<R±NN>', MEASURED, True)
@@ -72,11 +78,13 @@ TAGS['&IT&'] = Tag('&IT&', MEASURED, True)
 MANUAL_16 = 'https://download-files.wixmp.com/ugd/288b5d_124e2927d3324571a2016b69e780d159.pdf'
 TAGS['QF'] = Tag('<QF:value>', MANUAL_16 + ' p126; broadcast frequency notification', True)
 TAGS['QSYF'] = Tag('<QSYF>', MANUAL_16 + ' p126; v16.1.8 connected parser, 12 digits', True)
-TAGS.update({name: Tag(f'<{name}>', MANUAL_16 + ' pp113,125', False)
+TAGS.update({name: Tag(f'<{name}>', MANUAL_16 + ' pp113,125', name in BARE_TAGS)
              for name in ('E', 'EA', 'EJ', 'SMF', 'SMFP')})
 TAGS['LHR'] = Tag('<LHR>', MANUAL_16 + ' p125 request data', True)
 TAGS['LHJ'] = Tag('<LHJ>', MANUAL_16 + ' p125 request data')
 TAGS['BLR'] = Tag('<BLR>', MANUAL_16 + ' p126; p65 exchange', True)
+TAGS['VRP'] = Tag('<VRP>', MANUAL_16 + ' p125; peeking request')
+TAGS['VRPJ'] = Tag('<VRPJ>', MANUAL_16 + ' p125; peeking rejection', True)
 
 
 @dataclass(frozen=True)
@@ -185,7 +193,8 @@ class MessageParser:
                 break
             # A VMail's length leaves out its closing '>', which follows as one more byte
             # (P1 session 021: 196 declared, 197 sent).
-            if content[:4] == b'<SM>' and content[size - 1:size] != b'>':
+            if (b'<SM>' in content[:size] and content[size - 1:size] != b'>'
+                    and decode_application(content[:size].decode('utf-8', errors='replace')).envelope is not None):
                 if len(content) == size and not final:
                     break
                 size += content[size:size + 1] == b'>'
@@ -207,6 +216,7 @@ CQ_PERIOD_S = 10.0
 #: code of behaviour keeps the CF and slots at 500 (deck slide 23), so 500 is the default.
 BANDWIDTHS = (500, 2300, 2750)
 DEFAULT_BW = 500
+FAREWELL_IDLE_S = {500: 25, 2300: 10, 2750: 10}
 #: The slot step follows the modem, not the width: VarAC V8.2.0 sets 750 Hz for VARA HF
 #: (2550 Hz only for VARA SAT), so the ten offsets hold at every HF bandwidth.
 SLOT_OFFSETS = (-3750, -3000, -2250, -1500, -750, 750, 1500, 2250, 3000, 3750)
@@ -231,6 +241,11 @@ BEACON_LIFETIME_S = 24 * 60 * 60
 #: Release V7.0.8 (2023-03-17) specifies 5 s before beacon/relay, superseding
 #: the undated FAQ's 60 s.
 CLEAR_S = 5
+#: Kestrel waits eight seconds after a request unkeys before retrying, so the last
+#: request keyed before the deadline is heard out that long; a key that never drops
+#: still ends the attempt CONNECT_GRACE_S past the deadline.
+CONNECT_REPLY_S = 8
+CONNECT_GRACE_S = 30
 #: VarAC's advanced beacon, as 26 stations keyed it on 10-23 and stock's KISS port hands
 #: it over: twenty characters, `2`, a digit, a
 #: status letter, the six-character locator and the callsign, space padded. The letter is
@@ -238,7 +253,8 @@ CLEAR_S = 5
 #: every station (VMail, most likely), 2 an email gateway, 4 an AI gateway, 8 probably a
 #: BBS. The digit after the 2 never changes for a station and is not yet understood.
 #: KISS command 2 both ways; stock drops command 0 text and falls over on command 1.
-BEACON_TEXT = re.compile(r'(2[01][A-Z])([A-R]{2}[0-9]{2}[A-X]{2})([A-Z0-9]{3,7}) *')
+#: The subsquare arrives in either case: VA2OPS keys `FN35fl`.
+BEACON_TEXT = re.compile(r'(2[01][A-Z])([A-R]{2}[0-9]{2}[A-Xa-x]{2})([A-Z0-9]{3,7}) *')
 BEACON_KISS = 2
 SERVICE_BITS = ((1, 'VMail'), (2, 'email'), (4, 'AI'), (8, 'BBS'))
 
@@ -317,6 +333,14 @@ def callsign(call: str) -> str:
     return call
 
 
+def canonical_call(call: str) -> str:
+    call = callsign(call)
+    match = re.fullmatch(r'(.+)-([0-9]{1,2})', call)
+    if match:
+        return match[1] + (f'-{int(match[2])}' if int(match[2]) else '')
+    return call
+
+
 def base_call(call: str) -> str:
     return re.sub(r'-[0-9]{1,2}$', '', callsign(call))
 
@@ -325,6 +349,9 @@ def base_call(call: str) -> str:
 class Event:
     kind: str
     raw: str
+    sequence: int | None = field(default=None, compare=False)
+    generation: int | None = field(default=None, compare=False)
+    diagnostic: bool = field(default=False, compare=False)
 
 
 class HostError(RuntimeError):
@@ -351,6 +378,9 @@ class Client:
         self.link_message_start = 0
         self.link_generation = 0
         self._outbound_connect_pending = False
+        self._connect_deadline = 0.0
+        self._connect_keyed = False
+        self._connect_listen_end = 0.0
         self._sent_after = None
         self._lines = deque(maxlen=4096)
         self.sequence = 0
@@ -370,6 +400,38 @@ class Client:
         self._discard_sequence = 0
         self.version = None
         self.bandwidth = None
+        self.data_writer = None
+        self._writes = {}
+        self._stream_poisoned = False
+
+    def enable_writer(self):
+        """Serialize every data write once interactive application use starts."""
+        if self._stream_poisoned:
+            raise HostError('Data stream is poisoned; reconnect the host')
+        if self.data_writer is None:
+            from .data_writer import DataWriter
+            self.data_writer = DataWriter(self.data_socket)
+
+    def _poll_writer(self):
+        if self.data_writer is None:
+            return
+        for completion in self.data_writer.poll():
+            record = self._writes.pop(completion.write_id, None)
+            if record is None:
+                continue
+            generation, payload = record
+            if completion.disposition == 'unknown':
+                self._stream_poisoned = True
+            if generation != self.link_generation:
+                continue
+            if completion.disposition == 'complete':
+                # Fresh BUFFER evidence must follow known socket completion.
+                self._sent_after = self.sequence
+                if self.raw_transfer is not None:
+                    self.raw_transfer.raw('tx', payload)
+            self.event(Event('write_complete', json.dumps(dict(
+                write_id=completion.write_id, generation=generation,
+                disposition=completion.disposition, after=self.sequence))))
 
     @classmethod
     def open(cls, host='127.0.0.1', command_port=8300, data_port=8301, kiss_port=None, *,
@@ -396,6 +458,7 @@ class Client:
     def _text(self, chunk=b'', *, final=False):
         if self._receive_quarantined:
             return
+        generation = self.link_generation
         try:
             messages = self._messages.feed(chunk, final=final)
         except ValueError as error:
@@ -407,12 +470,17 @@ class Client:
                 'hex': rejected[:4096].hex(), 'truncated': len(rejected) > 4096})))
             return
         for content in messages:
+            if generation != self.link_generation:
+                break
             text = content.decode('utf-8', errors='replace')
             self.message_sequence += 1
+            sequence = self.message_sequence
             self.messages.append((self.message_sequence, text))
-            self.event(Event('message', text))
+            self.event(Event('message', text, sequence, generation))
             for part in TextParser().feed(text, final=True):
-                self.event(Event('tag' if part.tag else 'text', part.raw))
+                self.event(Event('tag' if part.tag else 'text', part.raw,
+                                 sequence, generation,
+                                 diagnostic='<SM>' in text))
         if final and self._messages.pending:
             self.event(Event('incomplete', bytes(self._messages.pending).decode('utf-8', errors='replace')))
             self._messages.pending.clear()
@@ -436,13 +504,21 @@ class Client:
     def drain_steps(self, *, timeout=30, cancelled=lambda: False):
         """Done once the last send is delivered and the key is up."""
         after, end = self._sent_after, self.clock() + timeout
-        delivered = after is None
+        delivered = after is None and not (self.data_writer and self.data_writer.pending)
         while True:
             if cancelled():
                 return
+            if self._stream_poisoned:
+                raise HostError('Data write has unknown extent; framed stream is poisoned')
+            if self._sent_after != after:
+                after = self._sent_after
+                delivered = after is None
+            writing = bool(self.data_writer and self.data_writer.pending)
             if after is not None and self._discard_sequence > after:
                 raise HostError("Transmit queue cleared without delivery confirmation")
-            if not delivered:
+            if writing:
+                delivered = False
+            elif not delivered:
                 lines = self.since(after)
                 delivered = 'DISCONNECTED' in lines or ('BUFFER 0' in lines and self.buffer == 0)
             elif not (self.ptt or self.pending):
@@ -462,6 +538,8 @@ class Client:
         if self.closed:
             return
         self.closed = True
+        if self.data_writer is not None:
+            self.data_writer.close()
         try:
             for stream in (self.command_socket, self.data_socket, self.kiss_socket):
                 try:
@@ -478,6 +556,10 @@ class Client:
         self.messages.clear()
         self.link_message_start = self.message_sequence
         self.link_generation += 1
+        if self.data_writer is not None and self.data_writer.pending:
+            # Old framed writes cannot be allowed onto a replacement link.
+            self._stream_poisoned = True
+            self.data_writer.close()
 
     def _line(self, raw):
         self.sequence += 1
@@ -506,6 +588,13 @@ class Client:
             self.busy_events += int(self.busy)
         elif raw in ('PTT ON', 'PTT OFF'):
             self.ptt = raw == 'PTT ON'
+            if self._outbound_connect_pending:
+                now = self.clock()
+                if self.ptt and now < self._connect_deadline:
+                    self._connect_keyed = True
+                elif not self.ptt and self._connect_keyed:
+                    self._connect_keyed = False
+                    self._connect_listen_end = now + CONNECT_REPLY_S
         elif raw in ('PENDING', 'CANCELPENDING'):
             if raw == 'PENDING' and not (self.connected or self.pending or self._outbound_connect_pending):
                 self._retire_link_messages()
@@ -529,6 +618,7 @@ class Client:
     def poll(self, timeout=0.1):
         if self.closed:
             raise HostError('Host connection is closed')
+        self._poll_writer()
         streams = [self.command_socket, self.data_socket] + ([self.kiss_socket] if self.kiss_socket else [])
         for stream in self.ready(streams, timeout):
             chunk = stream.recv(65536)
@@ -559,6 +649,7 @@ class Client:
                     self._line(line.decode('ascii', errors='replace').lstrip('\n'))
                 if len(self._command) > 65536:
                     raise HostError('Unterminated VARA host line')
+        self._poll_writer()
 
     def wait(self, predicate, *, after, timeout=10):
         end = self.clock() + timeout
@@ -603,7 +694,7 @@ class Client:
         if bandwidth not in BANDWIDTHS:
             raise ValueError('VarAC runs VARA HF at 500, 2300 or 2750 Hz')
         self.mycall = callsign(mycall)
-        for command in ('LISTEN OFF', 'PUBLIC ON', 'CWID ON', 'COMPRESSION TEXT',
+        for command in ('LISTEN OFF', 'PUBLIC ON', 'CWID OFF', 'COMPRESSION TEXT',
                         f'MYCALL {self.mycall}'):
             self.request(command)
         self.set_bandwidth(bandwidth)
@@ -626,7 +717,7 @@ class Client:
             self.request('LISTEN ON')
 
     def send_text(self, text):
-        self._send(frame_message(text), text)
+        return self._send(frame_message(text), text)
 
     def send_vmail(self, vmail):
         """As session 021 sent its VMail: the length counts all but the closing '>'."""
@@ -636,11 +727,23 @@ class Client:
     def _send(self, payload, text):
         if self.closed or not self.connected:
             raise HostError('Text requires a connected session')
+        if self._stream_poisoned:
+            raise HostError('Data stream is poisoned; no additional frames are safe')
         self._sent_after = self.sequence
-        self.data_socket.sendall(payload)
-        if self.raw_transfer is not None:
-            self.raw_transfer.raw("tx", payload)
+        write_id = None
+        if self.data_writer is not None:
+            from .data_writer import WriterUnavailable
+            try:
+                write_id = self.data_writer.submit(payload, self.link_generation)
+            except WriterUnavailable as error:
+                raise HostError(str(error)) from error
+            self._writes[write_id] = (self.link_generation, payload)
+        else:
+            self.data_socket.sendall(payload)
+            if self.raw_transfer is not None:
+                self.raw_transfer.raw("tx", payload)
         self.event(Event('sent', text))
+        return write_id
 
     def send_tag(self, name, value=None):
         self.send_text(emit_tag(name, value))
@@ -756,6 +859,9 @@ class Client:
         deadline = self.clock() + timeout
         self._retire_link_messages()
         self._receive_quarantined = False
+        self._connect_deadline = deadline
+        self._connect_keyed = False
+        self._connect_listen_end = 0.0
         self._outbound_connect_pending = True
         try:
             self.request(f'CONNECT {self.mycall} {callsign(peer)}')
@@ -767,7 +873,10 @@ class Client:
         while not self.connected:
             if 'DISCONNECTED' in self.since(after):
                 raise HostError(ended or 'Connection attempt ended without a link')
-            if ended is None and (cancelled() or self.clock() >= deadline):
+            now = self.clock()
+            listening = ((self._connect_keyed or now < self._connect_listen_end)
+                         and now < deadline + CONNECT_GRACE_S)
+            if ended is None and (cancelled() or now >= deadline and not listening):
                 ended = 'stopped' if cancelled() else 'timed out'
                 # ABORT replaces the modem's station without a DISCONNECTED; the key drops
                 # when the frame in the air ends.
@@ -802,7 +911,7 @@ class State(str, Enum):
 class Flow:
     def __init__(self, client: Client, tuner: Callable[[int], None], *, band=20,
                  codec: SlotCodec | None = DEFAULT_CODEC, occupied=None,
-                 profile=None, services=None, received_retune_steps=None):
+                 profile=None, services=None, received_retune_steps=None, mail_ready=lambda: None):
         self.client, self.tuner, self.band, self.codec = client, tuner, band, codec
         self.occupied = occupied or (lambda: client.busy)
         self.state = State.CALLING
@@ -814,6 +923,7 @@ class Flow:
         self.qsy_slot = self.qsy_phase = None
         self.qsy_receiving = False
         self.received_retune_steps = received_retune_steps
+        self.mail_ready = mail_ready
 
     def tune(self, dial):
         if self.client.ptt or self.client.pending or self.client.connected:
@@ -983,7 +1093,7 @@ class Flow:
                 readiness = self.client.wait_message_steps(
                     lambda text: self.client.connected and not self.client.closed
                                  and any(part.raw in ('<AWQ>', '<Q>')
-                                     for part in TextParser().feed(text, final=True)),
+                                     for part in decode_application(text).parts),
                     after=link_start, timeout=timeout)
                 for hint in readiness:
                     current_link()
@@ -1015,8 +1125,9 @@ class Flow:
                 yield from self._qsy_steps(offset, timeout=timeout)
                 self.qsy_phase = 'waiting for peer acceptance (<QSYR>)'
                 self.client.send_tag('TL')
+                self.mail_ready()
                 yield from self.client.wait_message_steps(
-                    lambda text: any(part.raw == '<QSYR>' for part in TextParser().feed(text, final=True)),
+                    lambda text: any(part.raw == '<QSYR>' for part in decode_application(text).parts),
                     after=after, timeout=timeout)
                 self.qsy_phase = 'waiting for opening signal report'
                 yield from self.opening_steps(timeout=timeout)
@@ -1090,9 +1201,9 @@ class Flow:
             if self.dial != origin:
                 raise HostError('Frequency changed before received QSY')
             end = self.client.clock() + timeout
-            transaction = self.received_retune_steps(target, generation)
+            transaction = wait(self.received_retune_steps(target, generation))
             try:
-                for hint in wait(transaction):
+                for hint in transaction:
                     if self.client.clock() >= end:
                         raise TimeoutError('Received QSY retune boundary timed out')
                     yield hint
@@ -1101,9 +1212,12 @@ class Flow:
             self.received_tuned(target)
             self.qsy_phase = 'waiting for peer arrival (<TL>)'
             yield from wait(self.client.wait_message_steps(
-                lambda text: text == '<TL>', after=after, timeout=timeout))
-            after = self.client.message_sequence
+                lambda text: any(part.raw == '<TL>' for part in decode_application(text).parts),
+                after=after, timeout=timeout))
+            after = next(seq for seq, text in self.client.messages if seq > after
+                         and any(part.raw == '<TL>' for part in decode_application(text).parts))
             self.client.send_tag('QSYR')
+            self.mail_ready()
             self.qsy_phase = 'waiting for peer opening signal report'
             yield from wait(self.client.wait_message_steps(
                 lambda text: text.startswith('de ') and any(
@@ -1141,14 +1255,15 @@ class Flow:
         # Do not wait for CLEANTXBUFFER's answer: FAILED is normal for an over
         # in flight, and a missing answer must never prevent DISCONNECT.
         failed = False
-        for command in ('CLEANTXBUFFER', 'DISCONNECT'):
+        # ABORT preserves LISTEN; close incoming admission before the unkey wait.
+        for command in ('LISTEN OFF', 'CLEANTXBUFFER', 'DISCONNECT'):
             try:
                 client.send_command(command)
             except (HostError, OSError):
                 # A broken host still gets every best-effort stop command. If
                 # ABORT also fails, propagate so run() stops the local runtime.
                 failed = True
-        while failed or client.connected or client.ptt or client.pending:
+        while failed or cancelled() or client.connected or client.ptt or client.pending:
             if failed or cancelled() or client.clock() >= end:
                 after = client.sequence
                 try:
@@ -1179,18 +1294,72 @@ class Flow:
                     yield .1
             yield .1
 
-    def farewell_steps(self, text='73', *, timeout=15, cancelled=lambda: False):
+    def farewell_steps(self, text='73', *, timeout=None, cancelled=lambda: False):
+        client = self.client
+        if timeout is None:
+            timeout = FAREWELL_IDLE_S[client.bandwidth or DEFAULT_BW]
+        start = client.clock()
+        end, hard_end = start + timeout, start + 60
+        cursor, messages = client.sequence, client.message_sequence
+        buffered = client.buffer
+        drained = peer_close = disconnected = False
+
+        def expired():
+            nonlocal end, cursor, messages, buffered, drained, peer_close, disconnected
+            now = client.clock()
+            if cancelled() or now >= min(end, hard_end):
+                return True
+            progress = False
+            for seq, line in client._lines:
+                if seq <= cursor:
+                    continue
+                words = line.split()
+                if words[:1] == ['BUFFER'] and len(words) == 2:
+                    try:
+                        remaining = int(words[1])
+                    except ValueError:
+                        continue
+                    if remaining < 0:
+                        continue
+                    fresh_zero = (remaining == 0 and not drained
+                                  and client._sent_after is not None
+                                  and not (client.data_writer and client.data_writer.pending)
+                                  and seq > client._sent_after)
+                    progress |= remaining < buffered or fresh_zero
+                    drained |= fresh_zero
+                    buffered = remaining
+                elif line == 'DISCONNECTED' and not disconnected:
+                    disconnected = progress = True
+            for seq, message in client.messages:
+                if seq > messages and not peer_close and any(
+                        part.tag == 'DISC' for part in TextParser().feed(message, final=True)):
+                    peer_close = progress = True
+            cursor, messages = client.sequence, client.message_sequence
+            if progress:
+                end = now + timeout
+            return False
+
         try:
             if not cancelled():
-                self.client.send_text(text + emit_tag('DISC'))
-                yield from self.client.drain_steps(timeout=timeout, cancelled=cancelled)
+                client.send_text(text + emit_tag('DISC'))
+                yield from client.drain_steps(timeout=60, cancelled=expired)
+                if not expired():
+                    client.send_command('LISTEN OFF')
+                    client.send_command('DISCONNECT')
+                    end = client.clock() + timeout
+                    while True:
+                        if expired():
+                            break
+                        if not (client.connected or client.ptt or client.pending):
+                            return
+                        yield .1
         except (HostError, TimeoutError, ValueError, OSError):
             # Delivery is best effort. A missing peer ACK must never leave ARQ
             # querying forever instead of issuing the host close commands.
             pass
-        yield from self.close_steps(cancelled=cancelled)
+        yield from self.close_steps(cancelled=lambda: True)
 
-    def farewell(self, text='73', *, timeout=15):
+    def farewell(self, text='73', *, timeout=None):
         self.client.finish(self.farewell_steps(text, timeout=timeout))
 
 
@@ -1206,6 +1375,14 @@ def age(seconds):
     if seconds < 3600:
         return f'{seconds / 60:.0f} min'
     return f'{seconds // 3600:.0f} h {seconds % 3600 // 60:.0f} min'
+
+
+COVERAGE_WINDOW_S = 60
+COVERAGE_NOTICE_S = 300
+COVERAGE_LOSS_SHARE = 0.02
+#: The passive watch dropping a channel to keep up with the audio, and taking it back.
+SHED = 'passive follower behind the audio: not reading this channel'
+RESUMED = 'passive follower caught up: reading this channel again'
 
 
 def channel_frequency(band, slot, codec=DEFAULT_CODEC):
@@ -1239,6 +1416,8 @@ def follow_line(said, *, frequency=None):
     channel = label(said.slot)
     if frequency is not None and not isinstance(said.slot, str):
         channel += f' {khz(frequency)} kHz'
+    if said.kind == 'coverage':
+        return f'[{channel}] coverage: {said.text}'
     station = f'{said.station} (signed): ' if said.station else 'station unverified: '
     return f'[{channel}] ' + station + said.text
 
@@ -1279,10 +1458,33 @@ class Heard:
         if match is None:
             raise ValueError(f'not a VarAC beacon: {text!r}')
         status, grid, call = match.groups()
-        return cls(n, call, None, 500, sn, at, beacon=True, grid=grid, status=status)
+        return cls(n, call, None, 500, sn, at, beacon=True, grid=grid.upper(), status=status)
 
 
-VMAIL = re.compile(r'(?:<QSYR>\r\n)?<SM>((?:<(?:TO|FRM|TME|SBJ):[^<>\r\n]*>)*)<MSG:([^<>]*)>', re.S)
+VMAIL = re.compile(r'(?:(?:<QSYR>|<TL>)\r\n)?<SM>((?:<(?:TO|FRM|TME|SBJ):[^<>\r\n]*>)*)<MSG:([^<>]*)>', re.S)
+
+
+@dataclass(frozen=True)
+class ApplicationMessage:
+    parts: tuple
+    envelope: str | None = None
+
+
+def decode_application(text):
+    if text.startswith('<SM>'):
+        return ApplicationMessage((), text)
+    prefix, separator, envelope = text.partition('\r\n<SM>')
+    if separator:
+        parts = tuple(TextParser().feed(prefix, final=True))
+        report = bool(parts and re.fullmatch(r'de [A-Za-z0-9/-]+\s*', parts[0].raw)
+                      and any(part.tag == 'R' for part in parts))
+        if any(part.tag for part in parts) and all(
+                part.tag or not part.raw.strip() or report and i == 0
+                for i, part in enumerate(parts)):
+            return ApplicationMessage(parts, '<SM>' + envelope)
+    if '<SM>' in text:
+        return ApplicationMessage((Text(text),))
+    return ApplicationMessage(tuple(TextParser().feed(text, final=True)))
 
 
 @dataclass(frozen=True)
@@ -1324,11 +1526,14 @@ class VMail:
                    fields.get('TO'), fields.get('TME'))
 
     def wire(self):
-        if self.sender is not None or self.recipient is not None or self.composed is not None:
-            raise ValueError('Forwarded VMail is receive-only; compose a new VMail to send')
-        if not self.subject or any(c in self.subject for c in '<>\r\n') or any(c in self.body for c in '<>'):
-            raise ValueError('A VMail needs a one-line subject; no evidenced escaping for < or >')
-        return f'<SM><SBJ:{self.subject}><MSG:{self.body}>'
+        text = '<SM>'
+        for name, value in (('TME', self.composed), ('FRM', self.sender), ('TO', self.recipient)):
+            if value is not None:
+                text += f'<{name}:{value}>'
+        text += f'<SBJ:{self.subject}><MSG:{self.body}>'
+        if self.parse(text) != self:
+            raise ValueError('Invalid VMail fields; no evidenced escaping for protocol brackets')
+        return text
 
 
 @dataclass(frozen=True)
@@ -1372,23 +1577,123 @@ class Mailbox:
 
     def __init__(self, root):
         self.root = Path(root)
+        self._records = {}
+        self._dedup = {}
+
+    @staticmethod
+    def _entry(record):
+        keys = ('id', 'utc', 'direction', 'from', 'to', 'subject')
+        if (not isinstance(record, dict) or
+                any(not isinstance(record.get(key), str) for key in keys) or
+                record['direction'] not in ('in', 'out') or
+                Path(record['id']).name != record['id'] or
+                record['id'] in ('', '.', '..')):
+            raise ValueError('invalid mailbox record; existing files preserved')
+        return {key: record[key] for key in keys}
+
+    def _append_index(self, records):
+        with (self.root / 'index.jsonl').open('a', encoding='utf-8') as index:
+            for record in records:
+                index.write(json.dumps(self._entry(record), ensure_ascii=False) + '\n')
+            index.flush()
+            os.fsync(index.fileno())
+        mail_storage.sync_directory(self.root)
 
     def store(self, direction, mycall, peer, vmail, **detail):
+        from .mail_storage import durable_mkdir
+        self.entries()
         now = datetime.now(timezone.utc)
         sender, to = (peer, mycall) if direction == 'in' else (mycall, peer)
-        record = {'id': f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{sender.replace('/', '_')}",
+        record = {'id': f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex}-{sender.replace('/', '_')}",
                   'utc': now.isoformat(timespec='milliseconds'), 'direction': direction,
                   'from': sender, 'to': to, 'via': peer, 'subject': vmail.subject, 'body': vmail.body, **detail}
-        self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / (record['id'] + '.json')).write_text(json.dumps(record, ensure_ascii=False, indent=1) + '\n')
-        with (self.root / 'index.jsonl').open('a') as index:
-            index.write(json.dumps({key: record[key] for key in ('id', 'utc', 'direction', 'from', 'to', 'subject')},
-                                   ensure_ascii=False) + '\n')
+        self._entry(record)
+        durable_mkdir(self.root)
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=self.root,
+                                         prefix='.vmail-', delete=False) as out:
+            temporary = Path(out.name)
+            try:
+                json.dump(record, out, ensure_ascii=False, indent=1)
+                out.write('\n')
+                out.flush()
+                os.fsync(out.fileno())
+                os.replace(temporary, self.root / (record['id'] + '.json'))
+                mail_storage.sync_directory(self.root)
+            finally:
+                temporary.unlink(missing_ok=True)
+        self._append_index([record])
         return record
 
     def entries(self):
         path = self.root / 'index.jsonl'
-        return [json.loads(line) for line in path.read_text().splitlines()] if path.is_file() else []
+        if not self.root.exists():
+            return []
+        entries, offset, repair = [], 0, False
+        if path.exists():
+            data = path.read_bytes()
+            lines = data.splitlines(keepends=True)
+            for n, line in enumerate(lines):
+                try:
+                    entry = self._entry(json.loads(line))
+                except (ValueError, UnicodeDecodeError):
+                    if n != len(lines) - 1 or line.endswith(b'\n'):
+                        raise ValueError('invalid mailbox index; existing file preserved') from None
+                    repair = True
+                    break
+                entries.append(entry)
+                offset += len(line)
+            if repair or (data and not data.endswith(b'\n')):
+                with path.open('r+b') as index:
+                    index.truncate(offset)
+                    index.seek(offset)
+                    if entries and not data[:offset].endswith(b'\n'):
+                        index.write(b'\n')
+                    index.flush()
+                    os.fsync(index.fileno())
+        known = {entry['id'] for entry in entries}
+        if len(known) != len(entries):
+            raise ValueError('duplicate mailbox index IDs; existing file preserved')
+        recovered, present = [], set()
+        for record_path in self.root.glob('*.json'):
+            if not re.fullmatch(r'\d{8}T\d{12}Z-.+\.json', record_path.name):
+                continue
+            stat = record_path.stat()
+            signature = (stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+            present.add(record_path.stem)
+            cached = self._records.get(record_path.stem)
+            if cached is not None and cached[0] == signature:
+                record = cached[1]
+            else:
+                record = json.loads(record_path.read_text(encoding='utf-8'))
+                self._entry(record)
+                if (record_path.stem != record['id'] or
+                        not isinstance(record.get('body'), str)):
+                    raise ValueError('invalid mailbox record; existing file preserved')
+                self._records[record['id']] = (signature, record)
+            if record['id'] not in known:
+                # A record replace can commit before its index append fails.
+                with record_path.open('rb') as source:
+                    os.fsync(source.fileno())
+                recovered.append(record)
+        if known - present:
+            raise OSError('indexed mailbox record missing; custody cannot be verified')
+        recovered.sort(key=lambda record: (record['utc'], record['id']))
+        if recovered or path.exists():
+            self._append_index(recovered)
+        entries += [self._entry(record) for record in recovered]
+        self._dedup = {}
+        for n, entry in enumerate(entries, 1):
+            cached = self._records.get(entry['id'])
+            if cached is not None:
+                row = cached[1]
+                if row['direction'] == 'in' and row.get('composed_utc'):
+                    key = (row['to'], row['from'], row['composed_utc'], row['subject'], row['body'])
+                    self._dedup.setdefault(key, n)
+        return entries
+
+    def duplicate(self, owner, sender, mail):
+        self.entries()
+        return self._dedup.get((owner, sender, mail.composed, mail.subject, mail.body))
 
     def read(self, n):
         entries = self.entries()
@@ -1405,6 +1710,8 @@ class Session:
     call CQ, chat, and return. `say` is the operator's screen, `emit` the desk's
     events.jsonl, `arm` the keying line and `line_state` its readback. `caller` names
     the station behind an incoming attempt that never linked, when the host read it.
+    `power` sets the rig's RF power in watts when given them and returns what it reads
+    back, through the session's own CAT; `power_clamp_w` is the station's ceiling on it.
     `slots` is the receive-only channel watch (`contact.slots.SlotWatch`), if any.
     `band_tuner` takes the rig to another band's calling frequency and reads its setup
     back; the flow's own tuner, which moves the dial alone, by default."""
@@ -1414,14 +1721,18 @@ class Session:
                 '/tag TAG [value]', '/qsy SLOT', '/bye [text]', '/clear', '/auto on|off',
                 '/beacon [MINUTES|now|force|off]', '/beacon hop BANDS [every MINUTES]',
                 '/beacon hop auto [BANDS] [every MINUTES]',
-                '/beacon hop status', '/band N', '/band ready|unready', '/away [MESSAGE]', '/back', '/vmail [N | send SUBJECT | pending | collect CALL | dismiss CALL]', '/email send TO_EMAIL REPLY_EMAIL SUBJECT',
-                '/bbs list|get N|request N|capture', '/inquire heard', '/pskreporter [status|off]', '/all [cf|slot N|TEXT|status|off]', '/verbose [on|off]', '/quit')
+                '/beacon hop status', '/band N', '/band ready|unready', '/away [MESSAGE]', '/back', '/vmail [N | send SUBJECT | send CALL SUBJECT (offline) | park CALL SUBJECT | parked [N] | cancel N | parking on|off | relay on|off | notify CALL | pending | collect CALL | dismiss CALL]', '/email send TO_EMAIL REPLY_EMAIL SUBJECT',
+                '/bbs list|get N|request N|capture', '/inquire heard', '/pskreporter [status|off]', '/all [cf|slot N|TEXT|status|off]', '/verbose [on|off]', '/power [WATTS]', '/quit')
 
     def __init__(self, client: Client, flow: Flow, *, say, mailbox: Mailbox, emit=lambda kind, **record: None,
                  arm=lambda on: None, line_state=lambda: None, caller=lambda: None,
                  bandwidth=DEFAULT_BW, wait_seconds=SLOT_WAIT_S, slots=None, band_tuner=None, reporter=None, bbs_catalog=None,
-                 wall_clock=time.time):
+                 wall_clock=time.time, bbs_core=None, bbs_say=None, bbs_reload=None,
+                 identify=lambda bandwidth, after_peer: None, idcall=None, ident_report=None,
+                 power=None, power_clamp_w=None):
         self.client, self.flow, self.mailbox = client, flow, mailbox
+        self.power, self.power_clamp_w = power, power_clamp_w
+        self._power_owed = None
         self.band_tuner = band_tuner or flow.tuner
         self._band_fault = False
         self.band_setup = None
@@ -1433,11 +1744,18 @@ class Session:
         self._follow_tuned = False
         self._follow_hint_shown = False
         self.say, self.emit, self.arm, self.line_state = say, emit, arm, line_state
+        self.ident_report = ident_report or say
+        self.idcall = idcall or client.mycall
+        self.keyer = identify
+        self.owed = self._after_peer = False
+        self._identifying = False
         self.caller = caller
         self.bandwidth, self.wait_seconds = bandwidth, wait_seconds
         self.heard: list[Heard] = []
         self.auto = True
         self.verbose = False
+        self._audio_lost = {}
+        self._coverage_noticed = float('-inf')
         self._bbs_waiting = False
         self._peer_parse_fault = None
         self._service_hints = set()
@@ -1445,8 +1763,11 @@ class Session:
         self._notice_phase = None
         self._notice_data = None
         self.away = None
+        self._away_owed = None
+        self._bbs_list_queued = None
         self.new_vmails = 0
         self.compose = None
+        self._compose_link = None
         from .email_gateway import EmailClient
         self.email = EmailClient(self)
         from .bbs_client import BBSClient
@@ -1458,7 +1779,6 @@ class Session:
         self.broadcast = BroadcastClient(self)
         from .mail_collection import MailCollection
         self.mail_collection = MailCollection(self)
-        self._vmail_sent = False
         self._linked_at = None
         self.peer = None
         self.intent = None
@@ -1483,14 +1803,28 @@ class Session:
         self._quitting = False
         self._force_close = False
         self._close_failed = None
+        from ..bbs.frontends.varac import VarACEntrance
+        self.bbs = VarACEntrance(self, bbs_core, say=bbs_say, reload=bbs_reload)
+        from .mail_ack import MailAckOwner
+        from .mail_parking import MailParking
+        self.mail_ack = MailAckOwner(self)
+        self.parking = MailParking(self, wall_clock=wall_clock)
+        self._mail_replies = []
+        self.flow.mail_ready = self._mail_ready
+        self._inbox_contact_keys = set()
 
     @property
     def calling_hz(self):
         return CALLING_HZ[self.flow.band]
 
     @property
+    def _vmail_sent(self):
+        return self.mail_ack.busy and self.mail_ack.kind in ('direct', 'parking')
+
+    @property
     def _auto_answer(self):
-        return self.auto and (not self.hopping.active or self.hopping.ready(self.flow.band))
+        return (self.auto and not self._closing and not self._quitting
+                and (not self.hopping.active or self.hopping.ready(self.flow.band)))
 
     def where(self, entry):
         band = entry.band or self.flow.band
@@ -1520,6 +1854,15 @@ class Session:
             return
         if kind == 'host':
             words = raw.split()
+            if raw == 'PTT ON':
+                self.owed = True
+            if (self._closing or self._quitting) and words[:1] in (['PENDING'], ['CONNECTED']):
+                self._force_close = True
+                try:
+                    self.client.send_command('LISTEN OFF')
+                finally:
+                    self.client.send_command('ABORT')
+                return
             if words[:1] == ['CQFRAME'] and len(words) == 3:
                 self._heard(raw)
             elif raw == 'PENDING' and not self.client.calling and self._attempt_at is None:
@@ -1527,11 +1870,15 @@ class Session:
             elif raw == 'CANCELPENDING' and self._attempt_at is not None:
                 self._attempted()
             elif words[:1] == ['CONNECTED']:
+                self.parking.invalidate_notices()
                 self.broadcast.selected = None
                 self._attempt_at = None
-                mine = base_call(self.client.mycall)
-                self.peer = next((call for call in words[1:3] if base_call(call) != mine), self.peer)
+                mine = callsign(self.client.mycall)
+                previous = self.peer if self.contact is not None else None
+                self.peer = next((call for call in words[1:3] if callsign(call) != mine), previous)
                 self._begin()
+            elif raw == 'DISCONNECTED':
+                self.bbs.ended()
         elif kind == 'kiss':
             self._heard(raw, advanced=True)
         elif kind == 'broadcast':
@@ -1542,33 +1889,58 @@ class Session:
         elif kind == 'broadcast_error':
             self.emit('broadcast_error', detail=raw)
         elif kind == 'message':
+            if self._closing or self._quitting:
+                self.emit('rx', text=raw)
+                return
+            application = decode_application(raw)
+            acknowledged = self.mail_ack.message(
+                application, event.sequence if event.sequence is not None else self.client.message_sequence,
+                event.generation if event.generation is not None else self.client.link_generation)
+            if application.envelope is not None:
+                reply = self.client.send_tag
+                if (self.flow.qsy_receiving
+                        and self.flow.qsy_phase == 'waiting for peer arrival (<TL>)'
+                        and any(part.tag == 'TL' for part in application.parts)):
+                    reply = lambda tag: self._mail_replies.append((self.client.link_generation, tag))
+                self.emit('rx', text=raw)
+                if (vmail := VMail.parse(application.envelope)) is not None:
+                    if self.bbs.owned or self.files.active or self.bbs_host.active:
+                        reply('SMF' if self.parking.parking_enabled else 'SMFP')
+                    else:
+                        self._take(vmail, reply=reply)
+                else:
+                    self.say('Unrecognized VMail envelope retained in session log; not acknowledged')
+                return
+            if any(part.tag == 'VRP' for part in application.parts):
+                if self.client.connected:
+                    self.client.send_tag('VRPJ')
+                return
+            if self.bbs.message(raw):
+                return
             if self.bbs_host.message(raw):
                 return
             if self.files.message(raw):
                 return
             self.emit('rx', text=raw)
-            if self._closing or self._quitting:
-                return
-            if (vmail := VMail.parse(raw)) is not None:
-                self._take(vmail)
-                return
-            if raw.startswith(('<SM>', '<QSYR>\r\n<SM>')):
-                self.say('Unrecognized VMail envelope retained in session log; not acknowledged')
             lines = raw.replace('\r\n', '\n').rstrip('\n').split('\n')
             self.say(f'{"RX " if self.verbose else ""}{self.peer}: {lines[0]}')
             for line in lines[1:]:
                 self.say(' ' * (len(self.peer) + 2) + line)
-            if self._vmail_sent and raw.strip() == '<SMR>':
-                self._vmail_sent = False
+            if acknowledged and self.mail_ack.kind == 'direct' and self.mail_ack.result == 'SMR':
                 self.say(f'{self.peer} acknowledged the VMail')
         elif kind == 'incomplete' and self._bbs_waiting:
             self.emit('bbs_incomplete', peer=self.peer, dial_hz=self.flow.dial, text=raw)
             self.say('Incomplete BBS reply retained in session log')
         elif kind == 'tag':
             self.emit('tag', text=raw)
-            self._service_hint(raw)
+            if not event.diagnostic:
+                self._service_hint(raw)
         elif kind == 'sent':
-            self.emit('tx', text=raw)
+            self.emit('tx', text=raw, status='queued')
+        elif kind == 'write_complete':
+            if json.loads(raw)['disposition'] != 'complete':
+                self.mail_ack.interrupt('writer did not confirm complete admission')
+            self.bbs.writer_completion(raw)
         elif kind == 'held':
             self.say(f'{"beacon" if self.intent == "beacon" else raw} held: channel busy')
         elif kind == 'cq':
@@ -1577,8 +1949,10 @@ class Session:
                      f'{self.client.bandwidth} Hz')
         elif kind == 'state':
             self._state(State(raw))
-        elif kind == 'tune' and self.slots is not None:
-            self.slots.retune(int(raw))
+        elif kind == 'tune':
+            self.parking.invalidate_notices()
+            if self.slots is not None:
+                self.slots.retune(int(raw))
 
     def _verbose_event(self, event):
         kind, raw = event.kind, event.raw
@@ -1615,10 +1989,12 @@ class Session:
 
     def diagnostic(self, kind, **details):
         """Actual runtime observations, delivered on the terminal thread."""
-        if kind == 'link_recovery':
+        if kind in ('link_recovery', 'capture_rate'):
             self.say(details['text'])
-            self.emit('link_recovery', **details)
+            self.emit(kind, **details)
             return
+        if kind in ('acknowledged', 'discarded'):
+            self.emit('tx', status=kind, bytes=details['bytes'])
         if not self.verbose:
             return
         if kind == 'rx_protocol':
@@ -1683,6 +2059,8 @@ class Session:
                   rx_frequency_hz=rx_dial + 1500, received_unix=received_unix, n=entry.n, call=entry.call, slot=entry.slot, beacon=entry.beacon,
                   band_m=entry.band, dial_hz=self.where(entry), bandwidth_hz=entry.bw, sn=entry.sn,
                   **(dict(grid=entry.grid, status=entry.status) if entry.grid else {}))
+        if entry.beacon:
+            self.parking.heard(entry.call, rx_dial)
 
     def _state(self, state):
         self.emit('state', state=state.value, dial_hz=self.flow.dial)
@@ -1693,8 +2071,7 @@ class Session:
                            f'for {self.wait_seconds} s',
             State.CONNECTING: f'connecting {self.peer} on {khz(self.flow.dial)} kHz at {bw} Hz',
             State.CONNECTED: f'connected {self.peer}; Enter sends, /bye ends',
-            State.MONITORING: f'monitoring {khz(self.calling_hz)} kHz at {bw} Hz, '
-                              f'auto-answer {"on" if self._auto_answer else "off"}'
+            State.MONITORING: f'monitoring {khz(self.calling_hz)} kHz at {bw} Hz, {self._answering()}'
                               + (f', beacon every {self.beacon} min' if self.beacon else '')
                               + ''.join(f'; {slot_line(a)}' for a in self._watched() if a.state == 'busy'),
         }.get(state)
@@ -1706,10 +2083,13 @@ class Session:
     def _begin(self):
         if self.contact is not None or self._closing or self._quitting:
             return
+        if not self._auto_answer and self.intent is None:
+            self._force_close = True
+            self._run(self._farewell())
+            return
         self.bbs_host.reset()
         self.bbs_host.advertise()
         self.contacts += 1
-        self._vmail_sent = False
         self._service_hints.clear()
         self.contact = dict(n=self.contacts, peer=self.peer, how=self.intent or 'incoming',
                             dial_hz=self.flow.dial, bandwidth_hz=self.client.bandwidth,
@@ -1717,27 +2097,84 @@ class Session:
         self.emit('link', event='connected', peer=self.peer, how=self.contact['how'])
         self.emit('contact', **self.contact, ended_utc=None, line=None)
         self._linked_at = self.client.clock()
+        self.mail_ack.linked()
+        self._inbox_contact_keys.clear()
+        self.bbs.linked()
         for seq, text in self.client.messages:
             if seq > self.client.link_message_start:
-                for part in TextParser().feed(text, final=True):
+                for part in decode_application(text).parts:
                     if part.tag:
                         self._service_hint(part.raw)
         if self.intent is None:
             self.flow._state(State.CONNECTED)
-            if self.away:
-                # Away status goes out on the calling frequency (REL V11.4), as the
-                # measured `<AWQ>\r\n<VW>` does; no <AWQ>, so the link stays there.
-                self.client.send_text(emit_tag('AWAY') + '\r\n' + self.away)
-                self.say(f'away greeting sent to {self.peer}')
+            if self.away and self.flow.dial == self.calling_hz:
+                # ON2AD V16.1.8 p126: with auto-QSY only <AWQ> or <Q> crosses the
+                # calling frequency, as the measured `<AWQ>\r\n<VW>` does. The
+                # away message waits for the caller's QSY.
+                self.client.send_tag('AWQ')
+                self._away_owed = self.client.link_generation
+                self.say(f'away: <AWQ> sent to {self.peer}; the away message follows the QSY')
+            elif self.away:
+                self._greet_away()
             elif self.flow.dial == self.calling_hz:
                 self.client.send_tag('Q')
+            if self.flow.dial in CALLING_HZ.values():
+                if self.parking.pending():
+                    self.client.send_tag('VW')
+            else:
+                self.parking.start_delivery()
 
-    def _take(self, vmail):
+    def _greet_away(self):
+        self._away_owed = None
+        self.client.send_text(emit_tag('AWAY') + '\r\n' + self.away)
+        self.say(f'away greeting sent to {self.peer}')
+
+    def _opened_here(self):
+        """The peer sent its opening report on the current frequency: a caller
+        without auto-QSY exchanges it on the calling frequency (ON2AD V16.1.8 p126)."""
+        return any(text.startswith('de ') and any(part.tag == 'R' for part in TextParser().feed(text, final=True))
+                   for seq, text in self.client.messages if seq > self.client.link_message_start)
+
+    def _settled_tick(self):
+        if (self.contact is None or not self.client.connected or self.steps is not None or self._closing
+                or self.files.active or self.bbs_host.active or self.bbs.active):
+            return
+        generation = self.client.link_generation
+        if self._away_owed is not None:
+            if self._away_owed != generation or not self.away:
+                self._away_owed = None
+            elif self.flow.dial != self.calling_hz or self._opened_here():
+                self._greet_away()
+        if self._bbs_list_queued is not None:
+            if self._bbs_list_queued != generation:
+                self._bbs_list_queued = None
+            elif (self.flow.dial not in CALLING_HZ.values() and self.flow.state is State.CONNECTED
+                  and not self.mail_ack.busy and not self.parking.active):
+                self._bbs_list_queued = None
+                self.list_bbs()
+
+    def _mail_ready(self):
+        # C4: QSYR precedes the receipt SMR for a TL/SM aggregate.
+        replies, self._mail_replies = self._mail_replies, []
+        for generation, tag in replies:
+            if generation == self.client.link_generation:
+                self.client.send_tag(tag)
+        self.parking.start_delivery()
+
+    def _take(self, vmail, *, reply=None):
         if not self.client.connected or self.peer is None:
             return
-        if vmail.recipient is not None and vmail.recipient.upper() != self.client.mycall.upper():
-            self.say(f'VMail addressed to {vmail.recipient!r} was not collected or acknowledged')
-            return
+        reply = reply or self.client.send_tag
+        if vmail.recipient is not None:
+            try:
+                recipient = canonical_call(vmail.recipient)
+                mine = canonical_call(self.client.mycall)
+            except ValueError:
+                reply('SMF')
+                return
+            if recipient != mine:
+                self.parking.deposit(vmail, reply=reply)
+                return
         detail = {}
         if vmail.sender is not None:
             detail['from'] = vmail.sender
@@ -1747,35 +2184,32 @@ class Session:
             # A relay can repeat a stored message after losing our SMR. Only
             # deduplicate envelopes with both original author and compose time.
             duplicate = None
-            if vmail.sender and vmail.composed:
-                for n, entry in enumerate(self.mailbox.entries(), 1):
-                    if entry['direction'] == 'in' and entry['from'] == vmail.sender:
-                        old = self.mailbox.read(n)
-                        if (old.get('composed_utc') == vmail.composed
-                                and old['to'] == self.client.mycall
-                                and old['subject'] == vmail.subject and old['body'] == vmail.body):
-                            duplicate = n
-                            break
+            contact_key = (vmail.sender or self.peer, vmail.composed, vmail.subject, vmail.body)
+            if contact_key in self._inbox_contact_keys:
+                reply('SMR')
+                return
+            if vmail.composed:
+                duplicate = self.mailbox.duplicate(self.client.mycall, vmail.sender or self.peer, vmail)
             if duplicate is not None:
-                self.client.send_tag('SMR')
+                reply('SMR')
                 self.say(f'VMail {duplicate} already saved; acknowledged repeated relay from {self.peer}')
                 return
             record = self.mailbox.store('in', self.client.mycall, self.peer, vmail,
                                         dial_hz=self.flow.dial, snr=self.client.snr, **detail)
             n = len(self.mailbox.entries())
+            self._inbox_contact_keys.add(contact_key)
         except (OSError, ValueError, KeyError) as error:
-            self.say(f'VMail could not be saved; no acknowledgement sent: {error}')
+            self.say(f'VMail could not be saved; custody refused (SMF): {error}')
+            reply('SMF')
             return
         via = f' via {self.peer}' if vmail.sender else ''
         self.say(f'VMail {n} from {record["from"]}{via}: {vmail.subject or "(no subject)"} '
                  f'({len(vmail.body)} characters); /vmail {n} reads it')
         self.emit('vmail', direction='in', peer=self.peer, id=record['id'], subject=vmail.subject)
-        self.client.send_tag('SMR')
+        reply('SMR')
         self.mail_collection.received()
         if self.away:
             self.new_vmails += 1
-            if self.steps is None:
-                self._run(self._leaving())
 
     def _leaving(self):
         """The acknowledgement is delivered, then the link closes as the recorded farewells
@@ -1792,7 +2226,10 @@ class Session:
                 raise
 
     def _end(self):
+        self.mail_ack.interrupt('disconnected before acknowledgement')
+        self.bbs.ended()
         contact, self.contact = self.contact, None
+        self._after_peer = not self._closing
         verdict = {True: 'keying line reads HIGH; check the transmitter',
                    False: 'keying line reads LOW'}.get(self.line_state())
         if self.client.closed:
@@ -1813,8 +2250,18 @@ class Session:
 
     def tick(self, timeout=.1):
         self.client.poll(min(timeout, self._hint) if self.steps and self._hint else timeout)
+        self.bbs.tick()
         self.files.tick()
         self.bbs_host.tick()
+        self.mail_ack.tick()
+        if (self.away and not self.bbs.owned and not self._closing and self.contact is not None and self.client.connected
+                and self.client.clock() - self._linked_at >= AWAY_LINK_S):
+            self.say(f'away link at {AWAY_LINK_S // 60} min; closing')
+            self.mail_ack.interrupt('absolute away deadline')
+            if self.steps is not None:
+                self.steps.close()
+                self.steps = None
+            self._run(self._leaving())
         if self._peer_parse_fault is not None:
             (generation, reason), self._peer_parse_fault = self._peer_parse_fault, None
             if generation == self.client.link_generation:
@@ -1833,6 +2280,10 @@ class Session:
             self._error(error)
         if self.steps is not None:
             self._step()
+        try:
+            self._settled_tick()
+        except (ValueError, HostError, TimeoutError) as error:
+            self._error(error)
         if self.contact is not None and not self.client.connected:
             self._end()
         # A link that drops with the key down returns once the frame in the air ends.
@@ -1840,17 +2291,17 @@ class Session:
                 and self.line_state() is not True
                 and self.flow.state in (State.FAILED, State.RETURNED, State.CONNECTED)):
             self._return()
-        if (self.away and self.contact is not None and self.steps is None and self.client.connected
-                and self.client.clock() - self._linked_at >= AWAY_LINK_S):
-            self.say(f'away link at {AWAY_LINK_S // 60} min; closing')
-            self._run(self._leaving())
         self._slots_tick()
         self._beacon_tick()
+        self.parking.tick()
+        self._power_tick()
         self._operator_notice()
 
     def _receive_qsy(self, invitation):
+        self.bbs.detach('peer QSY')
         text, after, generation, origin = invitation
         self.flow.received_qsy_target(text, origin)
+        self.mail_ack.interrupt('QSY interrupted the mail exchange')
         if self.steps is not None:
             readiness = self.flow.qsy_phase in (
                 'waiting for peer auto-QSY readiness (<AWQ> or <Q>)',
@@ -1938,6 +2389,9 @@ class Session:
     def _slot_said(self, said):
         """Retain bounded current-band evidence; display only currently watched channels."""
         self.emit('slot', slot=said.slot, qso=said.kind, text=said.text, station=said.station or None)
+        if said.kind == 'coverage':
+            self._coverage_said(said)
+            return
         self._show_follow_hint()
         now = self.client.clock()
         lines = self._transcripts.setdefault(said.slot, deque(maxlen=REPLAY_LINES))
@@ -1947,8 +2401,32 @@ class Session:
         if self._follow_selected(said.slot):
             self.say(self._follow_line(said))
 
+    def _coverage_said(self, said):
+        """Coverage notes are diagnostics, logged but not traffic: the console gets one
+        line, at most every COVERAGE_NOTICE_S, when the audio lost in the last minute is
+        material (or under /verbose), and whenever the watch stops or resumes reading a
+        channel to keep up with the audio."""
+        if said.text in (SHED, RESUMED) and self.following is not None:
+            self.say(self._follow_line(said))
+            return
+        gap = re.match(r'passive audio gap: ([\d.]+) seconds', said.text)
+        if not gap or self.following is None:
+            return
+        now = self.client.clock()
+        lost = self._audio_lost.setdefault(said.slot, deque())
+        lost.append((now, float(gap[1])))
+        while lost[0][0] <= now - COVERAGE_WINDOW_S:
+            lost.popleft()
+        share = max(sum(s for _, s in d) for d in self._audio_lost.values() if d) / COVERAGE_WINDOW_S
+        if ((self.verbose or share > COVERAGE_LOSS_SHARE)
+                and now - self._coverage_noticed >= COVERAGE_NOTICE_S):
+            self._coverage_noticed = now
+            self.say(f'passive follower is dropping audio ({share:.0%} over the last minute); '
+                     'decodes may be missed')
+
     def _check_follow_retune(self):
-        if self.steps is not None or self.contact is not None or not self.idle or self.line_state() is True:
+        if (self.steps is not None or self.contact is not None or self._closing or self.broadcast.active
+                or not self.idle or self.line_state() is True):
             raise HostError('cannot retune to follow during a link or transmission; /stop or /bye first')
         if self._band_fault:
             raise HostError('band setup unverified; /band N must succeed first')
@@ -2048,6 +2526,8 @@ class Session:
             self.steps = None
         except (ValueError, HostError, TimeoutError) as error:
             self.steps = None
+            if self.flow.state is State.FAILED:
+                self.mail_ack.interrupt('opening or QSY exchange failed')
             if self._closing:
                 # A failed stop is fatal: leave the terminal so Host.close stops
                 # the runtime before rig.shutdown retires the keyer.
@@ -2065,7 +2545,15 @@ class Session:
         self._operator_notice()
 
     def stop(self):
+        self.mail_ack.interrupt('operator stopped exchange')
+        self.bbs.hard_stop('operator stop')
+        if self._bbs_list_queued is not None:
+            self._bbs_list_queued = None
+            self.say('queued BBS list cancelled')
+            if self.steps is None:
+                return
         if self.files.active or self.bbs_host.active:
+            self._force_close = True
             self.files.stop()
             return
         if self.flow.qsy_receiving and self.steps is not None:
@@ -2112,11 +2600,45 @@ class Session:
         try:
             self.monitor()
         except (ValueError, HostError, TimeoutError) as error:
+            if self._close_failed is not None:
+                raise
             self.flow.state = State.CALLING
             self.say(f'error: {error}; not monitoring. /auto on tries again')
             self.emit('error', text=str(error))
 
+    def identification_unsent(self):
+        if self.owed:
+            from ..core.cwid import unsent
+            self.owed = False
+            unsent(self.idcall, 'session ended before identification', self.ident_report)
+
+    def identify(self):
+        owed, after_peer = self.owed, self._after_peer
+        self.owed = self._after_peer = False
+        if owed:
+            return self.keyer(self.client.bandwidth, after_peer)
+
+    def _identify_steps(self):
+        closing = self._closing
+        self._closing = self._identifying = True
+        try:
+            steps = self.identify()
+            if steps is not None:
+                yield from steps
+            if self.line_state() is True:
+                raise HostError('keying line remains HIGH after identification; stopping runtime')
+            self._closing = closing
+        finally:
+            self._identifying = False
+
+    def _identified_return(self):
+        yield from self._identify_steps()
+        self.monitor()
+
     def monitor(self):
+        if self.owed:
+            self._run(self._identified_return())
+            return
         if self._band_fault:
             raise HostError('band setup unverified; /band N must succeed before transmitting')
         self._closing = False
@@ -2140,14 +2662,18 @@ class Session:
         self._show_follow_hint()
 
     def _farewell(self, text='73'):
-        if self.files.active or self.bbs_host.active:
-            yield from self.files.close_steps('operator ended capture')
-            return
         if self.idle and self.line_state() is not True:
             self.say('not linked; no farewell to send')
             return
         self._closing = True
         self.repeat = False
+        self.bbs.hard_stop('operator ended link')
+        if ((self.contact is not None or self.client.connected)
+                and (self.beacon or self._beacon_now or self.hopping.active)):
+            self.set_beacon(None)
+        if self.files.active or self.bbs_host.active:
+            yield from self.files.close_steps('operator ended capture')
+            return
         # Also settle an unlinked but still-keyed host. Completion must return
         # to monitoring even when /bye began in MONITORING.
         if self.flow.state not in (State.FAILED, State.RETURNED, State.CONNECTED):
@@ -2163,99 +2689,134 @@ class Session:
 
     def quit(self):
         self._quitting = True
-        if self.hopping.active:
+        self._closing = True
+        self.bbs.hard_stop('operator quit')
+        if self.beacon or self._beacon_now or self.hopping.active:
             self.set_beacon(None)
         try:
-            if self.broadcast.active:
-                self.broadcast.cancel()
-                if self.steps is not None:
-                    self.client.finish(self.steps)
-                    self.steps = None
             if self._close_failed is not None:
                 # terminal's finally calls quit after tick fails. Do not spend
                 # another close deadline while the runtime still owns the key.
                 raise self._close_failed
-            if self._closing:
-                # Finish the existing close, skipping any remaining farewell drain.
-                # Never queue a second <DISC> behind the unacknowledged first one.
-                if self.steps is not None:
-                    self.client.finish(self.steps)
-                    self.steps = None
-                # An interrupt may have exhausted the generator before it ever
-                # reached close_steps. Generator completion is not proof of close.
-                if self.client.connected or self.client.ptt or self.client.pending:
-                    self.client.finish(self.flow.close_steps(cancelled=lambda: True))
-            else:
-                if self.steps is not None:
-                    self.flow.cancel()
-                    if self.client.connected:
-                        self.steps.close()
-                    else:
-                        self.client.finish(self.steps)
-                    self.steps = None
-                if self.client.connected:
-                    self.client.finish(self._farewell())
-                elif self.client.ptt or self.client.pending:
-                    self.client.finish(self.flow.close_steps(cancelled=lambda: True))
+            steps, self.steps = self.steps, None
+            if self._identifying and steps is not None:
+                steps.close()
+                steps = None
+            stopping = steps is not None or not self.idle or self.line_state() is True
+            try:
+                if stopping:
+                    self.client.finish(self.flow.close_steps(timeout=5, cancelled=lambda: True))
+                elif not self.client.closed:
+                    self.client.send_command('LISTEN OFF')
+            finally:
+                if steps is not None:
+                    steps.close()
+            if self.line_state() is True:
+                raise HostError('keying line remains HIGH after close; stopping runtime')
         finally:
             self.files.end("session ended")
             self.bbs_host.reset()
             if self.contact is not None:
                 self._end()
+            self.identification_unsent()
 
     # -- the operator's commands ---------------------------------------------------
 
-    def command(self, line):
-        """One operator line; False ends the session."""
-        line = line.rstrip('\r\n')
-        if line.split()[:1] == ['/pskreporter']:
-            words = line.split()[1:]
-            if words not in ([], ['status'], ['off']):
+    def _local(self, line, words):
+        """Reads and settings that touch neither the link nor the transmitter. No busy
+        state refuses them and no draft is dropped for them."""
+        if self.parking.local_command(line, words):
+            return True
+        if words[:1] == ['/pskreporter']:
+            if words[1:] not in ([], ['status'], ['off']):
                 self.say('usage: /pskreporter [status|off]; enable at launch with --pskreporter --loc GRID')
             elif self.reporter is None:
                 self.say('PSKReporter off; enable at launch with --pskreporter --loc GRID')
             else:
-                if words == ['off']:
+                if words[1:] == ['off']:
                     self.reporter.stop()
                 self.say('PSKReporter: ' + json.dumps(self.reporter.status(), sort_keys=True))
-            return True
-        if line == '/status':
+        elif words == ['/status']:
             self.status()
-            return True
-        if line == '/help all':
-            self.broadcast.help()
-            return True
-        if line == '/all status':
-            self.broadcast.status()
-            return True
-        if line == '/email status':
-            self.email.command(['status'])
-            return True
-        if line == '/help email':
-            self.email.command([])
-            return True
-        if line == '/quit':
-            return False
-        words = line.split()
-        if words in (['/help'], ['/help', 'bbs']):
+        elif words in (['/help'], ['/help', 'bbs']):
             if words == ['/help']:
                 self.say('commands: ' + ', '.join(self.COMMANDS))
                 self.say('Slash commands control this client; other text is sent as chat when linked.')
                 self.say('/bye sends a graceful goodbye; /stop aborts an ordinary link or an active close; '
                          '/quit closes and exits without waiting for delivery. '
                          'During a readiness wait, /stop cancels only that wait.')
-                self.say('/status and /help preserve a VMail draft; other commands drop it.')
+                self.say('/status, /help, /heard, /slots, /follow, /vmail reads, /auto, /away, /back, '
+                         '/power and /verbose work in any state and preserve a draft; other commands drop it.')
                 self.broadcast.help()
             self.bbs_help()
-            return True
-        if words[:1] == ['/verbose']:
+        elif words == ['/help', 'all']:
+            self.broadcast.help()
+        elif words == ['/all', 'status']:
+            self.broadcast.status()
+        elif words == ['/help', 'email']:
+            self.email.command([])
+        elif words == ['/email', 'status']:
+            self.email.command(['status'])
+        elif words[:1] == ['/verbose']:
             if words[1:] not in ([], ['on'], ['off']):
                 self.say('usage: /verbose [on|off]')
             else:
                 self.verbose = not self.verbose if len(words) == 1 else words[1] == 'on'
                 self.say('verbose on: queued text, transmitted frames and decoded replies'
                          if self.verbose else 'verbose off')
+        elif words == ['/heard']:
+            for entry in self.heard:
+                self.say(self.listing(entry))
+            if not self.heard:
+                self.say('nothing heard yet')
+        elif words == ['/slots']:
+            self.list_slots()
+        elif words[:1] == ['/follow'] and len(words) == 2:
+            target = words[1].lower()
+            if target.isdigit() and len(target) <= 2:
+                target = int(target)
+            self.follow(None if target == 'off' else target)
+        elif words == ['/beacon', 'hop', 'status']:
+            self.hop_status()
+        elif words == ['/vmail']:
+            self.list_vmails()
+        elif words[:2] in (['/vmail', 'pending'], ['/vmail', 'dismiss']):
+            self.mail_collection.command(words[1:])
+        elif words[:1] == ['/vmail'] and len(words) == 2 and words[1].isdigit():
+            self.read_vmail(int(words[1]))
+        elif words[:1] == ['/auto'] and words[1:] in (['on'], ['off']):
+            self.set_auto(words[1] == 'on')
+        elif words[:1] == ['/away']:
+            self.set_away(line[5:].strip() or DEFAULT_AWAY)
+        elif words == ['/back']:
+            self.set_back()
+        elif words[:1] == ['/power']:
+            self.set_power(words[1:])
+        else:
+            return False
+        return True
+
+    def command(self, line):
+        """One operator line; False ends the session."""
+        line = line.rstrip('\r\n')
+        words = line.split()
+        try:
+            if self._local(line, words):
+                return True
+            if self.parking.draft is not None:
+                if words[:1] in (['/quit'], ['/bye'], ['/stop']):
+                    self.parking.draft = None
+                    self.say('Local VMail draft dropped; nothing sent')
+                else:
+                    self.parking.line(line)
+                    return True
+        except (ValueError, HostError, TimeoutError, OSError) as error:
+            self._error(error)
             return True
+        if self.bbs.command(line):
+            return True
+        if line == '/quit':
+            return False
         if self.broadcast.active:
             if words in (['/stop'], ['/bye']):
                 self.broadcast.cancel()
@@ -2304,18 +2865,6 @@ class Session:
                 stay_cf = len(words) == 3 and words[2].lower() == 'cf'
                 self.call(words[1], int(words[2]) if len(words) == 3 and not stay_cf else None,
                           auto_qsy=not stay_cf)
-            elif words == ['/slots']:
-                self.list_slots()
-            elif words[0] == '/follow' and len(words) == 2:
-                target = words[1].lower()
-                if target.isdigit() and len(target) <= 2:
-                    target = int(target)
-                self.follow(None if target == 'off' else target)
-            elif words == ['/heard']:
-                for entry in self.heard:
-                    self.say(self.listing(entry))
-                if not self.heard:
-                    self.say('nothing heard yet')
             elif words[:1] == ['/inquire']:
                 if words == ['/inquire', 'heard']:
                     self.inquire_heard()
@@ -2346,13 +2895,8 @@ class Session:
                 self._run(self._farewell(line[5:] or '73'))
             elif words == ['/clear']:
                 self.say(f'transmit buffer: {self.client.clean_buffer()}')
-            elif words[0] == '/auto' and words[1:] in (['on'], ['off']):
-                self.set_auto(words[1] == 'on')
             elif words[:2] == ['/beacon', 'hop']:
-                if words[2:] == ['status']:
-                    self.hop_status()
-                else:
-                    self.set_hopping(words[2:])
+                self.set_hopping(words[2:])
             elif words[0] == '/beacon' and len(words) <= 2:
                 if words[1:] in (['now'], ['force']):
                     self.beacon_now(force=words[1] == 'force')
@@ -2363,10 +2907,6 @@ class Session:
                     self.band_ready(words[1] == 'ready')
                 else:
                     self.change_band(int(words[1]))
-            elif words[0] == '/away':
-                self.set_away(line[5:].strip() or DEFAULT_AWAY)
-            elif words == ['/back']:
-                self.set_back()
             elif words[:1] == ['/bbs']:
                 if words == ['/bbs', 'list']:
                     self.list_bbs()
@@ -2380,12 +2920,10 @@ class Session:
                     self.say('usage: /bbs list | /bbs get N|filename | /bbs request N|filename | /bbs capture')
             elif words[:1] == ['/email']:
                 self.email.command(words[1:])
-            elif words == ['/vmail']:
-                self.list_vmails()
-            elif words[:2] in (['/vmail', 'pending'], ['/vmail', 'collect'], ['/vmail', 'dismiss']):
+            elif words[:2] == ['/vmail', 'collect']:
                 self.mail_collection.command(words[1:])
-            elif words[0] == '/vmail' and len(words) == 2:
-                self.read_vmail(int(words[1]))
+            elif words[:2] == ['/vmail', 'notify'] and len(words) == 3:
+                self.parking.notify(words[2])
             elif words[:2] == ['/vmail', 'send'] and len(words) >= 3:
                 self.compose_vmail(line.split(None, 2)[2].strip())
             else:
@@ -2467,11 +3005,18 @@ class Session:
         if self._follow_tuned and self.steps is None:
             return ('monitoring', 'passive follow; auto-answer and beacons suspended',
                     '/follow cf or /follow off returns to the calling frequency.')
-        return ('monitoring', f'not linked; {self.flow.state.value}',
+        return ('monitoring', f'not linked; {self.flow.state.value}; {self._answering()}',
                 'Ready for an operator command; no outgoing contact starts automatically.')
 
+    def _answering(self):
+        if self._auto_answer:
+            return 'auto-answer on'
+        if not self.auto:
+            return 'auto-answer off (/auto on to answer)'
+        return 'auto-answer suspended on this unready band (/band ready to answer)'
+
     def _data_status(self):
-        pending = self.client.buffer > 0
+        pending = self.client.buffer > 0 or bool(self.client.data_writer and self.client.data_writer.pending)
         # A local send can precede the first BUFFER report. An old BUFFER 0
         # cannot prove that this write has drained, nor prove peer reading.
         after = self.client._sent_after
@@ -2498,7 +3043,7 @@ class Session:
                 place += f' (slot {slot})'
         link = 'established' if self.client.connected else 'not established'
         self.say(f'Status: peer {self.peer if self.client.connected or self.steps else "none"}; '
-                 f'{place}; {self.client.bandwidth} Hz; modem link {link}.')
+                 f'{place}; {self.client.bandwidth} Hz; modem link {link}. {self.parking.summary()}')
         _, phase, action = self._operator_phase()
         self.say('Operation: ' + phase)
         self.say('Data: ' + self._data_status()[1])
@@ -2555,9 +3100,10 @@ class Session:
                 or self.flow.state is not State.CONNECTED:
             raise HostError('Last-heard inquiry needs an established link')
         if self.flow.dial in CALLING_HZ.values():
-            raise HostError('Last-heard inquiry requires QSY off the calling frequency first')
+            raise HostError('Last-heard inquiry requires QSY off the calling frequency first; '
+                            + self.qsy_hint())
         if (self.steps is not None or self._opening or self._bbs_waiting
-                or self.email.waiting or self._vmail_sent):
+                or self.mail_ack.busy or self.parking.active):
             raise HostError('Last-heard inquiry not sent: another application exchange is in progress')
         if self.client.pending or self.client.ptt or self._data_status()[0]:
             raise HostError('Last-heard inquiry not sent: wait for pending transmission to settle')
@@ -2569,18 +3115,29 @@ class Session:
                  '<LHE> means empty; <LHJ> means rejected. A modem ACK is not a list response. '
                  '/heard remains your local observations; no automatic retry.')
 
+    def qsy_hint(self):
+        return ('/qsy SLOT moves this link' if self.intent is not None else
+                f'{self.peer} called, so its station starts the QSY')
+
     def list_bbs(self):
-        if (self.steps is not None and self.flow.qsy_phase is not None
-                and self.flow.qsy_phase.startswith('waiting for peer auto-QSY readiness')):
-            raise HostError('BBS list not sent: peer has not announced auto-QSY readiness; '
-                            'wait, or /stop to cancel the wait and chat on the current frequency. '
-                            'Listing requires an agreed move off the calling frequency')
-        if self.steps is not None:
-            raise HostError('an exchange is in progress; wait for QSY/opening to complete')
-        if not self.client.connected or self.flow.state is not State.CONNECTED:
+        if self.mail_ack.busy or self.parking.active:
+            raise HostError('BBS list requires the mail exchange to settle')
+        if not self.client.connected or self._closing:
             raise HostError('BBS list needs an established link')
-        if self.flow.dial in CALLING_HZ.values():
-            raise HostError('BBS list requires QSY off the calling frequency first')
+        moving = self.flow.qsy_phase is not None or self.flow.qsy_receiving
+        if self.steps is not None and not moving and not self._opening:
+            raise HostError('BBS list not sent: another application exchange is in progress; '
+                            'wait for it to finish')
+        on_cf = self.flow.dial in CALLING_HZ.values()
+        if self.steps is not None or (on_cf and self.intent is None):
+            self._bbs_list_queued = self.client.link_generation
+            self.say('BBS list queued: it is requested once this link settles off the calling frequency'
+                     + ('' if self.steps is not None else '; ' + self.qsy_hint()) + '. /stop cancels it')
+            return
+        if self.flow.state is not State.CONNECTED:
+            raise HostError('BBS list needs an established link')
+        if on_cf:
+            raise HostError('BBS list requires QSY off the calling frequency first; /qsy SLOT moves this link')
         self.files.entries = ()
         self.files.offer = None
         self._run(self._bbs_list_steps())
@@ -2622,6 +3179,8 @@ class Session:
 
     def call(self, call, slot=None, *, auto_qsy=True):
         call = callsign(call)
+        if base_call(call) == base_call(self.client.mycall):
+            self.say(f'warning: {call} is this station\'s own callsign; calling it anyway')
         known = next((entry for entry in reversed(self.heard)
                       if entry.call == base_call(call) and entry.band in (None, self.flow.band)), None)
         self._connect('call', call, slot, known.bw if known else self.bandwidth, auto_qsy=auto_qsy)
@@ -2652,6 +3211,7 @@ class Session:
             self._opening = True
             try:
                 yield from self.flow.opening_steps()
+                self.parking.start_delivery()
             finally:
                 self._opening = False
 
@@ -2667,6 +3227,7 @@ class Session:
     def _calling(self, slot):
         if (yield from self.flow.cq_steps(slot, sniff_seconds=SNIFF_S, wait_seconds=self.wait_seconds)):
             yield from self.flow.opening_steps()
+            self.parking.start_delivery()
             return
         self.say(f'CQ on slot {slot} stopped' if self.flow.cancelled else
                  f'no answer on slot {slot}' if self._called else f'slot {slot} is busy; no CQ sent')
@@ -2679,6 +3240,7 @@ class Session:
             began = self.client.clock()
             if (yield from self.flow.cq_steps(slot, sniff_seconds=SNIFF_S, wait_seconds=self.wait_seconds)):
                 yield from self.flow.opening_steps()
+                self.parking.start_delivery()
                 return
             if self.flow.cancelled:
                 self.say(f'repeating CQ stopped after CQ {n}')
@@ -2703,6 +3265,7 @@ class Session:
         """The calling frequency between CQ cycles, for as long as the slot wait: beacon
         replies and direct calls land here (one did on 10-23 at 11:13Z), and VarAC
         publishes no CQ repeat to follow instead. Heard CQs list; a connect is taken."""
+        yield from self._identify_steps()
         self.client.listen()
         end = self.client.clock() + self.wait_seconds
         while not self.client.connected:
@@ -2978,10 +3541,11 @@ class Session:
                 self.hopping.defer()
         finally:
             self.intent = None
-            listening = self._auto_answer
-            self.arm(listening)
-            if listening:
-                self.client.listen()
+            if not (self._closing or self._quitting):
+                listening = self._auto_answer
+                self.arm(listening)
+                if listening:
+                    self.client.listen()
 
     def _leave(self, how, slot, bw):
         if self._band_fault:
@@ -2990,10 +3554,15 @@ class Session:
             self.flow.cancel()
             self.client.finish(self.steps)
             self.steps = None
+            if self.owed:
+                self._return()
         if self.steps is not None:
             raise HostError(f'{self.intent} is in progress; /stop first')
+        if self.client.connected:
+            raise HostError(f'linked with {self.peer}; /bye first')
         if not self.idle:
-            raise HostError('a link is up; /bye first')
+            raise HostError('an incoming link is being set up or the transmitter is keyed; '
+                            'wait for it to settle')
         if self.hopping.active and how != 'beacon':
             self.hopping.defer()
         self.intent, self.slot, self._called, self.repeat = how, slot, False, False
@@ -3011,8 +3580,8 @@ class Session:
             raise ValueError('an away message is one line of plain text (VarAC allows no tags in it)')
         self.away, self.new_vmails = text, 0
         self.emit('away', on=True, text=text)
-        self.say(f'away: a caller gets <AWAY> and "{text}", may leave a VMail, and is closed after '
-                 f'it or at {AWAY_LINK_S // 60} min; /back returns')
+        self.say(f'away: a caller gets <AWAY> and "{text}", may leave VMails, and is closed at '
+                 f'{AWAY_LINK_S // 60} min from connection; /back returns')
         if not self.auto:
             self.set_auto(True)
 
@@ -3044,27 +3613,93 @@ class Session:
     def compose_vmail(self, subject):
         if not self.client.connected:
             raise HostError('a VMail goes to the linked station; /call or /answer first')
+        if self.flow.dial in CALLING_HZ.values():
+            raise HostError('VMail requires QSY off the calling frequency first; ' + self.qsy_hint())
+        from .mail_parking import validate_content
+        validate_content(subject, '', local=True)
         VMail(subject, '').wire()
         self.compose = (subject, [])
+        self._compose_link = (self.client.link_generation, self.peer,
+                              datetime.fromtimestamp(self.parking.store.clock(), timezone.utc)
+                              .strftime('%Y-%m-%d %H:%M:%S'))
         self.say(f'VMail to {self.peer}, subject "{subject}": type the body; a line of only . sends it, '
                  '/status and /help preserve it; other /commands drop it')
 
     def send_vmail(self):
-        (subject, lines), self.compose = self.compose, None
+        from .mail_parking import validate_content
+        subject, lines = self.compose
+        generation, peer, composed = self._compose_link
+        if generation != self.client.link_generation or peer != self.peer:
+            raise HostError('VMail draft belongs to an earlier contact; drop it and compose again')
         vmail = VMail(subject, '\r\n'.join(lines))
-        size = len(vmail.wire())
-        if size > VMAIL_MAX:
-            self.say(f'VarAC caps a VMail at {VMAIL_MAX} characters; this one is {size}')
-        self.client.send_vmail(vmail)
-        self._vmail_sent = True
-        record = self.mailbox.store('out', self.client.mycall, self.peer, vmail,
-                                    dial_hz=self.flow.dial, snr=self.client.snr)
+        validate_content(vmail.subject, vmail.body, local=True)
+        try:
+            self.parking.send_direct(vmail, composed=composed)
+        except OSError as error:
+            raise HostError(f'VMail could not be queued: {error}') from error
+        self.compose = None
+        try:
+            record = self.mailbox.store('out', self.client.mycall, self.peer, vmail,
+                                        dial_hz=self.flow.dial, snr=self.client.snr)
+        except OSError as error:
+            raise HostError(f'VMail retained in parked queue; sent index could not be saved: {error}') from error
         self.emit('vmail', direction='out', peer=self.peer, id=record['id'], subject=subject)
         self.say(f'VMail queued for {self.peer}; waiting for peer acknowledgement <SMR>')
 
+    @property
+    def _clamp_said(self):
+        return 'no clamp' if self.power_clamp_w is None else f'clamp {self.power_clamp_w:g} W'
+
+    def set_power(self, words):
+        """`/power [WATTS]`: show or set the rig's RF power. It is CAT and not the key, so
+        it works in any state, but it never moves under a transmission: asked while
+        keyed, it is set as soon as the key is up."""
+        if self.power is None:
+            self.say('power control is not available in this session')
+            return
+        if not words:
+            read = self.power(None)
+            self.say(f'power {"unread" if read is None else f"{read:g} W"} ({self._clamp_said})')
+            return
+        try:
+            asked = float(words[0])
+        except ValueError:
+            asked = None
+        if len(words) != 1 or asked is None or not 0 < asked <= 100:
+            self.say('usage: /power [WATTS], 0 < WATTS <= 100')
+            return
+        watts, warning = clamp_power(asked, self.power_clamp_w, '/power')
+        if warning:
+            self.say(warning)
+        if self.client.ptt or self.line_state() is True:
+            self._power_owed = (asked, watts)
+            self.say(f'transmitting; power goes to {watts:g} W as soon as the key is up')
+            return
+        self._apply_power(asked, watts)
+
+    def _power_tick(self):
+        if self._power_owed is not None and not (self.client.ptt or self.line_state() is True):
+            owed, self._power_owed = self._power_owed, None
+            self._apply_power(*owed)
+
+    def _apply_power(self, asked, watts):
+        try:
+            read = self.power(watts)
+        except OSError as error:
+            self.say(f'power not set: {error}')
+            return
+        if read is None:
+            self.say(f'!! power asked {watts:g} W, RFPOWER did not read back ({self._clamp_said})')
+        elif abs(read - watts) > 1:
+            self.say(f'!! power asked {watts:g} W, the rig reads {read:g} W ({self._clamp_said})')
+        else:
+            self.say(f'power set to {read:g} W ({self._clamp_said})')
+        self.emit('power', requested_w=asked, set_w=watts, read_w=read, clamp_w=self.power_clamp_w)
+
     def set_auto(self, on):
         self.auto = on
-        if self.contact is None and self.idle:
+        if (self.contact is None and self.idle and self.steps is None
+                and not (self._closing or self._quitting or self.broadcast.active)):
             self.monitor()
         else:
             self.say(f'auto-answer {"on" if on else "off"} from the next return to the calling frequency')

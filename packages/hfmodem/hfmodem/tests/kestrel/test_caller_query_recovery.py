@@ -87,7 +87,7 @@ def test_extra_long_answer_fits_are_bounded_to_fresh_query_window(monkeypatch):
         return original(x,kind,*args,**kwargs)
     monkeypatch.setattr(A,'_payload_fit',fit)
     feed(hs,np.zeros(3*M.FS))
-    assert 0<len(calls)<=12 and min(calls)>=A._SESSION_NEED
+    assert 0<len(calls)<=6*len(A._CALLER_QUERY_ANSWERS) and min(calls)>=A._SESSION_NEED
     assert hs.payload_ledger.confirmed==0
 
 

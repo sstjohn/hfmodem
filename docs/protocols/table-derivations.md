@@ -400,7 +400,6 @@ is packaged as an asset:
 | Eight P3 interleavers | Computed — SCS's published recurrence | byte-identical against the archived bytes |
 
 
-<!-- site:omit:start -->
 ## PACTOR-4 C2 and higher normal-long geometry
 
 Runtime C2 arrays use an integer square-root column walk plus compact,
@@ -433,4 +432,3 @@ modem startup.
 | `c2-12420.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
 | `c2-16560.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
 | `c2-20700.swaps.z` | Replay swaps | Exact recovered CML session; offline proof command retained; operator-approved runtime representation, resource and canonical hashes pinned |
-<!-- site:omit:end -->

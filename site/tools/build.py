@@ -147,6 +147,8 @@ def reference_route(source):
 EVIDENCE_DOWNLOADS = (
     'evidence/vara-mail-0918/provenance.json',
     'evidence/vara-mail-0918/audio/20260918T154839Z-W9SSJ-tap.wav',
+    'evidence/pactor4-ve3kpg-0929/provenance.json',
+    'evidence/pactor4-ve3kpg-0929/audio/receiver.flac',
 )
 RECORDING_FILES = ('audio/vara-ofdm-k5dat-0930.flac', 'vara-ofdm-k5dat-0930.json')
 
@@ -193,34 +195,20 @@ def inline(text):
 
 
 def public_markdown(text):
-    """Exclude marked repository-only sections and comment lines from site documents."""
-    start, end = '<!-- site:omit:start -->', '<!-- site:omit:end -->'
+    """Drop comment lines, such as licence headers, outside fenced code."""
     out = []
-    hidden = fenced = False
+    fenced = False
     for line in text.splitlines():
         if re.match(r'\s*(```|~~~)', line):
             fenced = not fenced
-        if fenced:
-            if not hidden:
-                out.append(line)
-        elif line == start:
-            if hidden:
-                raise ValueError('Nested site omission')
-            hidden = True
-        elif line == end:
-            if not hidden:
-                raise ValueError('Unmatched site omission end')
-            hidden = False
-        elif not hidden and not re.fullmatch(r'\s*<!--.*-->\s*', line):
+        if fenced or not re.fullmatch(r'\s*<!--.*-->\s*', line):
             out.append(line)
-    if hidden:
-        raise ValueError('Unclosed site omission')
     return '\n'.join(out)
 
 
 def markdown(text):
     out = []
-    # Omitting sections can leave several blank lines between visible blocks.
+    # Dropped comment lines can leave several blank lines between visible blocks.
     blocks = []
     for part in re.split(r'(?m)(^```[^\n]*\n[\s\S]*?^```[ \t]*$)', text.strip()):
         if part.startswith('```'):

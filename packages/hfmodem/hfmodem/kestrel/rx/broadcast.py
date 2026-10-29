@@ -317,10 +317,27 @@ def decode_audio(samples, body_start, *, level, sample=0, sn=0.0, on_attempt=Non
     return None
 
 
+def _is_short_tail(raw, level):
+    """The short last packet of a multipart UI group, which cannot parse alone.
+
+    Its marker is the UI short form (8 at level 1, else 0) and its payload ends
+    0x14, one CRC byte, then zeros. Session DATA never carries that marker with
+    that end: a full body's per-frame field ends binary 01, a short close ends
+    on the level byte and 0x82 [arq.phy.vara_body], and the one close whose
+    field is the caller CRC puts 0x14 in the payload's last byte instead.
+    """
+    payload, marker = raw[:-3], raw[-3]
+    if marker != (8 if level == 1 else 0) or payload[-1] == 0x14:
+        return False
+    end = payload.rfind(0x14)
+    return 0 < end <= len(payload) - 2 and not any(payload[end + 2 :])
+
+
 def is_broadcast_frame(frame):
     """Reject identified UI packets at connected-DATA admission.
 
-    Complete single packets require canonical re-encoding. Multipart first
+    Complete single packets require canonical re-encoding; a short last packet
+    heard without its first needs the UI short envelope. Multipart first
     packets require the qualified physical marker, checksum-nibble envelope
     and a complete compact address header. The group checksum is checked by
     parse_packets before UI delivery; a partial packet cannot deliver UI.
@@ -338,7 +355,7 @@ def is_broadcast_frame(frame):
     ):
         return False
     if raw[0] in (0x40, 0x50):
-        return parse_packets([raw], level=level) is not None
+        return parse_packets([raw], level=level) is not None or _is_short_tail(raw, level)
     if raw[0] not in (0xC0, 0xD0) or raw[1] & 15 or raw[-3] != (9 if level == 1 else 1):
         return False
     core = bytes([raw[0] & 0x7F]) + raw[2:-3]

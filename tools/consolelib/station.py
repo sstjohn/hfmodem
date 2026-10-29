@@ -337,7 +337,7 @@ def spell_environment(env, band_m=None, working_point=None, *, selection=None):
                      'the port was busy or the rig answered short ***')
     if 'rfpower' in env:
         lines.append(f'  RFPOWER reads {env["rfpower"] or "unreadable"}; '
-                     'only --p1-watts/--p3-watts write it')
+                     'written by --power, --p1-watts/--p3-watts and the station clamp')
     if rig.get('dial_hz') or rig.get('mode'):
         lines.append(f'  dial {rig.get("dial_hz") or "unreadable"}, '
                      f'mode {rig.get("mode") or "unreadable"}, ptt {rig.get("ptt") or "?"}')
@@ -582,10 +582,13 @@ def prepare_radio(plan):
     if cfg is None or selection.RIG_NAME not in _MAIL_DATA_SETTINGS:
         raise ValueError('Guided radio preparation requires a saved FTDX10 or FT-891 station.')
     settings = _MAIL_DATA_SETTINGS[selection.RIG_NAME]
-    print(f'Preparing {selection.RIG_NAME.upper()} data audio and {cfg.rig.power_w:g} W power…', flush=True)
+    watts, warning = station_config.clamp_power(cfg.rig.power_w, cfg.rig.power_clamp_w, '[rig] power_w')
+    if warning:
+        print(warning, flush=True)
+    print(f'Preparing {selection.RIG_NAME.upper()} data audio and {watts:g} W power…', flush=True)
     commands = ['V VFOA', 'w MD0C;',
                 *(f'w EX{item}{value};' for item, value in settings.items()),
-                f'L RFPOWER {cfg.rig.power_w / 100:g}', 'q']
+                f'L RFPOWER {watts / full_scale_w(selection):g}', 'q']
     try:
         result = native_command(list(selection.RIGCTL), input='\n'.join(commands) + '\n', timeout=25)
     except claim.ClaimError as exc:
@@ -607,12 +610,77 @@ def prepare_radio(plan):
     if not mode.startswith(('PKTUSB', 'DATA-U')):
         raise ValueError('DATA USB mode was not verified; nothing was keyed.')
     try:
-        power = float(reading.get('levels', {}).get('RFPOWER', '')) * 100
+        power = float(reading.get('levels', {}).get('RFPOWER', '')) * full_scale_w(selection)
     except (ValueError, TypeError):
         raise ValueError('The radio did not report its RF power; nothing was keyed.') from None
-    if abs(power - cfg.rig.power_w) > 1:
-        raise ValueError(f'Radio power reads {power:g} W instead of {cfg.rig.power_w:g} W; nothing was keyed.')
+    if abs(power - watts) > 1:
+        raise ValueError(f'Radio power reads {power:g} W instead of {watts:g} W; nothing was keyed.')
     print('Data audio and RF power verified.', flush=True)
+
+
+def full_scale_w(selection):
+    """The watts RFPOWER 1.0 stands for: the station file's, else the rig profile's, else 100."""
+    cfg = selection._STATION_CONFIG
+    return cfg.full_scale_w if cfg else selection.RIG_PROFILE.get('max_watts') or 100
+
+
+def rfpower_w(selection):
+    """RFPOWER as the rig reads it, in watts, or None when it did not answer."""
+    try:
+        return float(cat('l', 'RFPOWER', selection=selection)) * full_scale_w(selection)
+    except (TypeError, ValueError):
+        return None
+
+
+def hold_power(plan):
+    """At the start of an arm, under its lease: RFPOWER to the arm's `--power`, or down
+    to the station clamp when the rig reads above it. Without either nothing here reads
+    or writes the rig, nor on a station with no CAT. A write that does not take is
+    said, never a refusal."""
+    selection = selection_for_plan(plan)
+    cfg = selection._STATION_CONFIG
+    if cfg is not None and cfg.rig.cat == 'none':
+        return
+    clamp_w = cfg.rig.power_clamp_w if cfg else None
+    wanted = plan['adjustments'].get('power_w')
+    if wanted is None and clamp_w is None:
+        return
+    if wanted is None:
+        found = rfpower_w(selection)
+        if found is None:
+            print(f'  !! RFPOWER did not read, so the {clamp_w:g} W station clamp is unchecked', flush=True)
+            return
+        if found <= clamp_w + 0.5:
+            return
+        print(f'  RFPOWER reads {found:g} W, above the {clamp_w:g} W station clamp; '
+              f'lowering it to {clamp_w:g} W', flush=True)
+        wanted = clamp_w
+    else:
+        wanted, warning = station_config.clamp_power(wanted, clamp_w, '--power')
+        if warning:
+            print(warning, flush=True)
+    try:
+        result = native_command([*selection.RIGCTL, 'L', 'RFPOWER', f'{wanted / full_scale_w(selection):g}'],
+                                timeout=4)
+        refused = result.returncode or re.search(r'RPRT -\d+', result.stdout + result.stderr)
+        if refused:
+            print(f'  !! the rig refused RFPOWER {wanted:g} W '
+                  f'({(result.stdout + result.stderr).strip() or f"exit {result.returncode}"})', flush=True)
+    except (claim.ClaimError, subprocess.SubprocessError, OSError) as error:
+        print(f'  !! RFPOWER {wanted:g} W was not written ({error}); the rig stays where it was', flush=True)
+    got = rfpower_w(selection)
+    print(power_said(wanted, got, clamp_w), flush=True)
+
+
+def power_said(wanted, got, clamp_w):
+    """The readback line after a power write: the setting, or a `!!` line naming both
+    figures when the rig did not read back what was asked."""
+    clamp = f' (clamp {clamp_w:g} W)' if clamp_w is not None else ''
+    if got is None:
+        return f'  !! power asked {wanted:g} W, RFPOWER did not read back{clamp}'
+    if abs(got - wanted) > 1:
+        return f'  !! power asked {wanted:g} W, the rig reads {got:g} W{clamp}'
+    return f'  power set to {got:g} W{clamp}'
 
 
 def check_rig(plan):

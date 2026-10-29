@@ -17,12 +17,16 @@ class RetuneRequest:
         self.done, self.error, self.cancelled = False, None, False
         self._lock = threading.Lock()
 
-    def cancel(self):
-        with self._lock:
+    def cancel(self, *, timeout=-1):
+        if not self._lock.acquire(timeout=timeout):
+            raise TimeoutError('Receiver retune cancellation timed out')
+        try:
             if self.done:
                 return False
             self.cancelled = self.done = True
             return True
+        finally:
+            self._lock.release()
 
 
 class AudioHostRuntime:
@@ -37,10 +41,12 @@ class AudioHostRuntime:
         self._attempt_end = 0.0
         self._setup_window_started = False
         self._retry_at = 0.0
+        self._request_listen_end = 0.0
         self._idle_at = 0.0
         self._progress = None
         self._state = None
         self._unkey_sequence = None
+        self._idle_unkey = None
         self._diagnostic_modem = None
         self._payload_credit = (0, 0)
         self._retunes = queue.Queue(maxsize=1)
@@ -183,9 +189,13 @@ class AudioHostRuntime:
             self._attempt_end = pending_at + 30 if pending_at is not None else now + 60
             self._setup_window_started = False
             self._retry_at = now + 8
+            self._request_listen_end = 0.0
             self._unkey_sequence = None
         self._state = hs.state
         if hs.state == VaraState.CONNECTING:
+            if hs.connect_request_pending and now >= max(self._attempt_end, self._request_listen_end):
+                hs.on_rx_stream((), flush=True)
+                now = self.clock()
             if self.modem.incoming_pending:
                 self._attempt_end = self.modem.incoming_pending_at + 30
             elif hs.connect_setup_pending and not self._setup_window_started:
@@ -203,25 +213,41 @@ class AudioHostRuntime:
             # even when CHAT keeps the ordinary connect-request cadence.
             anchor_unkey = quiet is not None or getattr(hs, 'connect_setup_pending', False)
             if anchor_unkey and self._unkey_sequence != self.modem.unkey_sequence:
-                self._unkey_sequence = self.modem.unkey_sequence
                 gap = quiet if quiet is not None and hs.connect_request_pending else 8
                 anchor = self.modem.last_unkey_at
                 self._retry_at = (now if anchor is None else anchor) + gap
-            if now >= self._attempt_end:
+            if self._unkey_sequence != self.modem.unkey_sequence:
+                self._unkey_sequence = self.modem.unkey_sequence
+                if hs.connect_request_pending and self.modem.last_unkey_at is not None:
+                    self._request_listen_end = self._retry_at
+            expired = now >= self._attempt_end
+            # The deadline stops new requests; it cannot take back a sent one's reply window.
+            listening = hs.connect_request_pending and now < self._request_listen_end
+            if expired and not listening:
                 self.modem.abort()
                 if not self.modem.connected and not self.modem.incoming_pending:
                     self.modem.observer.modem_disconnected()
-            elif now >= self._retry_at and not self.transport.receiving:
+            elif not expired and now >= self._retry_at and not self.transport.receiving:
                 hs.retry_connect()
                 gap = quiet if quiet is not None and hs.connect_request_pending else 8
                 anchor = self.modem.last_unkey_at
-                keyed = anchor_unkey and self._unkey_sequence != self.modem.unkey_sequence
-                self._retry_at = ((anchor if keyed and anchor is not None else self.clock()) + gap)
+                keyed = self._unkey_sequence != self.modem.unkey_sequence
+                self._retry_at = ((anchor if anchor_unkey and keyed and anchor is not None else self.clock()) + gap)
+                if keyed and hs.connect_request_pending and anchor is not None:
+                    self._request_listen_end = self._retry_at
                 self._unkey_sequence = self.modem.unkey_sequence
         elif hs.state == VaraState.CONNECTED:
             progress = (hs.progress, hs.idle_keyed)
             if progress != self._progress:
                 self._progress, self._idle_at = progress, now + 10
+            # Every transmission opens a reply window, including a turnaround
+            # ask that moves neither counter: shackbook 2026-10-28 re-asked
+            # 0.7 s behind its own ask and lost the grant keyed into the gap.
+            if self._idle_unkey != self.modem.unkey_sequence:
+                self._idle_unkey = self.modem.unkey_sequence
+                anchor = self.modem.last_unkey_at
+                if anchor is not None:
+                    self._idle_at = max(self._idle_at, anchor + 10)
             if not self.transport.receiving:
                 query = hs.intermediate_query_due_in()
                 retry = hs.data_retry_due_in()

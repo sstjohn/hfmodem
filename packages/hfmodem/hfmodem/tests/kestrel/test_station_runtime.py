@@ -40,7 +40,7 @@ def station(*, refuse=False):
     sent = []
     st = SimpleNamespace(audio=SimpleNamespace(samples=0),
         rig=SimpleNamespace(dial=lambda: 7100000),
-        cfg=SimpleNamespace(rig=SimpleNamespace(power_w=10, ptt=SimpleNamespace(settle_s=0))))
+        cfg=SimpleNamespace(declared_power_w=10, rig=SimpleNamespace(power_w=10, ptt=SimpleNamespace(settle_s=0))))
     def submit(req):
         if refuse:
             raise Refused('test refusal')

@@ -115,7 +115,7 @@ class BurstInvalidated(Exception):
 _HELD: dict[tuple[str, int], object] = {}
 
 
-def play_drained(samples: np.ndarray, samplerate: float, device) -> None:
+def play_drained(samples: np.ndarray, samplerate: float, device, *, cancelled=None) -> None:
     """Play one transmission into `device`, returning once it has been emitted.
 
     The one call in this project that hands audio to a sound card to transmit, so
@@ -172,13 +172,31 @@ def play_drained(samples: np.ndarray, samplerate: float, device) -> None:
     block = np.ascontiguousarray(np.asarray(samples, dtype=np.float32))
     if block.ndim == 1:
         block = block.reshape(-1, 1)
+    def write(stream):
+        if cancelled is None:
+            stream.write(block)
+            return
+        for start in range(0, len(block), max(1, int(samplerate * .05))):
+            if cancelled():
+                stream.abort()
+                raise InterruptedError('identification cancelled')
+            stream.write(block[start:start + max(1, int(samplerate * .05))])
+        if cancelled():
+            stream.abort()
+            raise InterruptedError('identification cancelled')
+
     if (held := _HELD.get((str(device), block.shape[1]))) is not None:
         # The drain a held stream cannot get from `stop`, in the same currency
         # and not as an estimate of the device's lag: the ring the write fills is
         # what stands between the last sample and the air, and it is empty again
         # exactly when the callback has taken all of it.
         room = held.write_available
-        held.write(block)
+        try:
+            write(held)
+        except InterruptedError:
+            _HELD.pop((str(device), block.shape[1]), None)
+            held.close()
+            raise
         while held.write_available < room:
             time.sleep(0.001)
         return
@@ -186,7 +204,7 @@ def play_drained(samples: np.ndarray, samplerate: float, device) -> None:
                              channels=block.shape[1], dtype="float32")
     try:
         stream.start()
-        stream.write(block)
+        write(stream)
         stream.stop()              # returns once the device has played it all
     finally:
         stream.close()

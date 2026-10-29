@@ -475,15 +475,14 @@ def test_buffer_clear_refuses_a_turn_we_hold_even_while_asking():
     assert tuple(hs._txq) == before
 
 
-@pytest.mark.parametrize('level', [1, 2, 3, 4])
-@pytest.mark.parametrize('sn', [-9.3, 20.0])
-def test_host_sn_does_not_change_500_rate_selection(level, sn):
+@pytest.mark.parametrize('level,sn,frame', [
+    (1, 20.0, 6), (2, 20.0, 6), (3, 20.0, 6), (4, 20.0, 4),
+    (1, -9.6, 0), (2, -9.6, 0), (3, -9.6, 5), (4, -9.6, 5)])
+def test_500_rate_selection_reads_host_sn_on_the_channel_scale(level, sn, frame):
     hs, _ = idle._station('500')
     hs._link_high_speed = True
-    hs._rx_read = (level, None)
-    previous = hs._irs_step()
     hs._rx_read = (level, sn)
-    assert hs._irs_step() == previous
+    assert hs._irs_step() == frame
 
 
 def test_called_close_waits_for_successful_transmission(monkeypatch):

@@ -276,3 +276,177 @@ def test_rejected_outbound_attempt_does_not_keep_inbound_boundary_open():
     c._line('CONNECTED W9SSJ WR9R 500')
     desk.session.command('/qsy 15')
     assert not any('<QSYF>' in x for x in desk.texts)
+
+
+def parked(desk, peer='K1ABC', body='queued before contact'):
+    return desk.session.parking.store.accept(owner='W9SSJ', sender='W9SSJ', recipient=peer,
+                                             via='W9SSJ', subject='waiting', body=body,
+                                             composed='2026-10-28 12:00:00', origin='local')[0]
+
+
+def mail_wires(desk):
+    return [text for text in desk.texts if '<SM>' in text]
+
+
+def advance_mail(desk):
+    for _ in range(8):
+        desk.tick()
+
+
+@pytest.mark.parametrize('outside_count', [False, True])
+def test_tl_sm_responder_custody_and_forwarding_precede_peer_report(outside_count):
+    desk = Desk()
+    row = parked(desk)
+    desk.hear('CONNECTED K1ABC W9SSJ 500', 'SN -7.0')
+    assert not mail_wires(desk)
+    assert desk.texts.count('4 <VW>') == 1
+    desk.receive('<QSYF>000014105750</QSYF>')
+    assert desk.flow.qsy_phase == 'waiting for peer arrival (<TL>)'
+    # C4 establishes this aggregate ordering, but its passive transcript does
+    # not preserve the full body. Exercise its shape with a synthetic UTF-8 body.
+    text = '<TL>\r\n<SM><SBJ:Happy Sunday!><MSG:café\r\n73>'
+    raw = v.frame_message(text[:-1]) + b'>' if outside_count else v.frame_message(text)
+    for byte in raw[:-1]:
+        desk.host.data.incoming.append(bytes([byte]))
+        desk.tick()
+    assert not desk.mailbox.entries() and not mail_wires(desk)
+    desk.host.data.incoming.append(raw[-1:])
+    advance_mail(desk)
+    assert desk.mailbox.read(1)['body'] == 'café\r\n73'
+    assert desk.texts.count('5 <SMR>') == desk.texts.count('6 <QSYR>') == 1
+    assert desk.texts.index('6 <QSYR>') < desk.texts.index('5 <SMR>')
+    assert len(mail_wires(desk)) == 1
+    assert desk.flow.qsy_phase == 'waiting for peer opening signal report'
+    assert desk.session.parking.store.get(row['id'])['state'] == 'in_flight'
+    assert not any('de W9SSJ' in text for text in desk.texts)
+    desk.receive('de K1ABC <R-07> <S:V>\r\n<SMR>')
+    assert desk.session.parking.store.get(row['id'])['state'] == 'delivered'
+    assert desk.session.steps is None and desk.host.client.connected
+
+
+def test_requester_forwards_after_tl_before_qsyr_and_accepts_mail_during_wait():
+    desk = caller()
+    row = parked(desk, 'KE8PLM')
+    desk.session.command('/call KE8PLM')
+    advance_mail(desk)
+    assert desk.flow.qsy_phase == 'waiting for peer acceptance (<QSYR>)'
+    assert len(mail_wires(desk)) == 1
+    assert desk.texts.index('4 <TL>') < desk.texts.index(mail_wires(desk)[0])
+    assert desk.session.parking.store.get(row['id'])['state'] == 'in_flight'
+    desk.receive('<QSYR>\r\n<SM><SBJ:reply><MSG:from the other endpoint>')
+    advance_mail(desk)
+    assert desk.mailbox.read(1)['body'] == 'from the other endpoint'
+    assert desk.texts.count('5 <SMR>') == 1
+    assert desk.session.parking.store.get(row['id'])['state'] == 'in_flight'
+    desk.receive('<SMR>')
+    assert desk.session.parking.store.get(row['id'])['state'] == 'delivered'
+
+
+@pytest.mark.parametrize('away', [False, True])
+def test_unsolicited_off_cf_present_and_away_start_delivery_once(away):
+    desk = Desk()
+    row = parked(desk)
+    if away:
+        desk.session.set_away('back later')
+    desk.flow.dial = v.slot_frequency(20, 11)
+    desk.hear('CONNECTED K1ABC W9SSJ 500')
+    advance_mail(desk)
+    desk.session.parking.start_delivery()
+    desk.flow.mail_ready()
+    advance_mail(desk)
+    assert len(mail_wires(desk)) == 1
+    assert desk.session.parking.store.get(row['id'])['attempts'] == 1
+    if away:
+        assert desk.texts.index(mail_wires(desk)[0]) > next(
+            index for index, text in enumerate(desk.texts) if '<AWAY>' in text)
+
+
+def test_direct_slot_call_starts_queue_after_opening_and_duplicate_hook_is_idempotent():
+    desk = Desk(**{'CONNECT W9SSJ K1ABC': ['OK', 'CONNECTED W9SSJ K1ABC 500', 'SN 4.0']})
+    row = parked(desk)
+    desk.do('/call K1ABC 11')
+    advance_mail(desk)
+    desk.session.parking.start_delivery()
+    assert len(mail_wires(desk)) == 1
+    assert desk.texts.index(mail_wires(desk)[0]) > next(
+        index for index, text in enumerate(desk.texts) if 'de W9SSJ' in text)
+    assert desk.session.parking.store.get(row['id'])['attempts'] == 1
+
+
+@pytest.mark.parametrize('repeat', [False, True])
+def test_cq_answer_starts_queue_after_opening_once(repeat):
+    from hfmodem.tests.contact.test_varac import CQ_DONE, FRAME
+    desk = Desk(**{FRAME: CQ_DONE})
+    row = parked(desk)
+    desk.session.command('/cq 1' + (' repeat' if repeat else ''))
+    desk.drive(until=lambda: desk.flow.state is v.State.WAITING)
+    desk.hear('SN 4.0', 'CONNECTED K1ABC W9SSJ 500')
+    desk.drive()
+    advance_mail(desk)
+    desk.flow.mail_ready()
+    assert len(mail_wires(desk)) == 1
+    assert desk.texts.index(mail_wires(desk)[0]) > next(
+        index for index, text in enumerate(desk.texts) if 'de W9SSJ' in text)
+    assert desk.session.parking.store.get(row['id'])['attempts'] == 1
+
+
+def test_away_second_mail_after_smr_drains_keeps_absolute_deadline_and_remainder():
+    desk = Desk()
+    first = parked(desk)
+    second = parked(desk, body='remainder for next contact')
+    desk.session.set_away('back later')
+    desk.flow.dial = v.slot_frequency(20, 11)
+    desk.hear('CONNECTED K1ABC W9SSJ 500')
+    start = desk.session._linked_at
+    advance_mail(desk)
+    desk.receive('<SM><SBJ:one><MSG:first stock message>')
+    advance_mail(desk)
+    assert desk.texts.count('5 <SMR>') == 1 and desk.host.client.connected
+    desk.host.now = start + 30
+    desk.receive('<SM><SBJ:two><MSG:second stock message>')
+    advance_mail(desk)
+    assert len(desk.mailbox.entries()) == 2 and desk.texts.count('5 <SMR>') == 2
+    assert desk.session._linked_at == start and desk.host.client.connected
+    desk.session._run(.1 for _ in range(10000))
+    desk.host.now = start + v.AWAY_LINK_S
+    desk.tick()
+    desk.drive()
+    assert not desk.host.client.connected
+    assert desk.session.parking.store.get(first['id'])['state'] == 'uncertain'
+    assert desk.session.parking.store.get(second['id'])['state'] == 'queued'
+    assert len(mail_wires(desk)) == 1
+
+
+def test_vrp_top_level_rejects_once_and_never_treats_mail_body_as_peek():
+    desk = Desk()
+    desk.flow.dial = v.slot_frequency(20, 11)
+    desk.hear('CONNECTED K1ABC W9SSJ 500')
+    frame = v.frame_message('<VRP>')
+    for byte in frame:
+        desk.host.data.incoming.append(bytes([byte]))
+        desk.tick()
+    assert desk.texts.count('6 <VRPJ>') == 1
+    desk.receive('<SM><SBJ:invalid><MSG:<VRP>>')
+    assert desk.texts.count('6 <VRPJ>') == 1
+
+
+def test_repeated_unchanged_buffer_reports_do_not_renew_mail_progress_timeout():
+    desk = Desk()
+    row = parked(desk)
+    desk.host.data.respond = lambda payload: desk.host.lines('BUFFER 500')
+    desk.flow.dial = v.slot_frequency(20, 11)
+    desk.hear('CONNECTED K1ABC W9SSJ 500')
+    advance_mail(desk)
+    owner = desk.session.mail_ack
+    started, sequence = owner.progress_at, desk.host.client.buffer_sequence
+    assert owner.state == 'active' and desk.host.client.buffer == 500
+    for elapsed in (30, 60, 90, 120, 150, 179):
+        desk.host.now = started + elapsed
+        desk.hear('BUFFER 500')
+        assert owner.state == 'active' and owner.progress_at == started
+    assert desk.host.client.buffer_sequence > sequence
+    desk.host.now = started + 181
+    desk.hear('BUFFER 500')
+    assert owner.state == 'unresolved' and owner.busy
+    assert desk.session.parking.store.get(row['id'])['state'] == 'uncertain'
+    assert len(mail_wires(desk)) == 1

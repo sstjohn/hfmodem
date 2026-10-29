@@ -261,6 +261,7 @@ def fly(plan, *, holds=None, header=None):
         try:
             read = plan['dial_hz'] or station.cat('f', selection=station.selection_for_plan(plan))
             dial = int(read) if str(read or '').isdigit() else None
+            station.hold_power(plan)
             plan.update(dial_hz=dial, readings=station.check_rig(dict(plan, dial_hz=dial or 0)))
             record_path.write_text(json.dumps(plan, indent=2) + '\n')
             selection = station.selection_for_plan(plan)

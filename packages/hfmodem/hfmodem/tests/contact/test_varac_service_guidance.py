@@ -36,7 +36,7 @@ def test_bbs_wait_diagnostic_does_not_send_or_offer_a_readiness_bypass():
     desk.session.steps = iter([None])
     before = list(desk.texts)
     desk.session.command('/bbs list')
-    assert 'peer has not announced auto-QSY readiness' in desk.said[-1]
+    assert desk.said[-1].startswith('BBS list queued')
     assert '/stop' in desk.said[-1] and '/qsy' not in desk.said[-1]
     assert desk.texts == before
 
@@ -161,6 +161,7 @@ def test_normal_data_notices_snapshot_ignores_byte_count_changes_and_empty_ptt()
 
 def test_vmail_input_and_application_ack_are_distinct_from_empty_buffer():
     desk = Desk()
+    desk.flow.dial = 14105750
     desk.hear('CONNECTED W9SSJ KF0RKC 500')
     desk.session.command('/vmail send greetings')
     desk.session.command('hello')
@@ -206,6 +207,7 @@ def test_status_tracks_real_qsy_delivery_acceptance_and_opening_waits():
 
 def test_new_contact_does_not_inherit_old_vmail_ack_wait():
     desk = Desk()
+    desk.flow.dial = 14105750
     desk.hear('CONNECTED W9SSJ KF0RKC 500')
     desk.session.command('/vmail send greeting')
     desk.session.command('hello')

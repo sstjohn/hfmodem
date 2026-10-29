@@ -3,6 +3,7 @@
 import pytest
 from hfmodem.ax25 import kiss
 from hfmodem.contact.broadcast import decode_ui, encode_ui
+from hfmodem.contact.varac import State
 from hfmodem.tests.contact.test_varac import Desk
 
 
@@ -245,3 +246,220 @@ def test_explicit_calling_frequency_selection_sends_and_restores_monitoring():
     d.do('/all off')
     assert d.session.broadcast.selected is None and d.flow.dial == 14105000
     assert (d.session._beacon_due, d.session._beacon_expires) == schedule
+
+
+def rig_line(d):
+    """The bridge's Rig.line_state: no keyer, so no reading, until the session arms."""
+    d.session.line_state = lambda: d.line if d.armed and d.armed[-1] else None
+
+
+@pytest.mark.parametrize('channel', ['cf', 'slot 11'])
+def test_selection_after_operator_close_arms_and_verifies_the_line(channel):
+    d = desk()
+    rig_line(d)
+    d.hear('CONNECTED W9SSJ K7QB 500')
+    d.do('/bye')
+    d.do('/auto off')
+    assert d.session.flow.state is State.MONITORING and not d.armed[-1]
+    d.do(f'/all {channel}')
+    assert d.session.broadcast.selected == d.flow.dial and d.armed[-1]
+    d.session.command('/all hello')
+    d.tick()
+    assert len(wire(d)) == 1
+
+
+def test_unreadable_line_after_arming_refuses_and_restores_the_arm():
+    d = desk()
+    d.hear('CONNECTED W9SSJ K7QB 500')
+    d.do('/bye')
+    d.do('/auto off')
+    d.session.line_state = lambda: None
+    d.do('/all cf')
+    assert d.session.broadcast.selected is None and not d.armed[-1]
+    assert any('keying line is unverified' in line for line in d.said)
+
+
+@pytest.mark.parametrize('guard, reason', [
+    ('linked', 'a link is up'), ('pending', 'connection pending'),
+    ('ptt', 'PTT on'), ('physical', 'keying line is HIGH'), ('steps', 'in progress')])
+def test_refusal_names_the_blocking_condition(guard, reason):
+    d = desk()
+    if guard == 'linked':
+        d.host.client.connected = True
+    elif guard == 'pending':
+        d.host.client.pending = True
+    elif guard == 'ptt':
+        d.host.client.ptt = True
+    elif guard == 'physical':
+        d.line = True
+    else:
+        d.session.steps = iter([None])
+    d.session.command('/all cf')
+    assert d.session.broadcast.selected is None
+    assert any(line.startswith('error: Broadcast refused: ') and reason in line for line in d.said)
+
+
+def test_directed_notice_reuses_admission_completion_without_selection_or_retune():
+    d = desk()
+    d.hear('BUSY OFF')
+    order = []
+    before = list(d.tunes), list(d.texts)
+    d.session.broadcast.directed('W9SSJ-1', before_admit=lambda: order.append('reserved'),
+                                 sent=lambda: order.append('sent'))
+    assert order == []
+    d.tick()
+    assert order == ['reserved']
+    assert len(wire(d)) == 1
+    assert bytes.fromhex(wire(d)[0].split()[3]) == encode_ui('W9SSJ', 'W9SSJ-1', b'<SMP>')
+    assert d.session.broadcast.selected is None
+    answer(d, 'QUEUED')
+    assert order == ['reserved']
+    answer(d, 'SENT')
+    assert order == ['reserved', 'sent']
+    assert (d.tunes, d.texts) == before
+
+
+@pytest.mark.parametrize('invalid', ['eligibility', 'busy', 'unknown', 'ptt', 'high', 'unknown-line',
+                                     'dial', 'generation', 'writer', 'buffer'])
+def test_directed_notice_rechecks_before_admission(invalid):
+    d = Desk(**{'BROADCAST CAPS': []})
+    d.hear('BUSY OFF')
+    allowed, reserved = [True], []
+    d.session.broadcast.directed('K1ABC', valid=lambda: allowed[0],
+                                 before_admit=lambda: reserved.append(True))
+    if invalid == 'eligibility':
+        allowed[0] = False
+    elif invalid in ('busy', 'unknown'):
+        d.host.client.busy = True if invalid == 'busy' else None
+    elif invalid == 'ptt':
+        d.host.client.ptt = True
+    elif invalid in ('high', 'unknown-line'):
+        d.line = True if invalid == 'high' else None
+    elif invalid == 'dial':
+        d.flow.dial += 750
+    elif invalid == 'generation':
+        d.host.client.link_generation += 1
+    elif invalid == 'writer':
+        d.host.client._writes[1] = (0, b'pending')
+    else:
+        d.host.client.buffer = 1
+    d.hear('BROADCAST CAPS 0 1')
+    assert not wire(d) and not reserved and not d.session.broadcast.active
+
+
+def test_directed_notice_failed_cooldown_commit_never_submits():
+    d = desk()
+    d.hear('BUSY OFF')
+    def fail():
+        raise OSError('disk full')
+    before = d.sent.count('ABORT')
+    d.session.broadcast.directed('K1ABC', before_admit=fail)
+    d.drive()
+    assert not wire(d) and d.sent.count('ABORT') == before
+    assert 'disk full' in d.session.broadcast.result
+
+
+def test_directed_notice_cancel_after_admission_keeps_reservation_without_sent():
+    d = desk()
+    d.hear('BUSY OFF')
+    events = []
+    d.session.broadcast.directed('K1ABC', before_admit=lambda: events.append('reserved'),
+                                 sent=lambda: events.append('sent'))
+    d.tick()
+    answer(d, 'QUEUED')
+    d.session.broadcast.cancel()
+    d.drive()
+    assert events == ['reserved'] and len(wire(d)) == 1
+    assert 'ABORT' in d.sent and not d.session.broadcast.active
+
+
+def test_directed_notice_ambiguous_admission_retains_reservation():
+    d = desk()
+    d.hear('BUSY OFF')
+    events = []
+    d.session.broadcast.directed('K1ABC', before_admit=lambda: events.append('reserved'),
+                                 sent=lambda: events.append('sent'))
+    d.drive()
+    assert events == ['reserved'] and len(wire(d)) == 1
+    assert 'ABORT' in d.sent and 'timed out' in d.session.broadcast.result
+
+
+def test_directed_notice_sent_does_not_commit_while_physical_line_is_high():
+    from hfmodem.contact.varac import HostError
+    d = desk()
+    d.hear('BUSY OFF')
+    sent = []
+    d.session.broadcast.directed('K1ABC', sent=lambda: sent.append(True))
+    d.tick()
+    answer(d, 'QUEUED')
+    d.line = True
+    answer(d, 'SENT')
+    with pytest.raises(HostError, match='unconfirmed; terminal must end'):
+        d.drive()
+    assert not sent
+
+
+@pytest.mark.parametrize('change', ['high', 'unknown-line', 'busy', 'unknown-busy', 'dial',
+                                   'generation', 'connected', 'pending', 'ptt', 'writer', 'buffer'])
+def test_directed_notice_rechecks_state_after_durable_reservation(change):
+    d = desk()
+    d.hear('BUSY OFF')
+    reserved = []
+    def reserve():
+        reserved.append(True)
+        c = d.host.client
+        if change in ('high', 'unknown-line'):
+            d.line = True if change == 'high' else None
+        elif change in ('busy', 'unknown-busy'):
+            c.busy = True if change == 'busy' else None
+        elif change == 'dial':
+            d.flow.dial += 750
+        elif change == 'generation':
+            c.link_generation += 1
+        elif change in ('connected', 'pending', 'ptt'):
+            setattr(c, change, True)
+        elif change == 'writer':
+            c._writes[1] = (c.link_generation, b'pending')
+        else:
+            c.buffer = 1
+    d.session.broadcast.directed('K1ABC', before_admit=reserve)
+    d.drive()
+    assert reserved == [True] and not wire(d)
+    assert not d.session.broadcast.active
+
+
+def test_directed_notice_restores_auto_off_arm_after_completion():
+    d = desk()
+    d.do('/auto off')
+    rig_line(d)
+    d.hear('BUSY OFF')
+    assert not d.armed[-1]
+    d.session.broadcast.directed('K1ABC')
+    assert d.armed[-1]
+    d.tick()
+    answer(d, 'QUEUED', 'SENT')
+    assert not d.armed[-1] and not d.session.broadcast.active
+
+
+@pytest.mark.parametrize('change', ['connected', 'pending'])
+def test_directed_notice_does_not_disarm_new_contact(change):
+    d = Desk(**{'BROADCAST CAPS': []})
+    d.do('/auto off')
+    rig_line(d)
+    d.hear('BUSY OFF')
+    d.session.broadcast.directed('K1ABC')
+    assert d.armed[-1]
+    setattr(d.host.client, change, True)
+    d.tick()
+    assert d.armed[-1] and not wire(d)
+
+
+def test_directed_notice_preflight_failure_restores_auto_off_arm():
+    from hfmodem.contact.varac import HostError
+    d = desk()
+    d.do('/auto off')
+    rig_line(d)
+    d.host.client.busy = None
+    with pytest.raises(HostError, match='deferred'):
+        d.session.broadcast.directed('K1ABC')
+    assert not d.armed[-1] and not wire(d)

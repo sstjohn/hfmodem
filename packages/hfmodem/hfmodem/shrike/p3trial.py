@@ -53,9 +53,11 @@ class ReplyClock:
     """Mail receive clock, independent of the initial-turn experiment limits.
 
     Start on the successful B +3.125 ms pulse epoch. The first packet placed
-    against it fixes `gap`, the pulse's distance past the peer's packet, and
-    from then on the pulse rides the peer's measured raster at that gap, in
-    every receiving stint. Accepted role changes rotate the epoch with the
+    against it fixes the pulse's distance past that decoder's packet marker.
+    Changeover and ordinary markers at each speed have separate calibrated
+    gaps: changing decoder must not move the emitted ACK phase. Subsequent
+    measurements of the same marker track drift with the raster's 1/4 gain.
+    Accepted role changes rotate the epoch with the
     grid, which is only the first guess for a stint no packet has seated yet;
     a failed break-in does not. Measured 0920-1015/1119/1233: the peer's
     raster came back 601.7-607 ms on per round trip, not 600.0, and a pulse
@@ -66,17 +68,48 @@ class ReplyClock:
     entry_phase: int | None = None
     pulse_epoch: int | None = None
     gap: int | None = None
+    _form_gaps: dict = field(default_factory=dict, repr=False)
+    _form_clocks: dict = field(default_factory=dict, repr=False)
 
     def entry(self, phase):
         if self.pulse_epoch is None:
             self.entry_phase = phase
 
-    def target(self, lead, phase=None):
+    def target(self, lead, phase=None, *, form=None):
         if self.entry_phase is None:
             return None
         if self.pulse_epoch is None:
             self.pulse_epoch = self.entry_phase + ROTATION + 150
         if phase is not None:
+            if form is not None:
+                if not self._form_clocks:
+                    # Only the first marker may seat a returning turn using
+                    # its old gap. All other decoder offsets must be measured
+                    # against that new turn, not a previous stint's raster.
+                    self._form_gaps = ({form: self._form_gaps[form]}
+                                       if form in self._form_gaps else {})
+                # A CS3 head and the variable headers at different levels
+                # are different timing measurements. Their decoder bias is
+                # not a movement of the peer's clock. Seat each marker on the
+                # already emitted reply phase before following its own drift.
+                if form not in self._form_gaps:
+                    self._form_gaps[form] = (self.pulse_epoch - phase) % CYCLE
+                previous = self._form_clocks.get(form)
+                if previous is None:
+                    origin = float(phase)
+                else:
+                    last, origin = previous
+                    if phase <= last:
+                        return self.pulse_epoch - lead
+                    projected = round(origin + round((phase-origin)/CYCLE)*CYCLE)
+                    origin += .25 * (phase-projected)
+                self._form_clocks[form] = (phase, origin)
+                projected = round(origin + round((phase-origin)/CYCLE)*CYCLE)
+                gap = self._form_gaps[form]
+                if self.gap is None:
+                    self.gap = gap
+                self.pulse_epoch = projected + gap
+                return self.pulse_epoch - lead
             if self.gap is None:
                 self.gap = (self.pulse_epoch - phase) % CYCLE
             self.pulse_epoch = phase + self.gap
@@ -85,6 +118,9 @@ class ReplyClock:
     def rotate(self, samples):
         if self.pulse_epoch is not None:
             self.pulse_epoch += samples
+        # The next stint's first marker retains its gap to follow real turn
+        # movement; target discards the other markers' stale calibrations.
+        self._form_clocks.clear()
 
     def slip(self, samples):
         self.rotate(-samples)

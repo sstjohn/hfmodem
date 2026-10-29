@@ -125,6 +125,33 @@ def test_setup_query_cannot_replace_existing_data_answer_debt(monkeypatch):
     assert called == [True] and len(io.sent) == 1
 
 
+@pytest.mark.parametrize('opening', [True, False])
+@pytest.mark.parametrize('marked', [False, True])
+def test_a_stock_chat_caller_gets_the_greeting(opening, marked):
+    """A stock CHAT caller keys no confirm: VE6DNL's setup query, answered with
+    stock's idle even with a greeting queued, then either its own opening
+    over, whose answer says traffic and draws its release (KQ4QWH 2026-10-25,
+    our away greeting went on that release), or its keepalive while it holds
+    the turn idle, answered the same way."""
+    hs, io = setup(marked=marked)
+    greeting = b'<AWQ>Away, please leave a VMail'
+    hs.send(greeting)
+    fs, x = wavfile.read(Path(__file__).with_name('fixtures') / 've6dnl-1024-query.wav')
+    feed(hs, x.astype(float) / 32768)
+    assert hs._tx_pending is None
+    if opening:
+        level = A._phy.level_key('500', hs._expect_level)
+        body = A._phy.vara_body(b'73', 'VE6DNL', body_len=A._phy.body_size('500', level))
+        feed(hs, padded(OF.data_over_tx(body, bw='500', level=level)))
+        assert io.host == [b'73'], io.msgs
+    else:
+        feed(hs, padded(M.synth_burst('W9SSJ', F.for_bw(F.SESSION_KEEPALIVE_B, '500'))))
+    traffic = M.synth_tone_pairs(F.control_bursts('VE6DNL', '500', 0)[1])
+    assert np.array_equal(io.sent[-1], traffic), io.msgs
+    feed(hs, padded(M.synth_burst('W9SSJ', F.for_bw(F.SESSION_TURN_RELEASE, '500'))))
+    assert hs._tx_pending is not None, io.msgs
+
+
 def test_peer_data_after_recovery_is_received_and_retires_setup_context():
     hs, io = setup()
     hs.send(b'local greeting')

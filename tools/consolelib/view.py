@@ -190,7 +190,7 @@ P4_DECISION = re.compile(
 P4_OVER = re.compile(r"\[p4 over\] at [\d.]+ (.*)")
 P4_SILENT = re.compile(r"\[p4 link\] no live packet at ([\d.]+); silent (\d+/\d+)")
 P4_UNREAD = re.compile(r"\[p4 link\] BREAKIN_UNREAD (\d+) ")
-P4_DETAIL = re.compile(r"\[p4 detail\] (\S+) at ([\d.]+)(.*)")
+P4_DETAIL = re.compile(r"\[p4 detail\] (.+?) at ([\d.]+)(.*)")
 P4_TX = re.compile(r"^\s*TX\[\d+\] P4 (?:LINK )?(.+?)\s+\([\d.]+s\)\s+--")
 P4_KEYED = re.compile(r"\[p4 link\] Keyed (\w+) status=0x([0-9a-f]{2}) payload=(b(['\"]).*\4) at ([\d.]+)")
 P4_REFUSED = re.compile(r"\[p4 link\] Refused (.+?): (\w+) at ([\d.]+)")
@@ -234,6 +234,8 @@ class P4Link:
         self.decoded = self.keys = self.greeting = 0
         self.keyed_text = ''
         self.frames = {}
+        self.failure = None
+        self.unmeasured_controls = {}
 
     @staticmethod
     def _fresh():
@@ -290,6 +292,10 @@ class P4Link:
                              at=float(refused.group(3)))
             return shown, False
         if MAIL.search(line):
+            failure = re.search(r'\[mail\] failed: (.+)', line)
+            if failure:
+                self.failure = failure.group(1)
+                return shown + [line], False
             if 'banner:' in line or 'remote SID' in line:
                 self.greeting += 1
             self.held.append(line)
@@ -368,7 +374,8 @@ class P4Link:
         if decision:
             state, peer, expect, key, reason, margin = decision.groups()
             cycle['decision'] = dict(state=state, peer=float(peer), expect=expect, key=key,
-                                     reason=reason, margin=float(margin))
+                                     reason=reason, margin=float(margin),
+                                     missed_slots=int(_fields(line).get('missed_slots', '0').rstrip(';')))
             return
         silent = P4_SILENT.search(line)
         if silent:
@@ -385,8 +392,21 @@ class P4Link:
             cycle['details'].append(row)
             if event == 'normal-header':
                 self._heard_at(row['at'])['hdr'] = row['header']
-            elif event == 'normal-decode' and row.get('crc_valid') == 'False':
-                self._heard_at(row['at'])['crc_bad'] = True
+            elif event in ('normal-decode', 'long-decode', 'long decode', 'sf8-long'):
+                heard = self._heard_at(row['at'])
+                heard['kinds'].add('normal' if event == 'normal-decode' else 'long')
+                if row.get('crc_valid') == 'False':
+                    heard['crc_bad'] = True
+                if row.get('crc_valid') == 'True' and row.get('timely') == 'False':
+                    heard['late_crc'] = True
+            elif event == 'answer-deferred':
+                self._heard_at(row['at'])['deferred'] = float(row['due']) / 48000
+            elif event == 'source-unclassified':
+                reason = re.search(r'\breason=(.*)', rest)
+                self._heard_at(row['at'])['source_reason'] = (
+                    reason.group(1).strip() if reason else 'source continuity unknown')
+            elif event == 'unmeasured-peer-ack':
+                self.unmeasured_controls[row['at']] = row
             elif event == 'peer-control-no-progress':
                 limit = f"/{row['limit']}" if 'limit' in row else ''
                 self._heard_at(row['at'])['progress'] = f"no progress {row['copies']}{limit}"
@@ -418,7 +438,7 @@ class P4Link:
         if silent and not (at_onset and at_onset.get('status') is not None):
             at, silent = silent
             expect = f"expected {decision['expect']}, " if decision else ''
-            heard.append((at, f"{at:8.2f} ← nothing ({expect}silent {silent})"))
+            heard.append((at, f"{at:8.2f} ← no decoded reply ({expect}silent {silent})"))
         answered = ours is not None and not (decision and ours.get('at') is not None
                                              and ours['at'] < decision['peer'])
         if ours is not None:
@@ -431,6 +451,9 @@ class P4Link:
         if lines and tail:
             lines[-1] = (lines[-1][:-1] + f", {tail})" if lines[-1].endswith(')')
                          else lines[-1] + f" ({tail})")
+        if decision and decision['missed_slots']:
+            n = decision['missed_slots']
+            lines.append(f"         !! reply schedule skipped {n} {'slot' if n == 1 else 'slots'}")
         state = over.get('state') or (decision and decision['state'])
         if state and state != self.state and state != 'DOWN':
             was = f" (was {self.state})" if self.state else ''
@@ -473,11 +496,21 @@ class P4Link:
         elif heard['kinds'] - {'word', 'short'}:
             kind = sorted(heard['kinds'] - {'word', 'short'})[0]
             hdr = f" hdr {heard['hdr']}" if heard.get('hdr') else ''
-            line = at + f"{kind}{hdr} ({'CRC bad' if heard.get('crc_bad') else 'unread'})"
+            line = at + f"{kind}{hdr} ({'CRC failed' if heard.get('crc_bad') else 'detected; no CRC-valid body'})"
         elif heard.get('maybe'):
             line = at + f"{heard['maybe']}? (unconfirmed)"
         else:
             return None
+        if heard.get('late_crc') and status is None:
+            # A valid SF8 result can miss admission and therefore never produce
+            # a frame registration. Do not present that as a demodulation miss.
+            line = at + 'long (CRC ok; decoded too late for admission)'
+        decision = self.cycle['decision']
+        if (heard.get('deferred') is not None
+                and not (decision and decision['reason'] == 'answer deferred')):
+            line += f" (decoded after reply decision; answer deferred to {heard['deferred']:.2f})"
+        if heard.get('source_reason'):
+            line += f" (source continuity warning: {heard['source_reason']})"
         if heard.get('silent'):
             line = (line[:-1] + f", silent {heard['silent']})" if line.endswith(')')
                     else line + f" (silent {heard['silent']})")
@@ -514,6 +547,16 @@ class P4Link:
                                label.replace('PROBE ROBUST', 'probe robust')
                                .replace('PROBE CHIRP', 'probe chirp'))))
         self.our_run = (label, self.our_run[1] + 1 if self.our_run[0] == label else 1)
+        target_at = (float(over['held_at']) if over and over.get('slot_accepted') == 'false'
+                     and over.get('held_at') is not None else
+                     at_onset['at'] if at_onset else None)
+        unmeasured = next((row for at, row in self.unmeasured_controls.items()
+                           if target_at is not None and abs(at-target_at) < .1
+                           and row['word'] == label), None)
+        if word and unmeasured:
+            control = f"v{unmeasured['value']}/{unmeasured['header']}"
+            held = f"; held from {target_at:.2f}" if over and over.get('slot_accepted') == 'false' else ''
+            return at + label + f" (unverified fallback for {control}{held})"
         acked = ' (repeat request)' if word and purpose == 'repeat-request' else ''
         if word and over and over.get('slot_accepted') == 'false':
             if over.get('held_status') is not None:
@@ -545,23 +588,25 @@ class P4Link:
             if name in over:
                 tail.append(f"{name} {over[name]}")
         if over.get('unread', '0') != '0':
-            tail.append(f"unread {over['unread']}")
+            tail.append(f"unread total {over['unread']}")
         if 'link' in over:
             spent, ceiling = map(float, over['link'].rstrip('s').split('/'))
             if spent >= ceiling / 2:
                 tail.append(f"link {spent:.0f}/{ceiling:g} s")
         return ', '.join(tail)
 
-    @staticmethod
-    def _why(decision, cycle):
+    def _why(self, decision, cycle):
         reason = decision['reason']
-        late = f"decoded {-decision['margin']:.0f} ms late, " if decision['margin'] < 0 else ''
+        if self.failure:
+            return f'session failed: {self.failure}'
+        # This is the decision's scheduling margin, not the CRC completion time.
+        late = f"decision {-decision['margin']:.0f} ms overdue, " if decision['margin'] < 0 else ''
         if reason == 'answer deferred':
             due = next((float(d['due']) / 48000 for d in cycle['details']
                         if d['event'] == 'answer-deferred'), None)
             return late + (f"deferred to {due:.2f}" if due is not None else 'deferred')
         if reason == 'body unread at decision':
-            return late + 'body unread' + (f", unread {cycle['unread']}" if cycle['unread'] else '')
+            return late + 'body unread' + (f", unread total {cycle['unread']}" if cycle['unread'] else '')
         if reason == 'packet observed; no response selected':
             return 'no response selected'
         return reason

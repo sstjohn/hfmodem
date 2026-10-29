@@ -162,6 +162,20 @@ def test_recovery_and_closing_reasons_reach_default_terminal_and_event_log(audio
     assert [r['state'] for r in desk.kinds('link_recovery')] == ['requested', 'closing']
 
 
+def test_a_capture_rate_warning_reaches_default_terminal_and_event_log(tools):
+    import varac_chat
+    desk = Desk()
+    events = varac_chat.Diagnostics()
+    for _ in range(300):
+        events.put('rx_protocol', text='ordinary frame')
+    text = '!! CAPTURE RATE: USB Audio Device is delivering 52% of real time'
+    events.put('capture_rate', text=text, device='USB Audio Device', share=.52, slow=True)
+    events.drain(desk.session)
+    assert desk.said[-1] == text
+    [record] = desk.kinds('capture_rate')
+    assert record['device'] == 'USB Audio Device' and record['share'] == .52
+
+
 def test_bounded_recovery_queue_preserves_newest_closing_reason(tools):
     import varac_chat
     desk = Desk()

@@ -56,6 +56,14 @@ orderly ARQ disconnect and revert to receive (`LostHost`, `ArdopHostServer.cs:33
 `ArdopHostTnc.cs:264`). Listeners set `SO_REUSEADDR` so a restarted modem can rebind
 its well-known ports immediately (`OpenSocket4`, `ArdopHostServer.cs:57`).
 
+hfmodem deliberately uses a stricter attachment lifecycle for single-controller
+safety: both sockets must connect before commands execute, a competing client
+is refused, and losing either socket closes both, disables listening and aborts
+the contact. Data-socket loss therefore produces command EOF without
+`DISCONNECTED` / `NEWSTATE DISC`. Incomplete pairs expire after five seconds.
+These are safety differences from stock, not ARDOP wire requirements; a raw
+socket pair still requires exclusive endpoint access to prevent mixed clients.
+
 **Encoding.** Command lines are CR (`0x0D`) terminated. Commands are
 case-insensitive: the modem upper-cases the whole line before dispatch
 (`_strupr`, `HostInterface.c:263`; `ArdopHostTnc.cs:284`) `[doc]`. The original

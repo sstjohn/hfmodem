@@ -104,6 +104,7 @@ P1_ACKS = (0, 1)
 # A mail arm announces 0 and the same flag is its opt-out: see `_arm_defaults`,
 # where the measurement for that half is.
 P1_STATUS_ANNOUNCE = 3
+P1_GRANT_NAMES = {pactor1.CS_59A: "0x59A", pactor1.CS_6A9: "0x6A9"}
 # The states in which a link is up and owes the far end a cycle. DISCONNECTING is
 # one of them: the QRT rides a packet, so a station saying goodbye is transmitting.
 LINKED = (State.CONNECTED, State.DISCONNECTING)
@@ -1618,8 +1619,11 @@ class RadioTx:
             ci = CS_ACK if ci is None else ci
             raw = placement.control_burst(ci, tail=False, swapped=None)
             audio = self._p3_offset(raw, control=True, ident=("cs", ci, False, None))
-            target = (self.reply_clock.target(placement.pulse_lead(audio),
-                                              r.p3_reply_phase())
+            identity = getattr(r, '_p3_peer_identity', None)
+            form = identity[:2] if identity is not None else None
+            phase = r._p3_peer[0] if form is not None else r.p3_reply_phase()
+            target = (self.reply_clock.target(placement.pulse_lead(audio), phase,
+                                              form=form)
                       + self.p3_irs_reply_offset_n)
         return (r.p3_reply_shift(slot) if target is None else
                 r.p3_reply_shift(slot, target=target))
@@ -2022,7 +2026,8 @@ class RadioTx:
         # connect -- leaves the far end still waiting on the P1 handshake.
         self._tx(pactor1.control_signal(index, msb_first=self.p1_ack_msb,
                                         invert=self._flip()),
-                 f"P1 CS{index + 1} {'MSB' if self.p1_ack_msb else 'LSB'}",
+                 f"{P1_GRANT_NAMES.get(index, f'P1 CS{index + 1}')} "
+                 f"{'MSB' if self.p1_ack_msb else 'LSB'}",
                  drive=self._fsk_drive)
 
     def _p1_nth(self, packet_count: int, *, breakin: bool = False) -> int:
@@ -4508,6 +4513,9 @@ class _SessionRx:
         # overlap, so the same failed frame would enter the sum four times and
         # push the peer's real repeats out.
         self.p3_memory = p3rx.FieldMemory()
+        # PACTOR-2's memory ARQ, fed only by `_p2_packet` on a PACTOR-2 link,
+        # where `deep_scan` reads it once a cycle.
+        self.p2_memory = p2rx.BurstMemory()
         # Tracks where in the cycle the peer's data frame lands. Fed only from
         # `deep_scan`, never from the rolling decoder: a lock is an offset into the
         # buffer it was found in, and `RollingRx` slides its buffer out from under
@@ -4608,11 +4616,13 @@ class _SessionRx:
             self._p3_expected_levels = ()
         return self._p3_expected_levels
 
+    def _p3_sl2_established(self) -> bool:
+        return (self._p3_presence_form == (self.host.arq._link_generation, 2)
+                and self._p3_row0 is not None)
+
     def sl2_prekey_expected(self) -> bool:
-        accepted = self._p3_presence_form
-        established = (accepted is not None and accepted == (self.host.arq._link_generation, 2)
-                       and self._p3_row0 is not None)
-        return self.sync.packet_level == 2 or 2 in self._p3_expected() or established
+        return (self.sync.packet_level == 2 or 2 in self._p3_expected()
+                or self._p3_sl2_established())
 
     def sl3_prekey_expected(self) -> bool:
         expected = self._p3_expected()
@@ -4778,6 +4788,7 @@ class _SessionRx:
         if role != self._p1_role or old_turn_ended or \
                 self.host.arq.state not in (State.CONNECTING, *LINKED):
             self.p1_memory.clear()
+            self.p2_memory.clear()
             self.p3_memory.clear()
             # A CRC-valid changeover can establish the incoming clock in the
             # very event that changes our role. Keep that fresh clock; discard
@@ -5157,9 +5168,22 @@ class _SessionRx:
         lo = max(seg_start, emitted_end + periods * cycle_n)
         hi = min(end, started + (periods + 1) * cycle_n)
         nominal = raster.rx_due(raster.keyed_slot) + periods * cycle_n
+        short_turn = (raster.sending and self.host.arq.unconfirmed_breakin
+                and cycle_n > round(2 * FS)
+                and round(.75 * FS) <= emitted_end - started <= round(.90 * FS))
+        stale_turn_answer = (short_turn and (self._p3_answer_at is None
+                                            or self._p3_answer_at < emitted_end))
+        if short_turn:
+            # CS3 is a short waveform even when it replaces a long-cycle
+            # control. The inherited long data reference puts its first
+            # answer seconds late. Centre this bounded receive search on the
+            # actual short emission's turnaround, not on that long reference.
+            # WS8EOC 0611's earlier accepted short CS3s were answered 131 and
+            # 144 ms after audio end. This is a search centre, not TX timing.
+            nominal = emitted_end + periods * cycle_n + round(.12 * FS)
         at = None
         if hi - lo >= P3_CS_N:
-            if self._p3_answer_at is not None:
+            if self._p3_answer_at is not None and not stale_turn_answer:
                 # Project onto this emitted slot's reply interval, never
                 # the latest periodic instant anywhere in a recovered tape.
                 periods = (lo - self._p3_answer_at + cycle_n - 1) // cycle_n
@@ -5175,7 +5199,7 @@ class _SessionRx:
                         and projected + P3_CS_N <= hi):
                     at = projected
             if (at is None and (self.host.arq.entry_pending
-                                or self._p3_answer_at is None)
+                                or self._p3_answer_at is None or stale_turn_answer)
                     and hi - lo >= round(.23 * FS)):
                 # The cold sweep has its own 0.46-s bracket and deadline.
                 # The nominal P1 position is a search centre only here;
@@ -5694,10 +5718,15 @@ class _SessionRx:
         if not self.p3_receive_offset_hz or not self._p3_acquisition_fits(self.P3_SL2_RESERVE_S):
             return None
         ev = read(audio)
-        if ev is not None and ev.information is not None:
+        self._queue_p3_nominal_carrier(audio, ev)
+        return ev
+
+    def _queue_p3_nominal_carrier(self, audio: np.ndarray, ev) -> None:
+        """Retain raw CRC-known SL2 for deferred carrier measurement."""
+        if (ev is not None and ev.packet is not None and ev.packet[0] == 2
+                and ev.packet[3] and not ev.breakin and ev.information is not None):
             self._p3_carrier_pending = (audio.copy(), ev, self.host.arq.dxcall,
                                         self._p3_acquisition_cycle)
-        return ev
 
     def _p3_read_again(self, seg_start: int, at: int):
         """This cycle's codeword, where a reader has already decoded it there.
@@ -6113,6 +6142,33 @@ class _SessionRx:
             ev = replace(ev, start=ev.start + offset)
         return None if ev is None else (ev, "P1 scanned")
 
+    def _p3_sl1_prekey(self, audio: np.ndarray):
+        """One bounded current SL1 read, without speculative speed work."""
+        if (self._tracked_only and self._scan_origin is not None
+                and self._p3_row0 is not None and self.sync.packet_level in (None, 1, 2)
+                and not self.host.arq.cycle_command_emitted
+                and self._p3_acquisition_fits(self.P3_SL1_RESERVE_S)):
+            origin = self._scan_origin
+            paths = (placement.LONG_PATHS if self._p3_cycle_n == round(spec.CYCLE_LONG_S * FS)
+                     else placement.SPEED_PATHS)
+            span = rxfront._packet_span(rxfront._frame_span(paths[1]))
+            latest = origin + audio.size - span
+            target = self._p3_row0 + ((latest - self._p3_row0) // self._p3_cycle_n) * self._p3_cycle_n
+            target = getattr(self, "_p3_target_row0", None) or target
+            lo = max(0, target - origin - p3frame.DATA_OFFSET * rxfront.SPS - 2400)
+            # Share the retained-window correction with the following tracked
+            # codeword reader if this CRC misses. The sparse decoder itself
+            # still samples only this packet's header and body.
+            lo = min(lo, max(0, audio.size - (self._p3_tracked_keep_n() or audio.size)))
+            fresh = self._p3_delivered_at is None or target > self._p3_delivered_at + rxfront.SPS
+            if fresh and target - origin >= p3frame.DATA_OFFSET * rxfront.SPS + rxfront.SPS:
+                ev = self.sync.sl1_packet_at(self._corrected(audio[lo:]), target - origin - lo)
+                if ev is not None:
+                    self._p3_changeover_pending = self._p3_repeat_changeover = False
+                    self.p3_memory.clear()
+                    return replace(ev, start=ev.start + lo, t=ev.t + lo / FS), "SL1 pre-key"
+        return None
+
     def _p3_packet(self, audio: np.ndarray):
         # A repeated changeover has a CS3 head, not a variable header, and
         # its shortened case-0 body is not an ordinary SL1 frame. Project the
@@ -6176,6 +6232,19 @@ class _SessionRx:
                 if owned or ((self.sync.packet_level or 0) >= 3
                              and not self.sl2_prekey_expected()):
                     return None
+        # A request to speed up is not proof the peer changed waveform.
+        # WS8EOC 1027: an SL2 miss consumed the available decode budget,
+        # leaving a complete SL1 frame unread and its predecessor ACKed.
+        # Keep the established narrow frame first; a CRC miss or a credible
+        # different header still leaves the requested upgrade eligible.
+        # A fade clears packet_level but not an established SL2 link: there
+        # SL1 first spent the SL2 reserve and left the 40-ms ladder (1003-1047).
+        sl1_first = (not wideband_first and self.sync.packet_level in (None, 1)
+                     and not self._p3_sl2_established())
+        if sl1_first:
+            got = self._p3_sl1_prekey(audio)
+            if got is not None:
+                return got
         # A requested SL2 must be decoded before its own ACK. preferred_only
         # intentionally stays on the last validated level, and the existing
         # wideband trial is SL3-only; neither can make this transition in time.
@@ -6201,33 +6270,10 @@ class _SessionRx:
                     self._p3_changeover_pending = self._p3_repeat_changeover = False
                     self.p3_memory.clear()
                     return replace(ev, start=ev.start + lo, t=ev.t + lo / FS), "SL2 pre-key"
-        # Read the current SL1 packet before spending time on a repeated CS3
-        # or speculative wideband body. The stock peer can advance immediately
-        # after our ACK; keeping the previous CHANGEOVER's counter for one more
-        # cycle guarantees a wrong reply on every such advance.
-        if (self._tracked_only and self._scan_origin is not None
-                and self._p3_row0 is not None and self.sync.packet_level in (None, 1, 2)
-                and not self.host.arq.cycle_command_emitted
-                and self._p3_acquisition_fits(self.P3_SL1_RESERVE_S)):
-            origin = self._scan_origin
-            paths = (placement.LONG_PATHS if self._p3_cycle_n == round(spec.CYCLE_LONG_S * FS)
-                     else placement.SPEED_PATHS)
-            span = rxfront._packet_span(rxfront._frame_span(paths[1]))
-            latest = origin + audio.size - span
-            target = self._p3_row0 + ((latest - self._p3_row0) // self._p3_cycle_n) * self._p3_cycle_n
-            target = getattr(self, "_p3_target_row0", None) or target
-            lo = max(0, target - origin - p3frame.DATA_OFFSET * rxfront.SPS - 2400)
-            # Share the retained-window correction with the following tracked
-            # codeword reader if this CRC misses. The sparse decoder itself
-            # still samples only this packet's header and body.
-            lo = min(lo, max(0, audio.size - (self._p3_tracked_keep_n() or audio.size)))
-            fresh = self._p3_delivered_at is None or target > self._p3_delivered_at + rxfront.SPS
-            if fresh and target - origin >= p3frame.DATA_OFFSET * rxfront.SPS + rxfront.SPS:
-                ev = self.sync.sl1_packet_at(self._corrected(audio[lo:]), target - origin - lo)
-                if ev is not None:
-                    self._p3_changeover_pending = self._p3_repeat_changeover = False
-                    self.p3_memory.clear()
-                    return replace(ev, start=ev.start + lo, t=ev.t + lo / FS), "SL1 pre-key"
+        if not sl1_first:
+            got = self._p3_sl1_prekey(audio)
+            if got is not None:
+                return got
         if wideband_first:
             if wideband_checked:
                 self.sync.note_miss()
@@ -6422,6 +6468,7 @@ class _SessionRx:
             how = "scanned RX 0 Hz"
             if ev is not None:
                 self.p3_memory.clear()
+                self._queue_p3_nominal_carrier(audio, ev)
         if ev is None:
             # A changeover has no normal variable-header block. In the long
             # listen gaps of the failed WS8EOC arm, complete CRC-valid packets
@@ -6720,6 +6767,31 @@ class _SessionRx:
     def _p3_changeover_packet(self, audio: np.ndarray, keep_s: float = 4.0):
         trim = max(0, len(audio) - round(keep_s * FS))
         window = audio[trim:]
+        # A first CS3 can acquire on the 100-Hz alias while its body only
+        # validates near nominal. Reuse its measured head, not another blind
+        # head search (which can select that same alias again). WS8EOC 1027
+        # 065647: missing this complete body let the next entry cover its peer.
+        head = self._p3_entry_body_checked_at
+        if (self.host.arq.entry_pending and head is not None
+                and self._scan_origin is not None
+                and abs(self.p3_receive_offset_hz) > p3acquire.P1_CROSS_CHECK_HZ):
+            at = head - self._scan_origin - trim
+            if 0 <= at and at + round(.80 * FS) <= len(window):
+                # Three fixed body hypotheses, each CRC-qualified; no timing
+                # or frequency ladder. Small neighbours allow a marginal
+                # body to survive residual carrier error around nominal.
+                for hz in (0.0, -2.0, 2.0):
+                    if not self._p3_acquisition_fits(self.CHANGEOVER_BODY_RESERVE_S):
+                        break
+                    ev = rxfront._cs_event(p3acquire.compensate(window, hz),
+                        placement.BREAKIN_CS, 0, at, at / FS, "")
+                    if ev.packet is not None:
+                        self._follow_p3_offset(hz)
+                        self._p3_changeover_pending = False
+                        self.p3_memory.clear()
+                        return (replace(ev, start=ev.start + trim,
+                                        t=ev.t + trim / FS),
+                                "first changeover body near nominal")
         got = p3acquire.changeover(window, offsets=self._p3_coarse_offsets())
         if got is None or got.event.packet is None:
             fine = self._p3_fine_offsets()
@@ -6776,7 +6848,14 @@ class _SessionRx:
         template carries no payload at all, and delivering one hands the host a
         decompressor's reading of `spec.TEMPLATE`.
         """
-        got = p2rx.decode_expected_burst(audio)
+        # The speculative pass over another protocol's audio would feed the
+        # memory strangers, and a PACTOR-2 phase that ended takes its copies.
+        if self.host.protocol is Protocol.PACTOR2:
+            memory = self.p2_memory
+        else:
+            memory = None
+            self.p2_memory.clear()
+        got = p2rx.decode_expected_burst(audio, memory=memory)
         if got is None:
             return None
         t, path, field, bin_pair = got
@@ -11300,22 +11379,28 @@ def tune_carrier(rig, out_dev, seconds: float, drive: float) -> None:
     low soundcard drive -- because on a data interface the audio level sets the
     output, so lowering only RFPOWER would not do it. RFPOWER is restored after.
     """
+    limits = config.power_limits()
+    if not limits.tune_carrier:
+        print("  TUNE: nothing keyed -- this rig's tuner does not search on a carrier "
+              "(rig profile tune_carrier = false); start a tuning cycle at the rig", flush=True)
+        return
     tone = drive * np.sin(2 * np.pi * 1500.0 * np.arange(int(seconds * FS)) / FS)
+    held = [config.clamp_power(watts, limits.clamp_w, what)
+            for watts, what in ((limits.tune_w, "the TUNE carrier"),
+                                (0.50 * limits.full_scale_w, "the TUNE restore"))]
+    for _, warning in held:
+        if warning:
+            print(warning, flush=True)
+    carrier, restore = (watts / limits.full_scale_w for watts, _ in held)
     print(f"  TUNE: {seconds:.0f}s carrier at 1500 Hz, drive {drive:.2f}, "
-          f"RFPOWER 0.10 -- match the ATU now", flush=True)
-    rig.set_power(0.10)
+          f"RFPOWER {carrier:.2f} -- match the ATU now", flush=True)
+    rig.set_power(carrier)
     try:
         ota._play(tone, out_dev, seconds + 5, rig, settle=0.10)
     finally:
         rig.ptt(False)
-        rig.set_power(0.50)
-        print("  TUNE done, RFPOWER restored to 0.50", flush=True)
-
-
-#: The top of this rig's RFPOWER scale in watts. The level is linear in watts
-#: over a hundred on the FT-891 -- 0.6 reads back as 60 W, 0.5 as 50 -- so a
-#: watts figure is a level and there is nothing above 1.00 to ask for.
-MAX_WATTS = 100.0
+        rig.set_power(restore)
+        print(f"  TUNE done, RFPOWER restored to {restore:.2f}", flush=True)
 
 
 class _PhasePower:
@@ -11348,9 +11433,12 @@ class _PhasePower:
 
     def __init__(self, rig, *, p1: Optional[float], p3: Optional[float]):
         self.rig = rig
-        self.levels = {Protocol.PACTOR1: None if p1 is None else p1 / MAX_WATTS,
-                       Protocol.PACTOR2: None if p3 is None else p3 / MAX_WATTS,
-                       Protocol.PACTOR3: None if p3 is None else p3 / MAX_WATTS}
+        # The level is linear in watts over the rig's full scale -- 0.6 reads back
+        # as 60 W on a 100 W rig -- so a watts figure is a level.
+        self.scale, self.clamp = config.power_limits()[:2]
+        self.levels = {Protocol.PACTOR1: None if p1 is None else p1 / self.scale,
+                       Protocol.PACTOR2: None if p3 is None else p3 / self.scale,
+                       Protocol.PACTOR3: None if p3 is None else p3 / self.scale}
         #: What this arm last put on the rig, and None until it has put anything
         #: there -- which is also what says whether there is a level to restore.
         self.level: Optional[float] = None
@@ -11367,7 +11455,7 @@ class _PhasePower:
                   "it started on is unknown and nothing is restored at "
                   "teardown", flush=True)
             return None
-        print(f"  RFPOWER {level:.2f} -> {level * MAX_WATTS:.0f} W at arm "
+        print(f"  RFPOWER {level:.2f} -> {level * self.scale:.0f} W at arm "
               f"start; restored at teardown", flush=True)
         return level
 
@@ -11389,14 +11477,18 @@ class _PhasePower:
         """
         if self.baseline is None or self.level is None:
             return
-        if self.rig.set_power_once(self.baseline):
-            print(f"  RFPOWER {self.baseline:.2f} -> "
-                  f"{self.baseline * MAX_WATTS:.0f} W restored (the level the "
+        watts, warning = config.clamp_power(self.baseline * self.scale, self.clamp,
+                                            "the arm-start level restored")
+        if warning:
+            print(warning, flush=True)
+        if self.rig.set_power_once(watts / self.scale):
+            print(f"  RFPOWER {watts / self.scale:.2f} -> "
+                  f"{watts:.0f} W restored (the level the "
                   f"arm started on)", flush=True)
         else:
             print(f"  !! RFPOWER NOT RESTORED: the rig is left at "
-                  f"{self.level * MAX_WATTS:.0f} W, not the "
-                  f"{self.baseline * MAX_WATTS:.0f} W it started on", flush=True)
+                  f"{self.level * self.scale:.0f} W, not the "
+                  f"{self.baseline * self.scale:.0f} W it started on", flush=True)
 
     def _write(self, level: float, what: str) -> bool:
         t0 = time.perf_counter()
@@ -11404,11 +11496,11 @@ class _PhasePower:
         ms = (time.perf_counter() - t0) * 1e3
         if not took:
             held = ("the level it is on" if self.level is None
-                    else f"{self.level * MAX_WATTS:.0f} W")
+                    else f"{self.level * self.scale:.0f} W")
             print(f"  !! RFPOWER {level:.2f} ({what}) DID NOT REACH THE RIG -- "
                   f"the arm goes on at {held}", flush=True)
             return False
-        print(f"  RFPOWER {level:.2f} -> {level * MAX_WATTS:.0f} W ({what}), "
+        print(f"  RFPOWER {level:.2f} -> {level * self.scale:.0f} W ({what}), "
               f"handed to rigctl in {ms:.2f} ms", flush=True)
         return True
 
@@ -12602,6 +12694,13 @@ def _scan_previous_window(sessrx, audio: np.ndarray, origin: int, *,
         return False
     _scan_frame(sessrx, audio, origin,
                 tracked_only=deferred and sending and not pending_turn)
+    # The driver has now aimed the upcoming slot. new_cycle still saw the
+    # expired previous aim, and a quiet receiver emits no control to trigger
+    # the usual post-key requalification. Do this work in the full listening
+    # interval, retaining the existing 50 ms admission and corroboration.
+    if (sessrx._p3_carrier_pending is not None
+            and sessrx._p3_acquisition_fits(.050)):
+        sessrx.nominate_p3_offset_after_control()
     return sessrx.frame_seen
 
 
@@ -17071,6 +17170,12 @@ def run(args) -> int:
             admission.failed()
 
 
+# The capture callback remains live between protocol cycles and during P4
+# handoffs. A full collection holds the GIL there too: the old per-cycle
+# collect(2) caused 7--24 ms capture holes in both WS8EOC arms on 2026-10-27.
+# Suspend cyclic GC until teardown closes the stream; reference counting stays
+# active, and the caller's collection policy is restored even on interruption.
+@_receive_gc()
 def _run(args, *, admission=None) -> int:
     try:
         identity = identification.resolve(args.mycall, getattr(args, "idcall", None))
@@ -17134,8 +17239,13 @@ def _run(args, *, admission=None) -> int:
                         ("--p3-watts", args.p3_watts)):
         if watts is None:
             continue
-        if not 0.0 < watts <= MAX_WATTS:
-            raise SystemExit(f"{flag} {watts} is not in (0, {MAX_WATTS:.0f}] W")
+        scale, clamp = config.power_limits()[:2]
+        watts, warning = config.clamp_power(watts, clamp, flag)
+        setattr(args, flag[2:].replace("-", "_"), watts)
+        if warning:
+            print(warning, flush=True)
+        if not 0.0 < watts <= scale:
+            raise SystemExit(f"{flag} {watts} is not in (0, {scale:.0f}] W")
         if not args.transmit:
             # There is no CAT connection in a dry run -- the rig object is what
             # holds it -- so the flag would be silently nothing rather than the
@@ -17389,6 +17499,9 @@ def _run(args, *, admission=None) -> int:
     host.stay_in_pactor1 = args.pactor1_only
     host.pactor2_only = getattr(args, "pactor2_only", False)
     if host.pactor2_only:
+        # The host ceiling too, so every path that asks `allows_protocol` --
+        # robust answers, grants and follows -- stops at PACTOR-2.
+        host.settings["MYLEVEL"] = "2"
         print("  PACTOR-2 maximum: P1 setup/fallback, bits45=1, experimental "
               "0x6A9 -> P2 SL1; P3/P4 disabled. P2 controls and negotiation "
               "still need real-peer validation; transmit speed capped at SL3.", flush=True)
@@ -17421,6 +17534,10 @@ def _run(args, *, admission=None) -> int:
         print("  P1 RESPONSE EXPERIMENT: bits45=1 (0x11 at counter 1); "
               "selected entry response 0x6A9. Entry waveform and P1-only "
               "policy unchanged.", flush=True)
+    host.p2_grant_6a9 = getattr(args, "p2_grant_6a9", False)
+    if host.p2_grant_6a9:
+        print("  --p2-6a9-grant: 0x6A9 after our announcement enters PACTOR-2 SL1 "
+              "and caps the contact at P2 (unproven reading).", flush=True)
     host.p1_grant_only = args.p1_grant_only
     if getattr(args, "after_connect", "arq") == "p1-robust":
         host.p4_after_first_ack = True
@@ -17929,7 +18046,7 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                       flush=True)
             cycles_run += 1
             with contextlib.ExitStack() as receive_scope:
-                gc_enabled = receive_scope.enter_context(_receive_gc())
+                receive_scope.enter_context(_receive_gc())
                 sessrx.new_cycle()
                 # Where our last carrier dropped, read before this cycle can key over
                 # it: the window collected below sits after the PREVIOUS transmission,
@@ -18207,8 +18324,6 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                     if not hush and (robust is None or args.after_robust == "p1"):
                         host.tick()                             # advance the cycle grid
                         tx.emit_pending_cs()
-            if gc_enabled:
-                gc.collect(2)
             # ...and the other half of the reversal: taking the link is decided
             # inside the tick, by the changeover packet the tick just sent.
             line = _grid_reversal(raster, host)
@@ -18629,7 +18744,7 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                     # same grid as the setup phase, one slot further on.
                     cycles_run += 1
                     with contextlib.ExitStack() as receive_scope:
-                        gc_enabled = receive_scope.enter_context(_receive_gc())
+                        receive_scope.enter_context(_receive_gc())
                         before = sessrx.count
                         receive_opportunity = host.arq.begin_receive_opportunity()
                         host.arq._receive_opportunity.capture_lost = getattr(live, 'lost', 0)
@@ -19007,8 +19122,6 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                             host.tick(elapsed_ticks=1 if closing_now else elapsed_ticks,
                                       cycle_ticks=raster.ticks)
                             tx.emit_pending_cs()
-                    if gc_enabled:
-                        gc.collect(2)
                     if not hush:
                         word_slot = (None if live is None else _p4_hold_word(
                             tx, host, live, raster, whole, seg_start, held_at))
@@ -19611,7 +19724,8 @@ def build_parser() -> argparse.ArgumentParser:
     level = door.add_mutually_exclusive_group()
     level.add_argument(
         "--pactor2-only", action="store_true",
-        help="PTC-II-style level-2 ceiling: P1 setup, bits45=1, 0x6A9 entry into P2 SL1, speed capped at SL3; never P3")
+        help="PTC-II-style level-2 ceiling (the PTC host's MYLevel 2): P1 setup, bits45=1, 0x6A9 entry into P2 SL1, "
+             "speed capped at SL3; never announces, grants or follows P3 or P4")
     level.add_argument(
         "--pactor1-only", action="store_true",
         help="never offer the upgrade; the session stays on 1400/1600 Hz and the channel sense judges only "
@@ -19652,6 +19766,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "--no-announce-lower is the uppercase form flown before 2026-09-08")
     p1.add_argument("--p1-6a9", action="store_true",
                     help="announce P1 bits45=1 and select 0x6A9 as the entry response")
+    p1.add_argument("--p2-6a9-grant", action="store_true", dest="p2_grant_6a9",
+                    help="unproven: read 0x6A9 after our bits45=3 announcement as a PACTOR-2 grant and enter P2 SL1 "
+                         "as --pactor2-only does, capped at P2 for the contact. Off: the announcement is resent "
+                         "as plain P1 after three 0x6A9 answers")
     p1.add_argument("--p1-ack-lsb", action=argparse.BooleanOptionalAction, default=True,
                     help="send the CS least-significant-bit first, as the air carries it; "
                          "--no-p1-ack-lsb is for comparison only")

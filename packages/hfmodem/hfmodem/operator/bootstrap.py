@@ -11,6 +11,8 @@ import shutil
 import sys
 import tempfile
 
+from ..core.paths import installed_data
+
 
 def tools_root():
     package = Path(__file__).resolve().parents[1]
@@ -47,10 +49,6 @@ def tools_root():
             if temporary.exists():
                 shutil.rmtree(temporary)
     return root, True
-
-
-def installed_data():
-    return Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'hfmodem'
 
 
 def environment(root, installed):
@@ -105,4 +103,5 @@ def face():
     spec.loader.exec_module(module)
     data = installed_data() if installed else root / 'operator-data'
     module.data_root = Path(os.environ.get('HFMODEM_DATA_DIR', data)).expanduser().resolve()
+    module.source_root = root
     return module

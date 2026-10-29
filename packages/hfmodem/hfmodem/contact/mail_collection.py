@@ -25,6 +25,7 @@ class MailCollection:
                 not isinstance(row, dict) or
                 not all(isinstance(row.get(key), str) for key in ('source', 'destination', 'utc')) or
                 type(row.get('dial_hz')) is not int or
+                type(row.get('urgent', False)) is not bool or
                 type(row.get('received', 0)) is not int for row in rows):
             raise ValueError('invalid relay-notices.json; existing file preserved')
         return rows
@@ -44,32 +45,43 @@ class MailCollection:
                 temporary.unlink(missing_ok=True)
 
     def notice(self, message, *, dial):
-        from .varac import utc
+        from .varac import canonical_call, utc
         s = self.session
-        if (message.command != 1 or message.info != b'<SMP>'
-                or message.destination != s.client.mycall
-                or message.source == s.client.mycall):
+        if (not s.parking.store.settings['relay'] or message.command != 1
+                or message.info not in (b'<SMP>', b'<SMU>')):
             return
+        try:
+            owner, source, destination = map(canonical_call,
+                                             (s.client.mycall, message.source, message.destination))
+        except ValueError:
+            return
+        if destination != owner or source == owner:
+            return
+        if not s.parking.store.available:
+            s.say('VMail parking store unavailable; collection notices remain enabled')
         try:
             rows = self._load()
             rows = [row for row in rows if (row['source'], row['destination']) !=
-                    (message.source, message.destination)]
-            rows.append(dict(source=message.source, destination=message.destination,
-                             utc=utc(), dial_hz=dial, received=0))
+                    (source, destination)]
+            rows.append(dict(source=source, destination=destination,
+                             utc=utc(), dial_hz=dial, received=0, urgent=message.info == b'<SMU>'))
             self._save(rows)
         except (OSError, ValueError) as error:
             s.say(f'Parked-mail notice could not be saved: {error}')
             return
-        s.say(f'Mail waiting at {message.source}; /vmail collect {message.source} connects to collect it. '
+        s.say(f'{"Urgent mail" if rows[-1]["urgent"] else "Mail"} waiting at {message.source}; '
+              f'/vmail collect {message.source} connects to collect it. '
               '/vmail pending lists saved notices.')
         s.emit('vmail_notice', **rows[-1])
 
     def received(self):
+        from .varac import canonical_call
         s = self.session
         try:
+            owner, peer = map(canonical_call, (s.client.mycall, s.peer))
             rows = self._load()
             for row in rows:
-                if row['destination'] == s.client.mycall and row['source'] == s.peer:
+                if row['destination'] == owner and row['source'] == peer:
                     row['received'] = row.get('received', 0) + 1
                     self._save(rows)
                     return
@@ -77,22 +89,24 @@ class MailCollection:
             s.say(f'VMail saved, but relay notice could not be updated: {error}')
 
     def command(self, words):
-        from .varac import CALLING_HZ, HostError, base_call, callsign, slot_frequency
+        from .varac import CALLING_HZ, HostError, base_call, canonical_call, slot_frequency
         s = self.session
         try:
+            owner = canonical_call(s.client.mycall)
             rows = self._load()
-            mine = [row for row in rows if row['destination'] == s.client.mycall]
+            mine = [row for row in rows if row['destination'] == owner]
             if words == ['pending']:
                 for row in mine:
                     s.say(f"{row['source']}: mail notice on {row['dial_hz'] / 1000:.3f} kHz, "
-                          f"{row['utc']}; {row.get('received', 0)} received since notice; "
+                          f"{row['utc']}; {'urgent; ' if row.get('urgent') else ''}"
+                          f"{row.get('received', 0)} received since notice; "
                           f"/vmail collect {row['source']}")
                 s.say('Notices remain until /vmail dismiss CALL; the relay may have more mail.'
                       if mine else 'No parked-mail notices saved for this callsign')
                 return
             if len(words) != 2 or words[0] not in ('collect', 'dismiss'):
                 raise ValueError('usage: /vmail pending | /vmail collect CALL | /vmail dismiss CALL')
-            peer = callsign(words[1])
+            peer = canonical_call(words[1])
             notice = next((row for row in mine if row['source'] == peer), None)
             if words[0] == 'dismiss':
                 if notice is None:
@@ -103,7 +117,7 @@ class MailCollection:
         except OSError as error:
             raise HostError(f'Cannot access parked-mail notices: {error}') from error
 
-        if peer == s.client.mycall:
+        if peer == owner:
             raise ValueError('Cannot collect mail from your own callsign')
         if s.client.closed:
             raise HostError('Host connection is closed')

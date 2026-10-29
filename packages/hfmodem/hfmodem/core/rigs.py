@@ -215,6 +215,13 @@ RIGS = {
               "tx_latency_ms": 0.0, "tx_latency_status": "UNMEASURED", "audio_chain": "x6100_usb",
               "note": "Xiegu X6100; single USB gives both CAT serial and a soundcard"},
 }
+# Whether a TUNE carrier gets the rig's tuner a match. The FT-891's tuner searches
+# on one; the FTDX10's does not: with no stored match it folds back on the SWR,
+# even through the tuner, until a tuning cycle is started at the rig.
+for _name, _carrier in (("generic", True), ("ft891", True), ("ftdx10", False),
+                        ("g90", True), ("x6100", True)):
+    RIGS[_name]["tune_carrier"] = _carrier
+assert all("tune_carrier" in profile for profile in RIGS.values())
 
 
 # Nominal backend DATA ladders; physical passband qualification is separate.
@@ -298,7 +305,7 @@ def profile_cat(name=None, *, environ=None, legacy_model=None):
 
 PROFILE_OVERRIDES = frozenset({"cat_port", "ptt_port", "settle", "tr_switch_s",
                                "tr_recovery_slack_s", "tx_latency_ms",
-                               "cat_rts", "cat_dtr",
+                               "cat_rts", "cat_dtr", "tune_carrier",
                                "calibration_status", "calibration_evidence"})
 
 
@@ -323,7 +330,7 @@ def resolve_profile(name=None, *, environ=None, legacy_model=None, profiles=None
                      and math.isfinite(value) and value >= 0
                      and (key not in ("settle", "tr_switch_s") or value > 0)
                      and (key != "tx_latency_ms" or value <= 60))
-        elif key in ("cat_rts", "cat_dtr"):
+        elif key in ("cat_rts", "cat_dtr", "tune_carrier"):
             valid = isinstance(value, bool)
         elif key == "calibration_status":
             valid = value in ("UNMEASURED", "PROVISIONAL", "INFERRED", "MEASURED")

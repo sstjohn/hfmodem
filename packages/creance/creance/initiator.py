@@ -34,6 +34,10 @@ from .scenarios import CwpSession
 from hfhost.supervisor import Supervisor
 from hfhost.transcript import Transcript, read
 
+#: A host can refuse a probe for a moment while it releases the previous
+#: session's attachment; a modem that is really down fails after this.
+REACH_GRACE_S = 5.0
+
 
 def _make_sid(modem: str) -> str:
     return f"{time.strftime('%Y%m%dT%H%M%S')}-{modem}-{secrets.token_hex(2)}"
@@ -96,8 +100,11 @@ def run_session(config: Config, modem_name: str, dst: str, scenario: str,
     client: ModemClient | None = None
     session: CwpSession | None = None
     try:
-        if not supervisor.ensure(modem_name):
-            raise ModemError(f"{modem_name}: not reachable")
+        reach_by = time.monotonic() + REACH_GRACE_S
+        while not supervisor.ensure(modem_name):
+            if time.monotonic() >= reach_by or cancel.is_set():
+                raise ModemError(f"{modem_name}: not reachable")
+            time.sleep(0.25)
         supervisor.acquire(modem_name)
 
         client = open_link(mcfg, host, transcript,

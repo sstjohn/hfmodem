@@ -21,7 +21,8 @@ import sys
 import numpy as np
 import pytest
 
-from hfmodem.shrike import hostmode, p1rx, rxfront
+from hfmodem.shrike import p1rx, rxfront
+from hfmodem.core import hostmode
 from hfmodem.shrike.arq import ArqConfig, ArqIO, PactorArq, State, parse_connect_arg
 from hfmodem.shrike.ptc import PtcHost, SimPeer
 

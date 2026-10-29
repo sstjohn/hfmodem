@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from scipy.io import wavfile
 
 from hfmodem.contact import passive as P, slots as S
@@ -182,28 +183,17 @@ def test_retune_cannot_interleave_between_control_flush_and_audio_enqueue():
     assert w._in.get_nowait() == ('tune', 14_105_750, 14_105_000, 1)
 
 
-def test_capture_gap_resets_reader_and_text_carry_before_later_audio(monkeypatch):
-    seen = []
-    class Monitor:
-        def __init__(self, dial, calling, **kwargs):
-            self.dial, self.samples = dial, 0
-            self._evidence = {1: SimpleNamespace(text='stale<', last_chunk=('old', 6, 0))}
-            self._channels = [SimpleNamespace(slot=1)]
-        @property
-        def now(self): return self.samples / S.FS
-        def retune(self, dial): seen.append('reset')
-        def _said(self, ch, kind, text): return ('qso', ch.slot, S.Said(ch.slot, self.now, kind, text))
-        def feed(self, x):
-            assert self._evidence[1].text == '' and self._evidence[1].last_chunk is None
-            self.samples += len(x); seen.append('later audio'); return []
-        def table(self): return []
-    monkeypatch.setattr(S, 'SlotMonitor', Monitor)
-    monkeypatch.setattr(S.os, 'nice', lambda _: None)
-    inbox, outbox = queue.Queue(), queue.Queue()
-    for item in [('gap', 72000), np.zeros(4800), None]: inbox.put(item)
-    S._watch(inbox, outbox, 14_105_000, 14_105_000, {})
-    assert seen == ['reset', 'later audio']
-    assert '1.50 seconds skipped' in outbox.get_nowait()[1][2].text
+@pytest.mark.parametrize('n, said', [(2400, '0.05'), (72000, '1.50')])
+def test_capture_gap_keeps_the_readers_and_drops_only_the_text_carry(n, said):
+    m = S.SlotMonitor(14_105_000, 14_105_000)
+    m.feed(np.zeros(S.BLOCK))
+    channels = [(ch, ch.cq, ch.frames, ch.idles, ch.ratios) for ch in m._channels]
+    m._evidence[1] = S._Evidence(text='stale<', last_chunk=('old', 6, 0))
+    found = m.gap(n)
+    assert [(ch, ch.cq, ch.frames, ch.idles, ch.ratios) for ch in m._channels] == channels
+    assert m._evidence[1].text == '' and m._evidence[1].last_chunk is None
+    assert [r[2].text for r in found if r[0] == 'qso'] == [f'passive audio gap: {said} seconds skipped'] * 3
+    assert m.samples + len(m._pending) == S.BLOCK + n
 
 
 def test_partial_emission_never_joins_retained_fragments_across_unknown_loss(monkeypatch):

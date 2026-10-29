@@ -36,6 +36,7 @@ def test_trimode_audio_cw_profile_has_effective_readback_and_bounded_speed():
     assert b'CWID: 4 2' in host.feed(b'CWID\r')
 
 
+@pytest.mark.realtime
 def test_station_refuses_requested_cw_for_a_different_configured_identity(running):
     runtime, station, server = running
     assert station.arbiter.identity.mycall == 'K1ABC'
@@ -125,6 +126,7 @@ def test_refused_cw_preserves_interval_obligation_and_pending_originals(tmp_path
 
 
 @pytest.mark.parametrize('answering', [False, True])
+@pytest.mark.realtime
 def test_serial_cwid_profile_drives_native_closing_audio_and_retires_its_contact(running, answering):
     from hfmodem.shrike import pactor1
     runtime, station, server = running

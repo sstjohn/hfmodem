@@ -147,6 +147,32 @@ def collector_claim(cfg):
     yield
 
 
+def session_power(cat, cfg):
+    """The watts this session sets: `power_w` held to the clamp, or the clamp itself when
+    no power is configured and the rig reads above it. None leaves the rig as it is."""
+    from hfmodem.core.config import clamp_power
+    from hfmodem.core.rig import RigError
+    rig = cfg.rig
+    if rig.power_w is not None:
+        watts, warning = clamp_power(rig.power_w, rig.power_clamp_w, '[rig] power_w')
+        if warning:
+            print(warning, flush=True)
+        return watts
+    if rig.power_clamp_w is None:
+        return None
+    try:
+        found = float(cat.command('l RFPOWER').splitlines()[1]) * cfg.full_scale_w
+    except (IndexError, ValueError, RigError):
+        print(f'warning: RFPOWER did not read, so the {rig.power_clamp_w:g} W station clamp is unchecked',
+              flush=True)
+        return None
+    if found <= rig.power_clamp_w + 0.5:
+        return None
+    print(f'RFPOWER reads {found:g} W, above the {rig.power_clamp_w:g} W station clamp; '
+          f'lowering it to {rig.power_clamp_w:g} W', flush=True)
+    return rig.power_clamp_w
+
+
 def radio(session, dial):
     from hfmodem.core.rig import Cat, Rig
     from hfmodem.core.ptt import RtsPtt
@@ -186,8 +212,10 @@ def radio(session, dial):
     else:
         cat.set_mode('PKTLSB' if dial < 10_000_000 else 'PKTUSB', 3000)
     cat.command(f'L AGC {cfg.voice.voice_agc}')
-    if cfg.rig.power_w is not None:
-        cat.command(f'L RFPOWER {cfg.rig.power_w / 100:g}')
+    watts = session_power(cat, cfg)
+    if watts is not None:
+        cat.command(f'L RFPOWER {watts / cfg.full_scale_w:g}')
+        session.tx_power_w = watts
     session.radio_check = lambda: verify(session)
     readback = session.radio_check()
     line.open()

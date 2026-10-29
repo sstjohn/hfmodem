@@ -324,7 +324,7 @@ def test_ardop_drivelevel_reaches_the_recorded_station_output(arb, monkeypatch):
     monkeypatch.setattr('hfmodem.besra.arq.modem.modulator.render_frame',
                         lambda *a, **kw: np.array([-10000, 0, 10000], dtype='<i2'))
     station = SimpleNamespace(audio=arb.audio, rig=arb.rig, arbiter=arb,
-                              cfg=SimpleNamespace(rig=SimpleNamespace(
+                              cfg=SimpleNamespace(declared_power_w=1, rig=SimpleNamespace(
                                   power_w=1, ptt=SimpleNamespace(settle_s=0))))
     link = BesraLink(station)
     host = HostServer(link.modem, control_port=0, data_port=0, quiet=True)
@@ -1253,7 +1253,7 @@ def test_station_identification_declares_the_passband_of_its_actual_cw_audio(arb
     from hfmodem.core.rates import CARD_RATE_HZ
     station = Station.__new__(Station)
     station.arbiter, station.rig = arb, arb.rig
-    station.cfg = SimpleNamespace(rig=SimpleNamespace(power_w=10))
+    station.cfg = SimpleNamespace(declared_power_w=10, rig=SimpleNamespace(power_w=10))
     arb.identity.end()
     emissions = []
     identify = arb.identify

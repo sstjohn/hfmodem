@@ -45,6 +45,17 @@ def tracked_structure(audio, origin, target, levels, *, changeover=False, gaps=(
             continue
         z = rxfront._sampled_baseband(part[:header_end-lo], home.tones, idx)
         header = p3rx.header_of(z, starts, home)
+        if sl == 1 and (header is None or header.fit < p3rx.anchor_gate(home)):
+            # The tracked packet reader can recover SL1 through a faded header.
+            # Apply that same bounded CRC proof to presence, without delivering
+            # bytes or changing the packet clock. WS8EOC 1027 kept repeating
+            # CRC-valid packets after the header-only guard silenced our ACKs.
+            end = target + rxfront._packet_span(rxfront._frame_span(home))
+            if (origin + len(audio) >= end
+                    and not any(a < end and b > lo for a, b in gaps)):
+                event = rxfront.SyncedRx().sl1_packet_at(part[:end-lo], at)
+                if event is not None and event.packet is not None and event.packet[3]:
+                    return 'tracked SL1 CRC'
         if header is None or header.fit < p3rx.anchor_gate(home) or sl not in header.levels:
             continue
         row = header.at + lead

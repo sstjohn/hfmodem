@@ -289,7 +289,7 @@ claim_record() {
 }
 
 claim_start() {
-  local fifo line deadline child_rc=0
+  local fifo line='' char deadline child_rc=0
   claim_launch_hold || return
   fifo=$(mktemp -d) || return
   mkfifo "$fifo/output" || { rm -rf "$fifo"; return 1; }
@@ -301,7 +301,12 @@ claim_start() {
   rm -rf "$fifo"
   deadline=$((SECONDS + 30))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if IFS= read -r -t 1 line <&6; then
+    # One character per read, kept even when the read reports a timeout: a byte that
+    # lands as the timer expires is read and then reported as timed out. Bash 5 keeps
+    # it in the variable; bash 3.2 drops it, so a narrow window remains there.
+    char=''
+    if IFS= read -r -n 1 -t 1 char <&6; then
+      if [ -n "$char" ]; then line=$line$char; continue; fi
       if [ "$line" = 'CLAIM ADMITTED' ]; then
         if [ "${CLAIM_INTERNAL:-0}" = 0 ]; then claim_admit; fi
         cat <&6 6>&- 7>&- 8>&- 9>&- &
@@ -311,6 +316,9 @@ claim_start() {
       fi
       printf '%s\n' "$line"
       case "$line" in 'CLAIM NOT ADMITTED'*) break ;; esac
+      line=''
+    elif [ -n "$char" ]; then
+      line=$line$char
     elif ! claim_processes alive "$CLAIM_PID"; then
       break
     fi
@@ -506,6 +514,17 @@ def recorded():
             (line.split() for line in Path(records).read_text().splitlines())}
 
 
+def recorded_as(pid, started, identities):
+    """A CLAIM_CHILDREN record names this process: ps start times compare as listed, and a
+    native child's claim token through the claim's own identity."""
+    if started is None or started == identities[pid]:
+        return started is not None
+    try:
+        return started.startswith('linux:') and claim.process_matches(pid, started)
+    except claim.ClaimError:
+        return False
+
+
 def end(children):
     for child in children:
         if child.alive():
@@ -614,7 +633,7 @@ def inventory():
             if (device_pids | matched) & protected:
                 raise claim.ClaimError('observing station still holds a device or claim')
         if mode == 'down' and not inherited and published and published.pid in rows:
-            if identities[published.pid] != published.started:
+            if not claim.process_matches(published.pid, published.started):
                 raise claim.ClaimError('claim publisher pid reused; refusing cleanup')
             print(f'pid {published.pid} ({published.command}) holds the claim; interrupt it and run down again', flush=True)
             raise SystemExit(7)
@@ -626,13 +645,13 @@ def inventory():
                     unknown.append(pid)
                 continue
             if mode != 'down':
-                if not within(pid, root, rows) and own.get(pid) != identities[pid]:
+                if not within(pid, root, rows) and not recorded_as(pid, own.get(pid), identities):
                     continue
                 if mode == 'daemon' and 'rigctld' not in rows[pid][2]:
                     continue
             if issued.get(pid) != identities[pid] and not inheritor(pid, matched, identities):
                 raise claim.ClaimError(f'pid {pid} started after this down was issued')
-            if legacy_target(pid, rows, matched, delegates) or mode != 'down' and own.get(pid) == identities[pid]:
+            if legacy_target(pid, rows, matched, delegates) or mode != 'down' and recorded_as(pid, own.get(pid), identities):
                 targets.append(NativeChild(pid, identities[pid], None, None, None))
             else:
                 unknown.append(pid)
@@ -649,7 +668,7 @@ def inventory():
 try:
     if mode == 'record':
         pid = int(args[0])
-        print(pid, claim.process_started(pid), flush=True)
+        print(pid, claim.ps_started(pid), flush=True)
     elif mode in ('alive', 'end'):
         pid = int(args[0])
         started = recorded().get(pid)

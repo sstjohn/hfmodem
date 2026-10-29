@@ -75,10 +75,8 @@ it does not tune the radio.
 | `mod110` | 188-110A MOD channel bits | Payload coding remains unknown; output is packed channel bits |
 | `cw` | Morse text | `--audio-centre 700` Hz by default |
 
-<!-- site:omit:start -->
 The dedicated `pactor4` receiver provides experimental PACTOR-4 chirp and
 burst recognition. It selects PACTOR-4 only.
-<!-- site:omit:end -->
 
 `stanag` (also `stang` or `bateleur`) is a convenience spelling for selecting
 one Bateleur waveform. It defaults to 4285 at 1200L; for example,
@@ -102,9 +100,7 @@ an application message passed its own checksum.
 PACTOR monitoring is passive observation of the existing receiver outputs;
 it does not establish an ARQ session or promise to reconstruct arbitrary
 third-party mail.
-<!-- site:omit:start -->
 PACTOR-4 recognition is experimental.
-<!-- site:omit:end -->
 Sabir's passive
 monitor recognizes its existing beacon and control formats. MOD monitoring
 does not claim to decode the unknown payload coding.

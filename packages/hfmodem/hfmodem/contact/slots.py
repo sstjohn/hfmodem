@@ -32,7 +32,7 @@ from ..kestrel.rx.cq_stream import CQDetector
 from ..kestrel.vara import compression, vara_frames as VF
 from ..monitor.cw import CwReader
 from .passive import HighSpeed, IdleReplies
-from .varac import BEACON_TEXT, DEFAULT_CODEC, SLOT_WAIT_S, label
+from .varac import BEACON_TEXT, DEFAULT_CODEC, RESUMED, SHED, SLOT_WAIT_S, label
 
 FS = 48000
 CENTRE_HZ = 1500
@@ -92,6 +92,15 @@ TAG = re.compile(r'<([A-Z]{1,6})(?::[^<>]*)?>')
 SIGNED = re.compile(r'(?:[0-9]+ )?de ([A-Z0-9/-]+) <R[+-][0-9]{2}>'
                     r'(?: <S:[A-Z]+>)?')
 TEXT_KEEP = 160
+GAP_FILL_S = 1
+#: The live watch reads at most this share of real time before it stops reading a
+#: channel, rather than fall behind and lose every channel's audio; under the lower
+#: share it reads one again. Apart far enough that a channel's own share cannot
+#: carry the load from one across the other. The load is averaged over LOAD_S of
+#: audio, and changed at most once per BALANCE_S.
+SHED_LOAD, RESUME_LOAD = .8, .35
+LOAD_S = 30
+BALANCE_S = 30
 
 
 def channels(dial, calling, *, offset=0, codec=DEFAULT_CODEC, passband=PASSBAND_HZ):
@@ -234,6 +243,11 @@ class Activity:
         return ' ↔ '.join(others) if len(others) == 2 else ', '.join(others)
 
 
+def _station(call):
+    """A full callsign, SSID 0 written bare: W9SSJ and W9SSJ-1 are two stations."""
+    return re.sub(r'-0+$', '', call.upper())
+
+
 def payload_text(payload, *, text_encoded=False):
     """Classify already CRC-validated bytes, without assuming Latin-1 is chat."""
     original = payload
@@ -320,10 +334,12 @@ class _Channel:
         self.slot, self.audio_hz, self.home = slot, audio_hz, home
         self.mixer = Mixer(audio_hz)
         self.cq = CQDetector(FS)
-        self.requests = HandshakeScanner(calls)
         self.frames = Receiver(observe_pairs=True)
         self.high = HighSpeed()
+        # The scanner reads its tones off the spectra the idle reader's front has
+        # just taken of the same audio, so `_read` feeds the idle reader first.
         self.idles = IdleReplies()
+        self.requests = HandshakeScanner(calls, frontend=self.idles.control)
         # Stock keys its closing ident on a mark at the channel's centre; the space,
         # 750 Hz below, is outside the mix and leaves the mark on-off keyed. The mix
         # holds nothing above 1900 Hz, so it is read at an eighth of the rate.
@@ -369,7 +385,7 @@ class SlotMonitor:
         self.dial = dial
         self._high_cursor = 0
         self._high_credit = .2
-        self._channels = []
+        self._channels, self._shed = [], set()
         self._place()
         self._pending = np.empty(0)
         self._spectra, self._measure_from = [], self.now
@@ -425,6 +441,19 @@ class SlotMonitor:
         self._pending = x
         return out
 
+    def gap(self, n):
+        """`n` samples of audio the watch never got. A dropout up to GAP_FILL_S is read
+        as silence, so a frame it falls outside the symbols of still decodes; a longer
+        one is passed over, as filling it would only put the watch further behind."""
+        for ev in self._evidence.values():
+            ev.text, ev.last_chunk = '', None
+        out = [self._said(ch, 'coverage', f'passive audio gap: {n / FS:.2f} seconds skipped')
+               for ch in self._channels]
+        if n > GAP_FILL_S * FS:
+            self.samples += n
+            return out
+        return out + self.feed(np.zeros(n))
+
     def _block(self, x):
         self.samples += len(x)
         spectrum = abs(np.fft.rfft(x * np.hanning(len(x)))) ** 2
@@ -432,6 +461,8 @@ class SlotMonitor:
         out = self._measure(spectrum)
         gap = np.mean([spectrum[(f >= a) & (f < b)].mean() for a, b in self._gaps]) if self._gaps else 0
         for ch in self._channels:
+            if ch.slot in self._shed:
+                continue
             ev = self._evidence.setdefault(ch.slot, _Evidence())
             band = spectrum[(f >= ch.audio_hz - HALF_HZ) & (f < ch.audio_hz + HALF_HZ)].mean()
             if gap > 0:
@@ -475,6 +506,27 @@ class SlotMonitor:
                     ev.text, ev.last_chunk = '', None
                 break
         return out
+
+    def shed(self):
+        """Stop reading one channel other than the modem's own, the quietest, then the
+        highest."""
+        rank = {'quiet': 0, 'signal': 1, 'busy': 2}
+        reading = [ch for ch in self._channels if not ch.home and ch.slot not in self._shed]
+        if not reading:
+            return []
+        ch = min(reversed(reading), key=lambda ch: rank[self._judge(ch).state])
+        self._shed.add(ch.slot)
+        return [self._said(ch, 'coverage', SHED)]
+
+    def resume(self):
+        """Read a shed channel again, its readers started afresh: the audio they
+        missed would only be read as a dropout."""
+        for i, ch in enumerate(self._channels):
+            if ch.slot in self._shed:
+                self._shed.discard(ch.slot)
+                self._channels[i] = _Channel(ch.slot, ch.audio_hz, self.calls, ch.home)
+                return [self._said(ch, 'coverage', RESUMED)]
+        return []
 
     def _coverage(self, ch, ev):
         notices = ch.high.drain_notices()
@@ -525,7 +577,10 @@ class SlotMonitor:
             kind = 'broadcast' if isinstance(result, Broadcast) else 'cq' if hasattr(result, 'call') else 'beacon'
             beacon = BEACON_TEXT.fullmatch(result.text) if kind == 'beacon' else None
             name = result.source if kind == 'broadcast' else result.call if kind == 'cq' else beacon[3] if beacon else ''
-            if name and name.split('-')[0] == self.mycall.split('-')[0]:
+            # The watch is fed silence while we key, so a frame here is another
+            # station's, even one that shares our base call: a CQ or beacon carries
+            # only the base. A broadcast names its source in full.
+            if kind == 'broadcast' and _station(name) == _station(self.mycall):
                 continue
             self._lit(ev, decoded=True)
             if name:
@@ -544,7 +599,10 @@ class SlotMonitor:
             self._link(ch, ev)
             ev.stage = 'connecting'
             if result.kind == 'CR':
-                ev.sent.add('caller')
+                # A CR names only the station called: the caller and calls left by an
+                # earlier link on this channel are not this attempt's.
+                ev.caller = ev.keyed = ''
+                ev.calls, ev.sent = [], {'caller'}
                 ev.called = result.gateway or ev.called
                 out.append(self._said(ch, 'stage', f'connect request: {ev.caller or "?"} calling {ev.called or "?"}'))
             else:
@@ -660,10 +718,10 @@ class SlotMonitor:
         tail = body.rstrip(b'\0')
         if ev.caller or ev.keyed or len(tail) < 2 or tail[-2] != phy._VARA_TRAILER:
             return
-        mine = self.mycall.split('-')[0]
+        mine = _station(self.mycall)
         for pool in (ev.calls, self.calls):
             fits = [c for c in dict.fromkeys(pool)
-                    if c not in (ev.called, mine) and crc16_genibus(c.encode()) >> 8 == tail[-1]]
+                    if c != ev.called and _station(c) != mine and crc16_genibus(c.encode()) >> 8 == tail[-1]]
             if fits:
                 ev.keyed = fits[0] if len(fits) == 1 else ''
                 return
@@ -716,7 +774,7 @@ class SlotWatch:
         self._table, self._now, self._found = SlotMonitor(dial, calling, **monitor).table(), 0., []
         self._process = context.Process(target=_watch, args=(self._in, self._out, dial, calling, monitor),
                                         daemon=True)
-        self._process.start()
+        _start_single_threaded(self._process)
 
     def _flush_controls(self):
         # Called with the parent lock held; every queue operation is nonblocking.
@@ -844,9 +902,43 @@ class SlotWatch:
         return self._table, self._now
 
 
+# A BLAS or OpenMP pool sizes itself when its library loads, which in a spawn child
+# is while the target is unpickled, before it runs: the cap has to be in the
+# environment the child starts with. The follower's matrices are small, so on a
+# Linux OpenBLAS a pool only spins (3 workers at 50% each beside an 86% decoder).
+SINGLE_THREADED = dict.fromkeys(('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+                                 'VECLIB_MAXIMUM_THREADS', 'NUMEXPR_NUM_THREADS',
+                                 'RAYON_NUM_THREADS'), '1')
+
+
+def _start_single_threaded(process):
+    saved = {name: os.environ.get(name) for name in SINGLE_THREADED}
+    os.environ.update(SINGLE_THREADED)
+    try:
+        process.start()
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                del os.environ[name]
+            else:
+                os.environ[name] = value
+
+
+def _lower_priority(increment):
+    os.nice(increment)
+    # Linux nice is per thread: carry it to any thread an import already started.
+    if os.path.isdir('/proc/self/task'):
+        nice = os.getpriority(os.PRIO_PROCESS, 0)
+        for tid in os.listdir('/proc/self/task'):
+            try:
+                os.setpriority(os.PRIO_PROCESS, int(tid), nice)
+            except ProcessLookupError:
+                pass
+
+
 def _watch(inbox, outbox, dial, calling, monitor):
-    os.nice(10)
-    generation = 0
+    _lower_priority(10)
+    generation, load, balanced = 0, 0., 0.
     try:
         watch = SlotMonitor(dial, calling, **monitor)
         while (item := inbox.get()) is not None:
@@ -860,18 +952,20 @@ def _watch(inbox, outbox, dial, calling, monitor):
                         outbox.put((generation, watch._said(ch, 'coverage',
                             f'passive station hints skipped: {item[1]}; identities may remain unknown')))
                 elif item[0] == 'gap':
-                    watch.samples += item[1]
-                    watch.retune(watch.dial)
-                    for ev in watch._evidence.values():
-                        ev.text, ev.last_chunk = '', None
-                    for ch in watch._channels:
-                        outbox.put((generation, watch._said(ch, 'coverage',
-                            f'passive audio gap: {item[1] / FS:.2f} seconds skipped; readers reset')))
+                    for record in watch.gap(item[1]):
+                        outbox.put((generation, record))
                 else:
                     watch.heard(*item[1:])
                 continue
-            before = watch.now
-            for record in watch.feed(item):
+            before, began = watch.now, time.monotonic()
+            records = watch.feed(item)
+            seconds = max(np.size(item), 1) / FS
+            load += ((time.monotonic() - began) / seconds - load) * min(1, seconds / LOAD_S)
+            if watch.now - balanced >= BALANCE_S and (load > SHED_LOAD or load < RESUME_LOAD):
+                change = watch.shed() if load > SHED_LOAD else watch.resume()
+                if change:
+                    records, balanced = records + change, watch.now
+            for record in records:
                 outbox.put((generation, record))
             if watch.now != before:
                 outbox.put((generation, ('table', watch.table(), watch.now)))

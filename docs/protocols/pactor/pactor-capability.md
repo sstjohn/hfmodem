@@ -88,9 +88,7 @@ level is performed."
 
 That sentence, across three editions of an ITU Recommendation and two vendor
 papers, is the entire published treatment.
-<!-- site:omit:start -->
 *The PACTOR-4 Protocol* has no link-establishment section at all.
-<!-- site:omit:end -->
 
 The PTC-IIIusb manual's `MYLevel` parameter takes 1, 2 or 3; the modem "will
 switch to PACTOR-2/-3 when the other station is so fitted", and the default 3

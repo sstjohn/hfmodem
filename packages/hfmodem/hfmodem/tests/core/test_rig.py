@@ -16,6 +16,7 @@ FT-891's response to an RTS edge from a foreign fd.
 """
 from __future__ import annotations
 
+import errno
 import socket
 import threading
 from pathlib import Path
@@ -441,8 +442,51 @@ def test_a_daemon_that_hangs_up_during_setup_fails_loudly(fake):
     """
     fake.no_extended = True
     cat = Cat("127.0.0.1", fake.port)
-    with pytest.raises(RigError, match="closed the connection|Broken pipe"):
+    with pytest.raises(RigError, match=f"no rigctld at 127.0.0.1:{fake.port}:") as exc:
         cat.open()
+    assert "Start rigctld first. It owns the CAT port." in str(exc.value)
+    # A peer close may surface as EOF, a failed write, or a reset on the next read.
+    # Check the transport cause rather than the kernel's platform-specific wording.
+    cause = exc.value.__cause__
+    if isinstance(cause, OSError):
+        assert cause.errno in {errno.EPIPE, errno.ECONNRESET}
+    else:
+        assert isinstance(cause, RigError)
+        assert str(cause) == "rigctld closed the connection"
+    assert cat._sock is None
+
+
+@pytest.mark.parametrize("failure", [None, errno.EPIPE, errno.ECONNRESET],
+                         ids=["eof", "broken-pipe", "reset"])
+def test_setup_peer_close_preserves_transport_cause_and_closes_socket(monkeypatch, failure):
+    error = OSError(failure, "peer disconnected") if failure is not None else None
+    sent = []
+    class SetupSocket:
+        closed = False
+        def settimeout(self, timeout): pass
+        def sendall(self, data):
+            sent.append(data)
+            if len(sent) == 2 and failure == errno.EPIPE:
+                raise error
+        def recv(self, size):
+            if len(sent) == 1:
+                return b"set_cache: 0\nRPRT -1\n"
+            if failure == errno.ECONNRESET:
+                raise error
+            return b""
+        def close(self): self.closed = True
+    sock = SetupSocket()
+    monkeypatch.setattr(Cat, "_connect", lambda self, deadline: sock)
+    cat = Cat("127.0.0.1", 0)
+    with pytest.raises(RigError, match="no rigctld at 127.0.0.1:0:") as exc:
+        cat.open()
+    assert sent == [b"+\\set_cache 0\n", b"+f\n"]
+    if error is None:
+        assert isinstance(exc.value.__cause__, RigError)
+        assert str(exc.value.__cause__) == "rigctld closed the connection"
+    else:
+        assert exc.value.__cause__ is error
+    assert cat._sock is None and sock.closed
 
 
 @pytest.mark.realtime

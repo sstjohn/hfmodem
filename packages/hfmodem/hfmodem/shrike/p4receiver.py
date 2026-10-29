@@ -15,6 +15,7 @@ WORD_SLACK_S = .035
 SCAN_WINDOW_S = 1.25
 SCAN_STEP_S = .400
 SCAN_ALLOWANCE_S = .080
+EMISSION_LOOKBACK_S = 10*1.25 + WORD_SLACK_S
 
 
 class Role(StrEnum):
@@ -137,6 +138,8 @@ class P4Receiver:
         self._body_attempted = set()
         self._missed_due = None
         self.emissions = []
+        self._emission_revision = 0
+        self._had_irs_emission = False
         self._responds_to = {}
         self.expected_words = None
         self.hold = None
@@ -161,6 +164,7 @@ class P4Receiver:
         self._chirp_cache = {}
         self._chirp_headers = {}
         self._chirp_prior_cycles = {}
+        self._chirp_sweeps = set()
         self._long_cache = {}
         # A robust hypothesis must never become a normal placement (or vice versa).
         self._robust_long_cache = {}
@@ -239,8 +243,7 @@ class P4Receiver:
             self._scan_after = max(self._scan_after, self.last_emission.stream_sample
                                    + round(self.last_emission.duration_s*self.fs))
         self._scan_cursor = max(self._scan_cursor, self._scan_after)
-        generation = (self.cfo_hz, tuple(self.capture_gaps),
-                      tuple((e.stream_sample, e.duration_s) for e in self.emissions))
+        generation = (self.cfo_hz, tuple(self.capture_gaps), self._emission_revision)
         if generation != self._scan_generation:
             self._scan_generation_number += 1
             if (self._scan_generation is not None and self._scan_last_block is not None
@@ -498,7 +501,7 @@ class P4Receiver:
             # The preceding short remains peer_onset until a long CRC passes.
             # A placed long on the adopted packet clock is still live carrier.
             live |= abs(at-self.clock.next_due) <= round(self.clock.slack_s*self.fs)
-        if self.peer_onset is None and not self.emissions and obs.word == 'Y27':
+        if self.peer_onset is None and self.last_emission is None and obs.word == 'Y27':
             live = True
         if live or word_live:
             if not any(abs(at-s) < self.fs//10 for s in self.live_onsets):
@@ -541,7 +544,27 @@ class P4Receiver:
         return any(em.stream_sample <= at < em.stream_sample+round(em.duration_s*self.fs)
                    for em in self.emissions)
 
+    def _trim_emissions(self, at):
+        audio_floor = at-round(6*self.fs)
+        cutoff = audio_floor-round(EMISSION_LOOKBACK_S*self.fs)
+        margin = round(p4rx.MATCHED_DELAY*self.fs/p4rx.SAMPLE_RATE)
+        # Retained audio can still contain replies to the ten-slot train lease.
+        retained = []
+        for em in self.emissions:
+            if (em.stream_sample >= cutoff
+                    or em.stream_sample+round(em.duration_s*self.fs)+margin >= audio_floor):
+                retained.append(em)
+            else:
+                self._had_irs_emission |= em.role == Role.IRS
+        if len(retained) != len(self.emissions):
+            self.emissions[:] = retained
+            self._emission_revision += 1
+
     def note_emission(self, em, *, close_grant=False):
+        # Opening handoff can submit probe keys already evicted from the window.
+        if (self.last_emission is not None and em.stream_sample
+                < self.last_emission.stream_sample-round((6+EMISSION_LOOKBACK_S)*self.fs)):
+            return
         potential_grant = (em.kind == Kind.BODY and em.role == Role.ISS
                            and em.packet_reply and not em.train and not em._close_grant)
         if potential_grant:
@@ -580,6 +603,8 @@ class P4Receiver:
         self._close_grant_word = close_grant
         if not any(e.stream_sample == em.stream_sample for e in self.emissions):
             self.emissions.append(em)
+            self._emission_revision += 1
+        self._trim_emissions(em.stream_sample)
         if self.hold and em.current_slot_accepted:
             self.hold.reset('our key')
             self._body_heads.clear()
@@ -1327,7 +1352,8 @@ class P4Receiver:
     def _normal_eligible(self):
         return (self.hold is not None and self.clock is not None
                 and self.clock.expects == Expect.PACKET and self.clock.cycle_s in (1.25, 3.75)
-                and (len(self._peer_heads) >= 2 or any(e.role == Role.IRS for e in self.emissions)
+                and (len(self._peer_heads) >= 2 or self._had_irs_emission
+                     or any(e.role == Role.IRS for e in self.emissions)
                      or self.last_emission is not None and self.last_emission.packet_reply))
 
     def _qam_work_eligible(self, entry):
@@ -1986,6 +2012,24 @@ class P4Receiver:
         if key not in self._chirp_cache:
             self._chirp_cache[key] = p4chirprx.decode_packet(
                 audio, fs=fs, start_sample=first, frequency_offset=key[1])
+            sweep = any(k in self._chirp_sweeps and header is not None
+                        and header[0] == onset and k[1] == key[1]
+                        for k, header in self._chirp_headers.items())
+            if self._chirp_cache[key] is None and sweep:
+                # Sweep timing is periodic by one symbol. Try the nearest
+                # predicted phase first; CRC, never the weak marker, admits it.
+                for offset in (0., -.015, .015, -.030, .030):
+                    candidate = first+round(offset*fs)
+                    if candidate < 0:
+                        continue
+                    recovered = p4chirprx.decode_packet(audio, fs=fs,
+                        start_sample=candidate, frequency_offset=key[1], sweep_verified=True)
+                    if recovered is not None:
+                        self._chirp_cache[key] = recovered
+                        self.live_events.append(dict(event='chirp sweep recovered', at=onset,
+                            status=recovered.frame.status.byte, header_score=recovered.header_score,
+                            timing_offset_s=offset))
+                        break
         reception = self._chirp_cache[key]
         if reception is not None:
             return Observation(Kind.CHIRP, fs, origin, first, onset,
@@ -2074,6 +2118,7 @@ class P4Receiver:
                 self._chirp_headers = {k: v for k, v in self._chirp_headers.items() if k[0] >= header_key[0]-6*fs}
                 self._chirp_prior_cycles = {k: v for k, v in self._chirp_prior_cycles.items()
                                             if k in self._chirp_headers}
+                self._chirp_sweeps.intersection_update(self._chirp_headers)
                 if header_key not in self._chirp_headers:
                     header = p4chirprx.acquire_header(audio, fs=fs, nominal_sample=nominal,
                                                      frequency_offset=self.clock.cfo_hz)
@@ -2081,6 +2126,19 @@ class P4Receiver:
                     if header is not None:
                         self._chirp_prior_cycles[header_key] = (
                             self.clock, self._train_generation, self.clock.cycle_s)
+                if (self._chirp_headers[header_key] is None
+                        and header_key not in self._chirp_sweeps
+                        and len(audio)-nominal >= round(.810*fs)):
+                    self._chirp_sweeps.add(header_key)
+                    sweep = p4chirprx.acquire_sweep(audio, fs=fs, nominal_sample=nominal,
+                                                   frequency_offset=self.clock.cfo_hz)
+                    if sweep is not None:
+                        self._chirp_headers[header_key] = (origin+sweep.start_sample, sweep.score)
+                        self._chirp_prior_cycles[header_key] = (
+                            self.clock, self._train_generation, self.clock.cycle_s)
+                        self.live_events.append(dict(event='chirp sweep detected',
+                            at=origin+sweep.start_sample, coherence=sweep.score,
+                            reason='protect receive span; CRC pending'))
             header = self._chirp_headers.get(header_key)
             first = None if header is None else header[0]-origin
             # Prediction and acquired onset have different retention bounds.

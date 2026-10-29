@@ -148,14 +148,14 @@ def test_wrong_whitener_reads_nothing():
     x, overs, _ = _session(_SESSIONS[0][0])
     s, e = overs[0]
     assert rx.decode_over(x, s, e).crc_ok, "sanity: the over decodes unmodified"
-    orig = rx._PN
+    orig = rx._PN.copy()
     try:
-        rx._PN = orig ^ 1
+        rx._PN[:] = orig ^ 1
         assert not rx.decode_over(x, s, e).crc_ok, (
             "a decode with the WRONG whitener PN passed CRC — the gate can pass "
             "without looking")
     finally:
-        rx._PN = orig
+        rx._PN[:] = orig
 
 
 def test_wrong_channel_interleave_reads_nothing():

@@ -46,6 +46,9 @@ def parser():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--band', type=int, choices=tuple(CALLING_HZ), default=20,
                    help='the band whose calling frequency to monitor (default 20)')
+    p.add_argument('--dial', type=int, metavar='HZ',
+                   help="hold the session on this dial in place of the band's VarAC calling "
+                        'frequency, for a link between stations that have agreed on it')
     p.add_argument('--bw', type=int, choices=BANDWIDTHS, default=DEFAULT_BW,
                    help=f'VARA bandwidth for monitoring, /cq and /call (default {DEFAULT_BW}); '
                         '/answer uses the bandwidth the CQ advertised')
@@ -56,6 +59,8 @@ def parser():
         p.add_argument('--' + field, help=helps.get(field, f'sent as <{field.upper()}:...> in the opening'))
     p.add_argument('--bbs-directory', help='serve this directory and advertise BBS; overrides station.toml')
     p.add_argument('--no-bbs', action='store_true', help='disable the configured BBS export')
+    p.add_argument('--bbs-config', help='shared BBS config; overrides station.toml [bbs] config')
+    p.add_argument('--no-bbs-service', action='store_true', help='disable interactive BBS service')
     p.add_argument('--pskreporter', action='store_true',
                    help='opt in to public PSKReporter CQ/beacon reports (default off)')
     p.add_argument('--idcall', help='CW call for the closing ID (default IDCALL, [station] idcall, then MYCALL)')
@@ -67,21 +72,49 @@ def parser():
 
 def plan(args, now):
     from hfmodem.core import config
+    from hfmodem.bbs.config import configured_path
 
+    station_path = os.environ.get(config.STATION_ENV)
+    if not station_path and (station.ROOT / 'station.toml').is_file():
+        station_path = station.ROOT / 'station.toml'
+    board_path = (None if getattr(args, 'no_bbs_service', False) else
+                  configured_path(getattr(args, 'bbs_config', None), station_path=station_path))
+    args.bbs_config = str(board_path) if board_path is not None else None
+
+    if getattr(args, 'bbs_config', None) and not getattr(args, 'no_bbs_service', False):
+        # Reject bad/conflicting catalogs before the shell launcher touches radio setup.
+        from hfmodem.bbs.config import load as load_bbs
+        from hfmodem.bbs.service import catalog_root
+        from hfmodem.contact.bbs import HostCatalog
+        from hfmodem.contact.bbs_server import configured_directory
+        board = load_bbs(args.bbs_config)
+        root = catalog_root(board, configured_directory(args.bbs_directory))
+        if root is not None:
+            check = HostCatalog()
+            try:
+                check.enable(root)
+            finally:
+                check.close()
     selection = station.resolve_selection()
     station.warn_receive_only(selection)
     stamp = now.strftime('%Y%m%dT%H%M%S%fZ')
     directory = HOLDS.arms / stamp
-    dial = CALLING_HZ[args.band]
+    dial = CALLING_HZ[args.band] if args.dial is None else in_band(args.dial, args.band)
     if args.bw != DEFAULT_BW:
         print(f'warning: VarAC keeps its calling frequencies and slots at {DEFAULT_BW} Hz; '
               f'this session monitors and calls at {args.bw} Hz')
     command = [str(station.ONAIR), 'vara-chat', str(dial), '--band', str(args.band),
                '--bw', str(args.bw), '--session', str(directory)]
+    if args.dial is not None:
+        command += ['--dial', str(dial)]
     if args.no_bbs:
         command += ['--no-bbs']
     elif args.bbs_directory is not None:
         command += ['--bbs-directory', args.bbs_directory]
+    if getattr(args, 'no_bbs_service', False):
+        command += ['--no-bbs-service']
+    elif getattr(args, 'bbs_config', None):
+        command += ['--bbs-config', args.bbs_config]
     if getattr(args, 'pskreporter', False):
         command += ['--pskreporter']
     if args.idcall is not None:
@@ -131,6 +164,13 @@ def plan(args, now):
                 adjustments=dict(kiwi=args.kiwi, witness_seconds=rtty.SESSION_S, retune=True),
                 console_argv=getattr(args, 'console_argv', None), git=arm.git_head(),
                 env=env, command=command)
+
+
+def in_band(dial, band):
+    from hfmodem.core.band import AMATEUR_HF_BANDS
+    if not any(m == band and lo * 1e6 <= dial and dial + 3000 <= hi * 1e6 for lo, hi, m in AMATEUR_HF_BANDS):
+        raise SystemExit(f'--dial {dial} does not put a 3 kHz passband inside the {band} m band')
+    return dial
 
 
 def fly(plan):

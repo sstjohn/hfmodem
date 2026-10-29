@@ -426,9 +426,9 @@ def paired_setup(tr, wire_a, deliver=False):
                 fa.notify("BUFFER 64")
                 fa.notify("BUFFER 0")
                 fa.notify("PTT OFF")
-                fb.send_data(bytes(fa.received_data[:64]))
                 fb.notify("PTT ON")
                 fb.notify("PTT OFF")
+                fb.send_data(bytes(fa.received_data[:64]))
         threading.Thread(target=echo, daemon=True).start()
     return fa, fb, ca, cb
 

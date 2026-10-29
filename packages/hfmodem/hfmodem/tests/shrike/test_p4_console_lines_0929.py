@@ -97,8 +97,8 @@ def test_2031_ladder_counts_each_short_against_its_budget(capsys):
     ours = [line for line in shown if '→' in line]
     assert [re.sub(r", link \d+/13 s", "", line) for line in ours] == [
         f'{1.25 * k:8.2f} → short v7 (try {k + 1}/8)' for k in range(1, 8)]
-    assert [line for line in shown if 'nothing' in line][-1] == \
-        '    9.69 ← nothing (expected word, silent 8/16, link 10/13 s)'
+    assert [line for line in shown if 'no decoded reply' in line][-1] == \
+        '    9.69 ← no decoded reply (expected word, silent 8/16, link 10/13 s)'
     assert shown[-1] == ('         == LINK DOWN: retry budget exhausted -- 0 frames decoded, '
                          '7 keys sent, greeting lines read: 0; stuck at our short v7 ×7')
 

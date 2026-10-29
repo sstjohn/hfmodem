@@ -22,6 +22,30 @@ holds decode adapters spawned as subprocesses. They are not on the grading path,
 which goes through `hfhost.Link` over a socket. An unnamed exception would be
 indistinguishable from a rule nobody enforces.
 
+## Import layers
+
+`tests/gates/test_import_direction.py` builds the AST import graph for every
+Python module in all three distributions, including relative and function-local
+imports. Within hfmodem, dependencies point down these layers:
+
+1. `core`, `ax25`
+2. Modem families: `bateleur`, `besra`, `brubru`, `kestrel`, `lanner`, `macagua`,
+   `merlin`, `sabir`, `shrike`. Families do not import each other.
+3. Family `host/` packages and `station_io`/`station_runtime` adapters, `station`,
+   `monitor`
+4. `contact`, `winlink`
+5. `bbs`, `operator`, the CLI and package entry points
+
+Nested packages inherit their family's layer unless named above. Every new
+hfmodem top-level package must be assigned a layer. hfhost remains stdlib only;
+creance reaches hfmodem only through its monitor runners. Shipped code must not
+import tests or checkout tools, including tools imported by their bare names.
+
+Existing violations are exact module edges in the gate's `ALLOWLIST`, including
+the operator bootstrap's
+bundled console import and the P4 runner's checkout detector. New edges fail the
+gate; resolved edges must be deleted from the allowlist.
+
 ## What is shared, and what deliberately is not
 
 `hfmodem/core/` holds what is true of the radio rather than of a waveform. The

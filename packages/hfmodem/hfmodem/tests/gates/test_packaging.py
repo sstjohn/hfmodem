@@ -58,8 +58,8 @@ DISTS = {
 
 # Every subpackage of hfmodem, by equality. Adding one is a deliberate act and has
 # to be recorded here; `host` joins this set when the dialects are extracted.
-TOP = {"ax25", "brubru", "core", "station", "besra", "kestrel", "lanner", "monitor", "sabir", "shrike",
-       "bateleur", "winlink", "operator", "_operator", "contact", "macagua", "merlin", "tests"}
+TOP = {"ax25", "bbs", "brubru", "core", "station", "besra", "kestrel", "lanner", "monitor", "sabir", "shrike",
+       "bateleur", "winlink", "operator", "_operator", "contact", "macagua", "merlin"}
 
 # Per protocol, so an explicit-list regression cannot ship a modem's top-level
 # modules with nothing under them.

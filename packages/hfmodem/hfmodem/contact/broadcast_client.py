@@ -27,13 +27,31 @@ class BroadcastClient:
         self.session.say(f'Broadcast: {self.phase or self.result or "idle"}; {place}; '
                          'remote reception is unconfirmed')
 
-    def idle(self):
+    def idle(self, *, arming=False):
         from .varac import HostError
         s, c = self.session, self.session.client
-        if (self.active or s.steps is not None or s._closing or s._quitting
-                or c.closed or c.connected or c.pending or c.ptt or s.contact is not None
-                or s.line_state() is not False or s._band_fault):
-            raise HostError('Broadcast requires an idle, unlinked, verified-unkeyed session')
+        for blocked, why in (
+                (self.active, 'a broadcast operation is already in progress'),
+                (s.steps is not None, f'{s.intent or "another operation"} is in progress'),
+                (s._closing, 'the session is closing'),
+                (s._quitting, 'the session is quitting'),
+                (c.closed, 'the host connection is closed'),
+                (c.connected, 'a link is up'),
+                (c.pending, 'the host has a connection pending'),
+                (c.ptt, 'the host reports PTT on'),
+                (s.contact is not None, 'a contact is still open'),
+                (s._band_fault, 'band setup is unverified')):
+            if blocked:
+                raise HostError(f'Broadcast refused: {why}')
+        if arming and s.line_state() is None:
+            # A session that is not answering holds no keyer, so its line reads only once armed.
+            s.arm(True)
+            if s.line_state() is not False:
+                s.arm(s._auto_answer)
+        line = s.line_state()
+        if line is not False:
+            raise HostError('Broadcast refused: the keying line is '
+                            + ('HIGH' if line else 'unverified (no keyer held)'))
         if c.buffer not in (None, 0):
             raise HostError('Broadcast refused while connected-data bytes remain queued')
 
@@ -47,8 +65,9 @@ class BroadcastClient:
         if words == ['status']:
             self.status()
             return
-        self.idle()
-        if words == ['cf'] or words[:1] == ['slot']:
+        selecting = words == ['cf'] or words[:1] == ['slot']
+        self.idle(arming=selecting or words == ['off'])
+        if selecting:
             if words != ['cf'] and len(words) != 2:
                 raise ValueError('usage: /all slot N')
             target = (s.calling_hz if words == ['cf'] else
@@ -77,14 +96,48 @@ class BroadcastClient:
         payload = text.encode('utf-8')
         if not text.isprintable():
             raise ValueError('Broadcast text must be one printable line')
-        raw = encode_ui(c.mycall, 'ALL', payload, command=1)
+        self._start('ALL', payload, self.selected)
+
+    def directed(self, recipient, payload=b'<SMP>', *, valid=lambda: True,
+                 before_admit=lambda: None, sent=lambda: None):
+        from .varac import HostError
+        s, c = self.session, self.session.client
+        def admit():
+            if c.busy is not False or c._writes or c.buffer != 0:
+                raise HostError('Directed broadcast deferred: channel or data drain is unverified')
+            before_admit()
+        try:
+            self.idle(arming=True)
+            if c.busy is not False or c._writes or c.buffer != 0:
+                raise HostError('Directed broadcast deferred: channel or data drain is unverified')
+            if not valid():
+                raise HostError('Directed broadcast is no longer eligible')
+            c.request('LISTEN OFF')
+            self._start(recipient, payload, s.flow.dial, valid=valid,
+                        before_admit=admit, sent=sent, directed=True)
+        except (HostError, ValueError, OSError):
+            if s.steps is None and not self.active:
+                self._restore_arm()
+            raise
+
+    def _restore_arm(self):
+        s, c = self.session, self.session.client
+        if not (c.connected or c.pending or c.closed or s._closing or s._quitting):
+            c.request('LISTEN CQ' if s._auto_answer else 'LISTEN OFF')
+            s.arm(s._auto_answer)
+
+    def _start(self, recipient, payload, dial, *, valid=lambda: True,
+               before_admit=lambda: None, sent=lambda: None, directed=False):
+        s, c = self.session, self.session.client
+        raw = encode_ui(c.mycall, recipient, payload, command=1)
         # Same qualified capacity/identity check as the host, before any request.
         from ..kestrel.rx.broadcast import packetize
-        packetize(Broadcast(1, c.mycall, 'ALL', payload))
+        packetize(Broadcast(1, c.mycall, recipient, payload))
         self.active, self.cancelled, self.result = True, False, None
         self.phase = 'checking host broadcast capability; nothing queued'
         self.token = secrets.token_hex(8)
-        s._run(self._send(raw, self.selected, c.link_generation))
+        s._run(self._send(raw, dial, c.link_generation, valid=valid,
+                          before_admit=before_admit, sent=sent, directed=directed))
 
     def cancel(self):
         if self.active:
@@ -99,7 +152,7 @@ class BroadcastClient:
         return (not c.closed and not c.connected and not c.pending
                 and c.link_generation == generation and self.session.flow.dial == dial)
 
-    def _wait(self, after, predicate, timeout, dial, generation):
+    def _wait(self, after, predicate, timeout, dial, generation, valid=lambda: True):
         from .varac import HostError
         c = self.session.client
         end = c.clock() + timeout
@@ -108,6 +161,8 @@ class BroadcastClient:
                 raise InterruptedError('broadcast cancelled')
             if not self._valid(dial, generation):
                 raise HostError('Link or frequency changed during broadcast operation')
+            if not valid():
+                raise InterruptedError('broadcast is no longer eligible')
             for line in c.since(after):
                 if line == 'WRONG':
                     raise HostError('Host rejected broadcast; no retry sent')
@@ -138,7 +193,8 @@ class BroadcastClient:
                 raise HostError('Broadcast cancellation/unkey unconfirmed; terminal must end')
             yield .1
 
-    def _send(self, raw, dial, generation):
+    def _send(self, raw, dial, generation, *, valid=lambda: True,
+              before_admit=lambda: None, sent=lambda: None, directed=False):
         from .varac import HostError
         s, c = self.session, self.session.client
         sent_command = False
@@ -146,17 +202,26 @@ class BroadcastClient:
         try:
             after = c.send_command('BROADCAST CAPS')
             caps = yield from self._wait(after, lambda line: line.startswith('BROADCAST CAPS '),
-                                        10, dial, generation)
+                                        10, dial, generation, valid)
             if '1' not in caps.split()[2:]:
                 raise HostError('Host does not support command-1 broadcasts; nothing sent')
             if c.ptt or s.line_state() is not False or c.busy is True:
                 raise HostError('Channel/keying state changed; broadcast not sent')
+            if not self._valid(dial, generation) or not valid():
+                raise InterruptedError('broadcast is no longer eligible')
+            before_admit()
+            if not self._valid(dial, generation) or not valid():
+                raise InterruptedError('broadcast is no longer eligible after admission reservation')
+            if (c.ptt or s.line_state() is not False
+                    or (c.busy is not False if directed else c.busy is True)
+                    or directed and (c._writes or c.buffer != 0)):
+                raise HostError('Channel/keying or drain state changed during admission reservation')
             self.phase = 'waiting for host admission'
             sent_command = True  # A write failure can still leave uncertain admission.
             after = c.send_command(f'BROADCAST {self.token} 1 {raw.hex()}')
             prefix = f'BROADCAST {self.token} '
             queued = yield from self._wait(after, lambda line: line.startswith(prefix),
-                                          10, dial, generation)
+                                          10, dial, generation, valid)
             if queued != prefix + 'QUEUED':
                 raise HostError('Broadcast completion arrived without matching admission')
             s.say(f'Broadcast queued on {dial / 1000:.3f} kHz USB dial; not yet counted as transmitted')
@@ -164,10 +229,11 @@ class BroadcastClient:
                    command=1, payload_hex=raw.hex())
             self.phase = 'queued; waiting for actual RF completion and unkey'
             result = yield from self._wait(after, lambda line: line.startswith(prefix)
-                                            and line != prefix + 'QUEUED', 60, dial, generation)
+                                            and line != prefix + 'QUEUED', 60, dial, generation, valid)
             if result == prefix + 'SENT':
                 if c.ptt or s.line_state() is not False:
                     raise HostError('Broadcast SENT arrived while keying remains unsettled')
+                sent()
                 self.result = 'transmitted; remote reception unconfirmed'
                 s.say(f'Broadcast transmitted on {dial / 1000:.3f} kHz USB dial; '
                       'remote reception is unconfirmed')
@@ -189,10 +255,14 @@ class BroadcastClient:
                 yield from self._settle()
             if isinstance(error, InterruptedError):
                 s.say('Broadcast wait cancelled; any transmitted frame remains unacknowledged')
+            elif isinstance(error, OSError) and not sent_command:
+                raise HostError(f'Broadcast not admitted: {error}') from error
             else:
                 raise
         finally:
             self.active, self.phase = False, None
+            if directed:
+                self._restore_arm()
 
     def received(self, message, *, dial, via='current channel'):
         s = self.session

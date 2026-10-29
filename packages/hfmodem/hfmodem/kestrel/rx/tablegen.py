@@ -89,14 +89,30 @@ def permutation(n: int, seed: int) -> tuple[np.ndarray, int]:
     out = np.empty(n, dtype="<i4")
     seen = np.zeros(n, dtype=bool)
     s, k = seed, 0
+    a, c = _permutation_jumps()
     while k < n:
-        s = step(s)
-        v = draw(s, n)
-        if not seen[v]:
-            seen[v] = True
-            out[k] = v
-            k += 1
+        states = (a * np.uint64(s & (_MOD - 1)) + c) & np.uint64(_MOD - 1)
+        values = (states.astype(np.float32) * np.float32(n)
+                  * np.float32(2.0**-24)).astype(np.int64)
+        _, first = np.unique(values, return_index=True)
+        take = np.sort(first[~seen[values[first]]])[:n - k]
+        out[k:k + len(take)] = values[take]
+        seen[values[take]] = True
+        k += len(take)
+        s = int(states[take[-1] if k == n else -1])
     return out, s
+
+
+@cache
+def _permutation_jumps() -> tuple[np.ndarray, np.ndarray]:
+    a = np.empty(8192, dtype=np.uint64)
+    c = np.empty(8192, dtype=np.uint64)
+    # Affine jumps advance any starting state by j + 1 draws.
+    mult, incr = 1, 0
+    for j in range(len(a)):
+        mult, incr = (mult * _MULT) % _MOD, (incr * _MULT + _INCR) % _MOD
+        a[j], c[j] = mult, incr
+    return a, c
 
 
 def whitener(nbits: int = 150000, seed: int = 29318) -> np.ndarray:

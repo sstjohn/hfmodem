@@ -15,9 +15,9 @@ each other.
 Five guards of the runner's are not moved, and each is named here rather than
 quietly missing:
 
-  * The supervisor set RFPOWER over CAT and verified the readback. Nothing here
-    writes to the radio, so the presets carry the drive and not the watts, and
-    the arm's own `readings` record what the rig was actually on.
+  * The supervisor set RFPOWER over CAT and verified the readback. The presets
+    carry the drive and not the watts; `--power` and the station clamp set RFPOWER
+    at arm start, and the arm's own `readings` record what the rig was actually on.
   * The supervisor's no-progress clock ended a link that was keying and moving
     nothing. `--timeout` and `--mail-timeout` still bound the launcher from
     inside; no watchdog sits outside it.
@@ -62,9 +62,8 @@ BANDWIDTHS = (500, 2300, 2750)
 BANDS = ((3525000, 3600000), (7025000, 7125000),
          (10100000, 10150000), (14025000, 14150000))
 
-# The operator authorised these arms at 50 W. Nothing here asks the radio for
-# watts -- there is no launcher flag that carries them and this console does not
-# write to the rig -- so the figure stands as the ceiling a preset may name.
+# The operator authorised these arms at 50 W. No preset asks the radio for watts,
+# so the figure stands as the ceiling a preset may name.
 AUTHORISED_WATTS = 50.0
 
 #: The soundcard peak every assessed arm flew. The retry form and the drive are

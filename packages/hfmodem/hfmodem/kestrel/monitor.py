@@ -27,7 +27,7 @@ from hfmodem.kestrel.rx import varahf2300 as RX
 from hfmodem.kestrel.vara import vara_control as VC
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
-from hfmodem.kestrel.vara.vara_arq import _ACK_PLATEAU, _ack_plateau, _tone_track
+from hfmodem.kestrel.vara.vara_arq import _ACK_PLATEAU, _ack_plateau, _top3_track
 
 FS = 48000
 ACCEPT = 0.8                      # gateway match acceptance (matched/total)
@@ -887,8 +887,12 @@ class HandshakeScanner:
     recogniser stays the project's one recogniser rather than a faster copy of it.
     """
 
-    def __init__(self, calls: Sequence[str]):
+    def __init__(self, calls: Sequence[str], frontend=None):
+        """``frontend`` is a :class:`ControlTrack` already fed this stream from its
+        first sample, whose spectra the tone track is then read from."""
         self.calls = list(calls)
+        self._frontend = frontend
+        self._pushed = 0
         self._plan = [_ScanPlan.build(VF.CR, VF.CR500),
                       _ScanPlan.build(VF.CONNECT_RESPONSE, VF.CONNECT_RESPONSE_500)]
         self._span = max(int(p.off[-1]) for p in self._plan)
@@ -900,14 +904,16 @@ class HandshakeScanner:
     def push(self, x: np.ndarray) -> list[tuple[int, Result]]:
         """Detections in the audio so far, as ``(burst start sample, Result)``."""
         self._buf = np.concatenate([self._buf, np.asarray(x, dtype=np.float64)])
+        self._pushed += len(x)
         if len(self._buf) < MK.NFFT + SCAN_BLOCK:
             return []
         # Windows start at buf[0], which stays lattice-aligned because exactly the
         # samples consumed by the windows just taken are the ones dropped.
         nwin = (len(self._buf) - MK.NFFT) // SCAN_GRID + 1
         self._track = np.concatenate(
-            [self._track, _tone_track(self._buf[:MK.NFFT + (nwin - 1) * SCAN_GRID],
-                                      SCAN_GRID)])
+            [self._track, _top3_track(self._buf[:MK.NFFT + (nwin - 1) * SCAN_GRID], SCAN_GRID,
+                                      frontend=self._frontend,
+                                      origin=self._pushed - len(self._buf))[0][:, 0]])
         self._buf = self._buf[nwin * SCAN_GRID:]
         n = len(self._track) - self._span
         if n <= 0:

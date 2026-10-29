@@ -160,6 +160,25 @@ def test_erased_second_frame_gets_frame_ten_only_after_the_pair(role, level):
     np.testing.assert_array_equal(io.sent[-1], io.sent[0])
 
 
+@pytest.mark.parametrize('level', [1, 2, 3])
+def test_a_high_speed_link_takes_no_pair_below_the_top(level):
+    """A high speed capable sender pairs at its top level only (GEARSHIFT-
+    OBSERVED §5); a weak read of a lower over as a pair whose second frame was
+    lost answered frame 10 to a single over (simulated air, -17 dB one way)."""
+    hs, io = _receiver('initiator', level, 6)
+    hs._link_high_speed = True
+    frames = [_build(level, value=v) for v in (31, 73)]
+    signal = tx.synth_burst(frames, onset=24000, level=level)
+    rec = rx.INDEX_RECORDS.get(level)
+    signal[24000 + (rec.lead + rec.ncols) * rec.dw:] = 0
+    _feed(hs, io, np.pad(signal, (0, rx.FS)))
+    ten = vf.over_continue_frames(hs.called, '500', (10,))[10][0]
+    assert not any(len(s) == len(mk.synth_tone_pairs(ten))
+                   and np.allclose(s, mk.synth_tone_pairs(ten)) for s in io.sent), io.msgs
+    assert not hs._pair_loss_500
+    assert io.host == [bytes([31]) * rx._PAYLOAD[level]], io.msgs
+
+
 @pytest.mark.parametrize('role', ['initiator', 'responder'])
 @pytest.mark.parametrize('t', [209.797, 222.219])
 def test_cables_short_remainder_80_waits_for_82_close(role, t):

@@ -5,7 +5,7 @@ import pytest
 
 from hfhost import ptc
 from hfmodem.shrike.arq import State
-from hfmodem.shrike.hostmode import REQUEST
+from hfmodem.core.hostmode import REQUEST
 from hfmodem.shrike.ptc import PtcHost, SimPeer
 
 

@@ -21,8 +21,13 @@ class P4LateFrame(Exception):
 
 def observed_extension(frame):
     status = frame.status
-    return (status.extended and status.protocol in (0, 3) and not status.source_mode
-            and frame.data.startswith(b"\x01\x01\x01"))
+    return (status.extended and not status.source_mode
+            and frame.data.startswith(b"\x01\x01\x01")
+            and (status.protocol in (0, 3)
+                 # WS8EOC 1027: repeated CRC-valid extended, empty changeover.
+                 # This admits the recorded control, not unknown source modes
+                 # or an unobserved extended changeover carrying user bytes.
+                 or status.protocol == 2 and not spec.field_payload(frame.data[3:])))
 
 
 @dataclass
@@ -258,15 +263,20 @@ class P4Host:
                    and counter == (self._source_counter+1) % 4)
         unresolved = len(covered) > self._source_width
         take = min(len(field), len(covered))
-        restart = (advance and kind != self._source_kind and self._source_width > 0
-                   and len(field) >= self._source_width
-                   and field[:take] == covered[:take])
+        # A format change can restart the source at a different counter after
+        # intervening speed controls. Require the entire retained prefix, not
+        # a suffix/text overlap, before crediting a counter-gap replay.
+        restart = (kind != self._source_kind and self._source_width > 0
+                   and (advance and len(field) >= self._source_width
+                        and field[:take] == covered[:take]
+                        or not advance and len(field) >= len(covered)
+                        and field.startswith(covered)))
         if advance and not restart:
             covered = covered[self._source_width:]
         take = min(len(field), len(covered))
         compatible = field[:take] == covered[:take]
         reason = None
-        if (same or advance) and compatible:
+        if (same or advance or restart) and compatible:
             novel = field[take:]
             covered += novel
             self._resegmented = same or unresolved or restart
@@ -318,7 +328,11 @@ class P4Host:
             raise P4StreamFailure(reason)
         identity = (status.byte, frame.data)
         kind = receipt_context.kind if receipt_context else Kind.NORMAL if counted else None
-        counted_source = kind in (Kind.NORMAL, Kind.LONG)
+        # Chirps carry the same counted source, even when a long field is
+        # retransmitted as several 22-byte fields. Opening BODY credit has its
+        # own receipt/counter rules below and must resolve before this history.
+        counted_source = (kind in (Kind.NORMAL, Kind.LONG)
+                          or kind == Kind.CHIRP and not (credit and credit.live))
         if not counted_source:
             self._reset_source()
         if identity == self.last:
@@ -407,7 +421,7 @@ class P4Host:
         self._result(receipt, before, delivery=payload, committed=committed,
                      released=released, reason=reason or source_reason,
                      replayed=replayed, new=new, resegmented=self._resegmented)
-        if kind in (Kind.BODY, Kind.CHIRP):
+        if kind == Kind.BODY or kind == Kind.CHIRP and not counted_source:
             self._reset_source()
         return payload
 

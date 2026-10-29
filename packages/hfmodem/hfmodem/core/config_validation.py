@@ -35,8 +35,9 @@ def check_station_rig(station, rig) -> None:
         raise ConfigError('[rig]: cat = "none" requires transmit = false')
     if not isinstance(rig.identity, str) or any(ord(c) < 32 or ord(c) == 127 for c in rig.identity):
         raise ConfigError("[rig]: identity must be text without control characters")
-    for name, value in (("dial_max_age_s", rig.dial_max_age_s), ("max_watts", rig.max_watts)):
-        if value is None and name == "max_watts":
+    for name, value in (("dial_max_age_s", rig.dial_max_age_s), ("max_watts", rig.max_watts),
+                        ("power_clamp_w", rig.power_clamp_w), ("tune_power_w", rig.tune_power_w)):
+        if value is None and name in ("max_watts", "power_clamp_w"):
             continue
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
             raise ConfigError(f"[rig]: {name} must be finite and positive")

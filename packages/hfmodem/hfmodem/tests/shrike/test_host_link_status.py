@@ -6,7 +6,8 @@ import math
 import pytest
 from hfhost import ptc
 
-from hfmodem.shrike import arq, hostmode
+from hfmodem.shrike import arq
+from hfmodem.core import hostmode
 from hfmodem.tests.shrike.test_ptc_compatibility import connected
 
 

@@ -5,7 +5,7 @@
 The worker owns the parser, ARQ and existing onair driver. The station thread
 only hands it indexed capture. Neither this module nor the native producer may
 open a card, set a dial, or operate PTT independently of the station arbiter.
-This runtime supports Normal calls with PACTOR-1/3 through POSIX PTYs or
+This runtime supports Normal calls with PACTOR-1/2/3 through POSIX PTYs or
 authenticated serial-supervisor streams serviced on the same native owner.
 """
 from __future__ import annotations
@@ -28,6 +28,17 @@ from .station_io import StationInput
 
 class _AttachmentEnded(ConnectionAbortedError):
     pass
+
+
+_ANNOUNCEMENT = {1: 0, 2: 1, 3: 3}
+"""Status bits 4-5 of the setup packet per MYLevel. Level 2 is the PTC-II
+ceiling `--pactor2-only` keys: bits45=1, 0x6A9 into P2, never P3 or P4."""
+
+
+def _apply_level(host, tx):
+    level = int(host.settings['MYLEVEL'])
+    host.pactor2_only = level == 2
+    tx.p1_status_bits45 = _ANNOUNCEMENT[level]
 
 
 class StationPtcRuntime:
@@ -193,8 +204,6 @@ class StationPtcRuntime:
             call = arg if name == 'MYCALL' else self.host.mycall
             if call.upper() != self.link.station.arbiter.identity.mycall:
                 raise ValueError('PTC CWID requires the configured station CW identity')
-        if name == 'MYLEVEL' and int(arg) == 2:
-            raise ValueError('STATION PTC SUPPORTS MYLEVEL 1 OR 3')
         if name == 'TXDELAY':
             from .onair import ANSWER_D_S
             if int(arg) * .005 + .010 > ANSWER_D_S:
@@ -256,7 +265,7 @@ class StationPtcRuntime:
         self.tx = tx
         if tx.settle + .010 > onair.ANSWER_D_S:
             raise ValueError('station PTT settle exceeds the native call-answer turnaround')
-        tx.p1_status_bits45 = 0 if self.host.settings['MYLEVEL'] == '1' else 3
+        _apply_level(self.host, tx)
         tx.prepare_p1_setup()
         tx.sessrx = onair._SessionRx(self.host)
         from . import telemetry
@@ -287,8 +296,7 @@ class StationPtcRuntime:
                     else:
                         self.tx.outdir = outdir
                     tx = self.tx
-                    level = int(host.settings['MYLEVEL'])
-                    tx.p1_status_bits45 = 0 if level == 1 else 3
+                    _apply_level(host, tx)
                     args = onair.build_parser().parse_args(['--transmit', '--mycall', host.arq.mycall
                         if called is None else host.mycall])
                     args.answer = 1 if called is not None else 0
@@ -367,7 +375,9 @@ class StationPtcRuntime:
             if self._port is None or self._port.closed or self._port.capture_retired:
                 self._new_transport(self.recovery_root)
             if host._owner.connect_pending:
-                if not self._endpoint.pending_bytes:
+                if self._endpoint.pending_bytes:
+                    self._stop.wait(.01)
+                else:
                     self._contact()
                 continue
             port = self._port

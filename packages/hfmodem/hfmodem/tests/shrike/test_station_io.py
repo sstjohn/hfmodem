@@ -98,7 +98,7 @@ class PollingCapture(Capture):
 def port(*, capture_factory=Capture, **options):
     audio, rig = capture_factory(), Keyer()
     station = SimpleNamespace(audio=audio, rig=rig,
-        cfg=SimpleNamespace(rig=SimpleNamespace(power_w=10)))
+        cfg=SimpleNamespace(declared_power_w=10, rig=SimpleNamespace(power_w=10)))
     station.arbiter = TxArbiter(audio, rig, drive=.6)
     link = SimpleNamespace(station=station, waveform=Waveform('pactor', 48000))
     return StationInput(link, **options), station

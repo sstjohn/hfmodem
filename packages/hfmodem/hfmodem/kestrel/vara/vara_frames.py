@@ -118,8 +118,9 @@ def link_setup_frame(caller: str, bw: str = "2300", level: int = 4,
     level; ``04 82`` at 22 dB.
 
     ``high_speed`` is a high speed capable caller's setup: body[7] bit 0 set and
-    the ask at 6, the highest level a session-confirm can start the called
-    station at; the confirm names the actual one  [see link_setup_marks].
+    an ask of 4 raised to 6, the highest level a session-confirm can start the
+    called station at; the confirm names the actual one  [see link_setup_marks].
+    A lower ask stands: KQ4QWH, high speed capable, asked 01 on the air.
     """
     if type(level) is not int or level not in (1, 2, 3, 4):
         raise ValueError("link-setup level must be a host speed level 1..4")
@@ -128,22 +129,22 @@ def link_setup_frame(caller: str, bw: str = "2300", level: int = 4,
     base, ssid = _split_ssid(caller)
     packed = _pack_callsign6(base)
     body[:len(packed)] = packed
-    body[5] = ssid                                            # SSID as integer, 0 if bare
+    body[5] |= ssid
     compression = validate_mode(compression)
     body[7] = (0x81 | MODE_BITS[compression]) if high_speed else 0x80
     if level > 1:
         body[8] = 0x14
         body[9] = crc16_genibus(caller.upper().encode()) >> 8
-    body[-2] = 6 if high_speed else ask
+    body[-2] = 6 if high_speed and ask >= 4 else ask
     body[-1] = grade | (0x0b if level == 1 else 0x02)
     return bytes(body) + crc16_genibus(bytes(body)).to_bytes(2, "big")
 
 
 def caller_from_link_setup(frame_bytes: bytes) -> str:
     """The full caller "CALL-SSID" from a decoded link-setup frame: base call
-    from the 6-bit field, SSID from body[5] (dropped when 0)  [spec 04 §4.2A]."""
-    base = unpack_callsign6(frame_bytes)
-    ssid = frame_bytes[5] if len(frame_bytes) > 5 else 0
+    from the 6-bit field, SSID from body[5]'s low nibble (dropped when 0)."""
+    base = unpack_callsign6(frame_bytes[:5] + bytes([frame_bytes[5] & 0xc0]))
+    ssid = frame_bytes[5] & 15
     return f"{base}-{ssid}" if ssid else base
 
 

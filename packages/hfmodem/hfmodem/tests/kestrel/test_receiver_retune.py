@@ -90,7 +90,7 @@ def test_final_ack_hook_only_after_successful_unkey_and_on_retry(monkeypatch):
     io = NS(received_over_acknowledged=lambda: events.append('ack fence'), log=lambda text: None)
     station = object.__new__(VaraStationHandshake)
     station.io = io
-    station.caller = "KQ4QWH"
+    station.caller, station.role = "KQ4QWH", "responder"
     station._over_answer = ('control', 1)
     station._reacks = 0
     station._progressed = lambda: None
@@ -170,7 +170,7 @@ def test_initial_final_ack_cursor_excludes_refused_and_nonfinal_responses():
     station = object.__new__(VaraStationHandshake)
     station.io = NS(received_over_acknowledged=lambda: events.append('fence'), log=lambda text: None)
     station._owe_nothing = lambda: None
-    station._chat_profile = True
+    station._chat_profile, station._link_high_speed = True, False
     station._txq = [b'queued']
     station._tx_control_burst = lambda frame: False
     station._tx_over_response(True)

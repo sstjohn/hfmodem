@@ -63,4 +63,5 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    from kestrel_connect import exit_status
+    raise SystemExit(exit_status(main))

@@ -32,11 +32,18 @@ level. The association between status-byte bits 4–5 and a PACTOR-3 grant is an
 inference from two gateways; see
 [capability negotiation](protocols/pactor/pactor-capability.md).
 
+Recorded PACTOR-3 sessions with [VE1YZ](../evidence/pactor3-ve1yz-0924/README.md)
+and [WS8EOC](../evidence/pactor3-ws8eoc-1003/README.md) are in the evidence index.
+
 ### PACTOR-4
 
 **Experimental, partial support. No successful on-air PACTOR-4 mail transfer
 has been demonstrated.** The PACTOR-1 and PACTOR-3 mail results above do not
 establish PACTOR-4 interoperability.
+Recorded gateway greetings from
+[VE3KPG](../evidence/pactor4-ve3kpg-0929/README.md) and
+[K4SPB](../evidence/pactor4-k4spb-1027/README.md) show the current reach:
+PACTOR-4 receive through the Winlink prompt, then no completed data turn.
 
 | Area | Present support | Limit |
 |---|---|---|
@@ -56,7 +63,7 @@ also covers coding, interleavers and the [C2 PRNG](protocols/pactor/pactor4-prng
 
 ## VARA
 
-Version 0.3.0 adds Kestrel chat with VarAC peers at BW500, BW2300 and
+Version 0.4.0 includes Kestrel chat with VarAC peers at BW500, BW2300 and
 BW2750, including CQ, beacons, QSY and VMail. Passive reception includes QSO
 transcripts and slot following. BBS support includes directory requests,
 validated downloads and serving a selected directory. The automatic receiver

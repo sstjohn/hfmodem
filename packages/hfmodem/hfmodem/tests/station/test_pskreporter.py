@@ -90,7 +90,7 @@ def test_batch_dedupe_own_call_and_stable_socket():
     assert [struct.unpack('!I', p[8:12])[0] for p in udp.packets] == [0, 1, 2, 3]
     assert all(p[16:18] == b'\x00\x03' for p in udp.packets[:3])
     assert udp.packets[3][16:18] == b'\x99\x92'
-    assert b'VARAC' in udp.packets[0] and b'hfmodem 0.3.0-rc0' in udp.packets[0]
+    assert b'VARAC' in udp.packets[0] and b'hfmodem 0.4.0' in udp.packets[0]
     now[0] = 4500
     r.offer(spot())
     r._batch()

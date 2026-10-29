@@ -32,6 +32,7 @@ is retained for its other readers, but is not the emitted synthesis pulse.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import cache
 
 import numpy as np
 
@@ -52,22 +53,13 @@ ROBUST_LEVEL = _rx.ROBUST_LEVEL
 C0 = 9                      # frame-start column offset (constant, = RX lock; spec §3.6.2)
 OUT_SCALE = 178.0          # output-amplitude scalar [ours]; RX is scale-invariant
 
-# shared fixed tables from the RX
-_GRID480 = _rx._GRID480
-_CELLS = _rx._CELLS
-_P = _rx._P
-_PN = _rx._PN
 grid480_index = _rx.grid480_index
 
-_CELL_INDEX = {(s, co): n for n, (s, co) in enumerate(_CELLS)}   # (sub,col) -> emit index
-_FRAME_CELL_INDEX = {0: _CELL_INDEX}
 
-
+@cache
 def _cell_index(advance: int) -> dict:
-    if advance not in _FRAME_CELL_INDEX:
-        _FRAME_CELL_INDEX[advance] = {c: n for n, c in
-                                      enumerate(_rx.frame_cells(advance))}
-    return _FRAME_CELL_INDEX[advance]
+    return {c: n for n, c in enumerate(_rx.frame_cells(advance))}
+
 
 # The two subbands share one real envelope and are staggered by half a hop.
 # The old low-passed correlation estimate blurred that envelope and placing
@@ -92,7 +84,7 @@ def encode_coded(frame_bytes: bytes) -> np.ndarray:
     if len(frame_bytes) != 46:
         raise ValueError("frame must be 46 bytes (368 bits)")
     src_bits = np.unpackbits(np.frombuffer(frame_bytes, np.uint8)).astype(int)  # 368
-    inp = src_bits ^ _PN[:N_SRC]                             # apply pre-FEC whitener
+    inp = src_bits ^ _rx._PN[:N_SRC]                         # apply pre-FEC whitener
     pf = _turbo.encode(inp)                                  # 748 coded bits
     assert pf.size == CODED
     return pf
@@ -116,7 +108,7 @@ def build_cells(pf: np.ndarray, ncol: int, ref: int = +1, advance: int = 0) -> d
             if ec >= ncol:
                 break
             if fc >= 1 and (s, fc) in index:
-                bit = int(pf[_P[(index[(s, fc)] + advance) % CODED]])
+                bit = int(pf[_rx._P[(index[(s, fc)] + advance) % CODED]])
                 val = val * (1.0 if bit == 0 else -1.0)
             grid[s][ec] = val
     return grid
@@ -132,7 +124,7 @@ def symbols(pf: np.ndarray, ncol: int | None = None, ref: int = +1,
     ck = {}
     for s in (0, 1):
         idx = grid480_index(s, ncol) + advance
-        ck[s] = OUT_SCALE * grid[s] * np.conj(_GRID480[idx[:ncol]])
+        ck[s] = OUT_SCALE * grid[s] * np.conj(_rx._GRID480[idx[:ncol]])
     return ck
 
 
@@ -173,7 +165,7 @@ def synth_burst(frame_bytes: bytes | Sequence[bytes], onset: int = 0,
         for s in (0, 1):
             idx = grid480_index(s, C0 + 8)[C0:]
             ck[s] = ck[s] * 1j ** q[s, 0]
-            ck[s][C0 - 8:C0] = OUT_SCALE * 1j ** q[s, 1:] * np.conj(_GRID480[idx])
+            ck[s][C0 - 8:C0] = OUT_SCALE * 1j ** q[s, 1:] * np.conj(_rx._GRID480[idx])
     ncol = len(ck[0])
     last_center = onset + (ncol - 1) * H
     if length is None:

@@ -39,9 +39,7 @@ describes the feed's missing-grid and gateway reporting limitations.
 
 Ranking uses the last 24 hours of PACTOR sessions, a two-hour recency decay,
 distance to the farther endpoint and generation weighting.
-<!-- site:omit:start -->
 Reported PACTOR-4 sessions receive double weight.
-<!-- site:omit:end -->
 Both endpoints need usable coordinates within 4200 km by default. Distance is
 a heuristic, not a propagation forecast. Rankings retain supporting session
 times, modes, calls, distances and filter counts. Frequencies remain **exact
@@ -61,9 +59,7 @@ failure or an empty ranking stops before opening the radio.
 
 The default initial dwell is 60 seconds. A fitted on-center FSK pair can buy one
 15-second candidate window, but energy or shape cannot renew a hold.
-<!-- site:omit:start -->
 A first credible P4 header gets its own window even if an earlier FSK shape expired.
-<!-- site:omit:end -->
 P1 setup,
 zero-error P1 controls, CRC-valid packets and P3 decoded headers/controls are
 readable evidence. A two-tone frequency fit rejects P1 events more than 60 Hz
@@ -71,7 +67,6 @@ off center; an unresolved fit is not accepted as zero offset. VARA, ARDOP and
 unidentified shapes do not renew the hold. There is no automatic retuning to
 an adjacent signal.
 
-<!-- site:omit:start -->
 P4 entry chirps use a separate blind two-lane header search, followed by the
 existing full-field CRC decoder. Partial strong headers earn only a candidate
 window. Robust P4 Chu headers remain **tentative**, even when well matched;
@@ -79,13 +74,10 @@ two distinct candidates may extend an exchange with recent readable PACTOR
 evidence. Neither a spreading comb nor a header correlation is called a
 decoded ACK or a working mail connection. Header searches run near nominal
 frequency; they do not chase an off-channel chirp.
-<!-- site:omit:end -->
 
 The default quiet release is 120 seconds without accepted evidence, preserving
 more material following an upgrade. Override it with `--quiet`.
-<!-- site:omit:start -->
 Normal P4 payloads are not blindly acquired by this watch.
-<!-- site:omit:end -->
 A session can be cut short once it stops producing recognizable evidence.
 `--max-hold 1800` imposes an
 absolute limit on each visit and labels that ending as potentially incomplete.
@@ -119,10 +111,8 @@ stopping the receiver daemon. The run directory contains `inventory.txt` and
 `inventory.json`, refreshed after every visit and on exit (including errors).
 They list channel visits, recorded hours, WAV paths, readable PACTOR activity
 and capture/analysis issues.
-<!-- site:omit:start -->
 The inventory also lists CRC-valid P4 entry chirps and tentative P4 headers,
 with P4 evidence first in the terminal.
-<!-- site:omit:end -->
 The terminal shows up to 20 visits; the files list all visits.
 Detection counts are not counts of complete sessions, and a candidate
 header may later produce a CRC-valid chirp in the same recording.

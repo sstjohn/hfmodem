@@ -105,11 +105,11 @@ jobs:
         # tagging; see docs/STATUS.md#release-qualification.
         run: |
           selection='not slow and not realtime and not wall_clock and not corpus and not hardware and not ardopcf'
-          nice -n 19 python -m pytest -c pyproject.toml -q -n auto --dist loadfile \
+          nice -n 19 python -m pytest -c pyproject.toml -q -n auto --dist loadfile --durations=50 \
             -m "$selection" \
             --ignore packages/hfmodem/hfmodem/tests/coexist \
             packages
-          nice -n 19 python -m pytest -c pyproject.toml -q -n 0 \
+          nice -n 19 python -m pytest -c pyproject.toml -q -n 0 --durations=50 \
             -m "$selection" \
             packages/hfmodem/hfmodem/tests/coexist
   publish:

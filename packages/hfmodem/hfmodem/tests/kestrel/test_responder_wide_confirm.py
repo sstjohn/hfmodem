@@ -24,22 +24,24 @@ def acquired(bw, *, immediate=b'', chat=False):
     return hs, io
 
 
-def confirm(hs, *, called=None, truncated=False):
+def confirm(hs, *, called=None, truncated=False, route='stream'):
     # Stock's level-4 short confirmation: also Xara c54/F1, seed 1551,
     # code index 3 (91 generator draws), keyed by the called station.
     samples = M.synth_burst(called or hs.called, F.for_bw(F.SESSION_CONFIRM, hs.bw))
     if truncated:
         samples = samples[:-4*M.HOP]
-    feed(hs, np.concatenate([np.zeros(4800), samples, np.zeros(24000)]))
+    audio = np.concatenate([np.zeros(4800), samples, np.zeros(24000)])
+    feed(hs, audio) if route == 'stream' else hs.on_rx_audio(audio)
 
 
 @pytest.mark.parametrize('bw', ['2300', '2750'])
-def test_wide_greeting_waits_for_confirmation_and_keys_data_in_the_granted_turn(bw):
+@pytest.mark.parametrize('route', ['stream', 'burst'])
+def test_wide_greeting_waits_for_confirmation_and_keys_data_in_the_granted_turn(bw, route):
     original = bytes(range(256))
     hs, io = acquired(bw, immediate=original)
     assert len(io.sent) == 1 and hs._tx_pending is None
     assert hs._awaiting_caller_confirm
-    confirm(hs)
+    confirm(hs, route=route)
     assert hs.turn == A._TURN_OURS and hs._tx_pending is not None, io.msgs
     assert len(io.sent) == 2 and not hs._awaiting_caller_confirm
     assert hs.payload_ledger.accepted == len(original) and hs.payload_ledger.confirmed == 0
@@ -49,22 +51,24 @@ def test_wide_greeting_waits_for_confirmation_and_keys_data_in_the_granted_turn(
 
 @pytest.mark.parametrize('bw', ['2300', '2750'])
 @pytest.mark.parametrize('case', ['wrong-call', 'truncated'])
-def test_wide_confirmation_requires_the_called_identity_and_complete_tail(bw, case):
+@pytest.mark.parametrize('route', ['stream', 'burst'])
+def test_wide_confirmation_requires_the_called_identity_and_complete_tail(bw, case, route):
     hs, io = acquired(bw, immediate=b'greeting')
     confirm(hs, called='N0ZZZ' if case == 'wrong-call' else None,
-            truncated=case == 'truncated')
+            truncated=case == 'truncated', route=route)
     assert len(io.sent) == 1 and hs._tx_pending is None
     assert hs._awaiting_caller_confirm and hs.payload_ledger.confirmed == 0
 
 
 @pytest.mark.parametrize('bw', ['2300', '2750'])
-def test_wide_greeting_queued_after_first_confirmation_waits_for_repeated_confirmation(bw):
+@pytest.mark.parametrize('route', ['stream', 'burst'])
+def test_wide_greeting_queued_after_first_confirmation_waits_for_repeated_confirmation(bw, route):
     hs, io = acquired(bw)
-    confirm(hs)
+    confirm(hs, route=route)
     assert hs._tx_pending is None and len(io.sent) == 2
     hs.send(b'delayed greeting')
     assert hs._tx_pending is None and len(io.sent) == 2
-    confirm(hs)
+    confirm(hs, route=route)
     assert hs.turn == A._TURN_OURS and hs._tx_pending is not None
     assert len(io.sent) == 3 and hs.payload_ledger.confirmed == 0
 
@@ -108,9 +112,13 @@ def test_empty_initial_turn_waits_for_idle_response_before_sending_new_host_data
 
 
 @pytest.mark.parametrize('bw', ['2300', '2750'])
-def test_empty_initial_wide_turn_keeps_polling_on_the_responder_cadence(bw):
+@pytest.mark.parametrize('route', ['stream', 'burst'])
+def test_empty_initial_wide_turn_keeps_polling_on_the_responder_cadence(bw, route):
     hs, io = acquired(bw)
-    hs._answer_responder_control(F.SESSION_KEEPALIVE_A)
+    samples = M.synth_burst(hs.called, F.for_bw(F.SESSION_KEEPALIVE_A, bw))
+    audio = np.concatenate([np.zeros(4800), samples, np.zeros(24000)])
+    feed(hs, audio) if route == 'stream' else hs.on_rx_audio(audio)
+    assert hs.turn == A._TURN_OURS and not hs._awaiting_caller_confirm
     assert hs._holding_idle() and hs.idle_poll_due_in() is not None
     sent = len(io.sent)
     _Clock.t += hs.idle_poll_due_in()

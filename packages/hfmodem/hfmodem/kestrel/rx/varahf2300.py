@@ -65,6 +65,7 @@ FS = 48000
 _REC0_2750, _REC1_2750, _REC2_2750, _REC3_2750 = 100, 101, 102, 103
 
 
+@cache
 def _load():
     # spec/tables/bw2300 constant data facts, regenerated (see tablegen): the
     # whitener and interleavers from the VB6 Rnd stream, record 3's bin-placement
@@ -96,11 +97,23 @@ def _load():
     return pn, il1, il2, base, cls
 
 
-_PN, _IL1, _IL2, _BASE_TABLES, _CLS = _load()
+@cache
+def __getattr__(name):
+    names = ("_PN", "_IL1", "_IL2", "_BASE_TABLES", "_CLS")
+    if name in names:
+        return _load()[names.index(name)]
+    if name == "_ROLES":
+        return _roles()
+    names = ("_REF_COL", "_REF_BIN", "_DATA_COL", "_DATA_ALLOC")
+    if name in names:
+        return _roles()[BASE_LEVEL][names.index(name)]
+    raise AttributeError(name)
+
 
 # Gray class-parameter rows (spec/06 §6.1d clsparm_gray): raw bpc-bit group -> symbol
 # index. Sourced from the promoted table (rows bpc=2/3/4 at offset (bpc-2)*16).
-_CLSPARM = {bpc: list(_CLS[(bpc - 2) * 16:(bpc - 2) * 16 + 2 ** bpc]) for bpc in (2, 3, 4)}
+_CLSPARM = {bpc: list(tablegen.clsparm_gray()[(bpc - 2) * 16:][:2 ** bpc])
+            for bpc in (2, 3, 4)}
 
 
 @cache
@@ -233,15 +246,16 @@ def _column_roles(level: int):
     is demodulated. That is what makes frame alignment testable without decoding.
     """
     r = RECORDS[level]
-    alloc, map1, map2 = _BASE_TABLES[level]
+    alloc, map1, map2 = _load()[3][level]
     ref = map1 != 0
     binpos = ((alloc + r.stride * map2 - r.first_bin) % r.span) + r.first_bin
     return (np.flatnonzero(ref), binpos[ref],
             np.flatnonzero(~ref), (alloc[~ref] - r.first_bin) % r.span)
 
 
-_ROLES = {lv: _column_roles(lv) for lv in _BASE_TABLES}
-_REF_COL, _REF_BIN, _DATA_COL, _DATA_ALLOC = _ROLES[BASE_LEVEL]
+@cache
+def _roles():
+    return {lv: _column_roles(lv) for lv in _load()[3]}
 
 
 def payload_bytes(level: int) -> int:
@@ -255,7 +269,7 @@ def turbo_perm(level: int) -> np.ndarray:
     The promoted full-height table gives an exact 0..N-1 bijection for every level."""
     r = RECORDS[level]
     N = r.n_info
-    c = _IL2[r.il_col::17][:N]
+    c = _load()[2][r.il_col::17][:N]
     assert len(c) == N and c.min() == 0 and c.max() == N - 1 and len(np.unique(c)) == N
     return c
 
@@ -266,7 +280,7 @@ def chan_perm(level: int) -> np.ndarray:
     The promoted full-height table gives an exact 0..coded-1 bijection for every level."""
     r = RECORDS[level]
     coded = r.coded
-    c = _IL1[r.il_col::17][:coded]
+    c = _load()[1][r.il_col::17][:coded]
     assert len(c) == coded and c.min() == 0 and c.max() == coded - 1 and len(np.unique(c)) == coded
     return c
 
@@ -302,7 +316,7 @@ def onair_to_frame(onair: np.ndarray, level: int, iters: int = 8) -> bytes:
         cheap one, while a wrong level still pays the full schedule and is
         rejected on its CRC exactly as before.
         """
-        cand = np.packbits((bits ^ _PN[:r.n_info]).astype(np.uint8)).tobytes()
+        cand = np.packbits((bits ^ _load()[0][:r.n_info]).astype(np.uint8)).tobytes()
         return check_frame(cand[:r.frame_bytes], level).crc_ok
 
     if r.coded == 2 * r.n_info + 12:
@@ -310,7 +324,7 @@ def onair_to_frame(onair: np.ndarray, level: int, iters: int = 8) -> bytes:
                                            check=_crc_ok)
     else:
         dec = _turbo.decode_r13(Lc, r.n_info, perm, iters=iters, check=_crc_ok)
-    frame_bits = (dec ^ _PN[:r.n_info]).astype(np.uint8)
+    frame_bits = (dec ^ _load()[0][:r.n_info]).astype(np.uint8)
     by = np.packbits(frame_bits).tobytes()
     return by[:r.frame_bytes]
 
@@ -531,7 +545,7 @@ def _whole_scores(ncol: np.ndarray, eq: np.ndarray, level: int) -> tuple:
     frac = eq / (eq.sum(2, keepdims=True) + 1e-12)
     hits = np.zeros((len(ncol), ng))
     share = np.zeros((len(ncol), ng))
-    for c, b in zip(*_ROLES[level][:2]):
+    for c, b in zip(*_roles()[level][:2]):
         hits += bins[:, c:c + ng] == b - r.first_bin
         share += frac[:, c:c + ng, b - r.first_bin]
     hits[np.arange(ng) > ncol[:, None] - r.ncols] = -1
@@ -554,7 +568,7 @@ def _onair_from_bins(bins: np.ndarray, level: int, ncol: int | None = None) -> n
     """Per-column lit bins -> on-air bits: bpc bits per data column via alloc + Gray.
     Columns past ``ncol`` are absent from the audio and contribute no bits."""
     r = RECORDS[level]
-    data_col, data_alloc = _ROLES[level][2:]
+    data_col, data_alloc = _roles()[level][2:]
     cols = data_col[data_col < (r.ncols if ncol is None else ncol)]
     gray = (bins[cols] - r.first_bin - data_alloc[:len(cols)]) % r.span
     # A 20-bin comb carries 16 values, so an argmax can land on a bin that means
@@ -583,7 +597,7 @@ def _bit_labels(level: int) -> tuple:
     """
     if level not in _BIT_LABELS:
         r = RECORDS[level]
-        data_alloc = _ROLES[level][3]
+        data_alloc = _roles()[level][3]
         gray = (np.arange(r.span)[None, :] - data_alloc[:, None]) % r.span
         lit = gray // r.stride < 2 ** r.bpc
         v = _clsinv(r.bpc)[np.where(lit, gray // r.stride, 0)]
@@ -611,7 +625,7 @@ def _onair_llr(mag: np.ndarray, level: int) -> np.ndarray:
     same recording.
     """
     r = RECORDS[level]
-    data_col = _ROLES[level][2]
+    data_col = _roles()[level][2]
     cols = data_col[data_col < len(mag)]
     p = mag[cols] ** 2
     ll = p / (np.median(p, axis=1, keepdims=True) + 1e-18)
@@ -743,7 +757,7 @@ def _guard_scores(mag: np.ndarray, level: int = BASE_LEVEL) -> tuple:
     ``share`` is the reference bins' energy fraction, a tie-break that survives
     fades deep enough to move an argmax."""
     r = RECORDS[level]
-    ref_col, ref_bin = _ROLES[level][:2]
+    ref_col, ref_bin = _roles()[level][:2]
     bins = mag.argmax(1) + r.first_bin
     ng = len(mag) - r.ncols + 1
     if ng <= 0:
@@ -888,7 +902,7 @@ def _onset_bins(x: np.ndarray, level: int, hz: float = 0.0,
 def _best_partial(onsets: np.ndarray, ncol: np.ndarray, bins: np.ndarray,
                   level: int) -> tuple:
     r = RECORDS[level]
-    ref_col, ref_bin = _ROLES[level][:2]
+    ref_col, ref_bin = _roles()[level][:2]
     g = np.arange(bins.shape[1])
     of = np.searchsorted(ref_col, ncol[:, None] - g)
     padded = np.pad(bins, ((0, 0), (0, ref_col[-1] + 1)), constant_values=-1)
@@ -952,7 +966,7 @@ def unread_over(audio: np.ndarray, floor: int, base_hits: int) -> str | None:
     for records 0-2 on a buffer one base over long."""
     others = tuple(lv for lv in INDEX_LEVELS if lv != BASE_LEVEL)
     for lv, hits, of, at in index_guard(audio, others):
-        if not of or hits * len(_REF_COL) < floor * of:
+        if not of or hits * len(_roles()[BASE_LEVEL][0]) < floor * of:
             continue
         return (f"unread over at {at / FS:.2f}s: {hits}/{of} reference columns "
                 f"at record {lv} ({RECORDS[lv].name}), {base_hits}/24 at the base "

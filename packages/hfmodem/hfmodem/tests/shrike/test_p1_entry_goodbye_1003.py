@@ -136,8 +136,11 @@ def test_real_p1_close_ack_does_not_credit_retained_application_bytes():
     a.on_host_disconnect()
     host.tick()
     # A modeled ACK is only a close-state pin, never recorded peer acceptance.
+    # It is the called station's codeword for the goodbye's counter, even ->
+    # CS1 (`ptc.PtcHost._p1_cs_for`); the grant settled the odd counter before
+    # it, so the alternation stands on CS2.
     seq = a.tx_seq
-    host.on_rx_event(cs(pactor1.CS_ACK_A if seq & 1 else pactor1.CS_ACK_B,
+    host.on_rx_event(cs(pactor1.CS_ACK_B if seq & 1 else pactor1.CS_ACK_A,
                         spec.Protocol.PACTOR1))
     assert a.state is arq.State.DISCONNECTED and a.goodbye_acked
     assert host.sent_total == sent

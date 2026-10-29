@@ -16,7 +16,8 @@ from __future__ import annotations
 import sys
 
 
-from hfmodem.shrike import arq, hostmode
+from hfmodem.shrike import arq
+from hfmodem.core import hostmode
 from hfmodem.shrike import pactor1
 from hfmodem.shrike import rxfront
 from hfmodem.shrike.arq import ArqIO, State

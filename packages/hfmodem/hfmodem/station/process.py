@@ -661,7 +661,7 @@ class Station:
             # mute the station rather than only the callsign.
             arb.identify(centred(self.rig.dial(), cwid.BANDWIDTH_HZ,
                                  centre_hz=cwid.TONE_HZ,
-                                 power_w=self.cfg.rig.power_w))
+                                 power_w=self.cfg.declared_power_w))
         except Exception as exc:            # noqa: BLE001
             print(f"identification failed: {exc}", file=sys.stderr)
 

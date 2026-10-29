@@ -1,0 +1,11 @@
+{
+  "source": "operator-data/captures/onair-20261027T045038967059Z-85aca34e-3028-412c-be44-74bf4b39a013/hold_174.flac",
+  "source_sha256": "3c13b87ee60dec9cd6b3c08a1d8f28de269d4116c18527d25217fc4e1e7f3bc8",
+  "pcm_sha256": "dd1b9aff30572faea1e0d2e00f2d74bd926f0fbba20a9fff44351b3fef3bb2f8",
+  "origin": 10756075,
+  "row": 10762795,
+  "offset_hz": 77.8,
+  "normalised_on_write": true,
+  "status": 2,
+  "channel": 0
+}

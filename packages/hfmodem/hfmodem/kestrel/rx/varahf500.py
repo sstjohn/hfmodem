@@ -158,6 +158,7 @@ _MIX = np.exp(-2j * np.pi * np.array([f0 for _, f0 in SUBBANDS])[:, None]
               * np.arange(_SEGLEN) / FS)
 
 
+@cache
 def _load():
     # spec/tables/bw500 constant data facts, regenerated (see tablegen). grid480
     # is the de-rotation reference (measured, 786 recovered cells); the rest are
@@ -169,19 +170,27 @@ def _load():
     return grid480, idx1, used, pn
 
 
-_GRID480, _IDX1, _USED, _PN = _load()
+@cache
+def __getattr__(name):
+    if name == "_CELLS":
+        return frame_cells(0)
+    if name == "_P":
+        return _load()[1][OFF::17][:CODED]
+    names = ("_GRID480", "_IDX1", "_USED", "_PN")
+    if name in names:
+        return _load()[names.index(name)]
+    raise AttributeError(name)
+
+
 @cache
 def frame_cells(fk: int = 0) -> tuple:
     """The data cells of frame ``fk`` of a burst, ``(sub, column)`` in emission
     order. A later frame reads the used-map ``fk`` columns on, as it reads the
     grid and the placement: stock's second frames put 13 of their 748 cells
     where frame 0's map would not, and every one of them on the advanced map."""
+    used = _load()[2]
     return tuple((s, co) for s in range(NCARR) for co in range(NSYM - 1)
-                 if co != 0 and _USED[17 * (128 * (co + fk) + s) + OFF] != 1)
-
-
-_CELLS = frame_cells(0)
-_P = _IDX1[OFF::17][:CODED]
+                 if co != 0 and used[17 * (128 * (co + fk) + s) + OFF] != 1)
 
 
 def grid480_index(sub: int, ncol: int) -> np.ndarray:
@@ -275,7 +284,7 @@ def _l3_tables(level: int = ROBUST_LEVEL):
     val = np.argsort(row)[np.where(valid, off // r.stride, 0)]
     labels = (val[:, :, None] >> np.arange(L3_BPC - 1, -1, -1)) & 1
     perm = tablegen.interleaver("bw500", 2)[r.rec::17][:r.n_src]
-    return ref, ref_bin, data, labels, valid, _IDX1[r.rec::17][:r.coded], perm
+    return ref, ref_bin, data, labels, valid, _load()[1][r.rec::17][:r.coded], perm
 
 
 # --------------------------------------------------------------------------- #
@@ -454,7 +463,7 @@ def _demod_aligned(samples: np.ndarray, start: int, onsets=None):
     cols, offsets, scores = {}, {}, []
     for k, (sub, _) in enumerate(SUBBANDS):
         if onsets is None:
-            onset, score = _lock_scored(bb[k], _GRID480[grid480_index(sub, NSYM)], _LEAD)
+            onset, score = _lock_scored(bb[k], _load()[0][grid480_index(sub, NSYM)], _LEAD)
             scores.append(score)
         else:
             onset = onsets[k]
@@ -475,7 +484,7 @@ def _demod_aligned_steps(samples, start, onsets=None):
     for k, (sub, _) in enumerate(SUBBANDS):
         if onsets is None:
             onset, score = yield from _lock_scored_steps(
-                bb[k], _GRID480[grid480_index(sub, NSYM)], _LEAD)
+                bb[k], _load()[0][grid480_index(sub, NSYM)], _LEAD)
             scores.append(score)
         else:
             onset = onsets[k]
@@ -499,7 +508,7 @@ def lock_score(samples: np.ndarray, start: int) -> float:
     if lead < _LEAD:
         seg = np.concatenate([np.zeros(_LEAD - lead, seg.dtype), seg])
     bb = fftconvolve(seg * _MIX[:, :len(seg)], _LP[None, :], "same", axes=-1)
-    return min(_lock_scored(bb[k], _GRID480[grid480_index(sub, NSYM)], _LEAD)[1]
+    return min(_lock_scored(bb[k], _load()[0][grid480_index(sub, NSYM)], _LEAD)[1]
                for k, (sub, _) in enumerate(SUBBANDS))
 
 
@@ -515,7 +524,7 @@ def _frame_gh(cols, fk: int):
         if avail <= 0:
             return None
         idx = grid480_index(sub, avail) + fk
-        r = col[base: base + avail] * _GRID480[idx]
+        r = col[base: base + avail] * _load()[0][idx]
         gp = np.sign(r.real) @ r
         if gp == 0:
             return None
@@ -525,7 +534,7 @@ def _frame_gh(cols, fk: int):
 
 def _dewhiten(bits: np.ndarray) -> bytes:
     """Turbo output bits -> frame bytes (de-whiten, pack). Both levels' lengths."""
-    return np.packbits((bits ^ _PN[:len(bits)]).astype(np.uint8)).tobytes()
+    return np.packbits((bits ^ _load()[3][:len(bits)]).astype(np.uint8)).tobytes()
 
 
 def _frame_crc_ok(bits: np.ndarray) -> bool:
@@ -552,7 +561,7 @@ def _cells_llr(gh, fk: int, c0: int):
     ``(self_consistency, Lc)`` — ``(−1.0, None)`` if the cell grid runs off the end
     at this ``c0``. The Stage-1 placement is advanced ``fk`` cells in lockstep with
     the grid advance :func:`_frame_gh` applies."""
-    place = _P[(np.arange(CODED) + fk) % CODED]
+    place = _load()[1][OFF::17][:CODED][(np.arange(CODED) + fk) % CODED]
     try:
         dv = np.array([gh[s][c0 + co] * np.conj(gh[s][c0 + co - 1])
                        for s, co in frame_cells(fk)])
@@ -814,12 +823,17 @@ def quality(samples: np.ndarray) -> float | None:
     return stock_sn(db)
 
 
+_PHYSICAL_SN = [-5.6, -2.0, -.1, 1.5, 3.5, 4.0, 7.5, 9.5, 11.9, 18.0, 19.9, 27.5, 45.0]
+_REPORTED_SN = [-9.3, -6.55, -3.9, -2.2, -1.7, -1.3, 4.9, 5.8, 6.9, 12.5, 13.8, 15.3, 21.4]
+
+
 def stock_sn(db: float) -> float:
-    physical = [-5.6, -2.0, -.1, 1.5, 3.5, 4.0, 7.5, 9.5, 11.9,
-                18.0, 19.9, 27.5, 45.0]
-    reported = [-9.3, -6.55, -3.9, -2.2, -1.7, -1.3, 4.9, 5.8, 6.9,
-                12.5, 13.8, 15.3, 21.4]
-    return float(db - 3.7 if db < physical[0] else np.interp(db, physical, reported))
+    return float(db - 3.7 if db < _PHYSICAL_SN[0] else np.interp(db, _PHYSICAL_SN, _REPORTED_SN))
+
+
+def channel_snr(sn: float) -> float:
+    """The channel SNR, dB, a stock-scale SN was read at: :func:`stock_sn` undone."""
+    return float(sn + 3.7 if sn < _REPORTED_SN[0] else np.interp(sn, _REPORTED_SN, _PHYSICAL_SN))
 
 
 def decode_burst_frames(samples: np.ndarray, start: int, stop: int | None = None,

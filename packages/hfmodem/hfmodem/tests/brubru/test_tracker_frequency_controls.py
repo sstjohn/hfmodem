@@ -4,7 +4,7 @@
 import pytest
 
 from hfmodem.brubru import waveform
-from hfmodem.shrike import hostmode as hm
+from hfmodem.core import hostmode as hm
 from .test_tracker import setup, request
 
 

@@ -1897,6 +1897,16 @@ class PactorArq:
             self._rx_this_cycle = True
             self.io.log(f"P3 mail repeated CS4: waiting for validating CS1/CS2; "
                         f"seq={self._inflight.seq}, {len(self._inflight.payload)}B retained")
+            # The command may repeat because our first ordinary packet was
+            # lost. Retry that exact field once before listening for parity
+            # confirmation. CS4 still credits no bytes, changes no counter or
+            # speed, and cannot restart the bounded confirmation wait.
+            packet = self._inflight
+            if (packet.sent_at_level > 0 and not packet.breakin
+                    and getattr(self.io, "protocol", None) == spec.Protocol.PACTOR3):
+                self.io.log("P3 mail CS4 confirmation: one exact-field retry")
+                self._sent(self._send_packet(packet.sl, packet.payload,
+                                             packet.status, breakin=False))
             return
         if cs_index == CS_BREAKIN:
             self._yield_link(acked=True)                    # "forces a break-in"
@@ -2982,6 +2992,7 @@ class PactorArq:
         qualified = self.peer_qualified
         current_crc = (op.crc and (not op.presence_checked
                                   or op.presence_source == 'current CRC'))
+        current_crc = current_crc or (qualified and op.presence_source == 'tracked SL1 CRC')
         if qualified:
             self._silent_cycles = 0
         elif op.crc and op.silence_before_crc is not None:
@@ -3059,6 +3070,14 @@ class PactorArq:
 
     def _charge_irs_silence(self, *, host_error_counted: bool = False) -> None:
         """Queue the current miss, or charge it immediately for legacy callers."""
+        if getattr(self.io, "awaiting_granted_entry", lambda: False)():
+            # The called station's own grant went out in this slot: the caller
+            # is keying the entry packet it was told to, in a waveform this
+            # PACTOR-1 receiver reads only behind its key. `GRANT_BUDGET` bounds
+            # the run, then the ordinary codeword and this budget resume.
+            self.io.log("nothing read behind our grant -> the caller's entry "
+                        "is due; not counting this cycle")
+            return
         if self._receive_opportunity is not None:
             self._receive_opportunity.silence_pending = True
             return

@@ -263,6 +263,20 @@ def test_file_output_requires_growth_after_first_observation(tmp_path):
     assert native._output_ready(None, output, observed)
 
 
+def test_a_header_written_after_an_empty_first_look_is_not_audio(tmp_path):
+    # The order the 10-27 Linux qualification traced: created, seen empty, header written.
+    output = tmp_path / "silent.wav"
+    output.touch()
+    observed = {}
+    assert not native._output_ready(None, output, observed)
+    output.write_bytes(b"W" * 78)
+    assert not native._output_ready(None, output, observed)
+    assert not native._output_ready(None, output, observed)
+    with output.open("ab") as stream:
+        stream.write(b"frames")
+    assert native._output_ready(None, output, observed)
+
+
 @pytest.mark.parametrize("change", ["truncate", "replace", "remove"])
 def test_file_output_restarts_baseline_on_new_capture(tmp_path, change):
     output = tmp_path / "capture.wav"

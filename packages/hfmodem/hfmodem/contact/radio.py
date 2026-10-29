@@ -69,8 +69,9 @@ def verify(session):
         if not power.isdecimal() or not 5 <= int(power) <= 100:
             raise ValueError(f'Invalid FTDX10 RF power readback: {power!r}')
         power = int(power)
-        if cfg.rig.power_w is not None and abs(power - cfg.rig.power_w) > 1:
-            raise ValueError(f'RF power changed: read {power} W, configured {cfg.rig.power_w:g} W')
+        configured = cfg.declared_power_w
+        if configured is not None and abs(power - configured) > 1:
+            raise ValueError(f'RF power changed: read {power} W, configured {configured:g} W')
         session.tx_power_w = power
         result.update(mode='DATA-L' if expected == '8' else 'DATA-U', route=route,
                       agc_raw=agc, width_hz=width, roofing_hz=roof, power_w=power)

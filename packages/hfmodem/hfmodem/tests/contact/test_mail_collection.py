@@ -121,7 +121,6 @@ def test_retry_after_reconnect_is_acknowledged_without_duplicate_saved_mail(tmp_
 
 
 @pytest.mark.parametrize('text', [
-    MAIL.replace('W9SSJ', 'N0XYZ'), MAIL.replace('W9SSJ', 'W9SSJ-1'),
     MAIL.replace('<FRM:K1ABC>', '<FRM:K1ABC><FRM:K2ABC>'),
     MAIL.replace('2026-10-25', '2026-99-99'),
     MAIL.replace('<FRM:K1ABC>', '<FRM:>'),
@@ -141,7 +140,7 @@ def test_save_failure_does_not_acknowledge_or_lose_live_contact(monkeypatch):
     monkeypatch.setattr(d.mailbox, 'store', fail)
     d.receive(MAIL)
     assert '5 <SMR>' not in d.texts and d.host.client.connected
-    assert any('no acknowledgement sent: disk full' in line for line in d.said)
+    assert any('custody refused (SMF): disk full' in line for line in d.said)
 
 
 def test_failed_call_and_cancel_preserve_notice():

@@ -53,6 +53,27 @@ resolve CAT/PTT endpoints, audio devices and timing; explicit tool options take
 precedence. Inspect resolved settings rather than copying the old rig’s gains
 or timing values to a different audio chain.
 
+## Transmit power
+
+`[rig] power_w` is the power the guided preparation and voice sessions set and the
+emission checks declare. `[rig] power_clamp_w` is a ceiling on every power this
+station sets: `--power`, chat `/power`, PACTOR phase presets, `power_w` itself.
+A request above it sets the clamp and prints a warning naming both figures; a rig
+found above it when an arm or session starts is lowered to it. Without the key
+nothing is clamped. A clamp below the rig's minimum (5 W on the FT-891 and FTDX10)
+is held at that minimum, with a warning.
+
+`[rig] tune_power_w` (default 10) is the power of a `--tune` carrier, also held to
+the clamp. Whether a tune carrier is sent at all is the rig profile's
+`tune_carrier`: on for the FT-891, whose tuner searches on one, and off for the
+FTDX10, whose tuner does not search on a carrier and needs a tuning cycle started
+at the rig. `[rig.profiles.<rig>] tune_carrier` overrides it.
+
+```toml
+[rig]
+power_clamp_w = 25
+```
+
 ## Keys that are refused, and why
 
 **`dial_hz`** is rejected by name. A gateway list publishes the channel *centre*;
@@ -88,7 +109,7 @@ PACTOR with `host = "ptc"` mounts the native session driver on a POSIX PTY.
 preserved and startup fails. Each sequential attachment gets a fresh PTY under
 that name. Without `pty`, the endpoint is reported under a private temporary
 directory. This initial station profile requires the transmit arbiter, CW
-identification, Normal calls, MYLevel 1 or 3 and PTT settle plus 10 ms fitting
+identification, Normal calls, MYLevel 1, 2 or 3 and PTT settle plus 10 ms fitting
 the native 90 ms call-answer turnaround. Longer TXDelay and Robust/longpath
 outgoing selections refuse. MODE defaults to 2 and MAXError to 70, from the SCS
 manual. Full stock SCS compatibility remains unqualified.

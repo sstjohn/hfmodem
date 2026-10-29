@@ -7,6 +7,7 @@ version = 1
 paths = [
   "tools/consolelib/txcal.py",
   "tools/consolelib/varac.py",
+  "tools/consolelib/voice.py",
   "tools/kestrel_host.py",
   "tools/vara_txcal.py",
   "tools/varac_chat.py",

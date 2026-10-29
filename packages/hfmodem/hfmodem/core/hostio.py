@@ -224,7 +224,6 @@ class Connection:
                 if self.closed:
                     return
                 data = self._delivery.popleft()
-                self._delivery_bytes -= len(data)
                 self._delivering = True
             try:
                 self._sendall(data, draining=True)

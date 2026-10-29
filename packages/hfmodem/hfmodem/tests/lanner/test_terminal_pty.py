@@ -18,6 +18,7 @@ import struct
 import sys
 import termios
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -104,10 +105,10 @@ class Terminal:
     def said(self):
         return self.log.read_text().splitlines()
 
-    def until(self, line, seconds=10, after=0):
+    def until(self, line, seconds=10, after=0, *, output=None):
         end = time.monotonic() + seconds
         while time.monotonic() < end:
-            if line in self.said()[after:]:
+            if line in self.said()[after:] and (output is None or output in self.screen):
                 return True
             self.pump(0.1)
         return False
@@ -137,10 +138,38 @@ def terminal(tmp_path):
     made.close()
 
 
+@pytest.mark.parametrize('delivery', ['log-first', 'output-first', 'missing-log',
+                                      'missing-output', 'shared-deadline'])
+def test_initial_display_wait_requires_both_channels_within_one_budget(monkeypatch, delivery):
+    clock = SimpleNamespace(now=0)
+    monkeypatch.setattr(sys.modules[__name__], 'time',
+                        SimpleNamespace(monotonic=lambda: clock.now))
+    terminal = Terminal.__new__(Terminal)
+    lines = ['size 24x100'] if delivery in ('log-first', 'missing-output') else []
+    terminal.screen = b'RX' if delivery in ('output-first', 'missing-log') else b'footer'
+    terminal.said = lambda: lines
+    def pump(seconds):
+        assert seconds == 0.1
+        clock.now += 1  # model delayed scheduling without a real terminal/sleep
+        if delivery == 'log-first':
+            terminal.screen += b'R' if clock.now == 1 else b'X'
+        elif delivery in ('output-first', 'shared-deadline') and clock.now == 2:
+            lines.append('size 24x100')
+        if delivery == 'shared-deadline' and clock.now == 4:
+            terminal.screen += b'RX'
+    terminal.pump = pump
+    ready = terminal.until('size 24x100', 3, output=b'RX')
+    assert ready == (delivery in ('log-first', 'output-first'))
+    assert clock.now == (2 if ready else 3)
+
+
 @pytest.mark.parametrize('stop', ['ctrl-c', 'ctrl-q', 'group-int', 'launcher-int',
                                   'launcher-term', 'launcher-hup'])
+@pytest.mark.realtime
 def test_the_backgrounded_terminal_takes_keys_resizes_and_unkeys_before_exit(terminal, stop):
-    assert terminal.until('size 24x100', 30), terminal.screen[-400:]
+    # The fake size event precedes draw(); the PTY may also split refresh writes.
+    # Observe both channels within the original startup budget before sending keys.
+    assert terminal.until('size 24x100', 30, output=b'RX'), terminal.screen[-400:]
     assert b'RX' in terminal.screen
     terminal.resize(30, 60)
     assert terminal.until('size 30x60')
@@ -178,6 +207,7 @@ def test_the_backgrounded_terminal_takes_keys_resizes_and_unkeys_before_exit(ter
     assert 'hand back' in terminal.said()
 
 
+@pytest.mark.realtime
 def test_a_console_gone_mid_over_halts_the_terminal_through_the_launcher(tmp_path):
     heard, owner = os.pipe()
     terminal = Terminal(tmp_path, owner=heard)
@@ -251,6 +281,7 @@ def test_pipe_on_nine_puts_back_what_it_found(nine):
             os.close(9)
 
 
+@pytest.mark.realtime
 def test_the_ownership_pipe_survives_the_launchers_rig_claim(tmp_path):
     """The rig claim takes descriptor 9 in the launcher, which is where a bare
     os.pipe() lands when the lower ones are busy."""

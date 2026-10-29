@@ -239,3 +239,34 @@ def test_two_chats_bbs_vmail_and_disconnect(tmp_path, monkeypatch, bw, snr, chun
         assert channel.dropped == int(lose_request)
     finally:
         catalog.close()
+
+
+STALLS = pytest.mark.xfail(strict=True, reason='the delivery stalls in the pair harness (10-27)')
+
+
+@pytest.mark.parametrize('caller,callee,bw', [
+    ('W9SSJ', 'W9SSJ-1', 500), ('W9SSJ', 'W9SSJ-1', 2300), ('W9SSJ-1', 'W9SSJ', 2300),
+    ('W9SSJ-1', 'W9SSJ', 500),
+    pytest.param('X-W9SSJ', 'W9SSJ', 500, marks=STALLS),
+    pytest.param('X-W9SSJ', 'W9SSJ', 2300, marks=STALLS),
+])
+def test_two_calls_of_one_station_chat_on_an_agreed_dial(tmp_path, monkeypatch, caller, callee, bw):
+    channel = Channel(None, 65536)
+    monkeypatch.setattr(arq, 'time', SimpleNamespace(monotonic=channel.clock))
+    monkeypatch.setitem(v.CALLING_HZ, 20, 14_074_500)
+    a = Peer(channel, callee, bw, tmp_path / 'a', HostCatalog())
+    b = Peer(channel, caller, bw, tmp_path / 'b', HostCatalog())
+    b.command(f'/call {callee} cf')
+    channel.until(lambda: all(p.client.connected and p.session.steps is None for p in (a, b)), 'connect')
+    assert a.flow.dial == b.flow.dial == 14_074_500
+    assert a.session.peer == caller
+    assert b.session.peer == callee
+    for sender, receiver, text in [(b, a, f'de {caller} portable'), (a, b, f'de {callee} home, copy'),
+                                   (b, a, 'ok 73'), (a, b, 'tu, signals fine here, nice to work our own link')]:
+        sender.command(text)
+        channel.until(lambda: any(text in line for line in receiver.said), f'chat delivery from {sender.call}')
+    b.command('/bye')
+    channel.until(lambda: all(not p.client.connected and p.session.contact is None
+                              and p.session.steps is None for p in (a, b)), 'disconnect')
+    assert all(p.modem.station.pending_bytes == 0 for p in (a, b))
+    assert not [(p.call, detail) for p in (a, b) for kind, detail in p.notices if kind == 'error']

@@ -70,8 +70,9 @@ class PacketRuntime:
         try:
             return future.result(timeout=2)
         except TimeoutError:
-            future.cancel()       # a timed-out command cannot act later
-            raise
+            if future.cancel():
+                raise
+            return future.result()
 
     def attach(self, personality, send=None, *, failed=None):
         def install():

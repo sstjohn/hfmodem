@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 
-from hfmodem.shrike import hostmode
+from hfmodem.core import hostmode
 from hfmodem.shrike.ptc import PtcHost, SimPeer
 
 # Sibling test module, imported as part of the `tests` package. Inserting this

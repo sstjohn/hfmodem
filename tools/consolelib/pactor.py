@@ -131,6 +131,10 @@ def arguments(air):
     connect.add_argument('--pactor1-only', action='store_true',
                          help="never offer the upgrade; the session stays on 1400/1600 Hz and the channel sense "
                               "judges only 1200-1800 Hz. Drops the assessed profile's grant flag")
+    connect.add_argument('--pactor2-only', action='store_true',
+                         help="run as a PACTOR-2-capped station (the modem's --pactor2-only): announce bits45=1, "
+                              "enter P2 only on 0x6A9 or a peer leading into it, never P3 or P4. "
+                              "Drops the assessed profile's grant flag")
     connect.add_argument('--unannounced', action='store_true',
                          help='advertise nothing and go up anyway (--p3-uninvited in place of the grant flag). '
                               'The uninvited entry opens at SL3; --entry-sl 1 removes that confound')
@@ -678,6 +682,12 @@ def flags(peer, level, args, directory, send):
         # this arm then declines, and WS8EOC answered the advertisement with a grant.
         words = _without(words, '--p1-grant-only', ('--p1-status-bits45', 1))
         words.append('--pactor1-only')
+    if getattr(args, 'pactor2_only', False):
+        if args.unannounced or args.pactor1_only or getattr(args, 'p1_6a9', False):
+            raise ValueError('--pactor2-only sets its own announcement and ceiling; '
+                             'drop --unannounced, --pactor1-only and --p1-6a9')
+        words = _without(words, '--p1-grant-only', ('--p1-status-bits45', 1))
+        words.append('--pactor2-only')
     if getattr(args, 'p1_6a9', False):
         if args.unannounced:
             raise ValueError('--p1-6a9 conflicts with --unannounced')
@@ -711,7 +721,7 @@ def flags(peer, level, args, directory, send):
         words += ['--p3-crest-limit', f'{db:g}']
     if args.changeover_p1_cs:
         words.append('--p3-changeover-p1-cs')
-    if not args.p3_fallback:
+    if not args.p3_fallback and not getattr(args, 'pactor2_only', False):
         words += ['--no-p3-fallback']
     # The flag defers our break-in until the mail client has a reply, and the mail
     # client cannot have a reply until we break in: VE3KPG 2026-09-18 keyed 19

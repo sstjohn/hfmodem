@@ -132,6 +132,10 @@ _PRELUDE = """
 import sys, time
 from pathlib import Path
 
+# On Linux a default audio endpoint resolves through PortAudio; no device here.
+from hfmodem.core import claim
+claim.audio_nodes = lambda *a, **k: ()
+
 marks, port, cfg_path = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 
 from hfmodem.core import ptt as pttmod
@@ -569,6 +573,7 @@ open(here / "go").close()
 _CLAIMED = """
 import os
 from hfmodem.core import claim
+claim.audio_nodes = lambda *a, **k: ()
 fd = os.open(claim.bootstrap()[0], os.O_RDWR)
 os.dup2(fd, 9)
 os.close(fd)
@@ -722,6 +727,7 @@ ota.DEADMAN_BUDGET_S = 1.0
 ota.find_rigctl = lambda *_a: Path(sys.argv[1])
 power = onair._PhasePower.__new__(onair._PhasePower)
 power.rig, power.baseline, power.level = ota.Rig(1036, "/dev/null", 38400), 0.25, 0.5
+power.scale, power.clamp = 100.0, None
 
 
 def session():

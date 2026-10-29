@@ -128,6 +128,28 @@ def passthrough_note(plan):
             'line the console generates.') if said else ''
 
 
+def held_power(mode, level, power, clamp_w):
+    """The preset and the arm's `--power`, each held to the station clamp with a warning.
+
+    `--power` replaces the preset's phase watts for the arm: the console sets it once
+    at the start and the launcher is given no phase levels to move it off.
+    """
+    from hfmodem.core.config import clamp_power
+    if power is not None:
+        power, warning = clamp_power(power, clamp_w, '--power')
+        held = dict(level, **dict.fromkeys(mode.phases))
+    else:
+        held, warnings = dict(level), []
+        for phase in mode.phases:
+            if level[phase] is not None:
+                held[phase], said = clamp_power(level[phase], clamp_w, f'preset {level["name"]} {phase}')
+                warnings.append(said)
+        warning = '\n'.join(filter(None, warnings))
+    if warning:
+        print(warning, flush=True)
+    return held, power
+
+
 def plan(mode, args, now):
     """The whole arm, decided before anything opens. Nothing here touches hardware."""
     if args.pounce < 0 or (args.pounce == 0 and not args.sense and not args.force):
@@ -229,6 +251,8 @@ def plan(mode, args, now):
     command = (mode.head(mode, peer, args, name) if mode.head else
                [str(station.ONAIR), mode.launcher, peer['call'], str(peer['centre_hz']),
                 '--log', name, '--band', str(peer['band_m'])])
+    level, power_w = held_power(mode, level, getattr(args, 'power', None),
+                                selected_cfg.rig.power_clamp_w if selected_cfg else None)
     words, adjustments = mode.flags(peer, level, args, directory, send)
     command += words
     if selected_cfg and mode.name == 'pactor':
@@ -282,7 +306,7 @@ def plan(mode, args, now):
     return dict(arm=name, directory=str(directory), mode=fly_mode, pounce_s=args.pounce,
                 call=peer['call'], band_m=peer['band_m'], centre_hz=peer['centre_hz'],
                 dial_hz=peer['dial_hz'], peer=peer, level=level, delivery=delivery,
-                adjustments=dict(adjustments,
+                adjustments=dict(adjustments, power_w=power_w,
                                  witness=args.witness, witness_seconds=args.witness_seconds,
                                  kiwi=args.kiwi, retune=args.retune,
                                  tap_tail_s=args.tap_tail, passthrough=extra,
@@ -629,6 +653,7 @@ def _fly(mode, plan, qualify=None, *, capture=None, capture_state=None):
                 print(note, flush=True)
             if plan['adjustments'].get('prepare_radio'):
                 station.prepare_radio(plan)
+            station.hold_power(plan)
             plan['readings'] = station.check_rig(plan)
             if plan['delivery']:
                 mail.write(plan['delivery'])

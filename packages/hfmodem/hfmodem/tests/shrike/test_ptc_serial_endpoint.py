@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from hfmodem.shrike import hostmode
+from hfmodem.core import hostmode
 from hfmodem.shrike.arq import State
 from hfmodem.shrike.ptc import PtcHost, SimPeer, serve
 from hfmodem.shrike.serial_endpoint import PtcSerialEndpoint

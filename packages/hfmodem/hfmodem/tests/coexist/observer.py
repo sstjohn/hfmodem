@@ -77,6 +77,12 @@ def _linux_identity_unchanged(directory, start, uids):
         raise ObservationError(f'credentials changed during participant discovery: {directory.name}')
 
 
+# A niced task on a loaded VM can take milliseconds just to be scheduled.
+CAPTURE_DEADLINE_NS = 1_000_000_000
+IDENTITY_DEADLINE_NS = 250_000_000
+YIELD_S = .005
+
+
 class _ExitConfirmationBudget:
     """Bound additional stat/UID/stat confirmations, shared by one capture.
 
@@ -92,9 +98,9 @@ class _ExitConfirmationBudget:
     def allow(self, directory, start, uids):
         now = time.monotonic_ns()
         if self.deadline_ns is None:
-            self.deadline_ns = now + 25_000_000
+            self.deadline_ns = now + CAPTURE_DEADLINE_NS
         key = (int(directory.name), start, tuple(uids))
-        identity = self.identities.setdefault(key, dict(deadline_ns=now + 5_000_000, checks=0))
+        identity = self.identities.setdefault(key, dict(deadline_ns=now + IDENTITY_DEADLINE_NS, checks=0))
         if (now >= self.deadline_ns or now >= identity['deadline_ns']
                 or self.checks >= 128 or identity['checks'] >= 32):
             return False
@@ -110,7 +116,7 @@ class _ExitConfirmationBudget:
         if remaining > 0:
             # Let strace/the exiting task run instead of spending every check
             # in one tight loop. allow() rechecks deadlines before any new read.
-            time.sleep(min(.001, remaining / 1_000_000_000))
+            time.sleep(min(YIELD_S, remaining / 1_000_000_000))
 
 
 def _linux_terminal(directory, start, uids, denied=None, budget=None):

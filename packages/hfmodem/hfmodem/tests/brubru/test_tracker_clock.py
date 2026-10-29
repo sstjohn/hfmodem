@@ -7,7 +7,7 @@ import pytest
 
 from hfmodem.ax25.connected import Connection, State
 from hfmodem.brubru.host.tracker import TrackerHost
-from hfmodem.shrike import hostmode as hm
+from hfmodem.core import hostmode as hm
 from .test_tracker import request
 
 

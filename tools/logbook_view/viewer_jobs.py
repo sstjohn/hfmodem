@@ -10,6 +10,10 @@ import time
 import uuid
 
 
+def roots(book):
+    return [a for r in book.roots for a in ('--root', str(r))]
+
+
 class Replays:
     def __init__(self, book, script=None, run=None):
         self.book = book
@@ -89,7 +93,7 @@ class Replays:
                 job = self.jobs[key]
                 job.update(state='running', started=time.time())
                 arm = job['arm']
-            command = [sys.executable, str(self.script), '--root', str(self.book.root),
+            command = [sys.executable, str(self.script), *roots(self.book),
                        '--arm', arm, '--out', str(self.book.viewer_root)]
             try:
                 result = (self.run(command, cwd=self.script.parent, capture_output=True,

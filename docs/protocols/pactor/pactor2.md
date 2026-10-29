@@ -12,9 +12,7 @@ Public sources are cited inline: `[M.1798]` for ITU-R Recommendation M.1798,
 sample recordings (one ARQ, one FEC broadcast), `[SCS]` for SCS's *The PACTOR-2
 Protocol — A Technical Description* (1996), `[SCS-P3]` for *The PACTOR-3
 Protocol* (2004), and `[SCS-P4]` for the SCS protocol reference.
-<!-- site:omit:start -->
 Its full title is *The PACTOR-4 Protocol*.
-<!-- site:omit:end -->
 
 `[SCS-P4]` is a PACTOR-2 source and not an analogy. Its §11 speed level is a
 two-carrier mode it states outright is "based on the PACTOR-2 speedlevel 1";
@@ -1378,9 +1376,7 @@ successive bursts before decoding.
   phase alphabet and the T/2 carrier stagger, §11.8 the symbol filter, §11.11
   and §11.12 the symbol counts and the packet arithmetic.
 
-<!-- site:omit:start -->
 Full bibliographic title of `[SCS-P4]`: SCS, *The PACTOR-4 Protocol*.
-<!-- site:omit:end -->
 
 - `[M.1798]` ITU-R Recommendation M.1798, *Characteristics of HF radio equipment
   for the exchange of digital data and electronic mail in the maritime mobile

@@ -5,7 +5,8 @@
 
 
 def facts_from(cfg):
+    power = cfg.declared_power_w
     return dict(name=cfg.station.name, qth=cfg.station.qth, grid=cfg.station.grid,
                 rig=cfg.selected_rig.upper(), antenna=cfg.station.antenna,
-                power=f"{cfg.rig.power_w:g} watts" if cfg.rig.power_w is not None else "",
+                power=f"{power:g} watts" if power is not None else "",
                 weather=cfg.station.weather)

@@ -39,6 +39,7 @@ def test_profile_and_flight_consumers():
         tr_recovery_slack_s=.015, audio_device='USB Audio Device',
         cat_port='/dev/cu.usbserial-00A6C71B0', ptt_port='/dev/cu.usbserial-00A6C71B1',
         note='Yaesu FT-891; set CAT rate to 38400 (menu 05-06); external soundcard on DATA jack',
+        tune_carrier=True,
         readback={
             'rig_levels': ('PREAMP', 'ATT', 'AF', 'RF', 'SQL', 'IF', 'NR',
                            'NOTCHF', 'AGC', 'NB', 'MONITOR_GAIN', 'RFPOWER',

@@ -1,0 +1,299 @@
+{
+  "capture_id": "onair-20261027T064359603967Z-732431ae-9d5f-4908-b964-efb24ed92a98",
+  "source_sha256": "7ae4edaacd229a4fa7a6759d6add3e0042d5bb0cd26f664c95e34bfd1a4332b0",
+  "probe_sha256": "bb8255dab335bb11ad7cb1af88583d8da1d0053f34316f1eba2fa3f1b1e73466",
+  "description": "Recorded receive clips resampled from the host capture to 8 kHz signed PCM; original timeline retained. Chirp CRC expectations verified offline.",
+  "cfo_hz": 4.952527899547475,
+  "frames": [
+    {
+      "kind": "body",
+      "status": 0,
+      "data": "524d53205472696d6f646520312e342e342e312057656c636f6d6520746f20",
+      "onset_sample": 1188685
+    },
+    {
+      "kind": "normal",
+      "status": 97,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953",
+      "onset_sample": 1248705
+    },
+    {
+      "kind": "normal",
+      "status": 97,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953",
+      "onset_sample": 1308705
+    },
+    {
+      "kind": "normal",
+      "status": 97,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953",
+      "onset_sample": 1368705
+    },
+    {
+      "kind": "normal",
+      "status": 97,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953",
+      "onset_sample": 1428705
+    },
+    {
+      "kind": "normal",
+      "status": 97,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953",
+      "onset_sample": 1488705
+    },
+    {
+      "kind": "normal",
+      "status": 97,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953",
+      "onset_sample": 1548705
+    },
+    {
+      "kind": "normal",
+      "status": 97,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953",
+      "onset_sample": 1608705
+    },
+    {
+      "kind": "normal",
+      "status": 97,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953",
+      "onset_sample": 1668708
+    },
+    {
+      "kind": "long",
+      "status": 99,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953534a2068617320313830206461696c79206d696e757465732072656d61696e696e672077697468204b345350422028454d35354344290d4d696e696d756d20616c6c6f776564207375737461696e6564207472616e73666572207370656564206973203235",
+      "onset_sample": 3948607
+    },
+    {
+      "kind": "long",
+      "status": 99,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953534a2068617320313830206461696c79206d696e757465732072656d61696e696e672077697468204b345350422028454d35354344290d4d696e696d756d20616c6c6f776564207375737461696e6564207472616e73666572207370656564206973203235",
+      "onset_sample": 4128607
+    },
+    {
+      "kind": "long",
+      "status": 99,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953534a2068617320313830206461696c79206d696e757465732072656d61696e696e672077697468204b345350422028454d35354344290d4d696e696d756d20616c6c6f776564207375737461696e6564207472616e73666572207370656564206973203235",
+      "onset_sample": 4308607
+    },
+    {
+      "kind": "long",
+      "status": 99,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953534a2068617320313830206461696c79206d696e757465732072656d61696e696e672077697468204b345350422028454d35354344290d4d696e696d756d20616c6c6f776564207375737461696e6564207472616e73666572207370656564206973203235",
+      "onset_sample": 4488607
+    },
+    {
+      "kind": "long",
+      "status": 99,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953534a2068617320313830206461696c79206d696e757465732072656d61696e696e672077697468204b345350422028454d35354344290d4d696e696d756d20616c6c6f776564207375737461696e6564207472616e73666572207370656564206973203235",
+      "onset_sample": 4668607
+    },
+    {
+      "kind": "long",
+      "status": 99,
+      "data": "746865204b345350422048796272696420524d5320696e204d656d706869732c20544e0d0a573953534a2068617320313830206461696c79206d696e757465732072656d61696e696e672077697468204b345350422028454d35354344290d4d696e696d756d20616c6c6f776564207375737461696e6564207472616e73666572207370656564206973203235",
+      "onset_sample": 4848607
+    },
+    {
+      "kind": "long",
+      "status": 96,
+      "data": "2062797465732f6d696e7574650d7b534649203d203931204f6e20323032362d31302d32372030363a3030205554437d0d0a5b574c324b2d352e302d4232465749484a4d24",
+      "onset_sample": 6648670
+    },
+    {
+      "kind": "long",
+      "status": 96,
+      "data": "2062797465732f6d696e7574650d7b534649203d203931204f6e20323032362d31302d3237203036",
+      "onset_sample": 7008656
+    },
+    {
+      "kind": "chirp",
+      "status": 96,
+      "data": "2062797465732f6d696e7574650d7b534649203d2039",
+      "onset_sample": 7368876
+    },
+    {
+      "kind": "chirp",
+      "status": 96,
+      "data": "2062797465732f6d696e7574650d7b534649203d2039",
+      "onset_sample": 7548914
+    },
+    {
+      "kind": "chirp",
+      "status": 96,
+      "data": "2062797465732f6d696e7574650d7b534649203d2039",
+      "onset_sample": 7729012
+    },
+    {
+      "kind": "chirp",
+      "status": 97,
+      "data": "31204f6e20323032362d31302d32372030363a303020",
+      "onset_sample": 8088807
+    },
+    {
+      "kind": "chirp",
+      "status": 97,
+      "data": "31204f6e20323032362d31302d32372030363a303020",
+      "onset_sample": 8268879
+    },
+    {
+      "kind": "chirp",
+      "status": 226,
+      "data": "0101015554437d0d0a5b574c324b2d352e302d423246",
+      "onset_sample": 8448900
+    },
+    {
+      "kind": "chirp",
+      "status": 99,
+      "data": "5749484a4d245d0d3b50513a2038323230343436320d",
+      "onset_sample": 8628777
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 11448865
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 11628716
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 11808938
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 11988846
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 12168896
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 12348887
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 12528610
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 12708578
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 12888929
+    },
+    {
+      "kind": "chirp",
+      "status": 0,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 13068526
+    },
+    {
+      "kind": "chirp",
+      "status": 65,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 13248764
+    },
+    {
+      "kind": "chirp",
+      "status": 65,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 13428873
+    },
+    {
+      "kind": "chirp",
+      "status": 65,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 13608835
+    },
+    {
+      "kind": "chirp",
+      "status": 66,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 13789077
+    },
+    {
+      "kind": "chirp",
+      "status": 67,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 13968936
+    },
+    {
+      "kind": "chirp",
+      "status": 67,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 14328930
+    },
+    {
+      "kind": "chirp",
+      "status": 67,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 14508910
+    },
+    {
+      "kind": "chirp",
+      "status": 67,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 14689060
+    },
+    {
+      "kind": "chirp",
+      "status": 67,
+      "data": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+      "onset_sample": 14868787
+    }
+  ],
+  "chirps": [
+    {
+      "onset": 153.51825,
+      "status": 96,
+      "data": "2062797465732f6d696e7574650d7b534649203d2039"
+    },
+    {
+      "onset": 183.52,
+      "status": 64,
+      "data": "434d5320766961204b34535042203e0d"
+    },
+    {
+      "onset": 203.52,
+      "status": 67,
+      "data": ""
+    },
+    {
+      "onset": 207.27,
+      "status": 64,
+      "data": ""
+    },
+    {
+      "onset": 234.768,
+      "status": 0,
+      "data": ""
+    },
+    {
+      "onset": 238.518021,
+      "status": 0,
+      "data": ""
+    }
+  ]
+}

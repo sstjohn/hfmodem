@@ -219,9 +219,7 @@ P2 single-copy decodes expose unsliced differential PSK inputs; P3 SL1–6 expos
 the accepted carrier clocks and differential phase. P3's receiver uses phase
 only, so its points have unit magnitude. Memory-combined CRC recovery is labelled
 and does not claim that one transmission independently decoded.
-<!-- site:omit:start -->
 P4 is not yet supported by this adapter.
-<!-- site:omit:end -->
 
 The link panel follows playback and selection. It shows the evidence-derived
 phase, current transmission, modulation/speed level and separate last TX/RX

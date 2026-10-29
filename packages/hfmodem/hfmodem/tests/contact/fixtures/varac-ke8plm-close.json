@@ -1,0 +1,646 @@
+{
+  "source": "operator-data/working/vara-chat/sessions/20261024T022751257601Z",
+  "host": [
+    {
+      "utc": "2026-10-24T02:46:22.066+00:00",
+      "kind": "command",
+      "raw": "CONNECT W9SSJ KE8PLM"
+    },
+    {
+      "utc": "2026-10-24T02:46:22.066+00:00",
+      "kind": "host",
+      "raw": "OK"
+    },
+    {
+      "utc": "2026-10-24T02:46:22.094+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:24.078+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:24.408+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:25.177+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:29.765+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:32.026+00:00",
+      "kind": "host",
+      "raw": "BUSY OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:32.170+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:36.746+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:39.307+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:39.683+00:00",
+      "kind": "host",
+      "raw": "CONNECTED W9SSJ KE8PLM 500"
+    },
+    {
+      "utc": "2026-10-24T02:46:39.683+00:00",
+      "kind": "state",
+      "raw": "connected"
+    },
+    {
+      "utc": "2026-10-24T02:46:39.683+00:00",
+      "kind": "sent",
+      "raw": "<AWQ>"
+    },
+    {
+      "utc": "2026-10-24T02:46:39.683+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:40.584+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:40.585+00:00",
+      "kind": "host",
+      "raw": "BUFFER 7"
+    },
+    {
+      "utc": "2026-10-24T02:46:42.237+00:00",
+      "kind": "host",
+      "raw": "BUSY OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:42.507+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:42.783+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:43.739+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:44.572+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:49.159+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:49.907+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:50.852+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:50.852+00:00",
+      "kind": "host",
+      "raw": "BUFFER 0"
+    },
+    {
+      "utc": "2026-10-24T02:46:55.363+00:00",
+      "kind": "message",
+      "raw": "<AWQ>"
+    },
+    {
+      "utc": "2026-10-24T02:46:55.363+00:00",
+      "kind": "tag",
+      "raw": "<AWQ>"
+    },
+    {
+      "utc": "2026-10-24T02:46:55.363+00:00",
+      "kind": "host",
+      "raw": "SN -2.4"
+    },
+    {
+      "utc": "2026-10-24T02:46:55.364+00:00",
+      "kind": "host",
+      "raw": "BITRATE (4)  88 bps RX"
+    },
+    {
+      "utc": "2026-10-24T02:46:55.364+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:56.066+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:57.007+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:46:57.951+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:46:59.671+00:00",
+      "kind": "host",
+      "raw": "BUSY OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:02.349+00:00",
+      "kind": "sent",
+      "raw": "?\n"
+    },
+    {
+      "utc": "2026-10-24T02:47:02.381+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:03.326+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:03.326+00:00",
+      "kind": "host",
+      "raw": "BUFFER 4"
+    },
+    {
+      "utc": "2026-10-24T02:47:03.610+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:04.906+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:09.497+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:09.772+00:00",
+      "kind": "host",
+      "raw": "IAMALIVE"
+    },
+    {
+      "utc": "2026-10-24T02:47:10.350+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:11.296+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:11.296+00:00",
+      "kind": "host",
+      "raw": "BUFFER 0"
+    },
+    {
+      "utc": "2026-10-24T02:47:13.003+00:00",
+      "kind": "host",
+      "raw": "BUSY OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:21.478+00:00",
+      "kind": "sent",
+      "raw": "73<DISC>"
+    },
+    {
+      "utc": "2026-10-24T02:47:21.494+00:00",
+      "kind": "host",
+      "raw": "BUFFER 10"
+    },
+    {
+      "utc": "2026-10-24T02:47:21.709+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:21.875+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:22.823+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:23.684+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:28.271+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:29.571+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:30.476+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:32.267+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:33.861+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:33.933+00:00",
+      "kind": "host",
+      "raw": "BUSY OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:34.244+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:35.962+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:37.547+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:39.306+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:40.892+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:42.651+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:44.242+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:44.314+00:00",
+      "kind": "host",
+      "raw": "BUSY OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:45.161+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:46.055+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:47.641+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:49.422+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:51.020+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:51.091+00:00",
+      "kind": "host",
+      "raw": "BUSY OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:51.364+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:52.939+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:54.526+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:54.577+00:00",
+      "kind": "host",
+      "raw": "BUSY OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:54.860+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:56.283+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:47:57.876+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:57.947+00:00",
+      "kind": "host",
+      "raw": "BUSY OFF"
+    },
+    {
+      "utc": "2026-10-24T02:47:59.706+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:48:01.295+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:48:02.120+00:00",
+      "kind": "sent",
+      "raw": "73<DISC>"
+    },
+    {
+      "utc": "2026-10-24T02:48:02.129+00:00",
+      "kind": "host",
+      "raw": "BUFFER 20"
+    },
+    {
+      "utc": "2026-10-24T02:48:03.105+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:48:04.693+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:48:06.454+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:48:08.053+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:48:09.751+00:00",
+      "kind": "host",
+      "raw": "IAMALIVE"
+    },
+    {
+      "utc": "2026-10-24T02:48:09.807+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:48:11.396+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:48:11.769+00:00",
+      "kind": "host",
+      "raw": "BUSY ON"
+    },
+    {
+      "utc": "2026-10-24T02:48:13.301+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:48:14.893+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:48:16.660+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    },
+    {
+      "utc": "2026-10-24T02:48:18.257+00:00",
+      "kind": "host",
+      "raw": "PTT OFF"
+    },
+    {
+      "utc": "2026-10-24T02:48:20.040+00:00",
+      "kind": "host",
+      "raw": "PTT ON"
+    }
+  ],
+  "events": [
+    {
+      "kind": "tx",
+      "utc": "2026-10-24T02:47:21.478+00:00",
+      "text": "73<DISC>"
+    },
+    {
+      "kind": "error",
+      "utc": "2026-10-24T02:47:51.566+00:00",
+      "text": "VARA host response timed out"
+    },
+    {
+      "kind": "tx",
+      "utc": "2026-10-24T02:48:02.120+00:00",
+      "text": "73<DISC>"
+    },
+    {
+      "kind": "link",
+      "utc": "2026-10-24T02:48:20.592+00:00",
+      "event": "disconnected",
+      "peer": "KE8PLM"
+    }
+  ],
+  "frames": [
+    {
+      "tx_id": 18,
+      "packet_kind": "session-turn-request-short",
+      "ptt_start_sample": 55305216,
+      "ptt_end_sample": 55350784,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 19,
+      "packet_kind": "data",
+      "ptt_start_sample": 55391744,
+      "ptt_end_sample": 55611904,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 20,
+      "packet_kind": "session-answer-query-short-a",
+      "ptt_start_sample": 55674368,
+      "ptt_end_sample": 55717888,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 21,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 55803904,
+      "ptt_end_sample": 55880192,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 22,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 55981056,
+      "ptt_end_sample": 56057344,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 23,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 56141824,
+      "ptt_end_sample": 56218112,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 24,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 56302592,
+      "ptt_end_sample": 56378880,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 25,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 56465920,
+      "ptt_end_sample": 56541696,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 26,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 56627200,
+      "ptt_end_sample": 56704000,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 27,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 56796160,
+      "ptt_end_sample": 56872448,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 28,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 56956416,
+      "ptt_end_sample": 57033216,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 29,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 57120768,
+      "ptt_end_sample": 57197056,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 30,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 57284096,
+      "ptt_end_sample": 57360384,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 31,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 57444864,
+      "ptt_end_sample": 57521664,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 32,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 57605632,
+      "ptt_end_sample": 57681920,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 33,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 57773568,
+      "ptt_end_sample": 57849856,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 34,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 57934848,
+      "ptt_end_sample": 58011648,
+      "unkey_confirmed": true
+    },
+    {
+      "tx_id": 35,
+      "packet_kind": "session-intermediate-answer-query-a",
+      "ptt_start_sample": 58097152,
+      "ptt_end_sample": 58177024,
+      "unkey_confirmed": true
+    }
+  ]
+}

@@ -55,7 +55,7 @@ def test_only_current_settled_link_may_request(guard):
     elif guard == 'bbs':
         session._bbs_waiting = True
     elif guard == 'vmail':
-        session._vmail_sent = True
+        session.mail_ack.reserve('direct', 1, lambda ack, reason: None)
     elif guard == 'buffer':
         client.buffer = 5
     elif guard == 'unreported':

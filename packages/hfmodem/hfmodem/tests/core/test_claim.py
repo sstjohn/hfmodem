@@ -66,8 +66,117 @@ def real_ps_output(monkeypatch, real_path):
 
 
 def test_process_started_real_ps(monkeypatch, namespace):
+    monkeypatch.setattr(claim, "sys", SimpleNamespace(platform="darwin"))
     output = real_ps_output(monkeypatch, namespace)
     assert claim.process_started(os.getpid()) == "_".join(output.split())
+
+
+@pytest.fixture
+def linux_proc(tmp_path, monkeypatch):
+    proc = tmp_path / "proc"
+    process = proc / str(os.getpid())
+    process.mkdir(parents=True)
+    (process / "stat").write_text(
+        f"{os.getpid()} (name with ) parentheses)) S " + "0 " * 18 + "12345 0\n")
+    boot = proc / "sys/kernel/random/boot_id"
+    boot.parent.mkdir(parents=True)
+    boot.write_text("12345678-1234-5678-9abc-123456789abc\n")
+    (proc / "stat").write_text("btime 1000\n")
+    read_text = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path.is_relative_to("/proc"):
+            path = proc / path.relative_to("/proc")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(claim, "sys", SimpleNamespace(platform="linux"))
+    ps = tmp_path / "bin/ps"
+    ps.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
+                  f"btime = Path({str(proc / 'stat')!r}).read_text().split()[1]\n"
+                  "print('Sat Oct 17 ' + ('12:00:00' if btime == '1000' else '11:59:59')"
+                  " + ' 2026' if 'lstart=' in sys.argv else 'fake-python')\n")
+    return proc
+
+
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_linux_release_survives_btime_shift(linux_proc, cleanup):
+    descriptor = claim.mutex() if cleanup else acquire()
+    before = claim.holder(descriptor, cleanup=cleanup).started
+    try:
+        (linux_proc / "stat").write_text("btime 999\n")
+        claim.mutex_release(descriptor) if cleanup else claim.release(descriptor)
+    except BaseException:
+        claim.close(descriptor)
+        raise
+    assert before == "linux:12345678-1234-5678-9abc-123456789abc:12345"
+    assert (claim.mutex_path() if cleanup else claim.claim_path()).read_bytes() == b""
+
+
+def test_linux_identity_reads_a_name_that_is_not_utf8(linux_proc):
+    (linux_proc / "44").mkdir()
+    (linux_proc / "44/stat").write_bytes(b"44 (\xff\xfe) S " + b"0 " * 18 + b"700 0\n")
+    assert claim.process_started(44).endswith(":700")
+
+
+@pytest.mark.parametrize("changed", ["ticks", "boot"])
+def test_linux_release_rejects_changed_identity(linux_proc, changed):
+    descriptor = acquire()
+    try:
+        path = linux_proc / (str(os.getpid()) + "/stat" if changed == "ticks"
+                             else "sys/kernel/random/boot_id")
+        path.write_text(path.read_text().replace("12345 0", "23456 0") if changed == "ticks"
+                        else path.read_text().replace("12345678", "23456789"))
+        with pytest.raises(claim.ClaimError, match="only the acquirer"):
+            claim.release(descriptor)
+    finally:
+        claim.close(descriptor)
+
+
+@pytest.mark.parametrize("path,content", [
+    ("stat", "malformed"), ("stat", "1 (wrong pid) S " + "0 " * 18 + "12345"),
+    ("stat", "{pid} (name) S " + "0 " * 18 + "invalid"),
+    ("boot", "invalid"), ("stat", None), ("boot", None)])
+def test_linux_identity_unavailable_fails_closed(linux_proc, path, content):
+    target = linux_proc / (str(os.getpid()) + "/stat" if path == "stat"
+                           else "sys/kernel/random/boot_id")
+    if content is None:
+        target.unlink()
+    else:
+        target.write_text(content.format(pid=os.getpid()))
+    with pytest.raises(claim.ClaimError, match="cannot identify pid"):
+        claim.process_started(os.getpid())
+
+
+@pytest.mark.parametrize("cleanup", [False, True])
+@pytest.mark.parametrize("clock_shift", [False, True])
+def test_linux_legacy_holder_release(linux_proc, cleanup, clock_shift):
+    descriptor = claim.ClaimDescriptor(claim.mutex()) if cleanup else acquire()
+    line = descriptor.pread().decode().split(" ", 2)
+    line[1] = "Sat_Oct_17_12:00:00_2026"
+    os.ftruncate(descriptor.fd, 0)
+    os.pwrite(descriptor.fd, " ".join(line).encode(), 0)
+    try:
+        if clock_shift:
+            (linux_proc / "stat").write_text("btime 999\n")
+            with pytest.raises(claim.ClaimError, match="only the acquirer"):
+                claim.mutex_release(descriptor) if cleanup else claim.release(descriptor)
+        else:
+            claim.mutex_release(descriptor) if cleanup else claim.release(descriptor)
+            descriptor = None
+    finally:
+        if descriptor is not None:
+            claim.close(descriptor)
+
+
+def test_linux_unlocked_legacy_holder_does_not_block_acquisition(linux_proc):
+    descriptor = acquire()
+    line = descriptor.pread().decode().split(" ", 2)
+    claim.close(descriptor)
+    line[1] = "Sat_Oct_17_12:00:00_2026"
+    claim.claim_path().write_text(" ".join(line))
+    (linux_proc / "stat").write_text("btime 999\n")
+    assert_free()
 
 
 @pytest.mark.parametrize("flag", ["password", "passwd", "secret", "token",

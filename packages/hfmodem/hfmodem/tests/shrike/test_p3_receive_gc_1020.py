@@ -167,7 +167,7 @@ def test_run_receive_gc_cycles(tmp_path, monkeypatch, loop_trace, held, hush, di
         assert gc.isenabled() is not disabled
     scopes = [s for s in trace.scopes if (s['tag'] == 'HOLD RX') is held]
     assert len(scopes) >= 2
-    assert all(s['normal'] and s['collected'] is not disabled for s in scopes)
+    assert all(s['normal'] and not s['collected'] and not s['enabled'] for s in scopes)
     assert all(s['steps'].index('listen') < s['steps'].index('exit') for s in scopes)
     assert any('scan' in s['steps'] for s in scopes)
     if hush:
@@ -177,8 +177,7 @@ def test_run_receive_gc_cycles(tmp_path, monkeypatch, loop_trace, held, hush, di
         assert keyed
         assert all(s['steps'].index('regrid') < s['steps'].index('emit')
                    < s['steps'].index('exit') for s in keyed)
-    if not disabled:
-        assert all(s['steps'][-2:] == ['exit', 'collect'] for s in scopes)
+    assert all(s['steps'][-1] == 'exit' for s in scopes)
 
 
 @pytest.mark.parametrize('held', [False, True])
@@ -196,7 +195,7 @@ def test_run_receive_exception_restores_gc(tmp_path, monkeypatch, loop_trace, he
     assert trace.lives[-1].closed
     assert not trace.last['normal'] and not trace.last['collected']
     assert trace.last['steps'][-1] == 'exit'
-    assert all(s['collected'] for s in trace.scopes[:-1])
+    assert all(not s['collected'] for s in trace.scopes)
 
 
 @pytest.mark.parametrize('held', [False, True])
@@ -216,7 +215,7 @@ def test_run_receive_early_exit(tmp_path, monkeypatch, loop_trace, held, handoff
         else:
             trace.pending = tx.p4_hold_audio = SimpleNamespace(pending=True)
     def separate_runner(*args, **kwargs):
-        assert gc.isenabled() and trace.active is None
+        assert not gc.isenabled() and trace.active is None
         assert not trace.last['collected']
         handed.append(True)
         return 'handoff complete'
@@ -229,7 +228,7 @@ def test_run_receive_early_exit(tmp_path, monkeypatch, loop_trace, held, handoff
     assert handed == ([True] if handoff else [])
     if not handoff:
         assert trace.scopes.index(scope) < len(trace.scopes) - 1
-        assert trace.scopes[-1]['collected']
+        assert not trace.scopes[-1]['collected']
 
 
 @pytest.mark.parametrize('word', [False, True])
@@ -251,7 +250,7 @@ def test_run_receive_first_ack_handoff(tmp_path, monkeypatch, loop_trace, word):
         words.append(tx.slot)
         return tx.slot if word else None
     def separate_runner(*args, **kwargs):
-        assert gc.isenabled() and trace.active is None
+        assert not gc.isenabled() and trace.active is None
         assert not trace.last['collected']
         assert kwargs == (dict(heard=words[-1]) if word else {})
         handed.append(True)

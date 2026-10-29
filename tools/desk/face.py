@@ -48,7 +48,7 @@ from hfmodem.station.qsolog import read_adif
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'logbook_view'))
 from logbook_view import audio, link, viewer
-from logbook_view.viewer_jobs import Replays
+from logbook_view.viewer_jobs import Replays, roots
 
 HERE = Path(__file__).resolve().parents[1] / 'logbook_view'
 mimetypes.add_type('audio/flac', '.flac')  # the stdlib table still says audio/x-flac
@@ -304,17 +304,19 @@ def default_root() -> Path:
 class Logbook:
     def __init__(self, root: Path, adif_paths: Iterable[Path] = (), viewer_root: Path | None = None,
                  station_path: Path | None = None, station=None, adif_dir: Path | None = None,
-                 stop=None):
+                 stop=None, also: Iterable[Path] = ()):
         self.root = root.resolve()
+        # The data root first, then older trees passed in `also`.
+        self.roots = tuple(dict.fromkeys(r.resolve() for r in (root, *also)))
         self.viewer_root = (viewer_root or self.root / 'working' / 'viewer-artifacts').resolve()
         self.adif_paths = list(adif_paths)
         self.adif_dir = adif_dir
         self.stop = stop or threading.Event()
-        self.working = (self.root / 'working').resolve()
+        self.workings = [r / 'working' for r in self.roots]
         # What /file/ serves: the arms and transcripts, and the recordings they name.
-        self.served = tuple((self.root / d).resolve() for d in ('working', 'captures', 'logs/onair', 'logs/sense'))
+        self.served = tuple((r / d).resolve() for r in self.roots for d in ('working', 'captures', 'logs/onair', 'logs/sense'))
         self.receivers = audio.kiwis(self.root)
-        self.converter, self.converted, self.converting = None, (None, {}), threading.Lock()
+        self.converters, self.converted, self.converting = None, (None, {}), threading.Lock()
         from consolelib.operator import station_file
         config_path = station_path or self.root / 'station.toml'
         if station_path is None and (os.environ.get('HFMODEM_STATION') or not config_path.is_file()):
@@ -346,11 +348,12 @@ class Logbook:
         return found
 
     def served_path(self, rel: str | Path) -> Path | None:
-        path = (self.root / rel).resolve()
-        return path if path.is_file() and any(path.is_relative_to(d) for d in self.served) else None
+        return next((path for r in self.roots if (path := (r / rel).resolve()).is_file()
+                     and any(path.is_relative_to(d) for d in self.served)), None)
 
     def url(self, path: Path) -> str | None:
-        return self.served_path(path) and '/file/' + quote(str(path.relative_to(self.root)))
+        return (local := self.served_path(path)) and '/file/' + quote(
+            str(local.relative_to(next(r for r in self.roots if local.is_relative_to(r)))))
 
     def recording(self, kind: str, rel: str | Path) -> dict | None:
         if not (local := self.served_path(rel) or self.served_path(Path(rel).with_suffix('.flac'))):
@@ -362,7 +365,7 @@ class Logbook:
     def rehears(self, arms: set[str]) -> dict[str, dict]:
         """The newest rehear of each arm, whichever decoder commit made it."""
         newest = {}
-        for p in (self.working / 'rehear').glob('*/*.json'):
+        for p in (q for w in self.workings for q in (w / 'rehear').glob('*/*.json')):
             if p.stem in arms:
                 r = rehearing(p, p.stat().st_mtime_ns)
                 if p.stem not in newest or r['run_utc'] > newest[p.stem]['run_utc']:
@@ -371,21 +374,24 @@ class Logbook:
 
     def delivered(self) -> Counter:
         """How many messages the recipient's inbox shows each arm delivered."""
-        path = self.working / 'winlink-delivered.json'
-        return Counter(d['arm'] for d in json.loads(path.read_text())) if path.is_file() else Counter()
+        sent = Counter()
+        for path in (w / 'winlink-delivered.json' for w in self.workings):
+            if path.is_file():
+                sent |= Counter(d['arm'] for d in json.loads(path.read_text()))
+        return sent
 
     def unconverted(self) -> dict[str, dict]:
         """The attempts legacy.py has not written yet, converted here the way it would write them,
         and again only once a transcript, arm or recording it reads has changed."""
         import legacy  # it reads the gateway listings through this module
         with self.converting:
-            if self.converter is None:
-                self.converter = legacy.Converter(self.root, book=self, stop=self.stop)
+            if self.converters is None:
+                self.converters = [legacy.Converter(r, book=self, stop=self.stop) for r in self.roots]
             if self.stop.is_set():
                 return {}
-            seen = self.converter.fingerprint()
+            seen = tuple(c.fingerprint() for c in self.converters)
             if seen != self.converted[0]:
-                self.converted = seen, self.converter.pending()
+                self.converted = seen, {k: v for c in reversed(self.converters) for k, v in c.pending().items()}
             return self.converted[1]
 
     def arm(self, path: Path, rehear: dict | None = None, delivered: int = 0, p: dict | None = None) -> dict:
@@ -400,7 +406,7 @@ class Logbook:
         reached = verdict.get('reached', [])
         # A converted arm keeps its transcript and recordings where they were made, and says what they held.
         converted = (p.get('source') or {}).get('converted_from')
-        log = self.root / converted if converted else path.parent / 'arm.log'
+        log = (self.served_path(converted) or self.root / converted) if converted else path.parent / 'arm.log'
         read, rederived = {}, []
         # The TX power a converted arm flew is read from its transcript here too,
         # not from what legacy.py stored: that field only catches up when it is re-run.
@@ -494,10 +500,10 @@ class Logbook:
 
     def entries(self) -> dict:
         grids = self.gateways()
-        arms = list(self.working.glob('*/arms/*/provenance.json'))
-        pending = self.unconverted()
-        heard, sent = self.rehears({p.parent.name for p in arms} | pending.keys()), self.delivered()
-        entries = [self.arm(p, heard.get(p.parent.name), sent[p.parent.name]) for p in arms]
+        arms = {p.parent.name: p for w in reversed(self.workings) for p in w.glob('*/arms/*/provenance.json')}
+        pending = {name: r for name, r in self.unconverted().items() if name not in arms}
+        heard, sent = self.rehears(arms.keys() | pending.keys()), self.delivered()
+        entries = [self.arm(p, heard.get(name), sent[name]) for name, p in arms.items()]
         entries += [self.arm(Path(r['directory']) / 'provenance.json', heard.get(name), sent[name], r)
                     for name, r in pending.items()]
         paths = self.adif_paths + (sorted(self.adif_dir.glob("*.adi")) if self.adif_dir else [])
@@ -554,7 +560,7 @@ class Handler:
         elif path == '/api/inspect':
             arm = parse_qs(url.query).get('arm', [''])[0]
             command = shlex.join([sys.executable, str(HERE / 'vara_view.py'),
-                                  '--root', str(self.book.root), '--arm', arm,
+                                  *roots(self.book), '--arm', arm,
                                   '--out', str(self.book.viewer_root)])
             self.send_bytes(json.dumps({'artifacts': viewer.artifacts(self.book.viewer_root, arm),
                                         'build_command': command}).encode(), 'application/json')
@@ -694,13 +700,13 @@ def export(book: Logbook, out: Path, audio_base: str | None, hostname: str | Non
     print(f"{len(log['entries'])} entries to {out}; {len(manifest)} recordings listed in {out.parent / 'audio-manifest.txt'}")
 
 
-def mount(service, data_root, config):
+def mount(service, data_root, config, also=()):
     directory = Path(config.desk.adif_dir).expanduser() if config.desk.adif_dir else None
     if directory is not None and not directory.is_absolute():
         directory = Path(service.station_file).parent / directory
     book = Logbook(Path(data_root), station_path=Path(service.station_file),
                    station={'mycall': config.station.mycall, 'grid': config.station.grid},
-                   adif_dir=directory, stop=service.closing)
+                   adif_dir=directory, stop=service.closing, also=also)
 
     def warm():
         try:

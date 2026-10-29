@@ -7,7 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hfmodem.shrike import arq, compress, hostmode, p3acquire, p3rx, rx, rxfront, spec, traffic
+from hfmodem.shrike import arq, compress, p3acquire, p3rx, rx, rxfront, spec, traffic
+from hfmodem.core import hostmode
 from hfmodem.tests import evidence
 from hfmodem.tests.shrike.test_tx_gear_hold import control, sender
 from hfmodem.tests.shrike.test_p3_ve3kpg_proposal_0924 import PROPOSAL, SID, proposal_leg
@@ -321,7 +322,7 @@ def test_operator_1003_synthetic_matching_ack_closure_of_recorded_bytes(arm):
         assert a._inflight is pending and a.tx_seq == 1
         assert pending.payload == wire[3:26] and bytes(a._outbuf) == suffix
         assert a._buffer_raw == len(wire) - 3
-        assert tuple(seam.frames) == frames
+        assert tuple(seam.frames) == frames + (frames[-1],)
     control(host, 2)
     assert a._mail_cs4_wait is None and a.tx_seq == 2
     assert a._buffer_raw == len(wire) - 26
@@ -382,7 +383,8 @@ def test_operator_1003_ve3kpg_peer_model_three_cs4_credits_only_validating_cs2_c
     host, seam, peer = proposal_leg()
     for cs, takes in [(4, False), (4, True), (4, True)]:
         peer.answer(host, cs, takes=takes)
-    assert [status & 3 for _, status, _ in seam.frames[1:]] == [1]
+    assert [status & 3 for _, status, _ in seam.frames[1:]] == [1, 1]
+    assert seam.frames[-1] == seam.frames[-2]
     assert peer.got == PROPOSAL[:23]
     assert host.arq._inflight.payload + bytes(host.arq._outbuf) == PROPOSAL
     peer.answer(host, 2)
@@ -447,7 +449,7 @@ def test_operator_1003_default_mail_guard_overrides_speed_and_gear_policies(poli
     control(host, 4)
     control(host, 6)
     host.tick()
-    assert tuple(seam.frames) == frames and a._inflight is pending
+    assert tuple(seam.frames) == frames + (frames[-1],) and a._inflight is pending
     control(host, 2)
     assert a.tx_seq == 2 and a._mail_cs4_wait is None
 
@@ -514,7 +516,8 @@ def test_operator_1003_attached_mail_client_uses_default_guard():
     control(host, 4)
     packet, frames = host.arq._inflight, tuple(seam.frames)
     control(host, 4)
-    assert host.arq._inflight is packet and tuple(seam.frames) == frames
+    assert host.arq._inflight is packet
+    assert tuple(seam.frames) == frames + (frames[-1],)
     assert host.arq._mail_cs4_wait == 0
 
 
@@ -612,6 +615,8 @@ def test_operator_1003_external_hostmode_no_credit_failure_event_and_retained_hi
     held = tuple(seam.frames)
     assert host.sent_total == len(first)
     control(host, 4)
+    assert tuple(seam.frames) == held + (held[-1],)
+    held = tuple(seam.frames)
     control(host, 1)  # Wrong parity must not settle c1.
     assert a._mail_cs4_wait == 0 and a._inflight is packet
     assert host._txbuf == len(suffix) and host.sent_total == len(first)
@@ -662,7 +667,8 @@ def test_operator_1003_recorded_two_cs4_answers_leave_first_normal_field_unconfi
         assert host.arq._buffer_raw == len(wire) - 3
         assert host.arq._inflight.payload == wire[3:26]
         assert host.arq._inflight.payload + bytes(host.arq._outbuf) == wire[3:]
-        assert len(seam.frames) == 1
+        assert len(seam.frames) == index+1
+        assert all(frame == seam.frames[0] for frame in seam.frames)
         assert (host.arq._mail_cs4_wait is not None) == bool(index)
     # Later recorded answers addressed the old transmitter's different state;
     # they cannot be relabelled as delivery evidence for this counterfactual.

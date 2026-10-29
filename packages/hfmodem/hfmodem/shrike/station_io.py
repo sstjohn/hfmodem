@@ -407,10 +407,10 @@ class StationInput:
 
         current()
         emission = (self.link.waveform.emission(station.rig.dial(),
-                        power_w=station.cfg.rig.power_w)
+                        power_w=station.cfg.declared_power_w)
                     if self._identifying is None else
                     centred(station.rig.dial(), cwid.BANDWIDTH_HZ,
-                            centre_hz=self._identifying[1], power_w=station.cfg.rig.power_w))
+                            centre_hz=self._identifying[1], power_w=station.cfg.declared_power_w))
         request = TxRequest(priority=LIVE, seq=0,
             protocol='pactor' if self._identifying is None else 'ident', audio=samples,
             rate=FS, at=at, settle_s=settle, responding=self.responding(), gain=gain,

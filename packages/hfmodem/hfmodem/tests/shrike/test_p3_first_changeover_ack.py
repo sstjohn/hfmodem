@@ -167,11 +167,12 @@ def test_following_recorded_data_gets_current_counter_ack(tmp_path):
     onair._p3_place_reply(g, tx, 6)
     tx.emit_pending_cs()
     assert not tx.refused and tx.slots_used == [0, 6]
-    # The recording's seq1 packet came 120 samples early of a whole six cycles.
-    # The reply rides the peer's measured raster now, taking up `RASTER_GAIN`
-    # of that reading, where it used to hold the free-running rotation.
+    # The decoders put seq1 120 samples early of a whole six cycles, but the
+    # recorded waveforms fit 6 x 60000 + 8: the CS3 head marker reads 88 late
+    # and the SL1 header 40 early. That is marker bias, not peer movement, so
+    # the reply keeps its accepted phase.
     assert abs(tx.tx_audio_start + row['origin'] - row['first_ack_audio']
-               - 6 * 60000 + round(onair.RASTER_GAIN * 120)) <= 1
+               - 6 * 60000) <= 1
 
 
 def test_diagnostic_exposes_whole_cycle_delay(tmp_path, capsys):

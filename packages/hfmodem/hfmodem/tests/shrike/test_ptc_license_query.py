@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """PTC-IIIusb 4.1 section 6.46's dummy query, not a Winlink agreement."""
 from hfmodem.shrike.ptc import PtcHost
-from hfmodem.shrike import hostmode
+from hfmodem.core import hostmode
 from .test_ptc_compatibility import Client
 
 

@@ -3,7 +3,7 @@
 # Documentation
 
 Operator guides, protocol references and recorded results. VarAC-compatible
-chat and supervised voice/CW contacts are included in 0.3.0.
+chat and supervised voice/CW contacts are included in 0.4.0.
 
 Project contact: [hfmodem@ssj.lol](mailto:hfmodem@ssj.lol).
 
@@ -53,6 +53,7 @@ for an FTDX10 or FT-891 on macOS or Linux.
 | PACTOR implementation inputs | [Constants, coding and permutation map](protocols/pactor/implementation-constants.md) |
 | VARA implementation inputs | [Constants and high-speed waveform map](protocols/vara/implementation-constants.md) |
 | Sources and strength of evidence | [Evidence tiers](protocols/EVIDENCE.md) |
+| Classic bulletin board (BBS) | [Note](BBS.md) |
 
 The comparison, PACTOR, VARA and ARDOP figures are checked against their source
 data by `docs/viz/tools/build.py --check`. Sabir illustrations and recorded simulation

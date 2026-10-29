@@ -518,19 +518,21 @@ def build(book, entry, out_root, recording=None, bw=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('--root', type=Path, required=True, help='existing logbook data checkout')
+    ap.add_argument('--root', type=Path, action='append', required=True,
+                    help='logbook data root; repeat for older trees, the first holding an arm wins')
     ap.add_argument('--arm', required=True, help='QSO ID in the logbook')
     ap.add_argument('--out', type=Path, help='artifact root, also passed to desk/face.py --viewer-root')
     ap.add_argument('--bw', type=int, choices=[500, 2300, 2750])
     ap.add_argument('--recording', help='exact /file/ URL of a recording listed for this QSO')
     args = ap.parse_args(argv)
     from desk.face import Logbook
-    book = Logbook(args.root)
+    root, *also = args.root
+    book = Logbook(root, also=also)
     entry = next((e for e in book.entries()['entries'] if e['id'] == args.arm), None)
     if entry is None:
         ap.error('QSO ID is not in this logbook.')
     try:
-        build(book, entry, args.out or args.root / 'working' / 'rehear-viewer', args.recording, args.bw)
+        build(book, entry, args.out or root / 'working' / 'rehear-viewer', args.recording, args.bw)
     except (OSError, ValueError) as exc:
         ap.error(str(exc))
     return 0

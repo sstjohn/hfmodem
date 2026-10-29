@@ -339,7 +339,10 @@ class PairScores:
 
 class ControlSchedule:
     capacity = 8192
-    hard_limit = 19
+    # A BW500 caller's answer reader behind a query at record 0 or 1 holds its
+    # turnaround's own frames and the 288 family twice, as the query's answer
+    # and as the low-record continue: 21.
+    hard_limit = 24
 
     def __init__(self, origin=0, generation=0, offset=0.0, retained=None):
         if not np.isfinite(offset):
@@ -364,6 +367,7 @@ class ControlSchedule:
         self.clear = np.empty((self.capacity, 2))
         self.residual = np.empty(self.capacity)
         self.power = np.empty((self.capacity, 70))
+        self.pair_floor = np.empty(self.capacity)
         self.denominator = np.empty(self.capacity)
         self.live = np.empty(self.capacity, bool)
         self.transforms = 0
@@ -491,6 +495,7 @@ class ControlSchedule:
         mag = full[:, 1:71].copy()
         power = mag * mag
         self.power[slots] = power
+        self.pair_floor[slots] = np.partition(power, 67, axis=1)[:, :67].mean(1) + 1e-30
         self.denominator[slots] = power.sum(axis=1)
         peaks = np.empty((len(slots), 3))
         for k in range(3):

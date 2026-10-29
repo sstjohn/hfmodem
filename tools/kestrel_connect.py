@@ -28,6 +28,7 @@ import argparse
 import atexit
 import csv
 import datetime as _dt
+from functools import partial
 import os
 import queue
 import sys
@@ -379,6 +380,12 @@ RECORD_DIR = _ROOT / "logs" / "onair"
 #: healthy per-burst stop returns 0.09-0.20 s past the last sample.
 STOP_BUDGET_S = 2.0
 
+#: How far off its nominal rate the capture may run, over two consecutive
+#: windows, before the operator is told. Two, so that the one block a first
+#: output stream costs [see AudioVaraIO._warm_transmit_path] is not a warning.
+PACE_TOLERANCE = .02
+PACE_WINDOW_S = 1.0
+
 
 class AudioWedged(RuntimeError):
     """A stream's stop or close did not come back within its budget.
@@ -394,13 +401,20 @@ class AudioWedged(RuntimeError):
 _wedged: AudioWedged | None = None
 
 
-def _bounded(budget_s: float, *calls) -> None:
+def _bounded(budget_s: float, *calls, cancelled=None, delivered=None) -> None:
     """Run `calls` in order on a helper thread, raising `AudioWedged` if they
-    have not all returned within `budget_s`."""
+    have not all returned within `budget_s`.
+
+    `delivered` counts the samples the device has handed over. It is what tells
+    a device that is merely slow from one that is stuck: on 2026-10-28 an FT-891
+    codec back from re-enumerating ran at half rate, a 6.35 s beacon took longer
+    than its 8.35 s to drain, and the line it left said CoreAudio was deadlocked.
+    """
     global _wedged
     if _wedged is not None:
         raise _wedged
     failed: list[BaseException] = []
+    began, before = time.monotonic(), delivered() if delivered is not None else 0
 
     def run() -> None:
         try:
@@ -411,18 +425,67 @@ def _bounded(budget_s: float, *calls) -> None:
 
     worker = threading.Thread(target=run, name="portaudio", daemon=True)
     worker.start()
-    worker.join(budget_s)
+    if cancelled is None:
+        worker.join(budget_s)
+    else:
+        end = time.monotonic() + budget_s
+        while worker.is_alive() and time.monotonic() < end:
+            if cancelled.is_set():
+                budget_s = .5
+                end = min(end, time.monotonic() + budget_s)
+            worker.join(min(.05, max(0, end - time.monotonic())))
     if worker.is_alive():
         import sounddevice as sd
         # Its exit handler is Pa_Terminate, which aborts every open stream and
         # would hang the interpreter's exit on the same mutex.
         atexit.unregister(sd._exit_handler)
-        _wedged = AudioWedged(
-            f"AUDIO WEDGED: a PortAudio stream did not stop within {budget_s:.1f} s; "
-            f"CoreAudio is deadlocked in this process and no stream is touched again")
+        moved = delivered() - before if delivered is not None else 0
+        if moved > 0:
+            share = moved / FS / (time.monotonic() - began)
+            why = (f"the audio device delivered {share:.0%} of real time; "
+                   f"the stream did not drain within {budget_s:.1f} s")
+        else:
+            why = (f"a PortAudio stream did not stop within {budget_s:.1f} s; "
+                   f"CoreAudio is deadlocked in this process")
+        _wedged = AudioWedged(f"AUDIO WEDGED: {why} and no stream is touched again")
         raise _wedged
     if failed:
         raise failed[0]
+
+
+def exit_status(main, *args):
+    """What `main(*args)` would exit with, or the end of the process if audio wedged.
+
+    A wedged stream is never stopped, so CoreAudio's IO thread goes on calling its
+    Python callback, and interpreter finalization frees what that callback runs:
+    on 2026-10-28 the chat host unkeyed, reported and handed back the line, then
+    died SIGSEGV in `Py_Finalize`. Once a stream has wedged, `main`'s own teardown
+    and the atexit handlers (the recording's store, the unkey hook, logging's
+    flush) are everything owed, and the process leaves through `os._exit` with the
+    status the interpreter would have given it.
+    """
+    try:
+        ending = SystemExit(main(*args))
+    except BaseException as raised:
+        if _wedged is None:
+            raise
+        ending = raised
+    if _wedged is None:
+        return ending.code
+    if not isinstance(ending, SystemExit):
+        sys.excepthook(type(ending), ending, ending.__traceback__)
+        status = 130 if isinstance(ending, KeyboardInterrupt) else 1
+    elif ending.code is None or isinstance(ending.code, int):
+        status = ending.code or 0
+    else:
+        print(ending.code, file=sys.stderr)
+        status = 1
+    print(f"{_wedged}: exit {status} without interpreter teardown", file=sys.stderr)
+    atexit._run_exitfuncs()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)
+
 
 # Shared with onair.sh: only an immediate occupancy refusal is retryable.
 # An expired pounce budget spends 3; the receiver's own faults remain ordinary
@@ -981,6 +1044,8 @@ class AudioVaraIO(_MailSeam, VaraIO):
         # the callback's own `frames` is the only place it is stated. Until the
         # first one arrives there is no loss to measure against it.
         self._blk = 128
+        self._paced: tuple[float, int] | None = None   # (callback instant, samples)
+        self._slow = False
         self.rec = Recorder(record) if record is not None else None
         self.connected_info = None
         self.taps = []
@@ -992,6 +1057,7 @@ class AudioVaraIO(_MailSeam, VaraIO):
     def _on_rx(self, indata, frames, t, status):
         n0 = self.samples
         self.samples = n0 + frames
+        self._paced = (time.monotonic(), self.samples)
         self._blk = frames
         if status.input_overflow or status.input_underflow:
             self.xruns += 1
@@ -1033,9 +1099,44 @@ class AudioVaraIO(_MailSeam, VaraIO):
 
     def start(self):
         self._stream.start()
+        threading.Thread(target=self._watch_pace, name="capture-pace", daemon=True).start()
         if self._warm:
             self._warm_transmit_path()
         self._hold_transmit_path()
+
+    def _watch_pace(self) -> None:
+        """Say so, loudly, while the capture runs off its rate against `time.monotonic()`.
+
+        A codec can come back from a USB re-enumeration clocking far from 48 kHz
+        and still read LIVE on every startup check: on 2026-10-28 the FT-891's
+        delivered 368640 samples in 13 s and nothing said so until a beacon's
+        drain overran. A playback on the same codec runs on that clock, so this
+        is the line to read before the first key-up. It warns and nothing else.
+        """
+        marks: list[tuple[float, int]] = []
+        while self._run.is_set():
+            time.sleep(PACE_WINDOW_S)
+            if self._paced is None or (marks and self._paced[0] == marks[-1][0]):
+                continue
+            marks = (marks + [self._paced])[-3:]
+            if len(marks) < 3:
+                continue
+            shares = [(b[1] - a[1]) / FS / (b[0] - a[0]) for a, b in zip(marks, marks[1:])]
+            off = [abs(share - 1) > PACE_TOLERANCE for share in shares]
+            share = (marks[-1][1] - marks[0][1]) / FS / (marks[-1][0] - marks[0][0])
+            if all(off) and not self._slow:
+                self._slow = True
+                text = (f"!! CAPTURE RATE: {self.rx_device} is delivering {share:.0%} of "
+                        f"real time ({share * FS:.0f} samples/s against {FS}); re-plug the "
+                        f"radio's USB cable or power-cycle the radio to restart its USB audio")
+            elif not any(off) and self._slow:
+                self._slow = False
+                text = f"capture rate: {self.rx_device} is back at {share:.0%} of real time"
+            else:
+                continue
+            print(f"  {text}", flush=True)
+            self._diagnostic("capture_rate", text=text, device=self.rx_device,
+                             share=round(share, 4), slow=self._slow)
 
     def _hold_transmit_path(self) -> None:
         """Leave the transmit stream running, where the capture does not pay for it.
@@ -1103,7 +1204,8 @@ class AudioVaraIO(_MailSeam, VaraIO):
         print(f"  {rates.host_report()}", flush=True)
         self._run.clear()
         try:
-            _bounded(STOP_BUDGET_S, drop_output, self._stream.stop, self._stream.close)
+            _bounded(STOP_BUDGET_S, drop_output, self._stream.stop, self._stream.close,
+                     delivered=lambda: self.samples)
         except AudioWedged as wedged:
             print(f"  {wedged}", flush=True)
         except Exception:
@@ -1227,7 +1329,7 @@ class AudioVaraIO(_MailSeam, VaraIO):
                 self._flush_tx_events(unkey_confirmed=bool(keyed))
 
     def tx(self, samples: np.ndarray, drive: float | None = None, *,
-           identification: bool = False) -> None:
+           identification: bool = False, cancelled=None) -> None:
         if getattr(self, "_trace_timing_enabled", False):
             self._timing_tx_seq += 1
         self.trace_timing_event("tx_entry", capture_samples=getattr(self, "samples", None))
@@ -1271,8 +1373,13 @@ class AudioVaraIO(_MailSeam, VaraIO):
             self.progress.inflight("tx", len(s) / FS + self.tx_tail)
             self._diagnostic('tx_start', identification=identification,
                              keyed=bool(getattr(self, '_tx_key_confirmed', False)), **metadata)
+            playback = {'cancelled': cancelled.is_set} if cancelled is not None else {}
+            waiting = {'cancelled': cancelled} if cancelled is not None else {}
+            if getattr(self, "_monitored", False):
+                # One codec both ways: its capture count is the playback's clock.
+                waiting['delivered'] = lambda: self.samples
             _bounded(len(block) / FS + STOP_BUDGET_S,
-                     lambda: play_drained(block, FS, self.tx_device))
+                     lambda: play_drained(block, FS, self.tx_device, **playback), **waiting)
             audio_end = getattr(self, "samples", None)
             if self._tx_key_confirmed:
                 self.bursts_sent += 1
@@ -1346,7 +1453,11 @@ class AudioVaraIO(_MailSeam, VaraIO):
             tail = max(0.0, self.tx_tail - late)
             self.trace_timing_event("tail_start", requested_s=self.tx_tail,
                                     drain_late_s=late, sleep_s=tail)
-            time.sleep(tail)
+            if cancelled is not None:
+                if cancelled.wait(tail):
+                    raise InterruptedError('identification cancelled')
+            else:
+                time.sleep(tail)
             self.trace_timing_event("tail_end", capture_samples=getattr(self, "samples", None))
         except BaseException as error:
             outcome = "error"
@@ -2078,18 +2189,21 @@ def connect(gateway: str, mycall: str, bw: str, io: AudioVaraIO,
     return hs.state == VaraState.CONNECTED
 
 
-def identify(io, mycall: str, bw: str) -> None:
+def identify(io, mycall: str, bw: str, say=partial(print, flush=True), *, cancelled=None) -> None:
     """Our callsign in CW straight after the session, whatever VARA's frames
     carried: the tail of our own transmission, so it senses no channel."""
-    with cwid.confirming(mycall):
+    with cwid.confirming(mycall, say):
         if io.burst_level is None:
             raise ValueError("no completed data burst for identification level")
         audio = cwid.audio(mycall.upper(), fs=FS, tone_hz=sum(occupied_hz("vara", bw)) / 2)
         drive = levels.drive_for_rms(audio, *io.burst_level)
         before = io.bursts_sent
+        if cancelled is not None and cancelled.is_set():
+            raise InterruptedError('identification cancelled')
         io.key(True)
         try:
-            io.tx(audio, drive, identification=True)
+            io.tx(audio, drive, identification=True,
+                  **({'cancelled': cancelled} if cancelled is not None else {}))
         finally:
             unwinding = sys.exc_info()[1]
             try:
@@ -2578,4 +2692,4 @@ def _run(args, identity, *, admission=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(exit_status(main))

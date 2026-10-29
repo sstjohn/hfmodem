@@ -257,8 +257,12 @@ def test_legacy_attempt_spends_shared_receipt(provenance, kind, match):
     assert host.arm(receipt) == 'spent'
     assert host.accept(frame(data, 0x61), **kwargs) is None
     assert host.last_credit == host.result.committed_credit == 0
+    before = sink.payload
     chirp(host, receipt, PREFIX[:22])
-    assert sink.payload.endswith(PREFIX[:22])
+    # The BODY receipt remains spent. Counted source continuity independently
+    # suppresses an exact retransmission of the NORMAL/LONG field's prefix.
+    assert sink.payload == before + (b'' if match else PREFIX[:22])
+    assert host.last_credit == host.result.committed_credit == 0
 
 
 @pytest.mark.parametrize('provenance', ['opening', 'changeover'])
@@ -667,13 +671,14 @@ def test_turn_rejected_body_cannot_deliver_or_create_candidate(rejection):
 
 
 @pytest.mark.parametrize('kind', [Kind.NORMAL, Kind.LONG])
-def test_turn_legacy_attempt_prevents_later_chirp_replay_credit(kind):
+def test_turn_legacy_receipt_stays_spent_while_counted_source_deduplicates_chirps(kind):
     turn, sink, _ = turn_open()
     receive(turn, packet(kind, 6*FS, PREFIX+b'Z', 0x61, 40))
     assert sink.payload == PREFIX*2+b'Z'
     receive(turn, packet(Kind.CHIRP, 10*FS, PREFIX[:22], 0x61, 22))
     receive(turn, packet(Kind.CHIRP, 14*FS, PREFIX[22:]+b'Z', 0x62, 22))
-    assert sink.payload == PREFIX*2+b'Z'+PREFIX+b'Z'
+    assert sink.payload == PREFIX*2+b'Z'
+    assert turn.adapter.last_credit == turn.adapter.result.committed_credit == 0
 
 
 def test_turn_tentative_chirp_interrupts_legacy_long_credit():

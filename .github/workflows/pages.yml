@@ -19,20 +19,34 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      NUMEXPR_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+      BLIS_NUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      # The page is rendered from the same script the suite tests, so what deploys
-      # cannot drift from what was reviewed.
-      - run: python -m pip install pytest
-      - run: python -m pytest site/tools/test*.py -q
-      - run: node --test site/tools/test_secret_desk.mjs site/tools/test_public_qsos.mjs site/tools/test_scroll_accessibility.mjs
-      - run: python site/tools/build.py --output _site
+          python-version: '3.13'
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      # The page is rendered from the same script the suite tests, so what deploys
+      # cannot drift from what was reviewed.
+      - name: Install recorded-audio decoder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flac
+      - name: Install local packages and site test tools
+        run: >-
+          python -m pip install pytest
+          -e packages/hfhost -e packages/creance -e packages/hfmodem
+      - run: python -m pytest site/tools/test*.py -q
+      - run: node --test site/tools/test_secret_desk.mjs site/tools/test_public_qsos.mjs site/tools/test_scroll_accessibility.mjs
+      - run: python site/tools/build.py --output _site
       - name: Install accessibility test tools
         run: |
           npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/site-a11y" playwright@1.64.0 axe-core@4.14.0

@@ -12,6 +12,7 @@
                                         is, who uses a frequency, an agency's
                                         channels (fetched, and kept)
     hfmodem version
+    hfmodem bbs local --config FILE     open the shared BBS without a radio
 
 Every verb that can key a transmitter refuses unless the station file says
 `transmit = true`, and says so rather than doing nothing quietly.
@@ -26,7 +27,6 @@ from pathlib import Path
 from hfhost.config import ConfigError
 
 from hfmodem import __version__
-from hfmodem.core.config import STATION_ENV
 
 
 def _config(path: str):
@@ -150,7 +150,9 @@ def cmd_station(args) -> int:
     from hfmodem.station import wire
     from hfmodem.core.rig import RigError
     from hfmodem.core.audio import AudioError
+    from hfmodem.core.config import STATION_ENV
 
+    args.file = args.file or Path(os.environ.get(STATION_ENV, "station.toml"))
     if str(args.file) == "stop":
         from hfmodem.station.client import ClientError, connect
         path = args.target or os.environ.get(STATION_ENV, "station.toml")
@@ -177,7 +179,7 @@ def cmd_station(args) -> int:
         from hfmodem.operator.bootstrap import face
         desk = face()
         if desk is not None:
-            desk.mount(service, desk.data_root, cfg)
+            desk.mount(service, desk.data_root, cfg, also=[desk.source_root])
         station = Station(cfg, station_file=service.station_file)
         station.service = service
         service.station = station
@@ -260,9 +262,30 @@ def cmd_version(args) -> int:
     return 0
 
 
+def cmd_bbs(argv: list[str]) -> int:
+    """Keep the offline BBS entrance independent of station/hardware claims."""
+    if argv[:1] == ['local']:
+        from hfmodem.bbs.frontends.local import main as local_main
+        return local_main(argv[1:])
+    if argv[:1] == ['doors']:
+        from hfmodem.bbs.install import main as install_main
+        return install_main(argv[1:])
+    if argv[:1] == ['messages']:
+        from hfmodem.bbs.message_admin import main as messages_main
+        return messages_main(argv[1:])
+    parser = argparse.ArgumentParser(prog='hfmodem bbs')
+    parser.add_argument('command', choices=['local', 'doors', 'messages'], help='local terminal or BBS administration')
+    parser.parse_args(argv)
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hfmodem", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="verb", required=True)
+
+    bbs = sub.add_parser('bbs', help='shared BBS: local terminal and door administration', add_help=False)
+    bbs.add_argument('args', nargs=argparse.REMAINDER)
+    bbs.set_defaults(fn=lambda args: cmd_bbs(args.args))
 
     console = sub.add_parser('console', help='operator console: setup, peers, calls and monitors', add_help=False)
     console.add_argument('args', nargs=argparse.REMAINDER)
@@ -289,8 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.set_defaults(fn=cmd_rig)
 
     s = sub.add_parser("station", help="run the station")
-    s.add_argument("file", type=Path, nargs="?",
-                   default=Path(os.environ.get(STATION_ENV, "station.toml")))
+    s.add_argument("file", type=Path, nargs="?")
     s.add_argument("target", type=Path, nargs="?")
     mode = s.add_mutually_exclusive_group()
     mode.add_argument("--detach", action="store_true", help="serve in observing mode")
@@ -362,6 +384,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ['bbs']:
+        return cmd_bbs(argv[1:])
     if argv and argv[0] in ('console', 'winlink'):
         from hfmodem.operator import bootstrap
         return getattr(bootstrap, argv[0])(argv[1:])

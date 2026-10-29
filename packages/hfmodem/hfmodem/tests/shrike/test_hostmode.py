@@ -8,7 +8,7 @@ six real assertions -- the manual's CRC example, both decoder round trips, the
 corruption/request/repeat exchange, and byte-at-a-time framing -- that pytest
 never ran.
 """
-from hfmodem.shrike import hostmode
+from hfmodem.core import hostmode
 
 
 def test_framing_selftest():
@@ -16,11 +16,11 @@ def test_framing_selftest():
 
 
 def test_tracker_and_ptc_share_transport_framing_without_modem_imports():
-    from hfmodem.core import hostmode as shared
+    from hfmodem.shrike import ptc
     from hfmodem.brubru.host import tracker
 
-    assert hostmode.Decoder is shared.Decoder is tracker.hm.Decoder
-    wire = shared.unwrap(shared.command(1, 'I W9SSJ'))
+    assert hostmode.Decoder is ptc.hostmode.Decoder is tracker.hm.Decoder
+    wire = hostmode.unwrap(hostmode.command(1, 'I W9SSJ'))
     [packet] = tracker.hm.Decoder(crc=False).feed(wire)
     assert packet.channel == 1 and packet.is_command
     assert packet.text == 'I W9SSJ'

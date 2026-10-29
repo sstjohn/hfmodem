@@ -118,6 +118,25 @@ def server():
     srv.stop()
 
 
+def test_commands_wait_for_a_complete_attachment(server):
+    srv, cport, dport = server
+    with socket.create_connection(("127.0.0.1", cport), timeout=2) as cmd:
+        cmd.sendall(b"MYCALL W9SSJ\rVERSION\r")
+        cmd.settimeout(.1)
+        with pytest.raises(socket.timeout):
+            cmd.recv(4096)
+        assert srv._mycall == ""
+        with socket.create_connection(("127.0.0.1", dport), timeout=2):
+            cmd.settimeout(2)
+            replies = bytearray()
+            while b"VERSION besra-" not in replies or not replies.endswith(b"\r"):
+                block = cmd.recv(4096)
+                assert block
+                replies.extend(block)
+            assert replies.startswith(b"MYCALL now W9SSJ\rVERSION besra-")
+            assert srv._mycall == "W9SSJ"
+
+
 def test_init_and_reply_grammar(server):
     srv, cport, dport = server
     c = Client("127.0.0.1", cport, dport)
@@ -270,5 +289,8 @@ def test_a_dropped_data_socket_ends_the_session(server):
         while srv.modem.connected and time.monotonic() < deadline:
             time.sleep(.01)
         assert not srv.modem.connected
+        assert srv._cfg["LISTEN"] == "FALSE"
+        assert not any(line == "DISCONNECTED" or line.startswith("NEWSTATE DISC")
+                       for line in c.lines)
     finally:
         c.close()

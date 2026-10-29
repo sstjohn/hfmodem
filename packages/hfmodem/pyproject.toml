@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hfmodem"
-version = "0.3.4"
+version = "0.4.0"
 maintainers = [{ email = "hfmodem@ssj.lol" }]
 description = "Experimental HF modems, receive monitors and shared radio station tools."
 # Inline, not a file path: this package directory carries no README.md, and
@@ -44,7 +44,7 @@ classifiers = [
 # hfhost supplies the config primitives and the client the station probes itself
 # through. The dependency runs one way only and tests/gates/test_import_direction.py
 # enforces it: hfhost must stay able to drive a modem it knows nothing about.
-dependencies = ["hfhost>=0.3.0", "creance>=0.3.0", "numpy>=1.24", "scipy>=1.10", "sounddevice>=0.4", "pyserial>=3.5"]
+dependencies = ["hfhost>=0.4.0", "creance>=0.4.0", "numpy>=1.24", "scipy>=1.10", "sounddevice>=0.4", "pyserial>=3.5"]
 
 [project.urls]
 Homepage = "https://hfmodem.ssj.lol"
@@ -66,6 +66,8 @@ include = ["hfmodem*"]
 # Left explicit: the default walks every directory without an __init__.py, and
 # this tree has large sibling directories that would cost minutes to discover.
 namespaces = false
+# The suite runs from a checkout or the source drop, never from an installed wheel.
+exclude = ["hfmodem.tests*"]
 
 [tool.setuptools.package-data]
 "hfmodem.shrike" = ["assets/c2-*.swaps.z"]
@@ -73,8 +75,6 @@ namespaces = false
 # The pulse is a separately cleared measurement. P4 uses the approved exact
 # replay swaps above; its original constructor is an offline proof tool.
 "hfmodem.kestrel.tx" = ["assets/*.npz"]
-# Not a package: the tripwire the tests put on every child's PYTHONPATH.
-"hfmodem.tests" = ["hermetic_py/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["hfmodem/tests"]

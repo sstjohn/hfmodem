@@ -67,7 +67,7 @@ def _pairs(tones):
 
 
 class _Link:
-    def __init__(self, high_speed: bool, ruin: int | None = None):
+    def __init__(self, high_speed: bool, ruin: int | None = None, confirm_route='stream'):
         self.to_callee, self.to_caller = [], []
         self.caller = VA.VaraStationHandshake(["W9SSJ"], _IO(self.to_callee), bw=BW,
                                               high_speed=high_speed)
@@ -75,6 +75,7 @@ class _Link:
                                               high_speed=high_speed)
         self.received, self.read_levels = bytearray(), []
         self.overs, self.ruin = 0, ruin
+        self.confirm_route = confirm_route
 
     def connect(self, greeting):
         # Queue the host greeting at CONNECTED, before the caller's waveform
@@ -132,7 +133,9 @@ class _Link:
     def callee_hears(self, x):
         cs = self.callee
         if cs._awaiting_caller_confirm:
-            # Wide responder confirmations are owned by the stream reader.
+            if self.confirm_route == 'burst':
+                cs.on_rx_audio(x)
+                return
             audio = np.concatenate([np.zeros(FS // 10), x, np.zeros(FS // 2)])
             for i in range(0, len(audio), POLL):
                 _Clock.t += POLL / FS
@@ -202,10 +205,10 @@ def clock(monkeypatch):
     monkeypatch.setattr(VA, "time", _Clock)
 
 
-def _session(high_speed, size, ruin=None):
+def _session(high_speed, size, ruin=None, confirm_route='stream'):
     rng = np.random.default_rng(1)
     greeting, upload = (rng.integers(0, 256, size, dtype=np.uint8).tobytes() for _ in "ab")
-    link = _Link(high_speed, ruin)
+    link = _Link(high_speed, ruin, confirm_route)
     deliver = link.caller.io.data
     def host_reply(payload):
         deliver(payload)
@@ -222,8 +225,9 @@ def _session(high_speed, size, ruin=None):
     return link
 
 
-def test_high_speed_capable_stations_climb_into_ofdm_both_ways_and_recover_a_nak():
-    link = _session(True, 4096, ruin=2)
+@pytest.mark.parametrize('confirm_route', ['stream', 'burst'])
+def test_high_speed_capable_stations_climb_into_ofdm_both_ways_and_recover_a_nak(confirm_route):
+    link = _session(True, 4096, ruin=2, confirm_route=confirm_route)
     caller, callee = link.caller, link.callee
     assert "rx link-setup — caller is W9SSJ (high speed capable, ask 6)" in callee.io.msgs
     assert "the caller's confirm starts our first over at level 6" in callee.io.msgs
@@ -239,8 +243,9 @@ def test_high_speed_capable_stations_climb_into_ofdm_both_ways_and_recover_a_nak
     assert _keyed_levels(caller) == link.read_levels == [4, 6, 10, 14, 15]
 
 
-def test_a_speed_limited_session_stays_at_level_four():
-    link = _session(False, 1024)
+@pytest.mark.parametrize('confirm_route', ['stream', 'burst'])
+def test_a_speed_limited_session_stays_at_level_four(confirm_route):
+    link = _session(False, 1024, confirm_route=confirm_route)
     caller, callee = link.caller, link.callee
     assert "rx link-setup — caller is W9SSJ (free, ask 4)" in callee.io.msgs
     assert caller._lead is None and callee._lead is None

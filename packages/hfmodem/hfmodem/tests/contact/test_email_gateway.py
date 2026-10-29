@@ -89,7 +89,10 @@ def test_cf_and_active_exchange_rejected():
     d.flow.dial=14_105_750
     d.session.steps=iter([.1])
     d.session.command('/email send a@example.org b@example.org Test')
-    assert 'current exchange' in d.said[-1] and not d.texts
+    d.session.command('body')
+    d.session.command('.')
+    assert 'another exchange is active; email draft retained' in d.said[-1] and not d.texts
+    assert d.session.email.draft is not None
 
 
 @pytest.mark.parametrize('response', ['<EJ>','<SMF>','<SMFP>','<ER><EJ>'])

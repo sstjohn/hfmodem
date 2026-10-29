@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """SCS 1.7 terminal echo and the unchanged Trimode recovery/handoff."""
-from hfmodem.shrike import hostmode as hm
+from hfmodem.core import hostmode as hm
 from .test_tracker import setup, connected
 
 

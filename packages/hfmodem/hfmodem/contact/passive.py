@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..kestrel.arq import phy
+from ..kestrel.rx.bw500_features import FeatureTrack
+from ..kestrel.rx.control_track import ControlTrack
 from ..kestrel.vara import vara_arq as VA, vara_frames as VF, vara_mfsk as MK
 
 FS = 48000
@@ -22,6 +24,10 @@ QUIET = 4 * STEP
 PAD = 12000
 MAX_SPAN = 12 * FS
 MAX_PENDING = 2
+#: An idle reply is 1.37 s, so a 2.5 s window searched every second holds each one
+#: whole at least once.
+IDLE_WINDOW = 5 * FS // 2
+IDLE_HOP = FS
 
 
 class IdleReplies:
@@ -36,19 +42,26 @@ class IdleReplies:
         self.raw = np.empty(0)
         self.samples = 0
         self.scanned = 0
+        # The modem's own control front: each window is transformed once, at an
+        # eighth of the rate, however many scans its 2.5 s span is read by.
+        self.front = FeatureTrack(stage='front')
+        self.control = ControlTrack(retain_seconds=IDLE_WINDOW / FS + 1)
         self.last = {}
         self.tones = {}
         self.pairs = {}
 
     def feed(self, samples, calls):
         self.samples += len(samples)
-        self.raw = np.concatenate((self.raw, samples))[-2 * FS:]
-        if len(self.raw) < int(1.5 * FS) or self.samples - self.scanned < FS // 4:
+        self.raw = np.concatenate((self.raw, samples))[-IDLE_WINDOW:]
+        self.front.feed(samples)
+        self.control.feed(self.front.last_low, self.front.samples)
+        if len(self.raw) < int(1.5 * FS) or self.samples - self.scanned < IDLE_HOP:
             return []
         self.scanned = self.samples
         kind = VF.for_bw(VF.SESSION_TURN_IDLE_RESPONDER, '500')
         band = MK.band_for('500')
-        track = VA._top3_track(self.raw, band=band)
+        origin = self.samples - len(self.raw)
+        track = VA._top3_track(self.raw, band=band, frontend=self.control, origin=origin)
         out = []
         calls = tuple(dict.fromkeys(c for c in calls if c))
         self.tones = {c: t for c, t in self.tones.items() if c in calls}
@@ -70,7 +83,7 @@ class IdleReplies:
                                        VA._control_family(call, call, '500'))
                 pairs, family = self.pairs[call]
                 if power is None:
-                    power = VA._band_power(self.raw, band)
+                    power = self._power(origin, band)
                 if VA._frame_fit(power, pairs, band)[0] < 2.0:
                     continue
                 at = VA._soft_pairs(power, pairs, family, band)
@@ -82,6 +95,12 @@ class IdleReplies:
             self.last[call] = start
             out.append(call)
         return out
+
+    def _power(self, origin, band):
+        if origin % 8 or origin < self.control.oldest_start:
+            return VA._band_power(self.raw, band)
+        power = self.control.power(origin, self.samples, band)
+        return np.concatenate((power, VA._band_power(self.raw[len(power) * VA._ACK_GRID:], band)))
 
 
 @dataclass(frozen=True)

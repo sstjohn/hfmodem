@@ -88,9 +88,18 @@ def test_competing_complete_attachment_never_replaces_incumbent(server):
         with connect(cmd_port) as other_cmd, connect(srv.data_port) as other_data:
             assert other_cmd.recv(4096) == b""
             assert other_data.recv(4096) == b""
-        assert srv._pairs.generation == generation
+            assert srv._pairs.generation == generation
+            cmd.sendall(b"VERSION\r")
+            read_until(cmd, b"VERSION")
+            cmd.shutdown(socket.SHUT_RDWR)
+            until(lambda: srv._pairs._active is None)
+            assert other_cmd.recv(4096) == b""
+            assert other_data.recv(4096) == b""
+            assert srv._pairs.generation == generation
+    with connect(cmd_port) as cmd, connect(srv.data_port):
         cmd.sendall(b"VERSION\r")
         read_until(cmd, b"VERSION")
+        assert srv._pairs.generation == generation + 1
 
 
 def test_ardop_output_blocks_preserve_bytes_with_configured_limit():
@@ -122,6 +131,26 @@ def test_bounded_output_fails_attachment_without_blocking_producer():
         assert not conn.send_bounded(b"x" * (MAX_OUTPUT + 1))
         assert conn.closed
         assert client.recv(1) == b""
+    finally:
+        conn.close()
+        client.close()
+
+
+def test_delivered_output_leaves_the_byte_bound_intact():
+    from hfmodem.core.hostio import Connection, MAX_OUTPUT
+    client, peer = socket.socketpair()
+    conn = Connection(peer, nodelay=False)
+    try:
+        for _ in range(5):
+            conn.send_later(b"x" * 1000)
+        received = bytearray()
+        while len(received) < 5000:
+            received += client.recv(5000)
+        deadline = time.monotonic() + 2
+        while (conn._delivery or conn._delivering) and time.monotonic() < deadline:
+            time.sleep(.005)
+        assert conn._delivery_bytes == 0
+        assert not conn.send_bounded(b"x" * (MAX_OUTPUT + 1))
     finally:
         conn.close()
         client.close()

@@ -48,6 +48,27 @@ and `--long-cycle` to permit extended packets. These examples specify command
 syntax, not a verified P2-serving gateway. Some channels explicitly refuse
 levels below P3.
 
+## Trials as a PACTOR-2-only station
+
+A stock peer will try to go to P3 or P4. To meet it as a PTC-II would, run
+capped at P2. These three forms apply the same policy:
+
+```sh
+tools/onair.sh pactor GW 7101500 --pactor2-only        # call
+tools/onair.sh pactor-answer 7101500 900 --pactor2-only  # answer
+tools/console pactor fly GW --band 40 --pactor2-only --sense --execute
+```
+
+In the PTC host, `#MYL 2` sets the same policy. The setup packet announces
+bits45=1 (`0x11`), never `0x31`. P2 SL1 starts only on `0x6A9` or when the
+peer starts sending P2. A `0x59A` grant, P3 or P4 frames, and uninvited upgrades
+are ignored. Status byte 2 reports level 2 while the link is in P2.
+If the P2 entry draws no answer within its budget, the link falls back to P1.
+
+Without the cap, a caller announcing `0x31` that draws `0x6A9` three times
+resends as plain P1 and stays there. `--p2-6a9-grant` instead reads that `0x6A9`
+as a P2 grant. It is off by default until a stock P1-to-P2 entry is recorded.
+
 The modem preset enables mail, requests eventual changeover, announces `01`,
 and accepts `0x6A9` as experimental permission to enter P2 at SL1. `0x59A`
 does not enter P3. An ordinary P1 acknowledgement accepts setup in P1 and

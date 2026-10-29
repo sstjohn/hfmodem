@@ -392,7 +392,8 @@ def running(tmp_path, monkeypatch, request):
         config.auth_token_file, config.port = str(token), 0
     station = SimpleNamespace(audio=card, rig=rig, lanes={},
         cfg=SimpleNamespace(station=SimpleNamespace(mycall='N0CALL'),
-                            rig=SimpleNamespace(power_w=10), protocols={'pactor': config}))
+                            rig=SimpleNamespace(power_w=10), protocols={'pactor': config},
+                            declared_power_w=10))
     station.arbiter = TxArbiter(card, rig, drive=.6, settle_s=.04,
                                identity=Identity('K1ABC'))
     link = ShrikeLink(station)
@@ -422,12 +423,13 @@ def running(tmp_path, monkeypatch, request):
         assert not rig.keyed and not card.closed and not rig.closed
 
 
+@pytest.mark.realtime
 def test_worker_serves_real_serial_and_reopens_a_fresh_attachment(running):
     runtime, station, server = running
     client = Client(server.endpoint)
     try:
         assert client.command('#MODE 0').code == ptc.OK
-        assert client.command('#MYL 2').code == ptc.FAIL
+        assert client.command('#MYL 4').code == ptc.FAIL
         assert client.command('C %N0DX').code == ptc.FAIL
         assert runtime.host.arq.state == State.LISTENING
         assert not station.rig.edges and runtime.host.settings['MYLEVEL'] == '3'
@@ -447,6 +449,7 @@ def test_worker_serves_real_serial_and_reopens_a_fresh_attachment(running):
 
 
 @pytest.mark.parametrize('running', ['managed'], indirect=True)
+@pytest.mark.realtime
 def test_managed_stream_runs_on_the_native_owner_and_retires_before_reopen(running):
     from hfmodem.tests.core.test_managed_host import Client as BrokerClient, read
     runtime, station, broker = running
@@ -491,6 +494,7 @@ def test_managed_stream_runs_on_the_native_owner_and_retires_before_reopen(runni
         client.close()
 
 
+@pytest.mark.realtime
 def test_serial_disconnect_during_native_carrier_retires_after_station_cw(running):
     from hfmodem.shrike import p1rx
     runtime, station, server = running
@@ -513,6 +517,7 @@ def test_serial_disconnect_during_native_carrier_retires_after_station_cw(runnin
         client.close()
 
 
+@pytest.mark.realtime
 def test_scanner_hold_retires_capture_until_explicit_release(running):
     runtime, station, server = running
     client = Client(server.endpoint)
@@ -532,6 +537,7 @@ def test_scanner_hold_retires_capture_until_explicit_release(running):
         client.close()
 
 
+@pytest.mark.realtime
 def test_native_incoming_call_is_answered_with_monitoring_disabled(running):
     from hfmodem.shrike import pactor1, p1rx
     runtime, station, server = running
@@ -575,6 +581,7 @@ def test_native_incoming_call_is_answered_with_monitoring_disabled(running):
         client.close()
 
 
+@pytest.mark.realtime
 def test_contype_rejection_does_not_enter_a_native_contact_or_send_cw(running):
     from hfmodem.shrike import pactor1
     runtime, station, server = running
@@ -611,7 +618,34 @@ def test_stop_wakes_a_worker_waiting_before_host_publication(tmp_path):
     assert not rig.edges
 
 
+def test_pending_connect_waits_for_host_drain_without_spinning():
+    card, rig = Card(), Keyer()
+    station = SimpleNamespace(audio=card, rig=rig)
+    station.arbiter = TxArbiter(card, rig, identity=Identity('K1ABC'))
+    runtime = StationPtcRuntime(SimpleNamespace(station=station))
+    drained = time.monotonic() + .2
+    passes, contacts = [], []
+    runtime.host = SimpleNamespace(
+        arq=SimpleNamespace(scan_held=False, state=State.DISCONNECTED),
+        contact_ready=lambda: True, _owner=SimpleNamespace(connect_pending=True))
+    runtime._port = SimpleNamespace(closed=False, capture_retired=False)
+    runtime._endpoint = SimpleNamespace()
+    runtime._other_active = lambda: False
+    runtime._answer_timing_ready = lambda: True
+    def pending():
+        runtime._endpoint.pending_bytes = 1 if time.monotonic() < drained else 0
+    def contact():
+        contacts.append(None)
+        runtime._stop.set()
+    runtime._service = lambda: (passes.append(None), pending())
+    runtime._contact = contact
+    runtime._idle()
+    assert contacts == [None]
+    assert len(passes) < 40
+
+
 @pytest.mark.parametrize('retirement', ['hangup', 'stop'])
+@pytest.mark.realtime
 def test_attachment_or_station_loss_during_key_unkeys_without_another_carrier(running, retirement):
     runtime, station, server = running
     client = Client(server.endpoint)
@@ -658,6 +692,7 @@ def test_factory_preserves_an_existing_operator_endpoint(tmp_path):
     assert runtime._endpoint is None and not rig.edges
 
 
+@pytest.mark.realtime
 def test_all_byte_values_cross_native_incoming_packets_and_real_pty_once(running):
     from hfmodem.shrike import compress, pactor1
     runtime, station, server = running
@@ -742,6 +777,7 @@ def test_all_byte_values_cross_native_incoming_packets_and_real_pty_once(running
 
 
 @pytest.mark.parametrize('mode', [0, 2, 'retire', 'graceful', 'cwid'])
+@pytest.mark.realtime
 def test_binary_outgoing_peer_confirmation_and_echo_over_native_audio(running, mode):
     from hfmodem.shrike import compress, pactor1, p1rx, spec
     runtime, station, server = running

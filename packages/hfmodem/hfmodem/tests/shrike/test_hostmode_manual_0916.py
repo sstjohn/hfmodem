@@ -51,7 +51,7 @@ import sys
 import time
 from types import SimpleNamespace
 
-from hfmodem.shrike import hostmode
+from hfmodem.core import hostmode
 from hfmodem.shrike.arq import State
 from hfmodem.shrike.ptc import PtcHost, SimPeer, serve
 

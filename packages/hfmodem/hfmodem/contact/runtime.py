@@ -89,7 +89,7 @@ class Session:
         self.preview_device = preview_device
         self.audio_ready = False
         self.radio_check = None
-        self.tx_power_w = cfg.rig.power_w
+        self.tx_power_w = cfg.declared_power_w
         self.receive_failure = None
         self.dial_hz = dial_hz
         self.contact = Contact(cfg.station.mycall.upper())

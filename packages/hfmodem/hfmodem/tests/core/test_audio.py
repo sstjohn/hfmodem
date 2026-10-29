@@ -1037,3 +1037,25 @@ def test_silence_idle_allows_holes_but_not_device_underruns(monkeypatch):
     assert sa._tx_invalid
     with pytest.raises(BurstInvalidated):
         sa.finish_burst()
+
+
+def test_cancelled_ident_aborts_audio_before_the_remaining_tones(monkeypatch):
+    log = _card(monkeypatch)
+    monkeypatch.setattr(_Out, 'abort', lambda self: log.append(('abort',)), raising=False)
+    with pytest.raises(InterruptedError, match='identification cancelled'):
+        play_drained(np.ones(48000, np.float32), 48000, 'fake-out',
+                     cancelled=lambda: any(item[0] == 'write' for item in log))
+    assert log == [('open', 1), ('start',), ('write', (2400, 1)), ('abort',), ('close',)]
+
+
+def test_cancelled_ident_retires_its_held_stream(monkeypatch):
+    log = _held_card(monkeypatch)
+    monkeypatch.setattr(_Ring, 'abort', lambda self: log.append(('abort',)), raising=False)
+    try:
+        with pytest.raises(InterruptedError, match='identification cancelled'):
+            play_drained(np.ones(48000, np.float32), 48000, 'fake-out',
+                         cancelled=lambda: any(item[0] == 'write' for item in log))
+        assert log[-2:] == [('abort',), ('close',)]
+        assert ('fake-out', 1) not in audio._HELD
+    finally:
+        drop_output()

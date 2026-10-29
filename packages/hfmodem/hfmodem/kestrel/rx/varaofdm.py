@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cache, cached_property
 
 import numpy as np
 from scipy.fft import next_fast_len
@@ -50,7 +50,6 @@ PILOT_ROWS = 20
 #: by a few dozen samples either way still reads no neighbouring symbol.
 _BACKOFF = 48
 
-_PN = (tablegen.whitener() & 1).astype(int)
 _SPECS = {2300: tablegen.BW2300, 2750: tablegen.BW2750, 500: tablegen.BW500}
 # per bandwidth: first OFDM level, first bin, carriers
 _FAMILIES = {2300: (10, 8, 49), 2750: (11, 3, 59), 500: (7, 27, 11)}
@@ -58,6 +57,11 @@ _FAMILIES = {2300: (10, 8, 49), 2750: (11, 3, 59), 500: (7, 27, 11)}
 _POS = (1, 1, 1, 2, 2, 3, 4)
 
 LEAD, MARK, DATA = 0, 1, 2
+
+
+@cache
+def _pn():
+    return (tablegen.whitener() & 1).astype(int)
 
 
 @dataclass(frozen=True)
@@ -178,7 +182,7 @@ def onair(frame: bytes, r: OfdmRecord) -> np.ndarray:
     info = np.zeros(r.n_info, int)
     info[:8 * len(frame)] = np.unpackbits(np.frombuffer(frame, np.uint8))
     chan, turbo = r.perms
-    return _turbo.encode_punctured(info ^ _PN[:r.n_info], turbo, r.coded)[chan]
+    return _turbo.encode_punctured(info ^ _pn()[:r.n_info], turbo, r.coded)[chan]
 
 
 def decode_frame(llr: np.ndarray, r: OfdmRecord, iters: int = 8) -> bytes:
@@ -186,7 +190,7 @@ def decode_frame(llr: np.ndarray, r: OfdmRecord, iters: int = 8) -> bytes:
     chan, turbo = r.perms
     Lc = np.empty(r.coded)
     Lc[chan] = np.clip(llr, -_LLR_CAP, _LLR_CAP)
-    pn = _PN[:r.n_info]
+    pn = _pn()[:r.n_info]
 
     def crc_ok(bits) -> bool:
         return check(np.packbits((bits ^ pn).astype(np.uint8)).tobytes()[:r.frame_bytes])

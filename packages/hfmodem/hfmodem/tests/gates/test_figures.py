@@ -109,7 +109,7 @@ def test_comparison_constellations_preserve_recorded_decisions():
     assert ofdm["bytes_label"] == "decoded frame bytes (including control/CRC)"
 
 
-def test_hidden_pactor4_graphics_match_the_implementation():
+def test_pactor4_graphics_match_the_implementation():
     import numpy as np
     from hfmodem.shrike import p4c2, p4normal, p4shorttx, p4longtx, tablegen
 

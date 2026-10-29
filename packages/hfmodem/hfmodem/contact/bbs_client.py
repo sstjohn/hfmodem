@@ -44,7 +44,7 @@ class BBSClient:
             raise HostError('BBS file evidence requires an established link')
         if s.flow.dial in CALLING_HZ.values():
             raise HostError('BBS file evidence requires QSY off the calling frequency')
-        if (s.bbs_host.active or s.steps is not None or s._opening or s.email.waiting or s._vmail_sent
+        if (s.bbs_host.active or s.steps is not None or s._opening or s.email.waiting or s.mail_ack.busy or s.parking.active
                 or c.pending or c.ptt or s._data_status()[0]):
             raise HostError('BBS file evidence requires other exchanges and transmission to settle')
 
@@ -236,7 +236,7 @@ class BBSClient:
         s._closing = True
         s.flow._state(State.FAILED)
         # Remain opaque while bounded close consumes late data; never resync it.
-        yield from s.flow.close_steps()
+        yield from s.flow.close_steps(cancelled=lambda: s._quitting or s._force_close)
         if s.line_state() is True:
             raise HostError('File capture ended but keying line remains HIGH')
         self.end(reason)
