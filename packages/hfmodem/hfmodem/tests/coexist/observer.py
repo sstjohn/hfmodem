@@ -70,6 +70,42 @@ def _linux_uids(directory):
     return tuple(map(int, rows[0]))
 
 
+def _linux_credentials(directory):
+    fields = {}
+    for row in (directory / 'status').read_text().splitlines():
+        key, _, value = row.partition(':')
+        fields.setdefault(key, []).append(value.split())
+    try:
+        (uids,), (gids,), ((permitted,),), ((effective,),) = (
+            fields[key] for key in ('Uid', 'Gid', 'CapPrm', 'CapEff'))
+        if len(uids) != 4 or len(gids) != 4:
+            return None
+        return tuple(map(int, uids)), tuple(map(int, gids)), int(permitted, 16), int(effective, 16)
+    except (KeyError, ValueError):
+        return None
+
+
+def _linux_own_credentials(proc):
+    try:
+        return _linux_credentials(proc / 'self')
+    except FileNotFoundError:
+        return None
+
+
+def _linux_read_withheld(theirs, ours):
+    """Whether credentials alone deny our PTRACE_MODE_READ_FSCREDS access.
+
+    Without CAP_SYS_PTRACE the kernel requires every real, effective and saved
+    ID of the target to equal our fs IDs, and its permitted capabilities to be
+    a subset of ours (kernel/ptrace.c, security/commoncap.c).
+    """
+    if theirs is None or ours is None or ours[3] & 1 << 19:
+        return False
+    (uids, gids, permitted, _), (own_uids, own_gids, own_permitted, _) = theirs, ours
+    return (set(uids[:3]) != {own_uids[3]} or set(gids[:3]) != {own_gids[3]}
+            or bool(permitted & ~own_permitted))
+
+
 def _linux_identity_unchanged(directory, start, uids):
     if proc_started((directory / 'stat').read_text(), int(directory.name)) != start:
         raise ObservationError(f'pid reused during participant discovery: {directory.name}')
@@ -201,8 +237,9 @@ def linux_participants(run, proc=Path('/proc'), *, started_after=None, known=Non
 
     A trusted bound means the UUID was created here after that boot-tick floor
     and participants were launched as new descendants; pre-existing process
-    adoption/exec is unsupported. Only a never-observed, older process with a
-    foreign-owned unreadable environment can then be proved outside the run.
+    adoption/exec is unsupported. Only a never-observed, older process whose
+    unreadable environment is foreign-owned, or whose credentials alone withhold
+    our read access, can then be proved outside the run.
     Without that bound, denied same-UID discovery remains an error.
     """
     if started_after is not None and (type(started_after) is not int or started_after < 0):
@@ -240,14 +277,21 @@ def linux_participants(run, proc=Path('/proc'), *, started_after=None, known=Non
             except PermissionError as exc:
                 if _linux_terminal(directory, before, uids, denied=exc, budget=budget):
                     continue
+                credentials, own = _linux_credentials(directory), _linux_own_credentials(proc)
                 exc.add_note(f'participant scope: start_floor={started_after!r}, '
                              f'observed_start={before!r}, observed_uids={uids!r}, '
+                             f'observed_credentials={credentials!r}, own_credentials={own!r}, '
                              f'known_identity={None if previous is None else (previous["start"], tuple(previous["uids"]))!r}')
                 if previous is not None or started_after is None or int(before) >= started_after:
                     raise
                 owner = environment_path.stat().st_uid
                 if owner == uid:
-                    raise
+                    if not _linux_read_withheld(credentials, own):
+                        raise
+                    _linux_identity_unchanged(directory, before, uids)
+                    if _linux_credentials(directory) != credentials:
+                        raise ObservationError(f'credentials changed during participant discovery: {pid}')
+                    continue
                 _linux_identity_unchanged(directory, before, uids)
                 if environment_path.stat().st_uid != owner:
                     raise ObservationError(f'environment owner changed during participant discovery: {pid}')

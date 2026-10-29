@@ -110,6 +110,8 @@ export function directionLabel(e,manifest={}) {
   if(e.direction==='rx')return `RX · ${manifest.called||manifest.call||'other station'}${/assumed/.test(e.attribution||'')?' (assumed)':''}`;
   return 'Unattributed signal';
 }
+export function eventLabel(e){const label=e.kind;if(e.transmit_label?.includes('SL1 ENTRY')&&label.startsWith('P3 '))return label.replace(' data',' entry');if(label.startsWith('connect->'))return 'Connect request → '+label.slice(9);if(['unknown','long burst','one-hot burst','wideband'].includes(label)){const named=e.observations?.find(o=>['CR','connect-response','connected-ack','link-setup'].includes(o.kind));if(named)return eventLabel(named);}if(e.transmit_label?.startsWith('tx link-setup'))return 'Link setup · '+label.replace('Base data','Base');if(label.startsWith('tx link-setup'))return 'Link setup';if(label.startsWith('tx connect-request-retry'))return 'Connect request · retry';if(label==='CR'||label.startsWith('tx connect-request'))return 'Connect request';if(label==='connect-response')return 'Connect response';if(label==='link-setup')return 'Link setup';if(label==='connected-ack')return 'Link acknowledgement';return label;}
+export function signalDescription(e,frame,manifest={}){return `${eventLabel(e)} · ${directionLabel(e,manifest)} · ${e.t0.toFixed(2)} s to ${(e.t1??e.t0).toFixed(2)} s · ${frame.status}. Whole-packet measurements, including results ahead of playback. Download the JSON for the full numeric plot data.`;}
 export function playbackSummary(events,time) {
   const completed=events.filter(e=>evidenceAvailable(e,time));
   const inbound=completed.filter(e=>e.direction==='rx'&&!localTx(e));

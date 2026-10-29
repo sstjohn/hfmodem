@@ -493,6 +493,19 @@ def test_discovery_failures_are_not_empty_inventory():
         macos_participants('run', runner)
 
 
+def test_failed_observer_start_leaves_its_error_unmasked_at_teardown(harness, monkeypatch):
+    def denied(self, *args, **kwargs):
+        raise ObservationError('participant discovery denied: /proc/1007')
+
+    monkeypatch.setattr(LinuxObserver if sys.platform == 'linux' else MacOSObserver, 'capture', denied)
+    claim_path = harness.root / 'rig.claim'
+    claim_path.touch()
+    with pytest.raises(ObservationError, match='/proc/1007'):
+        harness.observe([claim_path])
+    assert harness.observer is None
+    harness.close()
+
+
 def test_lsof_cannot_omit_a_live_marked_process():
     def runner(argv, **kwargs):
         if argv[0] == 'ps':

@@ -2,6 +2,16 @@
 <!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Changelog
 
+## 0.4.1 — 2026-10-29
+
+The first PyPI release of the 0.4 line; 0.4.0 was tagged but not published.
+
+- Fixed the Linux coexistence tests on hosts where a process of the same user
+  withholds its `/proc` environment, such as the GitHub runner's `systemd
+  --user`, and kept a failed observer start from being masked at teardown.
+- Fixed the site's example inspectors, whose symbol plots failed with a
+  `toFixed` error in Auto signal mode.
+
 ## 0.4.0 — 2026-10-29
 
 Includes the changes tagged as 0.3.1–0.3.4, which were not released on PyPI.

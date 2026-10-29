@@ -4,6 +4,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync, existsSync} from 'node:fs';
 import {PUBLIC_QSO_ROUTES, publicQsoRows, loadPublicQsos} from '../js/demo/public-qsos.mjs';
+import {signalDescription} from '../js/examples/link-state.js';
 
 const indexUrl = new URL('../examples/logbook/entries.json', import.meta.url);
 const entries = JSON.parse(readFileSync(indexUrl));
@@ -147,4 +148,23 @@ test('loader never follows an unapproved roster and reports missing public files
   await assert.rejects(loadPublicQsos(async url => url.href === indexUrl.href
     ? {ok:true, status:200, json:async () => entries}
     : {ok:false, status:404}), /could not load.*404/);
+});
+
+test('inspector signal captions take packet timing from the event, not its untimed symbol frames', () => {
+  let frames = 0;
+  for (const route of [...PUBLIC_QSO_ROUTES, 'varac-bbs']) {
+    const manifest = JSON.parse(readFileSync(manifestUrl(route)));
+    const events = JSON.parse(readFileSync(new URL(`../examples/${route}/${manifest.events}`, import.meta.url)));
+    for (const event of events) {
+      for (const view of Object.values(event.views || {})) {
+        for (const frame of view.frames.filter(frame => frame.symbols)) {
+          frames++;
+          const caption = signalDescription(event, frame, manifest);
+          assert(caption.includes(`${event.t0.toFixed(2)} s to ${(event.t1 ?? event.t0).toFixed(2)} s · ${frame.status}.`),
+                 `${route} ${event.id}: ${caption}`);
+        }
+      }
+    }
+  }
+  assert(frames > 0);
 });

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
-import {frequencyView,setWaveforms,waveformRows,linkState,radioMode,packetAt,packetProgress,symbolVisible,exchangeNote,evidenceClass,evidenceAvailable,directionLabel,playbackSummary,matchesEvent,byteRecords,hexDump,readableBytes,trafficBytes,exchangeRows,packetAnatomy} from './link-state.js?v=frequency-1026-1';
+import {frequencyView,eventLabel,signalDescription,setWaveforms,waveformRows,linkState,radioMode,packetAt,packetProgress,symbolVisible,exchangeNote,evidenceClass,evidenceAvailable,directionLabel,playbackSummary,matchesEvent,byteRecords,hexDump,readableBytes,trafficBytes,exchangeRows,packetAnatomy} from './link-state.js?v=signal-1029-1';
 import {installDeskEmbedding} from './desk-embed.mjs';
 const $ = id => document.getElementById(id);
 const state = {time:0, playing:false, selected:null, loop:null, events:[], cache:new Map(), tiles:new Map(), generation:0, eventPage:0};
@@ -13,7 +13,6 @@ function decodeRaster(value){return Uint8Array.from(atob(value),c=>c.charCodeAt(
 const seconds = t => `${t.toFixed(2)} s`;
 const color = e => ({verified:'#59d9c0',failed:'#efb56f',partial:'#e6cc87',control:'#79a9ee',tx:'#b8a2ef',candidate:'#a8b9cd'})[evidenceClass(e)];
 const senderColor = e => e.direction==='tx'?'#b8a2ef':e.direction==='rx'?'#59d9c0':'#a8b9cd';
-function eventLabel(e){const label=e.kind;if(e.transmit_label?.includes('SL1 ENTRY')&&label.startsWith('P3 '))return label.replace(' data',' entry');if(label.startsWith('connect->'))return 'Connect request → '+label.slice(9);if(['unknown','long burst','one-hot burst','wideband'].includes(label)){const named=e.observations?.find(o=>['CR','connect-response','connected-ack','link-setup'].includes(o.kind));if(named)return eventLabel(named);}if(e.transmit_label?.startsWith('tx link-setup'))return 'Link setup · '+label.replace('Base data','Base');if(label.startsWith('tx link-setup'))return 'Link setup';if(label.startsWith('tx connect-request-retry'))return 'Connect request · retry';if(label==='CR'||label.startsWith('tx connect-request'))return 'Connect request';if(label==='connect-response')return 'Connect response';if(label==='link-setup')return 'Link setup';if(label==='connected-ack')return 'Link acknowledgement';return label;}
 async function json(url){const r=await fetch(url);if(!r.ok)throw Object.assign(Error(`Could not load ${url} (${r.status})`),{status:r.status});const data=await r.json();if(data.map_base64){data.map=decodeRaster(data.map_base64);delete data.map_base64;}return data;}
 function memo(cache,key,loader,max){if(!cache.has(key)){const pending=loader().catch(error=>{if(cache.get(key)===pending)cache.delete(key);throw error;});cache.set(key,pending);while(cache.size>max)cache.delete(cache.keys().next().value);}return cache.get(key);}
 function symbols(e){return memo(state.cache,e.symbols,()=>json(base+e.symbols),24);}
@@ -78,11 +77,11 @@ function replaceReading(host,nodes){
  host.replaceChildren(...nodes);
  if(focused){const controls=[...host.querySelectorAll('button,a')];const same=id&&controls.find(b=>b.dataset.id===id);const next=same||controls[Math.max(0,Math.min(index,controls.length-1))]||host;next.tabIndex=next===host?-1:next.tabIndex;next.focus({preventScroll:true});}
 }
-function signalText(e,data,file){
+function signalText(e,data,file,frame=e){
  const description=$('signal-description'),link=$('signal-data'),values=$('signal-values');
  if(!e||!data){delete values.dataset.key;description.textContent='No packet signal retained at this position; unidentified audio is unknown.';link.hidden=true;values.textContent='';return;}
  const key=base+file;if(values.dataset.key===key)return;values.dataset.key=key;
- description.textContent=`${eventLabel(e)} · ${directionLabel(e,manifest)} · ${seconds(e.t0)} to ${seconds(e.t1??e.t0)} · ${e.status}. Whole-packet measurements, including results ahead of playback. Download the JSON for the full numeric plot data.`;
+ description.textContent=signalDescription(e,frame,manifest);
  link.href=base+file;link.hidden=false;
  if(data.spectrum){values.textContent=`Stored audio RMS: ${data.rms_dbfs} dBFS; strongest bin: ${data.peak_dbfs} dBFS.\nAverage power spectrum (frequency Hz: dBFS), 0–3000 Hz:\n`+data.spectrum.map((v,i)=>`${(i*3000/(data.bins-1)).toFixed(1)}: ${v.toFixed(2)}`).join('\n');}
  else {values.textContent=`${data.stage||'Decoded symbols'} · ${data.normalization||'stored decoder coordinates'}\nTime seconds | carrier Hz | in-phase | quadrature\n`+data.i.map((v,i)=>`${data.t[i]} | ${data.carrier[i]} | ${v} | ${data.q[i]}`).join('\n');}
@@ -193,7 +192,7 @@ if(frame?.symbols&&$('signalMode').value==='auto'){
  let points=data;
  if(rolling){const others=state.events.filter(f=>f!==e&&f.t0<=state.time&&f.t1>=state.time-+$('window').value).flatMap(f=>f.views?.[chosen]?.frames||[]).filter(f=>f.level===frame.level&&f.stage===frame.stage&&f.symbols!==frame.symbols);const unique=[...new Map(others.map(f=>[f.symbols,f])).values()];const batches=await Promise.all(unique.map(symbols));if(generation!==state.generation)return;points={...data};for(const k of ['i','q','t','carrier'])points[k]=[...data[k],...batches.flatMap(b=>b[k])];}
  const count=plotConstellation($('constellation'),points,whole,rolling?+$('window').value:null,$('carrier').value);
- signalText(frame,data,frame.symbols);
+ signalText(e,data,frame.symbols,frame);
  $('signalTitle').textContent=data.normalization?.includes('phase-only')?'Differential phase':'Constellation';$('cloudnote').textContent=`${sourceName(chosen)} · ${data.stage}${data.normalization?.includes('phase-only')?' · unit radius; phase spread only':''} · ${count} symbols${whole?' · whole frame':rolling?' · recent history':' · arriving with audio'}`;
  return;
 }

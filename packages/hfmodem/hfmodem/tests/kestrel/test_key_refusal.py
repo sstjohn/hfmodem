@@ -18,8 +18,10 @@ sound card the test provides — no device is opened and nothing is keyed.
 from __future__ import annotations
 
 import sys
+import threading
 
 import numpy as np
+import pytest
 
 from hfmodem.kestrel.arq import phy as _phy
 from hfmodem.kestrel.vara import vara_arq as VA
@@ -89,12 +91,28 @@ class _Card:
     def OutputStream(self, **kw): return _Out(self)
 
 
+_built: list = []
+
+
+@pytest.fixture(autouse=True)
+def _capture_ends_with_the_test():
+    """`connect` starts the transport, and its capture-pace thread sleeps through
+    `kestrel_connect.time` until stopped. Left running, it calls whatever a later
+    test in the worker has patched there: a fake clock's `sleep` becomes a loop
+    that runs that test's deadline out in a moment."""
+    yield
+    while _built:
+        _built.pop()._run.clear()
+
+
 def _transport(monkeypatch, rig: _Rig) -> tuple[object, _Card]:
     card = _Card()
     monkeypatch.setitem(sys.modules, "sounddevice", card)
     # One codec both ways, as the station this is about has: a rig keying its
     # own monitor into the receive path  [kestrel_connect.AudioVaraIO.tx].
-    return kc.AudioVaraIO("codec", "codec", rig=rig, tx_tail=0.0), card
+    io = kc.AudioVaraIO("codec", "codec", rig=rig, tx_tail=0.0)
+    _built.append(io)
+    return io, card
 
 
 def test_a_refused_key_up_puts_nothing_on_the_air(monkeypatch, capsys):
@@ -402,3 +420,10 @@ def test_an_idle_answer_that_never_went_out_does_not_count_as_keyed(monkeypatch)
     assert hs._answer_peer_idle() is True
     assert len(card.played) == 1
     assert hs._keyed_on_peer_burst is True
+
+
+def test_no_attempt_above_leaves_its_capture_running():
+    """Last in the file, so it sees every transport the attempts above started."""
+    running = [t for t in threading.enumerate() if t.name == "capture-pace"
+               and t._target.__self__._run.is_set()]
+    assert not running, f"{len(running)} capture-pace thread(s) outlived their test"

@@ -76,12 +76,11 @@ class Harness:
 
     def observe(self, paths):
         self.paths = set(map(str, paths))
-        observer = LinuxObserver if sys.platform == 'linux' else MacOSObserver
-        self.observer = (observer(self.run_id, started_after=self.process_start_floor)
-                         if sys.platform == 'linux' else observer(self.run_id))
+        observer = (LinuxObserver(self.run_id, started_after=self.process_start_floor)
+                    if sys.platform == 'linux' else MacOSObserver(self.run_id))
         if sys.platform == 'linux':
             self.watcher = Inotify(paths)
-        self.observer.start()
+        self.observer = observer.start()
         return self.observer
 
     def launch(self, argv, **kwargs):

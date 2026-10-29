@@ -76,6 +76,59 @@ def test_denied_in_scope_or_unclassified_process_remains_fatal(tmp_path, monkeyp
                                    started_after=None if case == 'no_bound' else 20, known=known)
 
 
+def write_credentials(directory, *, gid=None, permitted=0, effective=0):
+    uid, gid = os.getuid(), os.getgid() if gid is None else gid
+    (directory / 'status').write_text(
+        'Uid:\t' + '\t'.join([str(uid)] * 4) + '\nGid:\t' + '\t'.join([str(gid)] * 4)
+        + f'\nCapPrm:\t{permitted:016x}\nCapEff:\t{effective:016x}\n')
+
+
+def withheld_systemd_user_manager(root, withheld):
+    # CI: a pre-run same-UID systemd --user whose dumpable environ we may not read.
+    directory = make_proc(root, start=833)
+    write_credentials(directory, gid=os.getgid() + 1 if withheld == 'gid' else None,
+                      permitted=1 << 35 if withheld == 'capability' else 0)
+    (root / 'self').mkdir()
+    write_credentials(root / 'self')
+    return directory
+
+
+@pytest.mark.parametrize('withheld', ['gid', 'capability'])
+def test_pre_run_environment_withheld_by_credentials_is_excluded(tmp_path, monkeypatch, withheld):
+    directory = withheld_systemd_user_manager(tmp_path, withheld)
+    attempted = deny_environment(monkeypatch, directory, owner=os.getuid())
+    assert observer.linux_participants('run', tmp_path, started_after=279476) == {}
+    assert attempted == [directory / 'environ']
+
+
+@pytest.mark.parametrize('case', ['after_bound', 'known', 'same_credentials', 'own_ptrace_capability',
+                                  'no_own_credentials', 'credentials_change'])
+def test_credential_exclusion_keeps_possible_participants_fatal(tmp_path, monkeypatch, case):
+    directory = withheld_systemd_user_manager(tmp_path, 'same' if case == 'same_credentials' else 'gid')
+    if case == 'own_ptrace_capability':
+        write_credentials(tmp_path / 'self', permitted=1 << 19, effective=1 << 19)
+    if case == 'no_own_credentials':
+        (tmp_path / 'self' / 'status').unlink()
+    deny_environment(monkeypatch, directory, owner=os.getuid())
+    known = {41: {'start': '833', 'uids': (os.getuid(),) * 4}} if case == 'known' else None
+    if case == 'credentials_change':
+        read, reads = Path.read_text, []
+
+        def changed(path, *args, **kwargs):
+            text = read(path, *args, **kwargs)
+            if path == directory / 'status':
+                reads.append(path)
+                if len(reads) > 2:
+                    return text.replace(f'CapPrm:\t{0:016x}', f'CapPrm:\t{1:016x}')
+            return text
+
+        monkeypatch.setattr(Path, 'read_text', changed)
+    match = 'credentials changed' if case == 'credentials_change' else 'discovery denied'
+    with pytest.raises(observer.ObservationError, match=match):
+        observer.linux_participants('run', tmp_path,
+                                   started_after=833 if case == 'after_bound' else 279476, known=known)
+
+
 @pytest.mark.parametrize('change', ['start', 'credentials'])
 def test_known_identity_drift_is_not_foreign_nonparticipant_evidence(tmp_path, change):
     make_proc(tmp_path)

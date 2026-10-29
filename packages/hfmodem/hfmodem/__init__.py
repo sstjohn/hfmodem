@@ -9,7 +9,7 @@ radio rather than the waveform, and `host` for the dialects an application
 speaks to a modem.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 
 from .bateleur.config import (validate as _validate_bateleur_config,
