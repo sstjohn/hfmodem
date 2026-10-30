@@ -6402,10 +6402,10 @@
           "group": "VARA link"
         },
         {
-          "key": "winlink_cartel_mode",
-          "dest": "winlink_cartel_mode",
+          "key": "low_speed_only",
+          "dest": "low_speed_only",
           "flags": [
-            "--winlink-cartel-mode"
+            "--low-speed-only"
           ],
           "nargs": 0,
           "type": "str",
@@ -7610,10 +7610,10 @@
           "group": "VARA link"
         },
         {
-          "key": "winlink_cartel_mode",
-          "dest": "winlink_cartel_mode",
+          "key": "low_speed_only",
+          "dest": "low_speed_only",
           "flags": [
-            "--winlink-cartel-mode"
+            "--low-speed-only"
           ],
           "nargs": 0,
           "type": "str",

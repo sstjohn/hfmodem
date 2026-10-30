@@ -33,6 +33,18 @@ fn main() {
         serve(bw, &a[3], &a[4], a[5] == "true", &a[6]);
         return;
     }
+    if a[1] == "tx-control" {
+        use xara_phy::hf::ctrl::{self, Codebook, Fmt, Role};
+        let fmt = Fmt::from_index(a[3].parse().unwrap()).unwrap();
+        let code = a[4].parse().unwrap();
+        let extra = a[5].parse().unwrap();
+        let cb = Codebook::new(1, [1; 5], Role::Caller, bw);
+        let x = ctrl::frame_audio(&ctrl::leadin_grids(), &cb, fmt, code, extra);
+        let bytes: Vec<u8> = x.iter().flat_map(|v|
+            xara_phy::dsp::quantise(v * ctrl::gain(fmt, -5.0)).to_le_bytes()).collect();
+        std::fs::write(&a[6], bytes).unwrap();
+        return;
+    }
     let rec = Record::new(a[3].parse().unwrap()).unwrap();
     assert!(rec <= bw.top_level());
     match a[1].as_str() {

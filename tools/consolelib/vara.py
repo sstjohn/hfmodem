@@ -34,7 +34,7 @@ quietly missing:
 Three things this console does that the runner did not. `--witness` is on, so a
 third-party KiwiSDR records the arm; no VARA arm has ever flown with one.
 High speed capable is on by default, so the link-setup carries the high speed
-marker and the gear-shift climbs the full ladder; `--winlink-cartel-mode --no-witness`
+marker and the gear-shift climbs the full ladder; `--low-speed-only --no-witness`
 makes the launcher line byte-identical to what flew. And a
 credential the operator does not name as a file is read into this arm's
 environment rather than passed as a path, so it is in no transcript that quotes
@@ -238,7 +238,7 @@ def varied(air, link):
     link.add_argument('--direction', choices=('tx', 'rx'), default='tx')
     link.add_argument('--mail-timeout', type=int, default=240, choices=range(60, 601),
                       metavar='60..600')
-    link.add_argument('--winlink-cartel-mode', action='store_true',
+    link.add_argument('--low-speed-only', action='store_true',
                       help='key the stock link-setup and hold the L1-L4 ladder; the default is the high speed '
                            'capable form every user of this modem gets')
     link.add_argument('--cr-retry-form', choices=RETRY_FORMS, default=None,
@@ -312,8 +312,8 @@ def flags(peer, level, args, directory, send):
     probe = args.bw == 2750 and not args.data_retries
     if probe:
         words += ['--probe-intermediate-query']
-    if args.winlink_cartel_mode:
-        words += ['--winlink-cartel-mode']
+    if args.low_speed_only:
+        words += ['--low-speed-only']
     password = (str(Path(args.mail_password_file).expanduser().resolve())
                 if args.mail_password_file else None)
     if password:
@@ -328,7 +328,7 @@ def flags(peer, level, args, directory, send):
     adjustments = dict(row=f'{args.bw}-{args.direction}',
                        bw_hz=args.bw, direction=args.direction,
                        cr_retry_form=form, amplitude=args.amplitude,
-                       high_speed=not args.winlink_cartel_mode, mail_timeout_s=args.mail_timeout,
+                       high_speed=not args.low_speed_only, mail_timeout_s=args.mail_timeout,
                        data_retries=args.data_retries, probe_intermediate_query=probe,
                        advertised_hours_utc=peer.get('hours'),
                        roster_retrieved_utc=read_json(mode_root('vara') / 'peers.json').get('retrieved_utc'),

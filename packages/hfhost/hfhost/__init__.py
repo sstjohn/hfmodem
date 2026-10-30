@@ -3,4 +3,4 @@
 
 """hfhost — the host side of the VARA-style two-socket TCP modem interface."""
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"

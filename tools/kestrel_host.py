@@ -36,12 +36,12 @@ def main(argv=None):
     ap.add_argument('--tx-device', default='BlackHole 16ch')
     ap.add_argument('--rx-device', default='BlackHole 64ch')
     ap.add_argument('--amplitude', type=float, default=0.5)
-    ap.add_argument('--winlink-cartel-mode', action='store_true')
+    ap.add_argument('--low-speed-only', action='store_true')
     args = ap.parse_args(argv)
     # Importing/parsing --help never opens a device.
     from kestrel_connect import AudioVaraIO
     transport = AudioVaraIO(args.tx_device, args.rx_device, args.amplitude)
-    runtime = AudioHostRuntime(transport, high_speed=not args.winlink_cartel_mode)
+    runtime = AudioHostRuntime(transport, high_speed=not args.low_speed_only)
     server = VaraServer(host=args.host, cmd_port=args.cmd_port, data_port=args.data_port,
                         kiss_port=args.kiss_port, modem_factory=runtime.modem_factory)
     try:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
-"""Explicit offline Xara interop: setup, selftest, phy, session, or control."""
+"""Explicit offline Xara interop: setup, selftest, phy, session, control, or ladder."""
 import os
 import sys
 
@@ -32,7 +32,7 @@ def main():
         import pytest
         return pytest.main([str(paths.HERE / 'checks.py'),
                             str(paths.HERE / 'checks_ipc.py'), *sys.argv[2:]])
-    if kind not in ('phy', 'session', 'control'):
+    if kind not in ('phy', 'session', 'control', 'ladder'):
         print(f'unknown command: {kind}', file=sys.stderr)
         return 2
     try:

@@ -164,6 +164,10 @@ def decode_packet(audio, *, fs: int = 48000, start_sample: int = 0,
     return accepted[0]
 
 
+# Reject broadband coherence hits while retaining the weakest recorded chirp (lane share .164).
+SWEEP_SHARE = .15
+
+
 def acquire_sweep(audio, *, fs: int = 48000, nominal_sample: int,
                   frequency_offset: float = 0.) -> Header | None:
     """Protect a predicted chirp using both swept DBPSK lanes, not its marker.
@@ -173,6 +177,7 @@ def acquire_sweep(audio, *, fs: int = 48000, nominal_sample: int,
     retain phase coherence over 27 symbols. This is receive-span evidence,
     never permission to deliver bytes. The returned marker -1 requires CRC
     recovery with ``sweep_verified`` and does not establish a header word.
+    The two swept lanes must also carry enough of the received power.
     """
     raw = np.asarray(audio)
     if raw.ndim != 1 or np.iscomplexobj(raw) or not np.all(np.isfinite(raw)):
@@ -199,6 +204,7 @@ def acquire_sweep(audio, *, fs: int = 48000, nominal_sample: int,
     phase = .5*p4chirp.CHIRP_HZ_PER_S*np.maximum(t-sweep_origin, 0)**2
     shifts = np.arange(-32, 33)/8  # One symbol of timing, at 1/8 sample steps.
     scores = []
+    lane_power = []
     for tone, delay in ((1530., 0), (550., 4)):
         baseband = resample_poly(x*np.exp(-2j*np.pi*((tone+frequency_offset)*t+phase)), 1, 15)
         matched = np.convolve(baseband, p4chirp.QUASI_RRC)
@@ -206,10 +212,18 @@ def acquire_sweep(audio, *, fs: int = 48000, nominal_sample: int,
         indices = locations[None, :]+shifts[:, None]
         axis = np.arange(len(matched))
         symbols = np.interp(indices, axis, matched.real)+1j*np.interp(indices, axis, matched.imag)
+        lane_power.append((abs(symbols)**2).mean(axis=1))
         steps = symbols[:, 1:]*symbols[:, :-1].conjugate()
         scores.append(abs((steps**2).sum(axis=1))/np.maximum((abs(steps)**2).sum(axis=1), 1e-30))
     score = np.minimum(*scores)
     best = int(score.argmax())
     if score[best] < .70:
+        return None
+    window = (t >= 18*p4chirp.SYMBOL_S) & (t < 46*p4chirp.SYMBOL_S)
+    reference = np.mean(x[window]**2)*p4chirp.QUASI_RRC.sum()**2/2
+    if reference == 0:
+        return None
+    share = (lane_power[0][best]+lane_power[1][best])/reference
+    if share < SWEEP_SHARE:
         return None
     return Header(nominal_sample+round(shifts[best]/(1600/3)*fs), -1, float(score[best]))

@@ -2316,7 +2316,7 @@ def main() -> int:
     ap.add_argument("--compression", choices=("OFF", "TEXT", "FILES"), default="OFF",
                     help="link compression preference (default OFF); TEXT calls remain "
                          "OFF until its receive tables and interop checks are complete")
-    ap.add_argument("--winlink-cartel-mode", action="store_true",
+    ap.add_argument("--low-speed-only", action="store_true",
                     help="key the free link-setup (body[7] 0x80, ask 4) and stay at "
                          "level 4 instead of the default high speed capable "
                          "gear-shift: levels 4 to the bandwidth's top, stepped by "
@@ -2569,7 +2569,7 @@ def _run(args, identity, *, admission=None) -> int:
                               allow_data_retries=not args.no_data_retries,
                               probe_intermediate_query=True,
                               tx_level=args.tx_level,
-                              high_speed=not args.winlink_cartel_mode,
+                              high_speed=not args.low_speed_only,
                               compression=args.compression)
     identified = False
     id_owed = (identity.closing_required("vara", optional=args.cwid_optional) and not args.dry_run

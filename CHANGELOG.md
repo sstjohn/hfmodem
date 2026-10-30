@@ -2,6 +2,23 @@
 <!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Changelog
 
+## 0.4.2 — unreleased
+
+- PACTOR-4 receive is faster, most on Windows, where one search ran about
+  15 times slower than on macOS. Decoded output is unchanged on every
+  retained recording.
+- The Xara validation kit can run a seeded weak-signal ladder: noise from
+  clean down to −15 dB SNR in 2500 Hz, ITU good/moderate/poor fading,
+  frequency offset and drift, with each Kestrel↔Xara condition paired
+  against Xara↔Xara.
+- PACTOR-4 receive no longer mistakes ordinary packets for a chirp sweep.
+  The false sweeps, new in 0.4.1, could hold off an answer and cut a
+  decode short on some recordings.
+- Fixed the site deployment check, which read the inspector waterfall's
+  frequency axis before the waterfall had loaded.
+- The README's licensing section now states licences, notices and
+  trademarks only.
+
 ## 0.4.1 — 2026-10-29
 
 The first PyPI release of the 0.4 line; 0.4.0 was tagged but not published.

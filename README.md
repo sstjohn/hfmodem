@@ -215,26 +215,6 @@ descriptions and the site are CC BY 4.0; see `LICENSE-CC-BY-4.0`, and
 besra is derived from ardopcf in the places `NOTICE` names, and `NOTICE` carries the
 MIT notice and the Reed-Solomon notice that come with it.
 
-ALE linking protection encrypts ALE words when configured with a key. It is
-off unless `[protocols.ale] lp_level` is set to 1 or 2; see
-[the configuration guide](docs/CONFIG.md).
-
-Hash functions appear, and none of them secures traffic; `grep -rn hashlib` finds
-uses in the test suites as well as the code they exercise.
-`hfmodem/winlink/session.py` answers a Winlink gateway's `;PQ:`
-secure-login challenge with the MD5 challenge/response that Winlink's B2F protocol
-prescribes for a client logging in with a password (`hfmodem mail` takes it from
-the `WINLINK_PASSWORD` environment variable or from `--password-file`, both of
-which keep it out of argv, and from `--password`, which does not) — it
-authenticates the operator to the gateway and encrypts nothing. Other uses are
-bookkeeping: hfhost records a SHA-1 of each data blob in its session transcripts,
-and the conformance bench sums both ends of a test transfer with SHA-256 to prove
-the same bytes arrived. Sabir's proof tooling generates reproducible payloads
-and hashes payloads, waveforms, recordings and source files to identify the
-artifacts being compared. Tests also seed fixtures and check that bytes survived
-a round trip.
-
-The [console operator guide](docs/CONSOLE.md) covers installation, single-mode
-monitoring, ALE/HFLINK, peer rosters, flight planning and logbook replay.
-For tactical digital callsigns, [separate CW identification](docs/IDENTIFICATION.md)
-explains `--idcall` and the station configuration fallback.
+All trademarks belong to their respective owners. Product and protocol names
+are used nominatively, to identify what hfmodem interoperates with, and do not
+imply endorsement or authorization.

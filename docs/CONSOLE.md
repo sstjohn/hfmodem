@@ -209,8 +209,6 @@ hfmodem console release station.toml
 Attach leaves hardware unopened. Omit `--receive` to request transmit ownership,
 including its brief keying proof. See [station service](README-station.md).
 
-VARA's former `--speed-limited` option is now `--winlink-cartel-mode`.
-
 ## Receive-only operation
 
 ```sh

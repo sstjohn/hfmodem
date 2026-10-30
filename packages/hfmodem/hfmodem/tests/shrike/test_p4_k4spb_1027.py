@@ -17,6 +17,9 @@ from hfmodem.shrike.p4observation import Kind, Observation, Registered, Register
 from hfmodem.tests.shrike.test_p4turn import machine
 
 FIXTURE = Path(__file__).parent/'fixtures/k4spb-1027'
+FALSE_SWEEPS = Path(__file__).parent/'fixtures/false-sweeps-0929'
+FALSE_SWEEP_EVIDENCE = json.loads((FALSE_SWEEPS/'evidence.json').read_text())
+WEAK_CHIRP = Path(__file__).parent/'fixtures/ve3wlr-weak-chirp-0930'
 EVIDENCE = json.loads((FIXTURE/'evidence.json').read_text())
 FS = 48000
 
@@ -49,15 +52,25 @@ def test_recorded_greeting_source_is_delivered_once_across_all_formats():
         b'[WL2K-5.0-B2FWIHJM$]\r;PQ: 82204462\r')
 
 
-@pytest.mark.parametrize('index', range(6))
-def test_recorded_sweep_protects_short_answer_and_recovers_crc(index):
+@pytest.mark.parametrize('index, recent_normal', [
+    *[(index, False) for index in range(6)],
+    pytest.param(1, True, id='normal-short-chirp-transition'),
+])
+def test_recorded_sweep_protects_short_answer_and_recovers_crc(index, recent_normal):
     audio, nominal = clip(index)
+    assert p4chirprx.acquire_sweep(audio, nominal_sample=nominal,
+                                 frequency_offset=EVIDENCE['cfo_hz']) is not None
     origin = 2*FS
     at = origin+nominal
     rx = P4Receiver(FS, admitted=True, chirp=True)
     rx.enable_hold()
     rx.clock = Clock(Expect.PACKET, at, .33, 1.25, EVIDENCE['cfo_hz'])
     rx.expected = True
+    if recent_normal:
+        prior_normal = at-round(2.5*FS)
+        rx.observations.append(Observation(
+            Kind.NORMAL, FS, 0, prior_normal, prior_normal, .76, EVIDENCE['cfo_hz'],
+            .9, frame=frame(0x03, bytes(40))))
     m, _ = machine(role='irs', ladder='none', data='body', prekey_lead=.04)
     prior = at-round(1.25*FS)
     control = Observation(Kind.SHORT, FS, 0, prior, prior, .76, EVIDENCE['cfo_hz'],
@@ -120,6 +133,27 @@ def test_sweep_does_not_relax_crc_or_default_header_requirement():
 def test_robust_short_controls_do_not_claim_a_chirp_receive_span(value):
     x = np.r_[np.zeros(4800), p4robusttx.robust_short(value, 'B'), np.zeros(4800)]
     assert p4chirprx.acquire_sweep(x, nominal_sample=4800) is None
+
+
+@pytest.mark.parametrize('index, row', list(enumerate(FALSE_SWEEP_EVIDENCE['excerpts'])))
+def test_recorded_normals_and_words_do_not_claim_a_chirp_receive_span(monkeypatch, index, row):
+    with np.load(FALSE_SWEEPS/'excerpts.npz') as recording:
+        audio = resample_poly(recording['audio'][index].astype(float)/32768, 6, 1)
+        nominal = int(recording['nominal_samples'][index])*6
+    assert p4chirprx.acquire_sweep(audio, nominal_sample=nominal,
+                                 frequency_offset=row['cfo_hz']) is None
+    monkeypatch.setattr(p4chirprx, 'SWEEP_SHARE', 0)
+    assert p4chirprx.acquire_sweep(audio, nominal_sample=nominal,
+                                 frequency_offset=row['cfo_hz']) is not None
+
+
+def test_recorded_weak_chirp_claims_a_chirp_receive_span():
+    evidence = json.loads((WEAK_CHIRP/'evidence.json').read_text())
+    with np.load(WEAK_CHIRP/'excerpt.npz') as recording:
+        audio = resample_poly(recording['audio'].astype(float)/32768, 6, 1)
+        nominal = int(recording['nominal_sample'])*6
+    assert p4chirprx.acquire_sweep(audio, nominal_sample=nominal,
+                                 frequency_offset=evidence['cfo_hz']) is not None
 
 
 def test_extended_empty_changeover_does_not_kill_the_mail_stream():

@@ -105,7 +105,7 @@ a bit position within the failing over. A new session clears the latch.
 `VaraHostModem` to `VaraServer` and drives the existing audio transport plus
 connection/recovery/idle cadences on one owner thread. Host threads enqueue
 commands; receive faults reach the command socket. The adapter defaults to
-high-speed capability; `--winlink-cartel-mode` explicitly disables it. The separate
+high-speed capability; `--low-speed-only` explicitly disables it. The separate
 package host CLI still defaults to loopback.
 
 The launcher defaults to BlackHole cables and reports PTT ON/OFF to the host;

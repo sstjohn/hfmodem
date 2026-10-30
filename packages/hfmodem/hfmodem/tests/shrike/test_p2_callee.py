@@ -10,7 +10,6 @@ callee answers our `0x31` with `0x6A9`. No stock PACTOR-1-to-PACTOR-2 entry is
 on tape, so taking `0x6A9` as a grant stays behind `PtcHost.p2_grant_6a9`; not
 losing the link to it is the default.
 """
-import pytest
 
 from hfmodem.shrike import arq, onair, pactor1, ptc, rxfront
 from hfmodem.shrike.arq import State

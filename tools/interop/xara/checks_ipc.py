@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Explicit on-demand process/pipe failures; no upstream build is needed."""
 import os
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -115,7 +116,7 @@ def trace_handles(monkeypatch):
 
 def test_second_endpoint_startup_failure_closes_the_first_and_trace(monkeypatch, tmp_path):
     handles = trace_handles(monkeypatch)
-    first = SimpleNamespace(closed=False)
+    first = SimpleNamespace(closed=False, got=bytearray(), events=[])
     def close():
         first.closed = True
     first.close = close
@@ -126,9 +127,13 @@ def test_second_endpoint_startup_failure_closes_the_first_and_trace(monkeypatch,
         created.append(first)
         return first
     monkeypatch.setattr(h, 'Xara', launch)
-    args = SimpleNamespace(out=tmp_path, bw=[500], registered=False, compression='OFF', provenance={})
-    with pytest.raises(OSError, match='second endpoint'):
-        h.controls(args)
+    args = h.parse_args(['control', '--out', str(tmp_path), '--bw', '500', '--caller', 'kestrel'])
+    args.provenance = {}
+    monkeypatch.setattr(h, 'inventory', lambda: [dict(bw=500, level=1, bps=18)])
+    assert not h.controls(args)
+    result = json.loads((tmp_path/'result.json').read_text())
+    assert result['cases'][0]['outcome'] == 'invalid'
+    assert 'second endpoint' in result['cases'][0]['error']
     assert first.closed
     assert handles and all(handle.closed for handle in handles)
 
@@ -145,9 +150,10 @@ def test_session_startup_failure_closes_trace_wavs_and_stops_modem(monkeypatch, 
     def failed(*args):
         raise OSError('endpoint startup failed')
     monkeypatch.setattr(h, 'Xara', failed)
-    args = SimpleNamespace(out=tmp_path, registered=False, compression='OFF', record_audio=True)
-    with pytest.raises(OSError, match='startup failed'):
-        h.session_case(args, 500, 'kestrel')
+    args = h.parse_args(['session', '--out', str(tmp_path), '--record-audio'])
+    monkeypatch.setattr(h, 'inventory', lambda: [dict(bw=500, level=1, bps=18)])
+    result = h.session_case(args, 500, 'kestrel')
+    assert result['outcome'] == 'invalid' and 'startup failed' in result['error']
     assert len(stopped) == 1
     assert handles and all(handle.closed for handle in handles)
     for path in tmp_path.rglob('*.wav'):

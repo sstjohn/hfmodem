@@ -160,6 +160,10 @@ _SPREAD_ENERGY = float(np.vdot(p4sig.SPREAD16, p4sig.SPREAD16).real)
 #: +/-600 Hz grid read its headers on an alias.
 _DESPREAD_CFOS = np.arange(-1488.0, 1489.0, 24.0)
 _DESPREAD_MIN_BLOCKS = 4
+_COARSE_TAPS = np.ascontiguousarray(
+    _SPREAD_CONJ[:, None] * np.exp(
+        -2j * np.pi * np.arange(p4sig.SPREAD_FACTOR)[:, None]
+        * _DESPREAD_CFOS[None, :] / p4rx.CHIP_RATE))
 #: The longest word in the bank plus the slide `p4words.match` is allowed.
 _WORD_SYMBOLS = max(map(len, p4words.BANK.values())) + p4words.MATCH_SHIFT
 
@@ -330,13 +334,14 @@ def _coarse_fractions(chips: np.ndarray) -> np.ndarray:
     Every 16-chip window is correlated once per carrier, and each start takes
     the mean over the windows on its own block grid.
     """
-    turns = np.arange(chips.size) / p4rx.CHIP_RATE
-    tuned = chips * np.exp(-2j * np.pi * _DESPREAD_CFOS[:, None] * turns)
-    windows = np.lib.stride_tricks.sliding_window_view(
-        tuned, p4sig.SPREAD_FACTOR, axis=1)
+    # Sliding windows cannot go to BLAS: lay out the Hankel matrix once and
+    # fold carrier rotation into the taps; it cancels in the magnitude.
+    hankel = np.ascontiguousarray(np.lib.stride_tricks.sliding_window_view(
+        chips, p4sig.SPREAD_FACTOR))
+    corr = hankel @ _COARSE_TAPS
     power = np.maximum(np.lib.stride_tricks.sliding_window_view(
         np.abs(chips) ** 2, p4sig.SPREAD_FACTOR).sum(1), 1e-30) * _SPREAD_ENERGY
-    ratio = np.abs(windows @ _SPREAD_CONJ) ** 2 / power
+    ratio = (corr.real**2 + corr.imag**2).T / power
     fractions = np.zeros((_DESPREAD_CFOS.size, p4sig.SPREAD_FACTOR))
     for start in range(p4sig.SPREAD_FACTOR):
         usable = (chips.size - start) // p4sig.SPREAD_FACTOR

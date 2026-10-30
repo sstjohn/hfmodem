@@ -3,4 +3,4 @@
 
 """creance — conformance and performance harness for the radio flock."""
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"

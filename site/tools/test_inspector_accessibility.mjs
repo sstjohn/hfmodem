@@ -6,7 +6,7 @@ export async function checkInspectors(page, baseURL) {
  for(const route of ['vara-send','vara-receive','pactor3-send','pactor3-receive','ardop-send','ardop-receive','varac-bbs']){
   await page.goto(new URL(`examples/${route}/`,baseURL).href);
   await page.locator('#workspace').waitFor({state:'visible'});
-  const spectrum=await page.locator('#waterfall').getAttribute('data-frequency-high');
+  const spectrum=await(await page.waitForFunction(()=>document.getElementById('waterfall').dataset.frequencyHigh)).jsonValue();
   const geometry=await page.evaluate(async()=>await(await fetch('./manifest.json')).json());
   assert.equal(Number(spectrum),(geometry.waterfall.bins-1)*geometry.waterfall.hz_per_bin);
   await page.locator('#frequencyRange').selectOption('signal');
