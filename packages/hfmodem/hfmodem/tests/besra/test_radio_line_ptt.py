@@ -1,0 +1,439 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+
+"""besra keying the line itself, with no daemon in the transmit path.
+
+On 2026-08-09 rigctld stopped answering on the FIRST key-down of a session, every
+session, at 50 W into a real antenna — and none of it reproduced off the air: CAT
+alone answered 40 of 40, key/unkey without audio 15 of 15, CAT under a streaming
+codec 30 of 30. RF into the USB serial adapter is what those three lack. besra's
+emergency unkey caught it twice in one session and that is the wrong place to be
+catching it, so with ``line_ptt`` the ordinary key and unkey are ioctls on a
+descriptor `Rig` holds for the session and hamlib is left to set frequency and
+mode, before there is any RF about.
+
+WHAT IS TESTED HERE, AND WHAT CANNOT BE. Whether the kernel moves a pin is the
+kernel's business, and a pty will not stand in for a real port — on macOS
+``TIOCMBIS`` against a pty returns ENOTTY, so a fixture built on one tests nothing
+but its own fiction. So the decisions are asserted against a fake descriptor, the
+same way `tests/core/test_ptt_last_resort.py` does. What no test here can show is
+behaviour under RF; only the rig can.
+"""
+
+from __future__ import annotations
+
+import atexit
+import logging
+import os
+import struct
+import subprocess
+import sys
+
+import pytest
+
+from hfmodem.besra.radio import Rig
+from hfmodem.core import posix
+from hfmodem.core.ptt import PttError
+
+fcntl = posix.module("fcntl")
+termios = posix.module("termios")
+
+TERMIOS = pytest.mark.posix_only("drives RtsPtt's termios ioctls against a fake port")
+
+
+class _FakePort:
+    """Answers TIOCMGET from its own bit state, and records what was asked.
+
+    `stuck` is a bitmask TIOCMBIC cannot clear and `dead` one TIOCMBIS cannot
+    set — lines the driver accepts the command for and does not move."""
+
+    def __init__(self, stuck: int = 0, dead: int = 0) -> None:
+        self.bits = termios.TIOCM_RTS       # as an open() leaves it
+        self.stuck = stuck
+        self.dead = dead
+        self.calls: list[int] = []
+        self.closed = False
+
+    def ioctl(self, fd, request, arg):
+        self.calls.append(request)
+        if request == termios.TIOCMBIC:
+            self.bits &= ~(struct.unpack("I", arg)[0] & ~self.stuck)
+            return arg
+        if request == termios.TIOCMBIS:
+            self.bits |= struct.unpack("I", arg)[0] & ~self.dead
+            return arg
+        if request == termios.TIOCMGET:
+            return struct.pack("I", self.bits)
+        raise AssertionError(f"unexpected ioctl {request:#x}")
+
+    @property
+    def high(self) -> bool:
+        return bool(self.bits & termios.TIOCM_RTS)
+
+
+class _BlindPort(_FakePort):
+    """Takes TIOCMBIS and TIOCMBIC, fails TIOCMGET — a driver that accepts the
+    command and cannot report the line, so the pin can be high with nothing
+    able to confirm it. It goes blind on `blind`: a line unreadable at arm
+    never arms."""
+
+    blind = False
+
+    def ioctl(self, fd, request, arg):
+        if self.blind and request == termios.TIOCMGET:
+            self.calls.append(request)
+            raise OSError(6, "Device not configured")
+        return super().ioctl(fd, request, arg)
+
+
+def _wire(monkeypatch, p: _FakePort) -> _FakePort:
+    monkeypatch.setattr(os, "open", lambda *a, **k: 7)
+    monkeypatch.setattr(os, "close", lambda fd: setattr(p, "closed", True))
+    monkeypatch.setattr(fcntl, "ioctl", p.ioctl)
+    monkeypatch.setattr(termios, "tcgetattr", lambda fd: [0, 0, 0, 0, 0, 0, []])
+    monkeypatch.setattr(termios, "tcsetattr", lambda fd, when, attrs: None)
+    return p
+
+
+def _no_daemon(*a, **k):
+    raise AssertionError("this rig reached for hamlib")
+
+
+@pytest.fixture
+def line_rig(caplog, monkeypatch):
+    """Build a line-keyed rig on a given fake port, every route to hamlib closed.
+
+    The guard belongs to the fixture rather than to one test because it is a
+    property of the whole configuration: a `line_ptt` rig is given a rigctld
+    address it can reach nothing at, and is expected never to try. Anything that
+    still asked rigctl to key or unkey fails here rather than on the air.
+    """
+    caplog.set_level(logging.INFO, logger="hfmodem.besra.radio")
+    monkeypatch.setattr(Rig, "_write", _no_daemon)
+    monkeypatch.setattr(subprocess, "Popen", _no_daemon)
+    monkeypatch.setattr(subprocess, "run", _no_daemon)
+    rigs = []
+
+    def build(p: _FakePort) -> Rig:
+        _wire(monkeypatch, p)
+        # rigctl=sys.executable: an executable that always exists, so construction
+        # passes the missing-hamlib refusal; the daemon guard proves nothing
+        # spawns it.
+        r = Rig(1036, "/dev/no-such-cat", 38400, rigctl=sys.executable,
+                rigctld="127.0.0.1:1", ptt_device="/dev/null", line_ptt=True)
+        rigs.append(r)
+        return r
+
+    yield build
+    # The atexit unkey would run against a torn-down fake, on a descriptor number
+    # that by then belongs to somebody else.
+    for r in rigs:
+        atexit.unregister(r._atexit_unkey)
+        r._keyer = None
+
+
+@pytest.fixture
+def port():
+    return _FakePort()
+
+
+@pytest.fixture
+def rig(line_rig, port):
+    return line_rig(port)
+
+
+# -- the transmit path -------------------------------------------------------
+
+
+@TERMIOS
+def test_the_transmit_path_keys_the_line_and_not_the_daemon(rig, port):
+    rig.ptt(True)
+    assert port.high, "the rig never keyed the line"
+    rig.ptt(False)
+    assert not port.high
+    assert not rig.retired, "a clean unkey must not retire the rig"
+
+
+@TERMIOS
+def test_the_emergency_unkey_takes_the_line_down_itself(rig, port, caplog):
+    """The watchdog, `stop` and the signal handlers all arrive here. It was the
+    hamlib one-shot in this path that timed out twice in one session.
+
+    A line that ends low is not enough to assert: the last-resort `drop_rts`
+    OPENS the port to do it, which is exactly the sequence that must not be
+    reached mid-session — an open raises RTS, so a rig that is genuinely down
+    gets keyed for the length of an `open()`. So the evidence is that the port
+    was never reopened and nothing was said about a failed one-shot.
+    """
+    rig.ptt(True)
+    caplog.clear()
+    rig.unkey("watchdog")
+    assert not port.high
+    assert not port.closed, "the unkey reopened the port it already holds"
+    assert "one-shot" not in caplog.text, caplog.text
+
+
+@TERMIOS
+def test_arming_the_line_leaves_it_low(rig, port):
+    """Opening a serial port asserts RTS, which here IS key-down. Holding the
+    descriptor for a session is only safe because that assertion is undone on the
+    way in — before any caller can key, and before there is audio to modulate it."""
+    assert port.calls, "the line was never touched at arm time"
+    assert port.calls[0] == termios.TIOCMBIC, "the line must be cleared first"
+    assert not port.high
+
+
+@TERMIOS
+def test_a_key_that_does_not_reach_the_line_is_not_reported_as_transmitting(
+        line_rig, caplog):
+    """Reporting a key that did not happen is worse than failing it: the modem
+    plays a whole burst into a dead line and waits out an answer nobody was ever
+    asked for."""
+    p = _FakePort(dead=termios.TIOCM_RTS)
+    rig = line_rig(p)
+    rig.ptt(True)
+    assert "NOT TRANSMITTING" in caplog.text, caplog.text
+    assert not p.high
+    assert not rig.retired, "a line confirmed back low is still a line to trust"
+
+
+@TERMIOS
+def test_an_unconfirmed_key_up_still_lowers_the_line(line_rig, caplog):
+    """TIOCMBIS accepted, TIOCMGET broken: the pin may be high while the log
+    says NOT TRANSMITTING and nothing here believes the rig is keyed — which
+    blinds the watchdog, the one guard sized for a line left up. The only safe
+    exit is the drop-to-be-sure the bridge's line branch already takes."""
+    p = _BlindPort()
+    rig = line_rig(p)
+    p.blind = True
+    rig.ptt(True)
+    assert not p.high, (
+        "the ioctl may have raised the pin; an unconfirmed key-up must deassert")
+    assert "NOT TRANSMITTING" in caplog.text, caplog.text
+    assert rig.retired, "a line that cannot be read cannot be trusted to key again"
+
+
+@TERMIOS
+def test_a_line_that_will_not_unkey_raises_the_alarm_and_retires(line_rig, caplog):
+    """The one case that must keep the loud message: the line itself has failed,
+    so nothing is left to try and the operator does need to go to the rig."""
+    with pytest.raises(PttError, match="not confirmed low at arm"):
+        line_rig(_FakePort(stuck=termios.TIOCM_RTS))
+    p = _FakePort()
+    rig = line_rig(p)
+    assert rig.ptt(True)
+    p.stuck = termios.TIOCM_RTS
+    assert rig.ptt(False) is False
+    assert "MAY BE STUCK" in caplog.text and "manually" in caplog.text, caplog.text
+    assert rig.retired, "a transmitter that will not go down must not be keyed again"
+
+
+@TERMIOS
+def test_a_retired_rig_still_will_not_key_the_line(rig, port):
+    rig.retire()
+    rig.ptt(True)
+    assert not port.high, "a retired rig keyed the transmitter"
+
+
+@TERMIOS
+def test_the_keyer_s_verdict_reaches_the_caller(line_rig, port):
+    """`LineKeyer.key` already knew whether the line moved; `ptt` swallowed the
+    answer, so `RadioLink._transmit` played whole frames into a key-up the
+    keyer had refused and dropped. What the keyer read back is what `ptt`
+    returns."""
+    rig = line_rig(port)
+    assert rig.ptt(True) is True
+    assert rig.ptt(False) is True
+    dead = line_rig(_FakePort(dead=termios.TIOCM_RTS))
+    assert dead.ptt(True) is False, "an unconfirmed key-up must not read as keyed"
+
+
+# -- handing the line back ---------------------------------------------------
+
+
+@TERMIOS
+def test_stop_takes_the_line_down_and_hands_the_port_back(rig, port, caplog):
+    rig.ptt(True)
+    rig.stop()
+    assert not port.high, "shutdown left the transmitter up"
+    assert port.closed, "shutdown kept the port against the next session"
+    assert "reads LOW" in caplog.text, caplog.text
+
+
+@TERMIOS
+def test_a_clean_shutdown_says_nothing_loud_on_its_way_out(rig, caplog):
+    """`stop` releases the port and the atexit unkey runs after it. Reopening
+    would raise RTS, so nothing is reopened — and a shutdown that went perfectly
+    must not print the loudest message in the program on its way out.
+
+    The word `emergency` is worth something only while it is rare: this station
+    has one genuine emergency unkey, and an operator who has read it at the end
+    of every clean run is an operator who reads past it on the one that meant
+    it."""
+    caplog.set_level(logging.INFO, logger="hfmodem.besra.radio")
+    rig.stop()
+    rig._atexit_unkey()
+    assert "emergency" not in caplog.text, caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], caplog.text
+    assert "reads LOW" in caplog.text, "a clean shutdown left no evidence either"
+
+
+@TERMIOS
+def test_the_backstop_still_fires_for_an_exit_that_never_reached_stop(rig, port, caplog):
+    """The atexit handler earns its warning on the exits `stop` never reaches —
+    an uncaught exception out of a keyed session — and only there."""
+    caplog.set_level(logging.INFO, logger="hfmodem.besra.radio")
+    rig.ptt(True)
+    rig._atexit_unkey()
+    assert not port.high, "the backstop left the transmitter up"
+    assert "emergency unkey: atexit" in caplog.text, caplog.text
+
+
+# -- the configuration itself ------------------------------------------------
+
+
+@TERMIOS
+def test_the_line_must_be_named(port):
+    """Falling back to the daemon would be the defect wearing the fix's name: the
+    operator asked for the line and would be told nothing while every key went
+    back over the link RF disrupts."""
+    with pytest.raises(ValueError):
+        Rig(1036, "/dev/no-such-cat", 38400, rigctl=sys.executable, line_ptt=True)
+
+
+def test_without_the_flag_ptt_never_reaches_hamlib(monkeypatch):
+    r = Rig(1036, "/dev/no-such-cat", 38400, rigctl=sys.executable, rigctld="127.0.0.1:1")
+    atexit.unregister(r._atexit_unkey)
+    monkeypatch.setattr(Rig, "_write", _no_daemon)
+    monkeypatch.setattr(subprocess, "run", _no_daemon)
+    monkeypatch.setattr(subprocess, "Popen", _no_daemon)
+    assert r.ptt(True) is False
+    assert r.ptt(False) is True
+    r.unkey("test")
+    r.stop()
+    r._atexit_unkey()
+
+
+@pytest.mark.parametrize("transport", [["--serial", "/dev/fake-cat"],
+                                         ["--rigctld", "127.0.0.1:1"]])
+def test_radio_requires_line_ptt_before_devices_open(monkeypatch, capsys, transport):
+    import sys
+    from hfmodem.besra.host import run_server
+
+    monkeypatch.setattr(sys, "argv", ["run_server", "--radio", "ft891",
+                                    "--ptt-device", "/dev/fake-ptt", *transport])
+    monkeypatch.setattr(run_server, "arming_refusal", lambda device: None)
+    monkeypatch.setattr(run_server, "_radio_modem", _no_daemon)
+    with pytest.raises(SystemExit) as exc:
+        run_server.main()
+    assert exc.value.code == 2
+    assert "--radio requires --line-ptt" in capsys.readouterr().err
+
+
+def test_radio_line_ptt_keeps_the_arming_refusal(monkeypatch, capsys):
+    import sys
+    from hfmodem.besra.host import run_server
+
+    monkeypatch.setattr(sys, "argv", ["run_server", "--radio", "ft891",
+                                    "--serial", "/dev/fake-cat", "--line-ptt",
+                                    "--ptt-device", "/dev/fake-ptt"])
+    monkeypatch.setattr(run_server, "arming_refusal", lambda device: "fake refusal")
+    monkeypatch.setattr(run_server, "_radio_modem", _no_daemon)
+    with pytest.raises(SystemExit) as exc:
+        run_server.main()
+    assert exc.value.code == 2
+    assert "fake refusal" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("daemon", [None, "127.0.0.1:1"])
+def test_serial_cat_disables_hamlib_ptt(daemon):
+    rig = Rig(1036, "/dev/fake-cat", 38400, rigctl=sys.executable, rigctld=daemon)
+    atexit.unregister(rig._atexit_unkey)
+    argv = rig._base()
+    if daemon:
+        assert argv == [sys.executable, "-m", "2", "-r", daemon]
+    else:
+        assert argv == [sys.executable, "-m", "1036", "-r", "/dev/fake-cat",
+                        "-s", "38400", "-P", "NONE"]
+
+
+@pytest.fixture
+def launch_admission(monkeypatch):
+    from hfmodem.core import claim
+
+    events = []
+
+    descriptor = claim.ClaimDescriptor(9)
+    class Admission:
+        claim = descriptor
+        def opened(self):
+            events.append("opened")
+
+        def failed(self):
+            events.append("failed")
+
+    def inherited(fd, *, launch):
+        assert (fd, launch) == (9, True)
+        events.append("inherited")
+        return Admission()
+
+    monkeypatch.setattr(claim, "inherited", inherited)
+    return events
+
+
+def test_radio_with_line_ptt_reaches_device_setup(monkeypatch, launch_admission):
+    import sys
+    from hfmodem.besra.host import run_server
+
+    monkeypatch.setattr(sys, "argv", ["run_server", "--radio", "ft891",
+                                    "--rigctld", "127.0.0.1:1", "--line-ptt",
+                                    "--ptt-device", "/dev/fake-ptt"])
+    monkeypatch.setattr(run_server, "arming_refusal", lambda device: None)
+
+    def setup(args, *, descriptor):
+        assert descriptor.fd == 9
+        assert args.line_ptt
+        assert args.ptt_device == "/dev/fake-ptt"
+        raise SystemExit(42)
+
+    monkeypatch.setattr(run_server, "_radio_modem", setup)
+    with pytest.raises(SystemExit) as exc:
+        run_server.main()
+    assert exc.value.code == 42
+    assert launch_admission == ["inherited", "failed"]
+
+
+def test_radio_without_a_rig_transport_does_not_require_line_ptt(monkeypatch, launch_admission):
+    import sys
+    from hfmodem.besra.host import run_server
+
+    monkeypatch.setattr(sys, "argv", ["run_server", "--radio", "ft891"])
+
+    def no_gate(device):
+        raise AssertionError("applied the rig arming gate without a rig transport")
+
+    def setup(args, *, descriptor):
+        assert descriptor.fd == 9
+        assert not (args.serial or args.rigctld or args.line_ptt)
+        raise SystemExit(42)
+
+    monkeypatch.setattr(run_server, "arming_refusal", no_gate)
+    monkeypatch.setattr(run_server, "_radio_modem", setup)
+    with pytest.raises(SystemExit) as exc:
+        run_server.main()
+    assert exc.value.code == 42
+    assert launch_admission == ["inherited", "failed"]
+
+
+def test_direct_cat_uses_the_entry_descriptor(monkeypatch):
+    from hfmodem.core import native
+    from types import SimpleNamespace
+    descriptor = object()
+    rig = Rig(1036, '/dev/fake-cat', 38400, rigctl=sys.executable, descriptor=descriptor)
+    atexit.unregister(rig._atexit_unkey)
+    def spawn(argv, *, claim_fd):
+        assert claim_fd is descriptor
+        return SimpleNamespace(_process=SimpleNamespace(
+            communicate=lambda **kw: (b'7100000\n', b''), returncode=0))
+    monkeypatch.setattr(native, 'spawn_native', spawn)
+    assert rig._once('f').stdout == '7100000\n'

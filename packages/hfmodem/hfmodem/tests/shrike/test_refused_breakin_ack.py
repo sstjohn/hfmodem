@@ -1,0 +1,306 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+
+"""A refused CS3 cannot erase the ACK owed to the packet it would answer."""
+import pytest
+
+from hfmodem.shrike import arq, onair, placement, spec
+from hfmodem.tests.shrike.recorded_pcm import recorded_pcm
+from hfmodem.tests.shrike.test_control_profiles import _received_reply
+from hfmodem.tests.shrike.test_entry_candidate_body import META
+
+FS = onair.FS
+
+
+def test_recorded_repeat_keys_cs3_on_the_held_grid_when_historical_phase_disagrees(
+        tmp_path, monkeypatch, capsys):
+    session, tx, live, grid, slot, emitted = _received_reply(
+        tmp_path, monkeypatch, "historical", "audio-start")
+    tx.emit_pending_cs()
+    assert len(emitted) == 1
+    session.host.arq.on_host_data(b"ABCDEF")
+    session.host.arq.on_host_breakin()
+    shift = 2 * grid.cycle_n
+    origin = META["first_sample"] + shift
+    crop = recorded_pcm(META)
+    live.audio[origin:origin+len(crop)] = crop
+    head = session.rx._p3_delivered_at + shift
+    end = head + round(.83 * FS)
+    live.pos = live.now = end
+    grid.cycles += 2
+    session.rx.new_cycle()
+    tx.aim(grid, slot + 2)
+    onair._scan_frame(session.rx, live.audio[origin:end].copy(), origin)
+    assert len(session.packets) == 2
+    assert session.packets[-1].packet[2] == b"RMS"
+    assert session.host.arq._breakin_armed
+    assert tx._pending_p3_cs is None  # The attempted CS3 replaces this ACK.
+    timing = grid._p3_reply_timing()
+    assert timing is not None
+    # The comb is put in front of the peer's read instant by 17.75 ms, which
+    # used to refuse the CS3 and fall back to the owed ACK. The slot keys the
+    # changeover on the held grid instead, with the clamp's reason warned.
+    grid.anchor -= placement.historical_control_pulse_lead(arq.CS_ACK)
+    session.host.tick()
+    trace = capsys.readouterr().out
+    assert "CHANGEOVER ON THE HELD GRID" in trace and "18 ms" in trace
+    assert "CHANGEOVER NOT PLACED" not in trace
+    assert len(emitted) == 2 and not tx.refused  # The CS3 reached the device.
+    assert len(tx.keyed) == 2 and tx.slots_used[-1] == slot + 2
+    a = session.host.arq
+    assert a.role == arq.ISS and a.unconfirmed_breakin
+    assert a._inflight.payload + bytes(a._outbuf) == b"ABCDEF"
+    assert tx._pending_p3_cs is None
+
+
+class RefusingTurn(arq.ArqIO):
+    def __init__(self):
+        self.events = []
+        self.refuse_ack = False
+        self.refuse_packet = True
+        self.delivered = []
+
+    def send_packet(self, sl, payload, status, breakin=False):
+        self.events.append(("packet", bytes(payload), status, breakin))
+        return arq.REFUSED if self.refuse_packet else len(payload)
+
+    def send_cs(self, index):
+        self.events.append(("cs", index))
+        return arq.REFUSED if self.refuse_ack else None
+
+    def deliver(self, data):
+        self.delivered.append(data)
+
+
+def receiving():
+    io = RefusingTurn()
+    a = arq.PactorArq(io)
+    a.role = arq.IRS
+    a._enter_connected()
+    a.breakin_bytes_override = 3
+    a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
+                   protocol=spec.Protocol.PACTOR3)
+    a.on_cycle()
+    io.events.clear()
+    a.on_host_data(b"ABCDEF")
+    a.on_host_breakin()
+    return a, io
+
+
+@pytest.mark.parametrize("refuse_ack", [False, True])
+def test_refused_turn_restores_bytes_and_attempts_only_owed_ack(refuse_ack):
+    a, io = receiving()
+    io.refuse_ack = refuse_ack
+    a._silent_cycles = 4
+    a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
+                   protocol=spec.Protocol.PACTOR3)
+    assert a._breakin_armed and not io.events
+    # This current CRC-valid repeat establishes presence before any local key.
+    # Refusing its ACK cannot turn the received packet back into peer silence.
+    assert a._silent_cycles == 0 and a._dark_windows == 0
+    seq, accepted = a._next_seq, a._rx_accepted
+    a.on_cycle()
+    assert [e[0] for e in io.events] == ["packet", "cs"]
+    assert io.events[-1] == ("cs", arq.CS_ACK)
+    assert io.events[0][1] == b"ABC" and io.events[0][3]
+    assert a.role == arq.IRS and a.state == arq.State.CONNECTED
+    assert a._inflight is None and a._next_seq == seq
+    assert bytes(a._outbuf) == b"ABCDEF" and a._buffer_raw == 6
+    assert io.delivered == [b"RMS"] and a._rx_accepted == accepted
+    assert not a._breakin_armed and not a._rx_this_cycle
+    assert not a._refused_burst
+    assert a._silent_cycles == 0
+    a.on_cycle()
+    # ...and the quiet cycle behind it is charged to the peer only if its own
+    # repeat request reached the air. A seam that refused it left the far end
+    # nothing to answer.
+    assert a._silent_cycles == (0 if refuse_ack else 1)
+    io.refuse_ack = False
+    a.on_cycle()
+    assert a._silent_cycles == (1 if refuse_ack else 2)
+
+
+def test_refused_fallback_ack_is_not_accounted_as_emitted():
+    a, io = receiving()
+    io.refuse_ack = True
+    emitted = []
+    a.on_cs_emitted = lambda cs: emitted.append(cs)
+    a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
+                   protocol=spec.Protocol.PACTOR3)
+    a.on_cycle()
+    assert io.events[-1] == ("cs", arq.CS_ACK) and not emitted
+    io.refuse_ack = False
+    a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
+                   protocol=spec.Protocol.PACTOR3)
+    a.on_cycle()
+    assert io.events[-1] == ("cs", arq.CS_ACK) and emitted == [arq.CS_ACK]
+
+
+@pytest.mark.parametrize("why", ["quiet_reclaim", "quiet_qrt", "armed_qrt"])
+def test_refused_quiet_or_teardown_turn_does_not_invent_an_ack(why):
+    a, io = receiving()
+    if why == "quiet_reclaim":
+        a._peer_receiving = arq.RECLAIM_CODEWORDS
+    else:
+        a.on_host_disconnect()
+        if why == "armed_qrt":
+            a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
+                           protocol=spec.Protocol.PACTOR3)
+    a.on_cycle()
+    assert len(io.events) == 2 and io.events[0][0] == "packet"
+    # THE DISPLACED CONTROL STILL KEYS, and it is the repeat request: a
+    # teardown settles nothing at the far end on its way out, and a reclaim has
+    # no packet at the far end to settle. Keying nothing instead withheld the
+    # emitted control phase the next placement is measured from -- see
+    # `test_breakin_prompt_placement`.
+    assert io.events[1] == ("cs", arq.CS_REQUEST)
+    assert a.role == arq.IRS
+    assert bytes(a._outbuf) == b"ABCDEF" and a._buffer_raw == 6
+
+
+def test_a_keyed_changeover_takes_the_link_and_the_peers_ack_settles_it():
+    """The other side of the same seam: the changeover that DOES key.
+
+    0913-1550 never reached this line -- ten placements refused for one to
+    seven milliseconds -- so the turn the mail client had already built its
+    reply for was never asked for. Keyed, the link is ours from the next cycle
+    and the peer's acknowledgement settles the packet the CS3 head carried.
+    """
+    a, io = receiving()
+    io.refuse_packet = False
+    a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
+                   protocol=spec.Protocol.PACTOR3)
+    assert a._breakin_armed
+    a.on_cycle()
+    assert [e[0] for e in io.events] == ["packet"]
+    assert io.events[0][1] == b"ABC" and io.events[0][3]
+    # THE TURN IS TAKEN BY THE PACKET, not by a codeword behind it.
+    assert a.role == arq.ISS and a.state == arq.State.CONNECTED
+    assert not a._breakin_armed and not a._breakin_pending
+    assert a._inflight is not None and a._inflight.payload == b"ABC"
+    assert bytes(a._outbuf) == b"DEF"
+    # ...and the peer's answer settles it and moves the rest of the reply.
+    a.on_rx_cs(arq.CS_ACK)
+    a.on_cycle()
+    assert a.role == arq.ISS
+    assert io.events[-1][0] == "packet" and io.events[-1][1] == b"DEF"
+    assert not io.events[-1][3]        # ...and no second changeover behind it
+
+
+def test_a_changeover_seam_that_keys_nothing_ends_the_link():
+    """0913-1556: 87 refusals, no carrier, no retry, no progress.
+
+    The arm took the turn on its first keyed changeover and then lost the peer.
+    Every cycle after that printed `CHANGEOVER NOT PLACED -- ... no fresh
+    corroborated packet/control phase pair`, which spends no retry by design --
+    and with nothing else keying in those cycles the link stood up with no
+    carrier on it until the hold's 96 idle cycles ran out in cycle 347, mail
+    stage still at "their turn".
+    """
+    a, io = receiving()
+    io.refuse_ack = True
+    for cycle in range(a.cfg.max_retries):
+        a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
+                       protocol=spec.Protocol.PACTOR3)
+        a.on_cycle()
+        assert io.events[-1] == ("cs", arq.CS_ACK)
+        assert not a._qrt_pending, cycle
+    a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
+                   protocol=spec.Protocol.PACTOR3)
+    a.on_cycle()
+    # SIGNED OFF, not vanished: the budget ends the link the way every other
+    # one does, and the goodbye then rides its own decision clock.
+    assert a._refused_cycles > a.cfg.max_retries and a._qrt_pending
+    a.on_cycle()
+    assert io.events[-2][0] == "packet" and io.events[-2][3]
+    assert io.events[-1] == ("cs", arq.CS_REQUEST)
+
+
+def test_a_fallback_that_reaches_the_air_keeps_the_link_up():
+    """NEGATIVE CONTROL, and it is 0913-1550: ten refusals, ten ACKs, no teardown.
+
+    The rule the budget above must not break. A refused changeover whose
+    fallback keys is a cycle the peer was answered in, and that station is not
+    off the air -- it is holding a link with a codeword, which is what the
+    reverse channel IS.
+    """
+    a, io = receiving()
+    for cycle in range(3 * a.cfg.max_retries):
+        a.on_rx_packet(1, b"RMS", 0, True, breakin=True,
+                       protocol=spec.Protocol.PACTOR3)
+        a.on_cycle()
+        assert io.events[-1] == ("cs", arq.CS_ACK)
+        assert a.state == arq.State.CONNECTED and a.role == arq.IRS, cycle
+
+
+def _capture_keyed_controls(io, monkeypatch):
+    # This in-memory seam distinguishes attempts from admitted controls. It
+    # records no RF claim; a REFUSED return must never enter the keyed list.
+    send = io.send_cs
+    keyed = []
+
+    def traced(index):
+        result = send(index)
+        if result != arq.REFUSED:
+            keyed.append(index)
+        return result
+
+    monkeypatch.setattr(io, 'send_cs', traced)
+    return keyed
+
+
+@pytest.mark.parametrize('crc_ok', [False, True], ids=['bad-crc', 'valid-crc'])
+@pytest.mark.parametrize('refuse_ack', [False, True], ids=['control-admitted', 'control-refused'])
+def test_valid_crc_resets_receive_counters_before_any_ack_key(
+        monkeypatch, crc_ok, refuse_ack):
+    a, io = receiving()
+    io.refuse_ack = refuse_ack
+    keyed = _capture_keyed_controls(io, monkeypatch)
+    a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks = 4, 2, 3
+    previous = a._next_seq, a._rx_accepted, a.rx_seq
+    a.on_rx_packet(1, b'RMS', 0, crc_ok, True, protocol=spec.Protocol.PACTOR3)
+    assert (a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks) == (
+        (0, 0, 0) if crc_ok else (4, 2, 3))
+    if crc_ok:
+        # Reset was already caused by receive evidence, with no local key or
+        # even a control attempt. Refusal of the owed ACK cannot undo it.
+        assert a._breakin_armed and not io.events and not keyed
+        emitted = []
+        monkeypatch.setattr(a, 'on_cs_emitted', emitted.append)
+        a.on_cycle()
+        assert [e[0] for e in io.events] == ['packet', 'cs']
+        assert io.events[-1] == ('cs', arq.CS_ACK)
+        assert keyed == ([] if refuse_ack else [arq.CS_ACK])
+        assert emitted == ([] if refuse_ack else [arq.CS_ACK])
+        assert (a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks) == (0, 0, 0)
+    else:
+        # An unread packet requests a repeat without gaining CRC credit; even
+        # an admitted request cannot substitute for the received valid frame.
+        assert not a._breakin_armed and io.events == [('cs', arq.CS_REQUEST)]
+        assert keyed == ([] if refuse_ack else [arq.CS_REQUEST])
+    assert a.role == arq.IRS and a.state == arq.State.CONNECTED
+    assert a._inflight is None and (a._next_seq, a._rx_accepted, a.rx_seq) == previous
+    assert bytes(a._outbuf) == b'ABCDEF' and a._buffer_raw == 6
+    assert io.delivered == [b'RMS']
+
+
+@pytest.mark.parametrize('refuse_request', [False, True])
+def test_no_received_packet_cannot_forgive_silence_or_release_queued_bytes(
+        monkeypatch, refuse_request):
+    a, io = receiving()
+    io.refuse_ack = refuse_request
+    keyed = _capture_keyed_controls(io, monkeypatch)
+    a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks = 4, 2, 3
+    previous = a._next_seq, a._rx_accepted, a.rx_seq
+    # No current receive callback: one quiet cycle may be charged only if
+    # its request was admitted. Neither outcome forgives the previous silence.
+    a.on_cycle()
+    assert io.events == [('cs', arq.CS_REQUEST)]
+    assert keyed == ([] if refuse_request else [arq.CS_REQUEST])
+    assert a._silent_cycles == (4 if refuse_request else 5)
+    assert (a._dark_windows, a._p3_crc_wait_ticks) == (2, 3)
+    assert a.role == arq.IRS and a.state == arq.State.CONNECTED
+    assert not a._breakin_armed and a._inflight is None
+    assert (a._next_seq, a._rx_accepted, a.rx_seq) == previous
+    assert bytes(a._outbuf) == b'ABCDEF' and a._buffer_raw == 6
+    assert io.delivered == [b'RMS']

@@ -1,0 +1,36 @@
+{
+  "file": "n9vc-0802-robust-shorts.wav",
+  "source": "logs/onair/20260802T230833Z-W9SSJ-K5DAT-13.wav",
+  "source_start": 82416000,
+  "samples": 312000,
+  "rate": 48000,
+  "sha256": "74f4d0adb53323ee77dda801e7951865186aa1f2297e4a252862bfc62937c02e",
+  "link": "N9VC PACTOR link: P1 connect, CS4 x10 / CS1 x5, five PACTOR-4 robust shorts, twelve unread long bursts, CW-ID; the whole link sits +400 Hz up the passband",
+  "shorts": [
+    {
+      "onset_s": 0.41,
+      "header": "A",
+      "value": 13
+    },
+    {
+      "onset_s": 1.66,
+      "header": "B",
+      "value": 13
+    },
+    {
+      "onset_s": 2.91,
+      "header": "A",
+      "value": 49
+    },
+    {
+      "onset_s": 4.16,
+      "header": "B",
+      "value": 49
+    },
+    {
+      "onset_s": 5.41,
+      "header": "A",
+      "value": 53
+    }
+  ]
+}

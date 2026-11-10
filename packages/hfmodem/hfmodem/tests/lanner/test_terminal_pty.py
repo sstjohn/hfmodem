@@ -1,0 +1,316 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+
+"""The RTTY terminal on a real pty, started through the launcher's own `rtty)` arm,
+on a fake card and keying line (`qso_on_fakes`). The arm runs the terminal in the
+background of a shell with no job control, which is where stdin, SIGINT and
+SIGWINCH could be lost; this drives keys, a resize, turnover and each exit path."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import select
+import shutil
+import signal
+import struct
+import sys
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from hfmodem.core import posix
+from hfmodem.tests import hermetic
+
+fcntl = posix.module("fcntl")
+pty = posix.module("pty")
+termios = posix.module("termios")
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[4]
+LAUNCHER = ROOT / 'tools' / 'onair.sh'
+
+#: The forked child does nothing but exec bash, so the other threads this test
+#: process may hold cannot leave it a lock to deadlock on.
+pytestmark = [pytest.mark.posix_only('drives the bash launcher through a pty'),
+              pytest.mark.skipif(not (LAUNCHER.is_file() and shutil.which('bash')),
+                                 reason='needs the launcher and bash'),
+              pytest.mark.filterwarnings('ignore:This process .* is multi-threaded, use of forkpty')]
+
+ARM = r'''
+set -euo pipefail
+MYCALL=W9SSJ; AUDIO_IN=codec; AUDIO_OUT=codec; PTT_PORT="$STUB/ptt"; RIG_NAME=ftdx10
+RIG_MODE=PKTUSB; MODEL=1; VENV="$STUB"; REPO="$STUB"
+die()              { printf '!! %s\n' "$*" >&2; exit 1; }
+say()              { :; }
+require_cat()      { :; }
+eval "$(awk '/^redact_secrets\(\)/ {f = 1} f {print} f && /^}/ {exit}' "$PORTS")"
+eval "$(awk '/^RIG_LOCK_FD=/ {f = 1} /^derive_ptt\(\)/ {exit} f' "$PORTS")"
+claim_down()       { printf 'claim down\n'; }
+require_hardware() { claim_rig || exit $?; }
+rigctld_start()    { trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP; }
+rig_power()        { printf 'power %s\n' "$1"; }
+prove_unkeyed()    { printf 'receiver rms 0.05 -> LIVE\n'; }
+tune()             { :; }
+nc()               { case "$(cat)" in *get_mode*) echo 'Mode: PKTUSB' ;; esac; }
+unkey_and_exit()   { printf 'verdict %s %s\n' "$1" "$2"; exit "$1"; }
+eval "$(awk '/^positional\(\)/ {f = 1} f {print} f && /^}/ {exit}' "$LAUNCHER")"
+set -- rtty 7080000 --adif "$STUB/log.adi" --session "$STUB/session"
+eval "case rtty in $(awk 'index($0, "rtty)") == 1 {f = 1} f && /^  ;;/ {exit} f' "$LAUNCHER" | sed 's/#.*//') ;; esac"
+'''
+
+
+class Terminal:
+    def __init__(self, tmp_path, owner=None):
+        (tmp_path / 'python').write_text(
+            f'#!/bin/bash\n[ "$1 $2" = "-m hfmodem.lanner.qso" ] || exec {sys.executable} "$@"\n'
+            f'shift 2\nexec {sys.executable} {HERE / "qso_on_fakes.py"} "$@"\n')
+        (tmp_path / 'python').chmod(0o755)
+        (tmp_path / 'arm.sh').write_text(ARM)
+        self.log = tmp_path / 'fake.log'
+        self.log.touch()
+        for device in ('cat', 'ptt'):
+            (tmp_path / device).touch()
+        self.claim = tmp_path / 'state' / 'rig.claim'
+        env = dict(os.environ, STUB=str(tmp_path), LAUNCHER=str(LAUNCHER), TERM='xterm',
+                   PORTS=str(LAUNCHER.parent / 'lib' / 'ports.sh'),
+                   CAT_PORT=str(tmp_path / 'cat'), PTT_PORT=str(tmp_path / 'ptt'),
+                   FAKE_LOG=str(self.log), PYTHONPATH=os.pathsep.join(sys.path),
+                   HFMODEM_COEXIST_HARNESS='1', HFMODEM_STATE_DIR=str(tmp_path / 'state'))
+        # Inherited fixed dimensions override ncurses resizing. This child owns
+        # a real pty; ncurses must follow its ioctl dimensions across resizes.
+        for name in ('LINES', 'COLUMNS', 'HFMODEM_STATION', 'HFMODEM_OWNER_FD',
+                     'HFMODEM_RIG', 'HFMODEM_PYTHON', 'RIG_CLAIMED', 'HFMODEM_COEXIST_LOG', 'HFMODEM_COEXIST_BARRIERS'):
+            env.pop(name, None)
+        if owner is not None:
+            os.set_inheritable(owner, True)
+            env['HFMODEM_OWNER_FD'] = str(owner)
+        # The exec audits the resolved program, which only an absolute argv[0] matches.
+        argv = [shutil.which('bash', path=env.get('PATH')), str(tmp_path / 'arm.sh')]
+        hermetic.guard.admit(argv, env)
+        self.pid, self.fd = pty.fork()
+        if self.pid == 0:
+            os.execve(argv[0], argv, env)
+        self.resize(24, 100)
+        self.screen, self.status = b'', None
+
+    def resize(self, rows, cols):
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+
+    def pump(self, seconds=0.2):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if select.select([self.fd], [], [], 0.05)[0]:
+                try:
+                    self.screen += os.read(self.fd, 65536)
+                except OSError:
+                    return
+
+    def send(self, keys, settle=0.3):
+        os.write(self.fd, keys)
+        self.pump(settle)
+
+    def said(self):
+        return self.log.read_text().splitlines()
+
+    def until(self, line, seconds=10, after=0, *, output=None):
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if line in self.said()[after:] and (output is None or output in self.screen):
+                return True
+            self.pump(0.1)
+        return False
+
+    def alive(self):
+        if self.status is None:
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid:
+                self.status = os.waitstatus_to_exitcode(status)
+        return self.status is None
+
+    def close(self):
+        try:
+            if self.alive():
+                os.killpg(self.pid, signal.SIGKILL)
+                # A killed group can stall in exit closing its terminal until the
+                # master is read, so keep reading until the launcher is reaped.
+                end = time.monotonic() + 15
+                while self.alive() and time.monotonic() < end:
+                    self.pump(0.1)
+                assert not self.alive(), 'the launcher outlived SIGKILL'
+        finally:
+            os.close(self.fd)
+
+
+SIGNALS = {'group-int': signal.SIGINT, 'launcher-int': signal.SIGINT,
+           'launcher-term': signal.SIGTERM, 'launcher-hup': posix.SIGHUP}
+
+
+@pytest.fixture
+def terminal(tmp_path):
+    made = Terminal(tmp_path)
+    yield made
+    made.close()
+
+
+@pytest.mark.parametrize('delivery', ['log-first', 'output-first', 'missing-log',
+                                      'missing-output', 'shared-deadline'])
+def test_initial_display_wait_requires_both_channels_within_one_budget(monkeypatch, delivery):
+    clock = SimpleNamespace(now=0)
+    monkeypatch.setattr(sys.modules[__name__], 'time',
+                        SimpleNamespace(monotonic=lambda: clock.now))
+    terminal = Terminal.__new__(Terminal)
+    lines = ['size 24x100'] if delivery in ('log-first', 'missing-output') else []
+    terminal.screen = b'RX' if delivery in ('output-first', 'missing-log') else b'footer'
+    terminal.said = lambda: lines
+    def pump(seconds):
+        assert seconds == 0.1
+        clock.now += 1  # model delayed scheduling without a real terminal/sleep
+        if delivery == 'log-first':
+            terminal.screen += b'R' if clock.now == 1 else b'X'
+        elif delivery in ('output-first', 'shared-deadline') and clock.now == 2:
+            lines.append('size 24x100')
+        if delivery == 'shared-deadline' and clock.now == 4:
+            terminal.screen += b'RX'
+    terminal.pump = pump
+    ready = terminal.until('size 24x100', 3, output=b'RX')
+    assert ready == (delivery in ('log-first', 'output-first'))
+    assert clock.now == (2 if ready else 3)
+
+
+@pytest.mark.parametrize('stop', ['ctrl-c', 'ctrl-q', 'group-int', 'launcher-int',
+                                  'launcher-term', 'launcher-hup'])
+@pytest.mark.realtime
+def test_the_backgrounded_terminal_takes_keys_resizes_and_unkeys_before_exit(terminal, stop):
+    # The fake size event precedes draw(); the PTY may also split refresh writes.
+    # Observe both channels within the original startup budget before sending keys.
+    assert terminal.until('size 24x100', 30, output=b'RX'), terminal.screen[-400:]
+    assert b'RX' in terminal.screen
+    terminal.resize(30, 60)
+    assert terminal.until('size 30x60')
+
+    terminal.send(b'\x1bOP')
+    assert terminal.until('key up'), 'F1 did not key'
+    keyed = len(terminal.said())
+    terminal.send(b'\x1b', settle=0.5)
+    assert terminal.until('key down', 30, after=keyed), 'Esc did not turn the over'
+
+    keyed = len(terminal.said())
+    terminal.send(b'AB\t')
+    assert terminal.until('key up', after=keyed)
+    keyed = len(terminal.said())
+    if stop in ('ctrl-c', 'ctrl-q'):
+        terminal.send(b'\x03' if stop == 'ctrl-c' else b'\x11')
+    elif stop == 'group-int':
+        os.killpg(os.tcgetpgrp(terminal.fd), signal.SIGINT)
+    else:
+        os.kill(terminal.pid, SIGNALS[stop])
+    assert terminal.until('key down', after=keyed)
+    end = time.monotonic() + 15
+    while terminal.alive() and time.monotonic() < end:
+        terminal.pump(0.2)
+    terminal.pump()
+    assert not terminal.alive()
+    if stop.startswith(('group', 'launcher')):
+        assert terminal.status == 128 + SIGNALS[stop]
+        tail = (b'claim down\r\npower 7080000\r\nreceiver rms 0.05 -> LIVE\r\n'
+                b'CLAIM RELEASED\r\n')
+    else:
+        assert terminal.status == 0 and b'verdict 0 7080000' in terminal.screen
+        tail = b'claim down\r\nCLAIM RELEASED\r\n'
+    assert terminal.screen.endswith(tail), terminal.screen[-400:]
+    assert 'hand back' in terminal.said()
+
+
+@pytest.mark.realtime
+def test_a_console_gone_mid_over_halts_the_terminal_through_the_launcher(tmp_path):
+    heard, owner = os.pipe()
+    terminal = Terminal(tmp_path, owner=heard)
+    os.close(heard)
+    try:
+        assert terminal.until('size 24x100', 30)
+        terminal.send(b'CQ\t')
+        assert terminal.until('key up')
+        keyed = len(terminal.said())
+        os.close(owner)
+        assert terminal.until('key down', after=keyed)
+        keyed = len(terminal.said())
+        terminal.send(b'\t', settle=1)
+        assert 'key up' not in terminal.said()[keyed:] and terminal.alive()
+    finally:
+        terminal.close()
+
+
+def _is_open(fd):
+    try:
+        fcntl.fcntl(fd, fcntl.F_GETFD)
+    except OSError:
+        return False
+    return True
+
+
+def pipe_on_nine(make):
+    """`make()` as it runs when os.pipe() hands back descriptor 9 for the read end,
+    whether 9 was open beforehand or not; what was there is put back."""
+    real, held = os.pipe, os.dup(9) if _is_open(9) else None
+    first, owner = real()
+    if first != 9:
+        os.dup2(first, 9)
+        os.close(first)
+    os.pipe = lambda: (9, owner)
+    try:
+        return make()
+    finally:
+        os.pipe = real
+        if held is not None:
+            os.dup2(held, 9)
+            os.close(held)
+        elif _is_open(9):
+            os.close(9)
+
+
+@pytest.mark.parametrize('nine', ['open', 'closed'])
+def test_pipe_on_nine_puts_back_what_it_found(nine):
+    """Closed, 9 is where a pipe made inside lands when the lower descriptors are
+    busy; open, it is someone else's and must come back unchanged."""
+    import stat
+    held = os.dup(9) if _is_open(9) else None
+    if nine == 'closed' and held is not None:
+        os.close(9)
+    if nine == 'open' and held is None:
+        spare = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(spare, 9)
+        os.close(spare)
+    try:
+        before = os.fstat(9).st_ino if nine == 'open' else None
+        seen = []
+        heard, owner = pipe_on_nine(lambda: (seen.append(os.fstat(9).st_mode), os.pipe())[1])
+        assert heard == 9 and stat.S_ISFIFO(seen[0])
+        os.close(owner)
+        assert os.fstat(9).st_ino == before if nine == 'open' else not _is_open(9)
+    finally:
+        if held is not None:
+            os.dup2(held, 9)
+            os.close(held)
+        elif _is_open(9):
+            os.close(9)
+
+
+@pytest.mark.realtime
+def test_the_ownership_pipe_survives_the_launchers_rig_claim(tmp_path):
+    """The rig claim takes descriptor 9 in the launcher, which is where a bare
+    os.pipe() lands when the lower ones are busy."""
+    rtty = pytest.importorskip('consolelib.rtty')
+    heard, owner = pipe_on_nine(rtty.owner_pipe)
+    terminal = Terminal(tmp_path, owner=heard)
+    os.close(heard)
+    try:
+        assert terminal.until('size 24x100', 30), terminal.screen[-400:]
+        assert terminal.claim.is_file()
+        terminal.send(b'CQ\t')
+        assert terminal.until('key up'), terminal.screen[-600:]
+        keyed = len(terminal.said())
+        os.close(owner)
+        assert terminal.until('key down', after=keyed)
+    finally:
+        terminal.close()

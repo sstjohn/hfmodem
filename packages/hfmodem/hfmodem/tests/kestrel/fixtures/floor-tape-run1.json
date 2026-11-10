@@ -1,0 +1,24 @@
+{
+  "source": "received floor tape",
+  "run": "ks-lim-hold1-1500-1",
+  "frames": [
+    {
+      "level": 4,
+      "raw": "0002000c002800f002200cc02a80ff02020c0c2828f0f2222ccceaaa7ffd000e002400d802d00ee02640d582fd0e0e2424d8dad2deeec66695577ff3002a00fc02080c3028a0f3c2288cf32a2afcfe0a043c18885331eaa47f99b226",
+      "offset": 0,
+      "payload_bytes": 89
+    },
+    {
+      "level": 3,
+      "raw": "d900d602f40e382490db62db4edba6d9d6d4f6fa361cb44bb9b995957d7f0f02220ccc2aa8fff2002c00e802700d2099ebb1",
+      "offset": 89,
+      "payload_bytes": 47
+    },
+    {
+      "level": 2,
+      "raw": "2ec0e682570df22c2ce8ea727d2d0eee2664d55affde99d990",
+      "offset": 136,
+      "payload_bytes": 22
+    }
+  ]
+}

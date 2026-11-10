@@ -1,0 +1,1594 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+
+"""The sound card: one stream, one clock, and four lanes reading off it.
+
+Derived from shrike's `_LiveInput`, which is the only audio front end in this
+project with measurements behind it, and freed of PACTOR's 1.25 s cycle so the
+other three protocols can share it.
+
+## One duplex stream, held open
+
+Two PortAudio streams on one CoreAudio device is the cause of both audio incidents
+here: capture RMS fell 0.13 → 0.008 with a second stream open, and a separate
+attempt returned err −50. A duplex stream cannot contend with itself.
+
+Holding it open also removes stream-startup latency from the turnaround. A PACTOR
+peer answers about 0.29 s after our burst ends; that window was being spent opening
+the device, so an answer audible on the speaker never reached the capture at all.
+
+`play_drained` is the same fact seen from the transmit-only tools, which hold no
+capture stream to contend with and so open one output stream per burst.
+
+## The grid is made of sample indices, not wall clock
+
+The codec emits 48000 samples a second whatever the scheduler is doing, so a
+boundary named by sample index is immune to it. Measured on this machine under
+load: sleeping to an absolute deadline lands within 2 ms at the median and **70 ms
+at the tail** — and 70 ms is a quarter of the window a peer's answer has to fit
+inside. Waiting for sample N asks the OS only to keep a buffer fed.
+
+`holdback` is how far short of a deadline a reader must stop for the final short
+sleep to have anything to bridge: a block **plus the input latency**, because the
+grid is anchored on the converter's timestamps and a sample exists one latency
+before the driver hands it over. Measured before the latency term was there: PTT
+went up 0 to 8 ms late, walking cycle to cycle because 1.25 s is 468.75 blocks and
+the phase rotates.
+
+## The ADC↔DAC offset is measured, and not from one callback
+
+One frame counter serves both directions, so the capture index our own carrier
+came up on is arithmetic rather than an estimate. The offset was measured at 1152
+samples with a standard deviation of zero over 22208 callbacks.
+
+That stability is why it is safe to *use*, and it is not a reason to read it once.
+A transient in a single callback would make the station either eat the opening
+symbols of every reply or feed its own carrier to four decoders — forever, and
+self-consistently, because nothing downstream can tell. So it is the median of the
+first `_LAT_MEDIAN_N` non-priming callbacks, and the spread is asserted.
+
+WASAPI timestamps carry no converter time, so their difference cannot measure
+this offset. On that host `lat` is nominal: PortAudio's reported input plus
+output buffering, in samples. Transmit indices remain estimates until the
+station's `tx_latency_ms` is measured on this host.
+
+## Lanes, and why the callback fans out
+
+Four protocols read the same capture at up to three different rates. The callback
+appends to a bounded `deque` per lane: O(1), atomic under the GIL, no lock, and it
+drops the oldest for free — which is the policy we want. `queue.Queue` would raise
+`Full` instead of dropping and takes a lock a decode thread can hold, and blocking
+on that inside a 2.7 ms callback is an xrun.
+
+## Level-blind, everywhere
+
+No RMS gate in the callback or in any lane. besra gated its receive path at 200
+int16 while this station's *quiet* channel measures 3935; the gate opened on the
+first block and never closed, and a perfect answer would have been discarded ahead
+of the demodulator.
+"""
+from __future__ import annotations
+
+import contextlib
+import logging
+import statistics
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Callable, NamedTuple, Protocol
+
+import numpy as np
+
+from hfmodem.core import gil, levels, rates, resample
+from hfmodem.core.operations import LeaseTimeout, OperationGate, leased
+
+CARD_RATE_HZ = rates.CARD_RATE_HZ
+
+# A one-hour run on the FTDX10's USB codec under heavy load saw at most 0.777 ms
+# excess over a 2.667 ms block across 1.35 million callbacks; allow about 13 times that.
+CALLBACK_JITTER_ALLOWANCE_S = 0.010
+BLOCKSIZE = 128
+LATENCY = "low"
+
+#: Callbacks to median the ADC↔DAC offset over before trusting it.
+_LAT_MEDIAN_N = 64
+
+#: A stream that starts and delivers nothing is the silent-total failure this
+#: module exists to make loud. It takes about 15 ms in practice.
+STARTUP_DEADLINE_S = 2.0
+
+#: The final hop onto a sample boundary, in short sleeps. A long `time.sleep`
+#: lands up to 9 ms late, which was two thirds of the observed PTT jitter.
+_HOP_S = 0.0005
+
+
+class AudioError(Exception):
+    """The card could not be opened, or started and delivered nothing."""
+
+
+class BurstInvalidated(Exception):
+    """A burst in flight stopped being what was composed, and the message says how.
+
+    A dropout mid-burst is a hole in what we transmitted. The emission is not
+    what the protocol composed, so it is abandoned rather than reported as sent —
+    ARQ exists to retry.
+    """
+
+
+#: Output streams left running between bursts, by (device, channels), and empty
+#: until a caller asks  [see hold_output].
+_HELD: dict[tuple[str, int], object] = {}
+
+
+def playback_callback(samples, *, submitted=None, complete=None, failed=None):
+    """Callback playback with the same submitted(offset, PCM) hook as play_drained."""
+    index = 0
+    def callback(out, frames, times, status):
+        nonlocal index
+        import sounddevice as sd
+        out.fill(0)
+        if status:
+            if failed is not None:
+                failed(str(status))
+            raise sd.CallbackAbort
+        count = min(frames, len(samples) - index)
+        if count:
+            out[:count, 0] = samples[index:index + count]
+            if submitted is not None:
+                submitted(index, out[:, 0])
+            index += count
+        if index >= len(samples):
+            if complete is not None:
+                complete()
+            raise sd.CallbackStop
+    return callback
+
+
+def play_drained(samples: np.ndarray, samplerate: float, device, *, cancelled=None, marks=None,
+                 submitted=None, uncertain=None) -> None:
+    """Play one transmission into `device`, returning once it has been emitted.
+
+    `submitted` receives each successful mono write and its submission offset.
+    `uncertain` receives the offset and length of writes reporting an underrun.
+
+    The one call in this project that hands audio to a sound card to transmit, so
+    that what `tools/ptt_tail_check.py` measures on the radio is the path the
+    modems transmit through rather than a second copy of it. That is a checked
+    claim rather than an intention:
+    `tests/core/test_audio.py::test_only_core_audio_hands_a_transmission_to_a_sound_card`
+    walks every module for a PortAudio output stream opened without a callback —
+    which is a stream that exists to be written to, and so is a transmission —
+    and this is the only one it allows. `samples` is mono or (frames, channels) —
+    a mono stream is inaudible on a multi-channel virtual device, so the callers
+    that must fill a channel count shape it themselves.
+
+    ``sd.play(..., blocking=True)`` is not this path and cannot be. Its callback
+    raises ``CallbackAbort`` when the array runs out (sounddevice's
+    ``_CallbackContext.callback_exit``), which is PortAudio's ``paAbort``:
+    *terminate immediately, do not wait for pending buffers to complete*. The
+    frames PortAudio was still holding are discarded rather than played, so the
+    end of the transmission is thrown away before the key is even considered. How
+    much depends on the stream's negotiated output latency — this station's USB
+    codec reports 3.42 ms low / 12.75 ms high — which is small, and nothing like
+    the quarter second the PTT hold that stood in for this was set to.
+
+    An explicit stream has the drain built in and needs no constant for it:
+    ``Stream.stop()`` is ``Pa_StopStream``, which waits until all pending audio
+    buffers have been played before it returns. Nothing here estimates how far
+    behind the device is, which is the whole point — a fixed hold had to, and
+    could only be wrong in one of two directions. Too short cuts the transmission
+    off; too long holds an unmodulated carrier on a shared band, and at the 0.25 s
+    it once was this station's input measured dead for 0.42 s after every burst,
+    which is a peer's whole preamble.
+
+    Opened AND CLOSED per burst unless the caller has said otherwise, and the
+    default is not negotiable on a shared device. ``sd.play`` leaves
+    sounddevice's module-global output stream open between calls, and a rig whose
+    PTT follows audio then stays keyed after CAT has unkeyed. Holding a stream
+    open on purpose is worse there: tried on the air 2026-07-28, capture fell from
+    ~0.13 RMS to 0.008 — 16x down, "receiver may be DEAF" every cycle, 0 control
+    signals in 21 — because two PortAudio streams on one CoreAudio device contend
+    for it, and a second one drew err −50 outright. `StationAudio` is the other
+    answer to that same fact, one duplex stream that cannot contend with itself;
+    this is for the transmit-only paths, which hold no capture stream at all.
+    :func:`hold_output` is the third, and it is for the case that measurement is
+    about: a transmit device that is not the device the capture holds.
+
+    What remains uncovered is everything below PortAudio: the USB codec's own
+    buffering and the rig's audio path, which report nothing. An idle hold past
+    the last sample is what covers that, and it is the caller's to hold — a modem
+    has work to do between the drain and the unkey, and where that work happens
+    is not this function's business.
+    """
+    import sounddevice as sd
+
+    block = np.ascontiguousarray(np.asarray(samples, dtype=np.float32))
+    if block.ndim == 1:
+        block = block.reshape(-1, 1)
+    def write(stream):
+        if cancelled is None and marks is None and submitted is None and uncertain is None:
+            stream.write(block)
+            return
+        offsets, callback = marks if marks is not None else ([], None)
+        k, start, prefix = 0, 0, 0
+        step = max(1, int(samplerate * .05))
+        dac_end = stream.time + stream.latency if marks is not None else 0.0
+        def check_cancelled():
+            if cancelled is not None and cancelled():
+                stream.abort()
+                raise InterruptedError('identification cancelled')
+        def enqueue(stop):
+            nonlocal dac_end
+            dac_start = dac_end
+            underflow = stream.write(block[start:stop])
+            if submitted is not None:
+                submitted(prefix + start, block[start:stop, 0])
+            if underflow and uncertain is not None:
+                uncertain(prefix + start, stop - start)
+            if underflow and marks is not None:
+                raise BurstInvalidated('output underrun during marked playback')
+            dac_end = dac_start + (stop - start) / samplerate
+            return dac_start
+        if marks is not None and len(block):
+            check_cancelled()
+            padding = np.zeros((step, block.shape[1]), dtype=block.dtype)
+            underflow = stream.write(padding)
+            if underflow and uncertain is not None:
+                uncertain(0, len(padding))
+            prefix = step
+            if submitted is not None:
+                submitted(0, padding[:, 0])
+            dac_end += step / samplerate
+        while start < len(block):
+            check_cancelled()
+            if k < len(offsets) and offsets[k] == start:
+                lead = min(step, max(1, int(stream.latency * samplerate)))
+                stop = min(start + lead, len(block))
+                if k + 1 < len(offsets):
+                    stop = min(stop, offsets[k + 1])
+                dac_start = enqueue(stop)
+                start = stop
+                while True:
+                    check_cancelled()
+                    if not stream.active:
+                        raise AudioError('output stream stopped during marked playback')
+                    if stream.time >= dac_start:
+                        break
+                    time.sleep(_HOP_S)
+                check_cancelled()
+                callback(k)
+                k += 1
+                continue
+            stop = min(start + step, len(block))
+            if k < len(offsets):
+                stop = min(stop, offsets[k])
+            enqueue(stop)
+            start = stop
+        check_cancelled()
+
+    if (held := _HELD.get((str(device), block.shape[1]))) is not None:
+        # The drain a held stream cannot get from `stop`, in the same currency
+        # and not as an estimate of the device's lag: the ring the write fills is
+        # what stands between the last sample and the air, and it is empty again
+        # exactly when the callback has taken all of it.
+        room = held.write_available
+        try:
+            write(held)
+        except BaseException as error:
+            if marks is not None or isinstance(error, InterruptedError):
+                _HELD.pop((str(device), block.shape[1]), None)
+                held.close()
+            raise
+        while held.write_available < room:
+            time.sleep(0.001)
+        return
+    stream = sd.OutputStream(samplerate=int(samplerate), device=device,
+                             channels=block.shape[1], dtype="float32")
+    try:
+        stream.start()
+        write(stream)
+        stream.stop()              # returns once the device has played it all
+    finally:
+        stream.close()
+
+
+#: How much silence a warm-up plays: long enough that the device is running and
+#: not merely opened, short enough to sit in front of a key-down unfelt. Paid once
+#: per device per process, so it is in no turnaround.
+WARM_S = 0.2
+
+#: Which device-and-shape pairs this process has already warmed. The cost the
+#: warm-up pays is the FIRST open, so a second one buys nothing and an ARQ link
+#: that paid it per burst would put `WARM_S` into every turnaround — against the
+#: 0.29 s a PACTOR peer takes to answer.
+_WARMED: set[tuple[str, int]] = set()
+
+
+def warm_output(device, channels: int = 1, *, submitted=None, uncertain=None) -> None:
+    """Open `device` and run silence through it, BEFORE the key. Once per process.
+
+    Two things this buys, and both are the caller's reason for calling it before
+    PTT rather than after. A device that will not open refuses here, with the
+    transmitter still down. And the first open of a session is the expensive one:
+    on the air, six 1 s tones sent in one order and then in reverse had the FIRST
+    one truncated both times, whichever settle it carried, because the stream
+    startup landed inside the keyed period — and the first burst of a session is
+    the connect request, which is all a station being called has to lock onto.
+    Pre-opening the device, the first tone came up full length.
+
+    What it does not buy is a burst whose own stream was opened before the key:
+    `play_drained` opens per burst and must, so that open is still paid under the
+    carrier. `tools/ptt_tail_check.py` sizes it — its key-to-first-sample lead has
+    no settle in it at all, so the 0.040 s it measured on this station's FT-891 is
+    the whole of the CAT acknowledgement, a COLD stream open and the codec's
+    latency together, and a warmed one is inside that.
+
+    `channels` is the shape the caller's own bursts carry, so that what this opens
+    is the stream they will open: kestrel fills a multi-channel device and the
+    rest of the tree sends mono. Nothing measured separates the device's start
+    from the format negotiated on top of it, so the warm-up matches the burst
+    rather than picking which half to believe costs.
+    """
+    key = (str(device), channels)
+    if key in _WARMED:
+        return
+    hooks = {key: value for key, value in dict(submitted=submitted, uncertain=uncertain).items()
+             if value is not None}
+    play_drained(np.zeros((int(WARM_S * CARD_RATE_HZ), channels), np.float32),
+                 CARD_RATE_HZ, device, **hooks)
+    _WARMED.add(key)
+
+
+def hold_output(device, samplerate: float, channels: int = 1) -> None:
+    """Keep `device`'s output stream running between bursts, from here on.
+
+    What the warm-up cannot buy. Warming pays the process's first open and no
+    later one, and on a virtual cable every later open still costs 0.15 s of
+    CoreAudio starting the device before a sample leaves — measured from a second
+    process on the cable, 0.150-0.192 s per burst, against 0.016-0.021 s once the
+    stream has been running. That 0.15 s stands in front of every answer this
+    station keys, and a VARA HF responder tolerates about one symbol of a late
+    answer's tail.
+
+    ONLY WHERE NOTHING ELSE HOLDS THE DEVICE. Two PortAudio streams on one
+    CoreAudio device contend, and the caller's capture stream is one of them
+    [see :func:`play_drained`] — so this is for a transmit device that is not the
+    receive device, which is what a two-cable bench has and a station with one
+    codec does not. The caller owns that distinction; nothing here can see it.
+
+    Idempotent, and :func:`drop_output` puts the device back.
+    """
+    import sounddevice as sd
+
+    key = (str(device), channels)
+    if key in _HELD:
+        return
+    stream = sd.OutputStream(samplerate=int(samplerate), device=device,
+                             channels=channels, dtype="float32")
+    stream.start()
+    _HELD[key] = stream
+
+
+def drop_output() -> None:
+    """Close every held output stream. A transmitter left keyed by a stream that
+    outlives the session is the failure `play_drained` opens and closes to avoid,
+    so whoever holds one is the one who has to let it go."""
+    while _HELD:
+        _, stream = _HELD.popitem()
+        stream.stop()
+        stream.close()
+
+
+@dataclass(frozen=True, slots=True)
+class Block:
+    """One callback's worth of capture, with where it sits on the card clock."""
+
+    adc_time: float
+    n0: int
+    samples: np.ndarray
+
+
+class Lane(Protocol):
+    """A decoder's view of the capture, at its own rate."""
+
+    rate: int
+
+    def push(self, block: Block) -> None: ...
+
+    def flush_to(self, card_index: int) -> None:
+        """Discard everything up to `card_index` — our own transmission."""
+        ...
+
+    def resync(self, card_index: int) -> None:
+        """A discontinuity happened at `card_index`. Recover, and say so."""
+        ...
+
+
+class _BaseLane:
+    """Shared queue and index bookkeeping.
+
+    The callback only ever *appends* a block or *publishes an index*. Everything
+    that reads or trims the buffer runs on the consumer's thread. A
+    read-modify-write from the callback races the decode thread doing the same, and
+    a turnaround is exactly when both happen at once — so the half-duplex flush
+    could be silently undone by the very thing it exists to prevent.
+    """
+
+    def __init__(self, rate: int, *, depth: int = 4096) -> None:
+        self.rate = rate
+        self._q: deque[Block] = deque(maxlen=depth)
+        self.dropped = 0
+        self.resyncs = 0
+        self._seen = 0
+        #: Published by the callback and the arbiter; consumed on the decode thread.
+        self._flush_before = 0
+        self._resync_at: int | None = None
+        #: Card index of the next sample this lane has not yet accounted for.
+        #: None until the first block, because a lane subscribed after the stream
+        #: started does not begin at zero — and assuming it does shifts a
+        #: sample-locked grid permanently, with nothing to say so.
+        self.pos: int | None = None
+
+    def push(self, block: Block) -> None:
+        if len(self._q) == self._q.maxlen:
+            self.dropped += 1     # oldest goes; a slow decoder cannot stall the card
+        self._q.append(block)
+        self._seen += 1
+
+    def _drain(self) -> list[Block]:
+        """popleft until empty. `list()` then `clear()` silently discards anything
+        the callback appended between the two — measured at 12,896 of 60,000 blocks
+        under contention, with `dropped` reporting zero. popleft is atomic per item
+        under the GIL and under free-threaded CPython."""
+        out = []
+        while True:
+            try:
+                out.append(self._q.popleft())
+            except IndexError:
+                return out
+
+    def _gather(self) -> tuple[np.ndarray, int]:
+        """Card-rate float32 from contiguous blocks, and the index it starts at.
+
+        Blocks are assembled by `n0`, so a gap — a deque drop, or a driver
+        discontinuity — is detected here rather than spliced silently into the
+        buffer. A splice is what makes a lost block invisible to a grid that is
+        made of the sample count.
+        """
+        blocks = self._drain()
+        if self._resync_at is not None:
+            at, self._resync_at = self._resync_at, None
+            blocks = [b for b in blocks if b.n0 >= at]
+            self.pos = at
+        blocks = [b for b in blocks if b.n0 + len(b.samples) > self._flush_before]
+        if not blocks:
+            return np.zeros(0, np.float32), self.pos or 0
+        if self.pos is None:
+            self.pos = blocks[0].n0
+        out, at = [], blocks[0].n0
+        expect = at
+        for b in blocks:
+            if b.n0 != expect:          # a hole: start again at this block
+                out, at, expect = [], b.n0, b.n0
+            out.append(b.samples)
+            expect = b.n0 + len(b.samples)
+        buf = np.concatenate(out)
+        # Trim our own carrier, which is still in flight when finish_burst runs:
+        # sample_now leads the delivered count by one input latency, so the last
+        # blocks of a burst arrive after the flush index was published.
+        if self._flush_before > at:
+            skip = min(self._flush_before - at, len(buf))
+            buf, at = buf[skip:], at + skip
+        return buf, at
+
+
+class RollingLane(_BaseLane):
+    """Overlapping windows, decoded as they fill. besra's measured policy.
+
+    `STEP_S` is how far the stream must advance before decoding again — a
+    length gate alone would re-decode the whole buffer on every station tick,
+    which measured five times besra's cadence. `OVERLAP_S` is longer than the
+    longest frame, so nothing straddles an edge and the resampler's transient
+    lands in a neighbouring window's interior. Deduplication is by stream
+    position rather than by wall clock, because a frame that sits in a six-second
+    buffer is otherwise delivered again on every later poll.
+    """
+
+    STEP_S = 0.25
+    OVERLAP_S = 6.0
+
+    def __init__(self, rate: int, decode: Callable[[np.ndarray], object],
+                 on_frame: Callable[[object], None] | None = None, **kw) -> None:
+        super().__init__(rate, **kw)
+        self.decode, self.on_frame = decode, on_frame
+        self._buf = np.zeros(0, np.float32)
+        self._buf_at = 0
+        self._decoded_to = 0
+
+    def poll(self) -> list[tuple[int, object]]:
+        """Decode what has arrived. Level-blind: nothing is gated.
+
+        Returns (card index, frame) so a position reported by a lane stays an
+        exact function of the card's sample count.
+        """
+        buf, at = self._gather()
+        if len(buf):
+            if self._buf_at + len(self._buf) != at:
+                self._buf, self._buf_at = buf, at       # discontinuity: start over
+            else:
+                self._buf = np.concatenate([self._buf, buf])
+        if not len(self._buf):
+            return []
+        end = self._buf_at + len(self._buf)
+        if end - self._decoded_to < int(self.STEP_S * CARD_RATE_HZ):
+            return []
+        window = (self._buf if self.rate == CARD_RATE_HZ
+                  else resample.from_card(self._buf, self.rate))
+        found = [(self._buf_at, f) for f in _iterable(self.decode(window))]
+        self._decoded_to = end
+        for _, f in found:
+            if self.on_frame:
+                self.on_frame(f)
+        keep = int(self.OVERLAP_S * CARD_RATE_HZ)
+        if len(self._buf) > keep:
+            self._buf_at += len(self._buf) - keep
+            self._buf = self._buf[-keep:]
+        return found
+
+    def flush_to(self, card_index: int) -> None:
+        self._flush_before = card_index
+
+    def resync(self, card_index: int) -> None:
+        self.resyncs += 1
+        self._resync_at = card_index
+
+
+@dataclass(frozen=True)
+class StreamFault:
+    index: int
+    cause: str
+    serial: int
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    at: int
+    samples: np.ndarray
+    faults: tuple[StreamFault, ...]
+    boundaries: tuple[int, ...]
+
+    def __iter__(self):
+        # Existing stream consumers still unpack the card index and samples.
+        return iter((self.at, self.samples))
+
+    def __getitem__(self, index):
+        return (self.at, self.samples)[index]
+
+
+class StreamLane(_BaseLane):
+    """Every sample once, in order — for a detector that carries state.
+
+    An adaptive noise floor, a hysteresis gate, a burst bracket: each of those
+    learns from the stream, so what it is shown has to be the stream. Overlapping
+    windows re-teach it the same audio on every poll, and a raster moves its
+    boundaries whenever a block is lost. Neither failure is visible from inside
+    the detector, which is why the lane makes the choice instead.
+
+    Resampling is refused rather than done. A stateless resample of each chunk
+    puts a transient at every chunk edge, and an energy gate reads those as
+    onsets — so a lane that quietly resampled would manufacture the bursts it
+    exists to find.
+    """
+
+    def __init__(self, rate: int, **kw) -> None:
+        if rate != CARD_RATE_HZ:
+            raise AudioError(
+                f"a stream lane runs at the card rate ({CARD_RATE_HZ} Hz), not "
+                f"{rate}: chunk-wise resampling would put an edge transient in "
+                "front of a stateful detector")
+        super().__init__(rate, **kw)
+        self.fault_serial = 0
+        self._fault_lock = threading.Lock()
+        self.faults: deque[StreamFault] = deque(maxlen=64)
+        self._fault_read = 0
+        self._push_next = None
+
+    def fault(self, card_index: int, cause: str) -> None:
+        with self._fault_lock:
+            self.fault_serial += 1
+            self.faults.append(StreamFault(card_index, cause, self.fault_serial))
+
+    def push(self, block: Block) -> None:
+        if self._push_next is not None and block.n0 != self._push_next:
+            self.fault(block.n0, "index gap")
+        self._push_next = block.n0 + len(block.samples)
+        if len(self._q) == self._q.maxlen:
+            self.fault(block.n0, "deque drop")
+        super().push(block)
+
+    def poll(self) -> list[StreamChunk]:
+        """What arrived since the last call, and the card index it starts at.
+
+        A list of at most one, so a caller can treat every lane the same way.
+        """
+        blocks = self._drain()
+        out = []
+        expect = self.pos
+        if self._resync_at is not None:
+            blocks = [b for b in blocks if b.n0 >= self._resync_at]
+            expect = self._resync_at
+        for block in blocks:
+            if expect is not None and block.n0 != expect:
+                out.clear()
+            out.append(block)
+            expect = block.n0 + len(block.samples)
+        with self._fault_lock:
+            faults = tuple(f for f in self.faults if f.serial > self._fault_read)
+        self._resync_at = None
+        if not out:
+            return []
+        self.pos = expect
+        at = out[0].n0
+        samples = np.concatenate([b.samples for b in out])
+        skip = min(len(samples), max(0, self._flush_before - at))
+        if skip == len(samples):
+            return []
+        if faults:
+            self._fault_read = faults[-1].serial
+        boundaries = tuple(b.n0 + len(b.samples) for b in out)
+        return [StreamChunk(at + skip, samples[skip:], faults, boundaries)]
+
+    def flush_to(self, card_index: int) -> None:
+        self._flush_before = card_index
+        self.fault(card_index, "flush")
+
+    def resync(self, card_index: int) -> None:
+        self.resyncs += 1
+        self._resync_at = card_index
+        self.fault(card_index, "resync")
+
+
+class CycleLane(_BaseLane):
+    """A reader locked to absolute sample positions, for a protocol with a raster.
+
+    PACTOR's cycle is 1.25 s of sample indices, so this hands out samples by
+    position rather than by availability. A discontinuity is not survivable the
+    way it is for a rolling window: the grid is *made of* the sample count, so a
+    lost block moves every later boundary. It re-acquires and says so.
+    """
+
+    def __init__(self, rate: int, **kw) -> None:
+        super().__init__(rate, **kw)
+        self.grid_valid = True
+        self._buf = np.zeros(0, np.float32)
+        self._buf_at = 0
+
+    def take_until(self, card_index: int) -> np.ndarray:
+        """Card-rate samples from `pos` up to `card_index`."""
+        buf, at = self._gather()
+        if len(buf):
+            if not len(self._buf):
+                self._buf, self._buf_at = buf, at
+            elif self._buf_at + len(self._buf) == at:
+                self._buf = np.concatenate([self._buf, buf])
+            else:
+                self.grid_valid = False
+                self._buf, self._buf_at = buf, at
+        want = card_index - self._buf_at
+        if want <= 0 or not len(self._buf):
+            return np.zeros(0, np.float32)
+        take = self._buf[:want]
+        self._buf = self._buf[len(take):]
+        self._buf_at += len(take)
+        self.pos = self._buf_at
+        return take
+
+    def flush_to(self, card_index: int) -> None:
+        self._flush_before = card_index
+        self.pos = max(self.pos or 0, card_index)
+
+    def resync(self, card_index: int) -> None:
+        self.resyncs += 1
+        self.grid_valid = False
+        self._resync_at = card_index
+
+
+def _to_card_scale(samples: np.ndarray) -> np.ndarray:
+    """Whatever a recording was stored as, in the units the card delivers.
+
+    The divisor is the negative rail rather than the positive one, matching how
+    `core.wav` reads and writes: two's complement is asymmetric, so a sample
+    written at full scale reads back at full scale only if both ends agree which
+    rail full scale is.
+    """
+    a = np.asarray(samples)
+    if np.issubdtype(a.dtype, np.integer):
+        return (a.astype(np.float32) / -float(np.iinfo(a.dtype).min))
+    return a.astype(np.float32)
+
+
+def _iterable(x):
+    if x is None:
+        return ()
+    return x if isinstance(x, (list, tuple)) else (x,)
+
+
+class Progress(NamedTuple):
+    """How far the card has taken a `TxStream`, published whole by the callback.
+
+    `emitted` samples have been handed to the card; `end` is the capture index just
+    past the last of them, holes included; `runs` holds the (stream position,
+    capture index) where each hole-free run of emission began.
+    """
+
+    emitted: int
+    end: int
+    runs: tuple[tuple[int, int], ...]
+
+    def card_end(self, position: int) -> int | None:
+        """The capture index just past stream sample `position - 1`, once emitted."""
+        if not 0 < position <= self.emitted:
+            return None
+        start, card = next(run for run in reversed(self.runs) if run[0] < position)
+        return card + position - start
+
+
+class TxStream:
+    """An open-ended transmission: written ahead of the DAC, drained by the callback.
+
+    `write` refuses to queue past `capacity`, so a producer that keeps it topped
+    up holds a bounded lead over the air. After `close` the callback drains what
+    is left and the transmission is done. Found empty before then it is an
+    underrun, and `starved_at` holds the capture index where the queue ran dry.
+    The producer only ever adds to `written`; the callback replaces `progress`
+    in one assignment, so a reader on any thread sees one callback's account
+    and never half of two.
+    """
+
+    def __init__(self, at: int, capacity: int) -> None:
+        self.at = at
+        self.capacity = capacity
+        self.written = 0
+        self.closed = False
+        self.idle = "fault"
+        self.starved_at: int | None = None
+        self.progress = Progress(0, at, ())
+        self._chunks: deque[np.ndarray] = deque()
+        self._head = np.zeros(0, np.float32)
+
+    @property
+    def emitted(self) -> int:
+        return self.progress.emitted
+
+    @property
+    def end(self) -> int:
+        return self.progress.end
+
+    @property
+    def queued(self) -> int:
+        return self.written - self.progress.emitted
+
+    def drained_at(self, progress: Progress) -> bool:
+        return self.closed and progress.emitted >= self.written
+
+    @property
+    def drained(self) -> bool:
+        return self.drained_at(self.progress)
+
+    def write(self, samples: np.ndarray) -> None:
+        if self.closed:
+            raise AudioError("write to a closed transmit stream")
+        buf = np.asarray(samples, np.float32)
+        if self.queued + len(buf) > self.capacity:
+            raise AudioError(f"transmit stream full: {self.queued} queued, "
+                             f"{len(buf)} more past its {self.capacity}")
+        self._chunks.append(buf)
+        self.written += len(buf)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def _read(self, n: int) -> np.ndarray:
+        out = []
+        got = 0
+        while got < n:
+            if not len(self._head):
+                try:
+                    self._head = self._chunks.popleft()
+                except IndexError:
+                    break
+                continue
+            take = self._head[:n - got]
+            self._head = self._head[len(take):]
+            out.append(take)
+            got += len(take)
+        return np.concatenate(out) if out else np.zeros(0, np.float32)
+
+    def _emitted(self, got: int, card: int) -> None:
+        was = self.progress
+        runs = was.runs if was.runs and was.end == card else was.runs + ((was.emitted, card),)
+        self.progress = Progress(was.emitted + got, card + got, runs)
+
+
+def timestamp_limitation(host_name: str | None) -> str | None:
+    """One host policy for every consumer of PortAudio callback stamps."""
+    return ("WASAPI timestamps carry no converter time"
+            if host_name == "Windows WASAPI" else None)
+
+
+def host_api_name(stream) -> str | None:
+    """The PortAudio host API behind a stream's input device, or None if it cannot say."""
+    try:
+        import sounddevice as sd
+        device = stream.device
+        device = device[0] if isinstance(device, (tuple, list)) else device
+        return sd.query_hostapis(sd.query_devices(device)["hostapi"])["name"]
+    except Exception:
+        return None
+
+
+class StationAudio:
+    """The card. One stream, one clock, N lanes.
+
+    `open()` blocks until the stream has delivered a block and the ADC↔DAC offset
+    has settled (or has a nominal WASAPI value), or fails inside
+    `STARTUP_DEADLINE_S`.
+    """
+
+    def __init__(self, *, input_device, output_device, gain: float | None = None,
+                 blocksize: int = BLOCKSIZE, tx_latency_n: int = 0,
+                 trace=None) -> None:
+        self.input_device = input_device
+        self.output_device = output_device
+        self.gain = levels.WORKING_POINT if gain is None else gain
+        self.blocksize = blocksize
+        #: The station's own, from `[audio] tx_latency_ms`. See `loop_lat`.
+        self.tx_latency_n = int(tx_latency_n)
+        #: `core.cbtrace.CallbackTrace`, or None. Two `time.monotonic()` calls
+        #: and eight indexed stores when it is on, and a null test when it is not.
+        self.trace = trace
+
+        self.samples = 0
+        self.holdback = 0
+        self.underruns = 0
+        self.overflows = 0
+        #: Captured and timestamped by the converter, never handed to Python.
+        #: `overflows` is the driver's opinion and it does not cover this.
+        self.lost = 0
+        #: Stamp-derived excursions on hosts without converter timestamps.
+        self.estimated_lost = 0
+        self.lat: int | None = None
+        #: Why raw input stamps cannot measure converter timing, or None.
+        #: Shared by the offset, clock fit and sample_now timing reports.
+        self.timestamp_limitation: str | None = None
+
+        self._lanes: list[Lane] = []
+        self._stream = None
+        self._lat_samples: list[int] = []
+        self._last: tuple[float, int] | None = None
+        self._dac: tuple[float, int] | None = None
+        self._ahead: float | None = None
+        self._floor_loss: rates.FloorLoss | None = None
+        self._fit: list[tuple[float, int]] = []
+        self._burst: tuple[np.ndarray, int] | None = None
+        self._tx_stream: TxStream | None = None
+        self._emitted = 0
+        #: Why the burst in flight is no longer what was composed, or None.
+        self._tx_invalid = None
+        #: Set by the callback instead of raising. See `_callback`.
+        self.failure: BaseException | None = None
+        self._lock = threading.Lock()
+        self._breathing = contextlib.ExitStack()
+        self.operations = OperationGate()
+        self.close_budget_s = 35.0
+        self.callback_count = 0
+        self._callback_at = time.monotonic()
+        self._consumed = 0
+        self._reserved = False
+
+    @property
+    def lat_provenance(self) -> str:
+        """Offset provenance follows the same stamp limitation as timing reports."""
+        return ("nominal" if self.timestamp_limitation and self.output_device is not None
+                else "measured")
+
+    @property
+    def loop_lat(self) -> int | None:
+        """Capture samples from a sample's ADC to an armed sample's emission.
+
+        `lat` is the measured driver timestamp offset, or nominal reported
+        input plus output buffering on WASAPI; see `lat_provenance`. It is not
+        the whole of the path. The codec's
+        own in-and-out delay is not in it, and until 2026-09-14 nothing carried
+        it, so every burst this station keyed reached the air that much later
+        than the index it was armed at. Measured twice on the same arm and
+        agreeing to 1 ms: 19.8 ms from where the peer's PACTOR-1 answer sat
+        against our 960 ms packet, and ~20 ms from what the PACTOR-3 witness
+        chain needs to close. `tx_latency_n` is the station's own measurement of
+        the residue and this is the sum the scheduler actually owes.
+        On WASAPI that residue must be measured on this host against the nominal
+        buffering baseline; an earlier codec-delay measurement cannot supply it.
+        """
+        return None if self.output_device is None else (self.lat or 0) + self.tx_latency_n
+
+    # -- lanes -------------------------------------------------------------
+
+    def subscribe(self, lane: Lane) -> Lane:
+        self._lanes.append(lane)
+        return lane
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def open(self) -> None:
+        import sounddevice as sd
+
+        options = dict(samplerate=CARD_RATE_HZ, blocksize=self.blocksize,
+                       dtype="float32", channels=1, latency=LATENCY)
+        if self.output_device is None:
+            self._stream = sd.InputStream(device=self.input_device,
+                                          callback=self._input_callback, **options)
+        else:
+            self._stream = sd.Stream(device=(self.input_device, self.output_device),
+                                     callback=self._callback, **options)
+        self.timestamp_limitation = timestamp_limitation(host_api_name(self._stream))
+        if self.trace is not None:
+            self.trace.timestamp_limitation = self.timestamp_limitation
+        self._floor_loss = (rates.FloorLoss(self.blocksize, CARD_RATE_HZ)
+                            if self.timestamp_limitation else None)
+        if self.lat_provenance == "nominal":
+            # PortAudio's reported buffering is deterministic, not a measurement
+            # of converter alignment. Its WASAPI stamps cannot establish that
+            # alignment, so do not feed their differences to the settling gate.
+            self.lat = round(sum(self._stream.latency) * CARD_RATE_HZ)
+            logging.getLogger(__name__).warning(
+                "WASAPI transmit timing is nominal: offset %s samples from "
+                "PortAudio's reported buffering; %s, so transmit indices are "
+                "estimates until the station's tx_latency_ms is measured on "
+                "this host", self.lat, self.timestamp_limitation)
+        self._stream.start()
+
+        deadline = time.monotonic() + STARTUP_DEADLINE_S
+        while self.samples == 0 or (self.output_device is not None and self.lat is None):
+            if self.failure is not None:
+                self.close()
+                raise AudioError(f"the audio callback failed: {self.failure}")
+            if time.monotonic() > deadline:
+                self.close()
+                raise AudioError(
+                    f"the stream on {self.input_device!r}/{self.output_device!r} "
+                    f"started but delivered nothing usable in {STARTUP_DEADLINE_S} s. "
+                    "Transmitting now would be calling into a channel we cannot hear.")
+            time.sleep(0.002)
+
+        if self.failure is not None:
+            self.close()
+            raise AudioError(f"the audio callback failed: {self.failure}")
+        lat = self._stream.latency
+        in_lat = lat[0] if isinstance(lat, tuple) else lat
+        self.holdback = self.blocksize + round(in_lat * CARD_RATE_HZ)
+
+    def breathe(self) -> None:
+        """Hand the callback the interpreter on a clock, until `close()`.
+
+        Called from the thread that polls the lanes and not inside `open()`:
+        `gil.breathing` naps only the thread that claims it, and the stream may be
+        opened from any thread. Scoped to one decode it left the readers around it
+        uncovered and the capture lost about a thousand samples a listening cycle;
+        held for the life of the stream it loses none at any ring depth
+        [see core.gil, tests/core/test_capture_loss].
+        """
+        self._breathing.enter_context(gil.breathing())
+
+    def close(self) -> None:
+        deadline = time.monotonic() + self.close_budget_s
+        self.operations.close(self.close_budget_s)
+        self._breathing.close()
+        stream = self._stream
+        if stream is None:
+            return
+        if getattr(self, "_closing_stream", None) is not stream:
+            self._closing_stream = stream
+            self._close_errors = []
+
+            def close():
+                try:
+                    stream.stop()
+                    stream.close()
+                except BaseException as exc:
+                    self._close_errors.append(exc)
+
+            self._close_thread = threading.Thread(target=close, name="station-audio-close", daemon=True)
+            self._close_thread.start()
+        self._close_thread.join(max(0, deadline - time.monotonic()))
+        if self._close_thread.is_alive():
+            raise LeaseTimeout("station audio did not close")
+        if self._close_errors:
+            raise AudioError(f"station audio close failed: {self._close_errors[0]}")
+        self._stream = None
+
+    # -- the callback ------------------------------------------------------
+
+    def _input_callback(self, indata, frames, t, status) -> None:
+        try:
+            self._body(indata, None, frames, t, status)
+        except BaseException as exc:
+            self.failure = exc
+
+    def _callback(self, indata, outdata, frames, t, status) -> None:
+        """Never raises.
+
+        sounddevice wraps this with `error=paAbort`, so an exception stops the
+        stream permanently — no further callbacks — while `sample_now()` keeps
+        extrapolating from the last timestamp against the wall clock. The arbiter
+        would go on keying into a channel the station can no longer hear, which is
+        precisely the silent-and-total failure this module exists to make loud. So
+        a failure is stored and the stream keeps running; `open()` and every
+        pre-key path check it.
+        """
+        try:
+            self._body(indata, outdata, frames, t, status)
+        except BaseException as exc:            # noqa: BLE001 — nothing may escape
+            outdata[:] = 0.0
+            self.failure = exc
+
+    def alive(self) -> None:
+        """Raise if the card has stopped being trustworthy.
+
+        Checked before a burst is armed, because a dead stream and a quiet band
+        look identical from above.
+        """
+        if self.failure is not None:
+            raise AudioError(f"the audio callback failed: {self.failure}")
+        if self._stream is not None and not self._stream.active:
+            raise AudioError("the audio stream is no longer active")
+
+    def _body(self, indata, outdata, frames, t, status) -> None:
+        t_in = time.monotonic() if self.trace is not None else 0.0
+        n0 = self.samples
+        self.samples += frames
+
+        if status:
+            if getattr(status, "input_overflow", False):
+                self.overflows += 1
+                for lane in self._lanes:
+                    lane.resync(n0)
+            if getattr(status, "output_underflow", False):
+                self.underruns += 1
+                burst = self._burst
+                if burst is not None and 0 < self._emitted < len(burst[0]):
+                    # Only while samples are actually going out. The lead before
+                    # `at` and the tail after the last sample are not part of the
+                    # emission, and invalidating a burst that went out intact is
+                    # the wrong direction to be wrong.
+                    self._tx_invalid = "an output underrun while the burst was in flight"
+                stream = self._tx_stream
+                if stream is not None and stream.emitted and not stream.drained:
+                    self._tx_invalid = "an output underrun while the stream was in flight"
+
+        ahead = t.inputBufferAdcTime - n0 / CARD_RATE_HZ
+        if self._floor_loss is None:
+            lost = rates.lost_step(ahead, self._ahead, self.blocksize, CARD_RATE_HZ)
+            lost_at = n0
+        else:
+            lost, lost_at = self._floor_loss.update(ahead, n0, frames)
+        if self.timestamp_limitation:
+            if lost and not self.estimated_lost:
+                logging.getLogger(__name__).warning(
+                    "uncertain timestamp loss estimate at sample %s: %s samples; "
+                    "%s; capture continues", lost_at, lost, self.timestamp_limitation)
+            self.estimated_lost += lost
+            lost = 0
+        self.lost += lost
+        if lost:
+            for lane in self._lanes:
+                if hasattr(lane, "fault"):
+                    lane.fault(lost_at, "timestamp loss")
+        self._ahead = ahead
+
+        self._last = (t.inputBufferAdcTime, n0)
+        if outdata is not None:
+            dac = t.outputBufferDacTime
+            if self.timestamp_limitation and self._dac is not None:
+                # WASAPI stamps the DAC as callback time plus queued padding, and
+                # shared-mode padding falls a whole engine period at a time: a
+                # callback early in the period stamps up to that period early,
+                # never late. Hold the latest projection, letting it fall only as
+                # fast as two clocks drift, so a burst's end waited out on one
+                # anchor is not judged unreached on the next.
+                held, frame = self._dac
+                drift = 1 - rates.FloorLoss.DRIFT_PPM * 1e-6
+                dac = max(dac, held + (n0 - frame) / CARD_RATE_HZ * drift)
+            self._dac = (dac, n0)
+        if outdata is not None and self.lat is None and not getattr(status, "priming_output", False):
+            self._lat_samples.append(
+                round((t.outputBufferDacTime - t.inputBufferAdcTime) * CARD_RATE_HZ))
+            if len(self._lat_samples) >= _LAT_MEDIAN_N:
+                self.lat = self._settle_lat()
+
+        # The fit uses the raw input anchor against its sample index, rather
+        # than callback-entry time and its load-dependent delivery jitter.
+        # It is only an estimate when timestamp_limitation is set: changing
+        # capture age can bias that raw stamp even with an exact converter.
+        if not self._fit or t.inputBufferAdcTime - self._fit[-1][0] >= 1.0:
+            self._fit.append(self._last)
+
+        # float32 at card rate, copied out of the driver buffer. Converting to
+        # int16 here was a 32768x scale error against `resample.from_card`, which
+        # takes float in +/-1.0 — measured at 75% of samples on the rail, i.e. a
+        # square wave, for every lane not running at the card rate. And scaling by
+        # 32767 wraps above full scale: 1.02 became -32114.
+        block = Block(t.inputBufferAdcTime, n0, np.array(indata[:, 0], np.float32))
+        for lane in self._lanes:
+            lane.push(block)
+
+        if outdata is not None:
+            self._fill(outdata, frames, n0)
+            for lane in self._lanes:
+                if hasattr(lane, 'push_tx'):
+                    lane.push_tx(n0, outdata[:, 0].copy())
+
+        if self.trace is not None:
+            self.trace.stamp(t_in, time.monotonic(), t, frames, n0, status)
+
+    def _settle_lat(self) -> int:
+        """The median, with the spread checked.
+
+        A spread here is not noise to average away — it means the offset is not a
+        constant on this hardware, and everything downstream assumes it is.
+        """
+        med = int(statistics.median(self._lat_samples))
+        spread = max(self._lat_samples) - min(self._lat_samples)
+        if spread > self.blocksize:
+            raise AudioError(
+                f"the ADC/DAC offset varies by {spread} samples over "
+                f"{len(self._lat_samples)} callbacks (median {med}). It has been "
+                "measured stable to zero on this station's hardware; a varying one "
+                "makes every transmit index an estimate.")
+        return med
+
+    def _fill(self, outdata, frames: int, n0: int) -> None:
+        """Zero unless a burst is armed for this range.
+
+        Zero-filling is the whole reason one held-open stream is safe here. besra
+        closes its output stream per burst because `sd.play` leaves a module-global
+        stream open and a rig whose PTT follows audio then stays keyed after CAT
+        has unkeyed. The invariant it protects is *nothing emitted between
+        bursts*, not *no stream* — and this satisfies it while keeping the
+        transmit index arithmetic.
+        """
+        with self._lock:
+            self.callback_count += 1
+            self._callback_at = time.monotonic()
+            self._fill_locked(outdata, frames, n0)
+
+    def _fill_locked(self, outdata, frames: int, n0: int) -> None:
+        outdata[:] = 0.0
+        if self._tx_stream is not None:
+            self._fill_stream(outdata, frames, n0)
+            return
+        burst = self._burst
+        if burst is None:
+            return
+        tx, at = burst
+        # arm_burst uses DAC capture indices; reserve_burst uses on-air indices.
+        start = n0 + (self.loop_lat if self._reserved else (self.lat or 0))
+        lo, hi = max(start, at), min(start + frames, at + len(tx))
+        if hi <= lo:
+            return              # the burst is not in this block, early or late
+        # Exact intersection, so a burst that begins mid-block begins mid-block
+        # rather than at the next boundary. A cursor instead of an index also
+        # stretches a burst across a skipped callback rather than skipping ahead.
+        outdata[lo - start:hi - start, 0] = tx[lo - at:hi - at]
+        if self._reserved and lo - at != self._consumed:
+            self._tx_invalid = (f"the card took sample {lo - at} of the burst "
+                                f"after {self._consumed}")
+        self._consumed += hi - lo
+        self._emitted = hi - at
+
+    def _fill_stream(self, outdata, frames: int, n0: int) -> None:
+        stream = self._tx_stream
+        start = n0 + self.loop_lat
+        if start + frames <= stream.at:
+            return
+        offset = max(0, stream.at - start)
+        got = stream._read(frames - offset)
+        outdata[offset:offset + len(got), 0] = got
+        if len(got):
+            stream._emitted(len(got), start + offset)
+        if len(got) < frames - offset and not stream.closed:
+            if stream.starved_at is None:
+                stream.starved_at = n0
+            if stream.emitted and stream.idle == "fault":
+                self._tx_invalid = "the transmit stream ran dry mid-transmission"
+        else:
+            stream.starved_at = None
+
+    # -- the clock ---------------------------------------------------------
+
+    def sample_now(self) -> float:
+        """Where the capture is, interpolated from the last block's ADC timestamp.
+
+        With converter stamps this avoids callback-entry delivery jitter (3 ms
+        rms — a whole PACTOR bit). When `timestamp_limitation` is set, the raw
+        anchor supplies only an estimate; neither nominal lat nor tx_latency_n
+        corrects its unknown capture age.
+        """
+        if self._last is None:
+            return 0.0
+        t0, n0 = self._last
+        return n0 + (time.monotonic() - t0) * CARD_RATE_HZ
+
+    def dac_time(self, output_frame: int) -> float:
+        if self._dac is None:
+            raise AudioError("no DAC clock anchor")
+        timestamp, frame = self._dac
+        return timestamp + (output_frame - frame) / CARD_RATE_HZ
+
+    def dac_frame_at(self, timestamp: float) -> float:
+        if self._dac is None:
+            raise AudioError("no DAC clock anchor")
+        anchor, frame = self._dac
+        return frame + (timestamp - anchor) * CARD_RATE_HZ
+
+    @leased
+    def wait_until_dac(self, output_frame: int, *, healthy: bool = False,
+                       deadline: float | None = None, cancelled=None) -> None:
+        while True:
+            if cancelled is not None and cancelled():
+                raise BurstInvalidated("cancelled")
+            if healthy:
+                self.check_callbacks()
+            if time.monotonic() >= self.dac_time(output_frame):
+                return
+            if deadline is not None and time.monotonic() >= deadline:
+                raise BurstInvalidated("audio wait deadline expired")
+            time.sleep(_HOP_S)
+
+    def clock_ppm(self) -> tuple[float, float]:
+        """(ppm, 1 sigma) of the capture clock against the system clock.
+
+        Read beside `lost`, which is what `preflight` does: a slope past a few
+        tens of ppm is a shortfall this fit cannot tell from a crystal.
+        When `timestamp_limitation` is set, this fits delivery timing, not the
+        converter; the result is an estimate, regardless of loss or fit sigma.
+        """
+        return rates.rate_fit(self._fit, CARD_RATE_HZ)
+
+    @leased
+    def wait_until(self, card_index: int, *, healthy: bool = False,
+                   deadline: float | None = None, cancelled=None) -> None:
+        """Block until the card has delivered `card_index`, in short hops."""
+        while self.sample_now() < card_index:
+            if cancelled is not None and cancelled():
+                raise BurstInvalidated("cancelled")
+            if healthy:
+                self.check_callbacks()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise BurstInvalidated("audio wait deadline expired")
+            time.sleep(_HOP_S)
+        if healthy:
+            self.check_callbacks()
+
+    def check_callbacks(self) -> None:
+        self.alive()
+        # Allow one block, negotiated output buffering, and the measured
+        # callback delivery margin. The FT-891 input run is still pending.
+        latency = (self.lat or 0) / CARD_RATE_HZ
+        if self._stream is not None:
+            reported = self._stream.latency
+            latency = reported[1] if isinstance(reported, tuple) else reported
+        timeout = self.blocksize / CARD_RATE_HZ + latency + CALLBACK_JITTER_ALLOWANCE_S
+        if time.monotonic() - self._callback_at > timeout:
+            raise BurstInvalidated("output callbacks stopped")
+
+    def callback_age(self) -> float:
+        return time.monotonic() - self._callback_at
+
+    # -- transmit ----------------------------------------------------------
+
+    @leased
+    def arm_burst(self, audio: np.ndarray, at: int) -> int:
+        """Schedule `audio` so its first sample reaches the DAC as capture index
+        `at` reaches the ADC. Returns the DAC capture index actually used;
+        the on-air index is that index plus `tx_latency_n`.
+
+        The lead is the ADC->DAC offset plus a few blocks of notice — not
+        `holdback`, which is a *reader's* constant and on this machine is 10986
+        samples against an offset of 1152. A request that cannot be met is clamped
+        forward and the real index returned, because a caller that records where it
+        asked for the carrier rather than where it went has recorded nothing.
+
+        One immutable store, not three fields: a callback landing between two of
+        them would emit the new burst against the previous index.
+        """
+        if self.output_device is None:
+            raise AudioError("capture-only audio cannot transmit")
+        buf = np.asarray(audio, np.float32)
+        earliest = int(self.samples) + (self.lat or 0) + 3 * self.blocksize
+        at = max(at, earliest)
+        self._tx_invalid = None
+        self._reserved = False
+        self._consumed = 0
+        self._emitted = 0
+        self._burst = (buf, at)                 # single atomic publication
+        return at
+
+    @leased
+    def reserve_burst(self, audio: np.ndarray, at: int, deadline: int) -> int:
+        """Reserve an on-air capture index only when the keyed interval fits.
+
+        Both `at` and the returned index are on-air; `deadline` is the key's
+        capture-clock deadline, so the fit check removes TX latency.
+        """
+        if self.output_device is None:
+            raise AudioError("capture-only audio cannot transmit")
+        buf = np.asarray(audio, np.float32)
+        with self._lock:
+            actual = max(at, int(self.samples) + self.loop_lat + 3 * self.blocksize)
+            if actual - self.tx_latency_n + len(buf) + round(0.1 * CARD_RATE_HZ) > deadline:
+                exc = BurstInvalidated("reserved burst exceeds keyed deadline")
+                exc.displacement = actual - at
+                raise exc
+            self._tx_invalid = None
+            self._consumed = self._emitted = 0
+            self._reserved = True
+            self._burst = (buf, actual)
+            return actual
+
+    @leased
+    def arm_stream(self, at: int, capacity: int) -> TxStream:
+        """Open a transmission of no fixed length, its first sample at capture index
+        `at` or the earliest this card can still meet. Write to what comes back;
+        `finish_burst` ends it, as it ends a burst.
+        """
+        if self.output_device is None:
+            raise AudioError("capture-only audio cannot transmit")
+        stream = TxStream(max(at, int(self.samples) + self.loop_lat + 3 * self.blocksize),
+                          capacity)
+        with self._lock:
+            self._tx_invalid = None
+            self._tx_stream = stream
+        return stream
+
+    def burst_done(self) -> bool:
+        stream = self._tx_stream
+        if stream is not None:
+            return stream.drained
+        burst = self._burst
+        return burst is None or self._emitted >= len(burst[0])
+
+    @leased
+    def cancel_burst(self) -> None:
+        """Drop an armed burst that never keyed. Emits nothing and records nothing."""
+        with self._lock:
+            self._burst = None
+            stream, self._tx_stream = self._tx_stream, None
+            if stream is not None:
+                stream.close()
+            self._emitted = self._consumed = 0
+            self._tx_invalid = None
+            self._reserved = False
+
+    @leased
+    def finish_burst(self) -> int:
+        """Stop emitting, flush every lane past our own carrier, and report where.
+
+        Advancing the lanes here is the one place that knows the sample index, so
+        half-duplex is enforced once — replacing besra's `muted` flag and shrike's
+        per-session flush with one mechanism.
+        """
+        with self._lock:
+            burst, self._burst = self._burst, None
+            stream, self._tx_stream = self._tx_stream, None
+            invalid, self._tx_invalid = self._tx_invalid, None
+            reserved = self._reserved
+            if self._reserved and burst is not None:
+                self.check_callbacks()
+                if self._consumed != len(burst[0]):
+                    invalid = invalid or (f"the card took {self._consumed} of "
+                                          f"{len(burst[0])} samples before the burst ended")
+                elif time.monotonic() < self.dac_time(
+                        burst[1] - self.loop_lat + len(burst[0])):
+                    invalid = invalid or "the burst ended before its last sample reached the DAC"
+            self._reserved = False
+        end = (burst[1] + len(burst[0])) if burst is not None else int(self.samples)
+        if burst is not None and not reserved:
+            end += self.tx_latency_n
+        if stream is not None:
+            stream.close()
+            end = stream.end
+        for lane in self._lanes:
+            lane.flush_to(end)
+        if invalid:
+            raise BurstInvalidated(f"{invalid} — what went out is not what was composed.")
+        return end
+
+
+class ReplayAudio:
+    """The same lane interface, fed from a recording.
+
+    This is how the transmit-adjacent code is exercised without a transmitter:
+    the whole station runs, four lanes decode, four host ports accept, and no
+    device is opened.
+
+    A recording is whatever it was stored as — usually 16-bit PCM — and the card
+    delivers float32 in [-1, 1]. Converting here rather than at each lane is what
+    makes the substitution honest: a replay that handed out integer PCM would put
+    audio 32768× hot into every decoder, and `resample.from_card` scales by 32768
+    again on the way to ARDOP's 12 kHz, so besra's lane saw nothing but rails. A
+    decoder tuned against that is tuned against a signal no card produces.
+    """
+
+    def __init__(self, samples: np.ndarray, *, blocksize: int = BLOCKSIZE) -> None:
+        self.samples_in = _to_card_scale(samples)
+        self.blocksize = blocksize
+        self.samples = 0
+        self.holdback = 0        # a file has no blocks to hold back for
+        self.lat = 0
+        self.loop_lat = 0
+        self._lock = threading.RLock()
+        self._tx_stream = None
+        self._stream_output = []
+        self.tx_latency_n = 0
+        self.underruns = self.overflows = 0
+        self._lanes: list[Lane] = []
+        self._i = 0
+        self._reserved = False
+        self._pending: tuple[np.ndarray, int] | None = None
+        #: (card index, samples) for every burst the station would have sent.
+        self.transmitted: list[tuple[int, np.ndarray]] = []
+
+    def subscribe(self, lane: Lane) -> Lane:
+        self._lanes.append(lane)
+        return lane
+
+    def open(self) -> None:
+        return None
+
+    def breathe(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def pump(self, blocks: int = 1) -> int:
+        sent = 0
+        with self._lock:
+            for _ in range(blocks):
+                if self.exhausted():
+                    break
+                self._advance(self.samples + min(self.blocksize, len(self.samples_in) - self._i))
+                sent += 1
+        return sent
+
+    def _advance(self, target):
+        count = min(target - self.samples, len(self.samples_in) - self._i)
+        if count > 0:
+            chunk = self.samples_in[self._i:self._i + count]
+            block = Block(self.samples / CARD_RATE_HZ, self.samples,
+                          np.asarray(chunk, np.float32))
+            for lane in self._lanes:
+                lane.push(block)
+            self._i += count
+        stream = self._tx_stream
+        if stream is not None:
+            start = max(self.samples, stream.at)
+            if target > start:
+                got = stream._read(target - start)
+                if len(got):
+                    self._stream_output.append((start, got.copy()))
+                    stream._emitted(len(got), start)
+                if len(got) < target - start and not stream.closed:
+                    if stream.starved_at is None:
+                        stream.starved_at = start + len(got)
+                else:
+                    stream.starved_at = None
+        self.samples = target
+
+    def exhausted(self) -> bool:
+        # A burst or stream in flight at the tape's end still completes its over.
+        with self._lock:
+            return (self._i >= len(self.samples_in)
+                    and self._pending is None and self._tx_stream is None)
+
+    def sample_now(self) -> float:
+        return float(self.samples)
+
+    def wait_until(self, card_index: int, *, healthy: bool = False,
+                   deadline: float | None = None, cancelled=None) -> None:
+        while True:
+            if cancelled is not None and cancelled():
+                raise BurstInvalidated("cancelled")
+            with self._lock:
+                if self.samples >= card_index:
+                    return
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise BurstInvalidated("audio wait deadline expired")
+                # EOF ends reception, not the virtual transmit clock.
+                self._advance(min(card_index, self.samples + self.blocksize))
+            # Let the station poll lanes between blocks, outside the audio lock.
+            time.sleep(0)
+
+    def wait_until_dac(self, output_frame: int, *, healthy: bool = False,
+                       deadline: float | None = None, cancelled=None) -> None:
+        self.wait_until(output_frame, healthy=healthy, deadline=deadline, cancelled=cancelled)
+
+    def check_callbacks(self) -> None:
+        return None
+
+    # -- transmit, recorded rather than emitted ----------------------------
+    #
+    # A replay has no transmitter, but it does have an answer to "what would this
+    # station have sent?" — which lets a whole ARQ
+    # exchange be checked against a recording with no radio in the room. So the
+    # burst is kept rather than dropped, and the lanes are still advanced past it,
+    # because half-duplex is a property of the protocol rather than of the card.
+
+    def arm_burst(self, audio: np.ndarray, at: int, *, strict_at=False) -> int:
+        with self._lock:
+            if strict_at and at < self.samples:
+                raise BurstInvalidated("requested burst index has passed")
+            at = max(at, int(self.samples))
+            self._reserved = False
+            self._pending = (np.asarray(audio, np.float32).copy(), at)
+            return at
+
+    def reserve_burst(self, audio: np.ndarray, at: int, deadline: int) -> int:
+        with self._lock:
+            actual = max(at, int(self.samples))
+            if actual + len(audio) + round(0.1 * CARD_RATE_HZ) > deadline:
+                exc = BurstInvalidated("reserved burst exceeds keyed deadline")
+                exc.displacement = actual - at
+                raise exc
+            self.arm_burst(audio, actual)
+            self._reserved = True
+            return actual
+
+    def arm_stream(self, at: int, capacity: int) -> TxStream:
+        with self._lock:
+            self._tx_stream = TxStream(max(at, int(self.samples)), capacity)
+            self._stream_output = []
+            return self._tx_stream
+
+    def alive(self) -> None:
+        return None
+
+    def burst_done(self) -> bool:
+        with self._lock:
+            if self._tx_stream is not None:
+                return self._tx_stream.drained
+            return self._pending is None or self.samples >= self._pending[1] + len(self._pending[0])
+
+    def cancel_burst(self) -> None:
+        with self._lock:
+            self._pending = None
+            self._reserved = False
+            if self._tx_stream is not None:
+                self._tx_stream.close()
+            self._tx_stream = None
+            self._stream_output = []
+
+    def finish_burst(self) -> int:
+        with self._lock:
+            pending, self._pending = self._pending, None
+            stream, self._tx_stream = self._tx_stream, None
+            reserved, self._reserved = self._reserved, False
+            end = self.samples
+            invalid = False
+            if pending is not None:
+                buf, at = pending
+                end = at + len(buf)
+                invalid = reserved and self.samples < end
+                if not invalid:
+                    self.transmitted.append((at, buf))
+            if stream is not None:
+                stream.close()
+                end = stream.end
+                self.transmitted.extend(self._stream_output)
+                self._stream_output = []
+            for lane in self._lanes:
+                lane.flush_to(end)
+            if invalid:
+                raise BurstInvalidated("reserved burst has not completed")
+            return end

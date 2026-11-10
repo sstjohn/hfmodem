@@ -1,0 +1,48 @@
+{
+  "file": "n9vc-0925-kiwi-connect.wav",
+  "source": "working/p4-oracle/kiwi/20260924/7101500/seg-0003.wav",
+  "source_start": 17368419,
+  "samples": 113990,
+  "rate": 11998.90779,
+  "header_rate": 11999,
+  "source_start_s": 1447.5,
+  "sha256": "6ca8bdd1e0f7cd51dc395c1c14c55759f8dc8ce10026ae092a40d100ad5f1a3a",
+  "link": "N9VC PACTOR link heard on a KiwiSDR at 7100.0 kHz dial, 2026-09-25 from 00:33Z, +910 Hz up the passband: P1 connect frames to N9VC from 1432.3 s, CS4 CS4, the caller's P1 packet, CS1, then robust shorts and robust long packets; source times are seconds into seg-0003",
+  "offset_hz": 910,
+  "connect": {
+    "at_s": 0.75,
+    "callsign": "N9VC",
+    "variant": "Normal"
+  },
+  "controls": [
+    {
+      "at_s": 4.52,
+      "cs": "CS4"
+    },
+    {
+      "at_s": 5.77,
+      "cs": "CS4"
+    },
+    {
+      "at_s": 7.02,
+      "cs": "CS1"
+    }
+  ],
+  "packet": {
+    "at_s": 5.99,
+    "status": 33,
+    "text": "1ky2d\r"
+  },
+  "shorts": [
+    {
+      "onset_s": 7.2,
+      "header": "A",
+      "value": 7
+    },
+    {
+      "onset_s": 8.47,
+      "header": "A",
+      "value": 38
+    }
+  ]
+}

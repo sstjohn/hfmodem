@@ -1,0 +1,8 @@
+{
+  "description": "Weakest marker-read CRC-valid chirp of the sweep corpus by lane power share.",
+  "source_capture": "captures/onair-0930-0012/stream.flac",
+  "source_sha256": "17499c234ca026c4af189dc0d138d24e5cdcdeb47c98a744dabf7a04b5fd934c",
+  "source_start_sample": 8076242,
+  "onset_seconds": 168.50504166666667,
+  "cfo_hz": 3.4841118611
+}

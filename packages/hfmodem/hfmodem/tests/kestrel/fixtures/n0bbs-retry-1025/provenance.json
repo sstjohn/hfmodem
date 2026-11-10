@@ -1,0 +1,7 @@
+{
+  "source": "station receive recording, 2026-10-25 20:28:27Z",
+  "start": 181435904,
+  "end": 181810176,
+  "sha256": "76985f55d49afbd15554671734b78adc1fe1bfad00909b579e478dd8b128fb2a",
+  "note": "A BBS gateway's CRC-clean L4 retransmission, recorded on air after the receiver predicted L1; the live log located it but did not deliver it. The tests call the gateway N0BBS; this decode does not use its callsign."
+}

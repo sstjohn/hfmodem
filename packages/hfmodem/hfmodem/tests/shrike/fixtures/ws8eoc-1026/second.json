@@ -1,0 +1,8 @@
+{
+  "source": "operator-data/captures/onair-20261027T041235156791Z-172305c0-f20e-4b99-8f63-169519828e8e/stream.flac",
+  "source_sha256": "2b1f88a5ee91d47e0c25d808bc4cf1f41d1d075bc57147a44bd5b54952e35989",
+  "first_sample": 1056003,
+  "head_sample": 1059843,
+  "offset_hz": -31.4,
+  "pcm_sha256": "aebae549ef78adea7ebea52c00f92dad0e24dc1b3bf7d0ae9857816324c73c98"
+}

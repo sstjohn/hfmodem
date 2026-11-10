@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+import os, sys; os.environ.get('HFMODEM_COEXIST_HARNESS') == '1' and os.environ.get('HFMODEM_COEXIST_SHIM') and sys.path.insert(0, os.environ.get('HFMODEM_COEXIST_SHIM'))

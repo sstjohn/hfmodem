@@ -1,0 +1,28 @@
+{
+  "file": "ve3kpg-0926-1409-hold-cs1.wav",
+  "source": "captures/onair-0926-1409/stream.flac",
+  "rate": 12000,
+  "samples": 21600,
+  "sha256": "168c93872435fabccf49ac48dab2d6f252b36bfc529db2baa4559550718b4df6",
+  "link": "VE3KPG on 7091.0 kHz, 2026-09-26 19:10Z, repeat-requesting our P1 packet 1 with CS1 in holds 11-16: each piece runs from our slot boundary + 0.95 s to + 1.25 s, the window the hold reads past our carrier",
+  "cut_s": [
+    0.95,
+    1.25
+  ],
+  "slots": [
+    30,
+    31,
+    32,
+    33,
+    34,
+    35
+  ],
+  "slot_boundaries_s": [
+    37.5567,
+    38.8067,
+    40.0567,
+    41.3067,
+    42.5567,
+    43.8067
+  ]
+}

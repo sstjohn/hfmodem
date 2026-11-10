@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+# The station the offline console tests plan against. Nothing opens it as hardware.
+schema = 1
+
+[station]
+mycall     = "W9SSJ"
+grid       = "EN63bc"
+control    = "local"
+regulatory = "unregulated"
+because    = "offline console test fixture"
+transmit   = true
+client_sid = "Pat-1.0.0"
+
+[rig]
+model = "ft891"
+
+[audio]
+input  = "USB Audio Device"
+output = "USB Audio Device"

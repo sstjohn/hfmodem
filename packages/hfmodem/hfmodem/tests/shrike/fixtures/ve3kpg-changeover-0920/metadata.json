@@ -1,0 +1,26 @@
+[
+  {
+    "file": "greeting.wav",
+    "head": 1848849,
+    "origin": 1845009,
+    "first_ack_audio": 1892590,
+    "offset_hz": 0,
+    "pcm_sha256": "2db40ae8a03e5cc4bfae7eeccee85b114ab7ca39cfa6c058bc58c4cd2ab84aa7"
+  },
+  {
+    "file": "proposal.wav",
+    "head": 4457869,
+    "origin": 4454029,
+    "first_ack_audio": 4501390,
+    "offset_hz": -12.8,
+    "pcm_sha256": "9feda0aafe9da45f8fc05166183bc9f1996899825237592865b1b915523ad9e3"
+  },
+  {
+    "file": "error.wav",
+    "head": 11386609,
+    "origin": 11382769,
+    "first_ack_audio": 11430190,
+    "offset_hz": -12.7,
+    "pcm_sha256": "6ddeceb5356ebf1df44ec8fd025ef7b6784716129f9222994a75759f6d637fbf"
+  }
+]

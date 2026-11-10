@@ -1,0 +1,252 @@
+[
+  {
+    "tape": "N0CALL-W9SSJ-bw2300-counter4096",
+    "bw": "2300",
+    "level": 4,
+    "rest": 4007,
+    "field": 153,
+    "code": 6,
+    "on": 43.075669,
+    "slot": 0
+  },
+  {
+    "tape": "N0CALL-W9SSJ-bw2300-counter4096",
+    "bw": "2300",
+    "level": 12,
+    "rest": 2230,
+    "field": 149,
+    "code": 5,
+    "on": 52.565568,
+    "slot": 0
+  },
+  {
+    "tape": "N0CALL-W9SSJ-bw2300-counter4096",
+    "bw": "2300",
+    "level": 14,
+    "rest": 74,
+    "field": 129,
+    "code": 0,
+    "on": 56.926946,
+    "slot": 0
+  },
+  {
+    "tape": "N0CALL-W9SSJ-bw2750-counter65536",
+    "bw": "2750",
+    "level": 4,
+    "rest": 65447,
+    "field": 153,
+    "code": 6,
+    "on": 42.905106,
+    "slot": 0
+  },
+  {
+    "tape": "N0CALL-W9SSJ-bw2750-counter65536",
+    "bw": "2750",
+    "level": 17,
+    "rest": 6856,
+    "field": 133,
+    "code": 1,
+    "on": 118.47349,
+    "slot": 0
+  },
+  {
+    "tape": "N0CALL-W9SSJ-bw2750-counter65536",
+    "bw": "2750",
+    "level": 17,
+    "rest": 2937,
+    "field": 129,
+    "code": 0,
+    "on": 118.47349,
+    "slot": 1
+  },
+  {
+    "tape": "N0CALL-W9SSJ-bw500-counter65536",
+    "bw": "500",
+    "level": 4,
+    "rest": 65493,
+    "field": 153,
+    "code": 6,
+    "on": 42.727114,
+    "slot": 0
+  },
+  {
+    "tape": "N0CALL-W9SSJ-bw500-counter65536",
+    "bw": "500",
+    "level": 13,
+    "rest": 742,
+    "field": 129,
+    "code": 0,
+    "on": 417.679235,
+    "slot": 1
+  },
+  {
+    "tape": "sweep-bw2300/20260926T050709Z-ladder",
+    "bw": "2300",
+    "level": 10,
+    "rest": 554,
+    "field": 137,
+    "code": 2,
+    "on": 20.12653,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw2300/20260926T050835Z-ladder",
+    "bw": "2300",
+    "level": 9,
+    "rest": 1025,
+    "field": 145,
+    "code": 4,
+    "on": 20.002191,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw2300/20260926T051938Z-ladder",
+    "bw": "2300",
+    "level": 6,
+    "rest": 609,
+    "field": 141,
+    "code": 6,
+    "on": 73.923259,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw2750-quiet/20260926T055838Z-ladder",
+    "bw": "2750",
+    "level": 15,
+    "rest": 5553,
+    "field": 141,
+    "code": 3,
+    "on": 59.915578,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw2750-quiet/20260926T055838Z-ladder",
+    "bw": "2750",
+    "level": 14,
+    "rest": 3389,
+    "field": 149,
+    "code": 5,
+    "on": 64.2964,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw2750-quiet/20260926T055838Z-ladder",
+    "bw": "2750",
+    "level": 13,
+    "rest": 1659,
+    "field": 137,
+    "code": 2,
+    "on": 68.647274,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw2750-quiet/20260926T060010Z-ladder",
+    "bw": "2750",
+    "level": 13,
+    "rest": 2526,
+    "field": 145,
+    "code": 4,
+    "on": 70.109248,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw2750-quiet/20260926T060706Z-ladder",
+    "bw": "2750",
+    "level": 15,
+    "rest": 7184,
+    "field": 153,
+    "code": 4,
+    "on": 32.922874,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw2750-quiet/20260926T060706Z-ladder",
+    "bw": "2750",
+    "level": 16,
+    "rest": 3919,
+    "field": 153,
+    "code": 0,
+    "on": 37.289843,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw2750-quiet/20260926T060706Z-ladder",
+    "bw": "2750",
+    "level": 17,
+    "rest": 0,
+    "field": 153,
+    "code": 0,
+    "on": 41.864025,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw500/20260926T052115Z-ladder",
+    "bw": "500",
+    "level": 11,
+    "rest": 1053,
+    "field": 141,
+    "code": 3,
+    "on": 19.916596,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw500/20260926T052202Z-ladder",
+    "bw": "500",
+    "level": 10,
+    "rest": 1212,
+    "field": 149,
+    "code": 5,
+    "on": 19.882348,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw500/20260926T052337Z-ladder",
+    "bw": "500",
+    "level": 12,
+    "rest": 542,
+    "field": 137,
+    "code": 2,
+    "on": 24.188459,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw500/20260926T052424Z-ladder",
+    "bw": "500",
+    "level": 10,
+    "rest": 952,
+    "field": 145,
+    "code": 4,
+    "on": 24.172487,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw500/20260926T053026Z-ladder",
+    "bw": "500",
+    "level": 9,
+    "rest": 990,
+    "field": 137,
+    "code": 5,
+    "on": 47.214792,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw500/20260926T053136Z-ladder",
+    "bw": "500",
+    "level": 8,
+    "rest": 1164,
+    "field": 149,
+    "code": 6,
+    "on": 47.175568,
+    "slot": 0
+  },
+  {
+    "tape": "sweep-bw500/20260926T053246Z-ladder",
+    "bw": "500",
+    "level": 9,
+    "rest": 1032,
+    "field": 141,
+    "code": 5,
+    "on": 47.4448,
+    "slot": 0
+  }
+]

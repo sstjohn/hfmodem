@@ -1,0 +1,72 @@
+[
+  {
+    "route": "vara-send",
+    "protocol": "VARA",
+    "peer": "NS0A",
+    "role": "Send",
+    "band": "40 m",
+    "date": "2026-09-27",
+    "time": "21:21",
+    "speed": "L9 acknowledged transmit",
+    "mail": "1 sent \u00b7 destination receipt confirmed"
+  },
+  {
+    "route": "vara-receive",
+    "protocol": "VARA",
+    "peer": "N5TW",
+    "role": "Receive",
+    "band": "20 m",
+    "date": "2026-09-23",
+    "time": "18:10",
+    "speed": "L4 receive \u00b7 speed-limited",
+    "mail": "2 received \u00b7 1 sent"
+  },
+  {
+    "route": "pactor3-send",
+    "protocol": "PACTOR-3",
+    "peer": "VE1YZ",
+    "role": "Send",
+    "band": "40 m",
+    "date": "2026-09-24",
+    "time": "04:10",
+    "speed": "SL6 acknowledged transmit",
+    "mail": "1 sent \u00b7 2 received"
+  },
+  {
+    "route": "pactor3-receive",
+    "protocol": "PACTOR-3",
+    "peer": "WS8EOC",
+    "role": "Receive",
+    "band": "80 m",
+    "date": "2026-10-03",
+    "time": "05:00",
+    "speed": "SL3 receive",
+    "mail": "1 received"
+  },
+  {
+    "route": "ardop-send",
+    "protocol": "ARDOP",
+    "peer": "WW2MI",
+    "role": "Send",
+    "band": "40 m",
+    "date": "2026-08-23",
+    "time": "03:11",
+    "speed": "4FSK.200.50S TX \u00b7 4PSK.200.100 RX",
+    "mail": "1 sent \u00b7 destination receipt confirmed",
+    "note": "Subsequent receive failed; three offered messages were not fetched and END was not confirmed.",
+    "source": "Remote KiwiSDR witness"
+  },
+  {
+    "route": "ardop-receive",
+    "protocol": "ARDOP",
+    "peer": "W6IDS",
+    "role": "Receive",
+    "band": "40 m",
+    "date": "2026-08-26",
+    "time": "15:24",
+    "speed": "4PSK.200.100 receive",
+    "mail": "3 received \u00b7 normal link close",
+    "note": "500 Hz session bandwidth; no local acknowledgement speed established.",
+    "source": "Remote KiwiSDR witness"
+  }
+]

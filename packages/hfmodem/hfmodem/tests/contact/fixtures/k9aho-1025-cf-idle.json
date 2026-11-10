@@ -1,0 +1,17 @@
+{
+  "session": "20261025T000514804991Z",
+  "source": "receive.flac",
+  "source_samples": [
+    607145000,
+    607255000
+  ],
+  "sample_rate": 48000,
+  "local_dial_hz": 7104250,
+  "calling_dial_hz": 7105000,
+  "audio_center_hz": 2250,
+  "kind": "session-turn-idle-responder",
+  "addressed_to": "W9SSJ",
+  "payload_tones_exact": 31,
+  "wave_sha256": "2ad3513cb8f2108762df2aaab3b34102e6e268e2ad36acd35729a1fca6161da8",
+  "limit": "Call key identifies addressee, not transmitting station; this is passive evidence, never an ARQ input."
+}

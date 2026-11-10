@@ -1,0 +1,128 @@
+hfmodem
+Copyright (C) 2026 Saul St John (W9SSJ)
+
+The code is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License as published by the Free Software
+Foundation, version 3. See LICENSE for the full text. The documentation of the
+software -- installing, configuring and operating it, its architecture, and the
+implementation notes in docs/implementation/ -- is under the same licence.
+
+The protocol descriptions and the project site are under the Creative Commons
+Attribution 4.0 International licence instead: the waveforms, wire formats and
+link behaviour set out in docs/protocols/, the illustrated guides in docs/viz/,
+the notes in evidence/, and the pages under site/ (its build code stays AGPL).
+Each file names its licence in its first lines, or in REUSE.toml when it cannot
+carry one. See LICENSE-CC-BY-4.0 for the full text and
+https://creativecommons.org/licenses/by/4.0/ for the deed, whose chief condition
+is attribution. LICENSES/ holds the text of every licence a file names.
+
+See docs/protocols/LICENSE.md for the protocol documentation's licence.
+
+Recordings of on-air transmissions, this station's and other stations', and
+data decoded from them, are listed in REUSE.toml as NOASSERTION. The project
+claims no copyright in and assigns no licence to these files.
+
+
+ATTRIBUTION
+
+ARDOP is Rick Muething KN6KB's protocol; besra implements it.
+
+The Winlink mail layer's secure-login answer (winlink/session.py,
+secure_login_response) is a port of fbb/secure.go in wl2k-go, Martin Hebnes
+Pedersen LA5NTA's Winlink library, at https://github.com/la5nta/wl2k-go. It
+carries:
+
+    The MIT License (MIT)
+
+    Copyright (c) 2014-2017 Martin Hebnes Pedersen (LA5NTA)
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
+
+The FBB compression codec (winlink/lzhuf.py) follows the structure and routine
+names of LZHUF.C: LZSS coded by Haruhiko Okumura, adaptive Huffman coding by
+Haruyasu Yoshizaki, edited and translated to English by Kenji Rikitake, 1988.
+LZHUF.C was published without a licence. Asked in 2001 by Russell Marks,
+Rikitake raised no objection to its use and Okumura agreed it may be used under
+the terms of his LZARI.C, on which it is based: "Use, distribute, and modify
+this program freely". Yoshizaki could not be reached. wl2k-go keeps that record
+with its Go port (lzhuf/COPYRIGHT). The 2048-byte window is the Winlink
+variant's.
+
+The PACTOR-4 C2 table generator (shrike/c2proof/cml/cml_generate.c) adapts the
+S-random interleaver of the Iterative Solutions Coded Modulation Library,
+copyright 2005-2006 Matthew C. Valenti and Yufei Wu, under the GNU Lesser General
+Public License version 2.1 or later. It is distributed under that licence, with
+its text and attribution beside it in shrike/c2proof/.
+
+The BBS game recipe's source edits (bbs/recipes/frotz_hook.py) patch Frotz, the
+Z-machine interpreter, which is under the GNU General Public License version 2
+or later. The file is distributed under that licence; its text is in LICENSES/.
+
+Test fixtures under tests/shrike/fixtures/sigidwiki/ are excerpts of recordings
+published by the Signal Identification Wiki (https://www.sigidwiki.com); the
+notes tests/shrike/sigidwiki-*.md name each fixture's page, and REUSE.toml the
+licence recorded for it.
+tests/shrike/fixtures/p4-robust-taunus/ holds symbol decisions read from a
+recording published at https://signals.taunus.de.
+
+
+
+NON-AFFILIATION
+
+hfmodem is an independent open project. It is not affiliated with, endorsed by,
+or sponsored by any of the products or organisations named in this file.
+Where this project takes code from another, the attribution section above names it.
+
+
+NAMES OF OTHER PRODUCTS
+
+Other HF data products are referred to in this project's code and documentation.
+The names identify protocols, products and interoperability targets.
+
+  VARA        A commercial HF modem developed by others. Named to describe
+              interoperability: which waveforms and which host dialect a given
+              modem here can speak, and which it cannot.
+
+  PACTOR      A family of HF modes developed by others. PACTOR-III's waveform is
+              published in ITU-R Recommendation M.1798.
+
+  ARDOP       The Amateur Radio Digital Open Protocol: an open, published
+              protocol, named to identify what besra implements.
+
+  Winlink,    Named as applications that can drive a modem here through one of
+  Pat, VarAC  the host dialects it offers. Naming them is a statement of what
+              works with what, not a claim of association or endorsement.
+
+  SCS         The developer of the PACTOR controllers whose host command set is
+              named descriptively where a modem here emulates it.
+
+  KiwiSDR     A networked HF receiver. hfhost opens one as an audio source,
+              speaking its stream protocol through code written here.
+              kiwiclient, the client its developers publish, carries no
+              licence, so none of it is copied into this project.
+
+The tests and the documents also name the software they were measured against or
+run beside -- ardopcf, M0LTE.Ardop, Hamlib, Winlink Express, RMS Trimode --
+in order to say what was compared with what. None of it is redistributed here.
+
+Please report inaccurate product references through the project issue tracker.
+
+The project repository is at:
+
+    https://github.com/sstjohn/hfmodem

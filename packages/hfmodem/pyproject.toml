@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hfmodem"
+version = "0.5.0"
+maintainers = [{ email = "hfmodem@ssj.lol" }]
+description = "Experimental HF modems, receive monitors and shared radio station tools."
+# Inline, not a file path: this package directory carries no README.md, and
+# `readme = "README.md"` quietly built wheels whose long description was empty
+# -- a blank PyPI page. The text lives here so the metadata cannot dangle.
+readme = { content-type = "text/markdown", text = """
+HF softmodems — **shrike** (PACTOR-1/2/3), **kestrel** (VARA), **besra**
+(ARDOP), **sabir**, **lanner** (RTTY, SITOR-B and NAVTEX), **brubru**
+(Robust Packet) and **bateleur** (military waveforms, ALE and selcall) — with
+shared station control, host ports and operator tools.
+
+Everything runs from recordings with no radio attached, and `transmit = false`
+in the station file is a hard interlock.
+
+Outbound mail delivery is confirmed over PACTOR-3, VARA and ARDOP.
+PACTOR-1 has received gateway mail. This is an experimental prerelease for
+developers only; do not rely on it for any purpose, especially emergency
+communications. The project README records tested paths and remaining limits.
+""" }
+requires-python = ">=3.13"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE"]
+keywords = ["ham radio", "winlink", "hf", "modem", "arq", "pactor", "vara", "ardop",
+            "mil-std-188-110", "stanag-4285"]
+# No `License ::` classifier: PyPI rejects metadata carrying both that and the
+# License-Expression the SPDX string above produces.
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Ham Radio",
+]
+
+# hfhost supplies the config primitives and the client the station probes itself
+# through. The dependency runs one way only and tests/gates/test_import_direction.py
+# enforces it: hfhost must stay able to drive a modem it knows nothing about.
+dependencies = ["hfhost>=0.4.0", "creance>=0.4.0", "numpy>=1.24", "scipy>=1.10", "sounddevice>=0.4", "pyserial>=3.5",
+                # Windows ships no IANA zone database and no curses.
+                "tzdata; sys_platform == 'win32'", "windows-curses; sys_platform == 'win32'"]
+
+[project.urls]
+Homepage = "https://hfmodem.ssj.lol"
+Source = "https://github.com/sstjohn/hfmodem"
+Issues = "https://github.com/sstjohn/hfmodem/issues"
+
+[project.optional-dependencies]
+# Kept for existing installation commands; sound-card support is installed by default.
+radio = []
+# Optional logbook certificate signing.
+operator = ["cryptography>=42"]
+dev = ["pytest>=7", "pytest-xdist", "ruff>=0.5"]
+
+[project.scripts]
+hfmodem = "hfmodem.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hfmodem*"]
+# Left explicit: the default walks every directory without an __init__.py, and
+# this tree has large sibling directories that would cost minutes to discover.
+namespaces = false
+# The suite runs from a checkout or the source drop, never from an installed wheel.
+exclude = ["hfmodem.tests*"]
+
+[tool.setuptools.package-data]
+"hfmodem.shrike" = ["assets/c2-*.swaps.z"]
+"hfmodem.shrike.c2proof" = ["cml/cml_generate.c", "cml/COPYING.LESSER", "NOTICE.md"]
+# P4 uses the approved exact replay swaps above; its original constructor is an
+# offline proof tool.
+
+[tool.pytest.ini_options]
+testpaths = ["hfmodem/tests"]
+# `build` matters as much here as in the root config: a setuptools staging copy
+# holds a second `hfmodem/tests` under the same module names, and pytest picks
+# whichever config is nearest the arguments it was given. Without it the suite
+# collects or refuses to collect depending on how it was invoked.
+norecursedirs = [".venv", "*.egg-info", "build"]
+markers = [
+    "wall_clock: real wall-budget admission test; run at nice 0 in the serial priority slice",
+    "realtime: depends on the machine keeping up -- a rendezvous between spawned processes, a wall-clock deadline, an elapsed time asserted on; deselect with -m 'not realtime' on a busy machine",
+    "slow: end-to-end tests that run the threaded modem in real time",
+    "corpus: needs the off-air recording corpus (HFMODEM_CORPUS)",
+    "ardopcf: needs a built ardopcf to cross-decode against (ARDOPCF)",
+    "hardware: needs the radio or the sound card (HFMODEM_RIG, HFMODEM_AUDIO)",
+    "wheel: builds a real wheel and inspects its contents",
+    "posix_only(reason): needs POSIX (fcntl, termios, ptys, signals, /proc, bash); skipped elsewhere with the reason",
+]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# The pyflakes rules — undefined names (F821), unused imports and vars. This is
+# the class of regression that a path no test executes hides until it runs, and
+# tests/gates/test_lint.py enforces it.
+select = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Imports the L2x2 module's `release043` fixture by name, which pytest needs.
+"hfmodem/tests/kestrel/test_rxwindow_xara_l1.py" = ["F401", "F811"]

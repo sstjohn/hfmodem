@@ -1,0 +1,59 @@
+{
+  "description": "False sweep coherence hits from recorded normal packets and V27 words. Each excerpt spans 0.25 s before to 1.25 s after the source onset; 48 kHz float audio resampled to 8 kHz signed int16 PCM with scipy.signal.resample_poly (1, 6).",
+  "excerpts": [
+    {
+      "arm": "0936",
+      "source_capture": "captures/onair-0929-0936/stream.flac",
+      "source_sha256": "daa080995d68d01992f49b1e4bf431c85f932809f3d629e424af8f46629154aa",
+      "source_start_sample": 2015808,
+      "onset_seconds": 42.246,
+      "cfo_hz": -2.562,
+      "traffic_kind": "WS8EOC normal stream"
+    },
+    {
+      "arm": "0936",
+      "source_capture": "captures/onair-0929-0936/stream.flac",
+      "source_sha256": "daa080995d68d01992f49b1e4bf431c85f932809f3d629e424af8f46629154aa",
+      "source_start_sample": 2196096,
+      "onset_seconds": 46.002,
+      "cfo_hz": -2.562,
+      "traffic_kind": "WS8EOC normal stream"
+    },
+    {
+      "arm": "0936",
+      "source_capture": "captures/onair-0929-0936/stream.flac",
+      "source_sha256": "daa080995d68d01992f49b1e4bf431c85f932809f3d629e424af8f46629154aa",
+      "source_start_sample": 3095952,
+      "onset_seconds": 64.749,
+      "cfo_hz": -3.534,
+      "traffic_kind": "WS8EOC normal stream"
+    },
+    {
+      "arm": "0936",
+      "source_capture": "captures/onair-0929-0936/stream.flac",
+      "source_sha256": "daa080995d68d01992f49b1e4bf431c85f932809f3d629e424af8f46629154aa",
+      "source_start_sample": 3335616,
+      "onset_seconds": 69.742,
+      "cfo_hz": -3.534,
+      "traffic_kind": "WS8EOC normal stream"
+    },
+    {
+      "arm": "2253",
+      "source_capture": "captures/onair-0929-2253/stream.flac",
+      "source_sha256": "f16d19d88bbf9c8c5450c1733a2405b719abba3b82b94f10f25ea0ec8699793b",
+      "source_start_sample": 1895808,
+      "onset_seconds": 39.746,
+      "cfo_hz": 2.842,
+      "traffic_kind": "V27 word stream"
+    },
+    {
+      "arm": "2253",
+      "source_capture": "captures/onair-0929-2253/stream.flac",
+      "source_sha256": "f16d19d88bbf9c8c5450c1733a2405b719abba3b82b94f10f25ea0ec8699793b",
+      "source_start_sample": 2314992,
+      "onset_seconds": 48.479,
+      "cfo_hz": 2.842,
+      "traffic_kind": "V27 word stream"
+    }
+  ]
+}

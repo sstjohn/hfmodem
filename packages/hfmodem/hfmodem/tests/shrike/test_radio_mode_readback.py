@@ -1,0 +1,211 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+
+"""Radio configuration gate: all CAT/process/PTT boundaries are fakes."""
+import json
+from pathlib import Path
+import subprocess
+from types import SimpleNamespace
+
+import pytest
+
+from hfmodem.core import rxreadiness as rx
+from hfmodem.core.claim import ClaimError
+from hfmodem.shrike import ota
+
+
+@pytest.mark.parametrize("width", [2400, 3000])
+def test_ft891_accepts_documented_width_covering_profile(width):
+    actual = rx.parse_mode_readback(f"PKTUSB\n{width}\n", 0)
+    proof = rx.validate_mode_width(actual, expected_mode="PKTUSB", model=1036, span_hz=(380, 2620))
+    assert proof["minimum_nominal_width_hz"] == 2240
+    assert proof["full_receiver_verified"] is False
+
+
+@pytest.mark.parametrize("text,code,err", [("", 0, ""), ("PKTUSB\n3000\n", 1, ""),
+    ("PKTUSB\n3000\n", 0, "RPRT -4"), ("RPRT -4\n", 0, ""),
+    ("PKTUSB\n0\n", 0, ""), ("PKTUSB\nnan\n", 0, ""),
+    ("PKTUSB\n3000\nRPRT 0\n", 0, "")])
+def test_missing_unsupported_failed_or_ambiguous_mode(text, code, err):
+    with pytest.raises(rx.ReceiverReadbackError): rx.parse_mode_readback(text, code, err)
+
+
+@pytest.mark.parametrize("mode,width", [("USB", 3000), ("PKTLSB", 3000),
+                                      ("PKTUSB", 2000), ("PKTUSB", 2240)])
+def test_bad_actual_mode_or_width(mode, width):
+    with pytest.raises(rx.ReceiverReadbackError):
+        rx.validate_mode_width(rx.RadioMode(mode, width, ""), expected_mode="PKTUSB",
+                               model=1036, span_hz=(380, 2620))
+
+
+def test_other_rig_not_restricted_to_ft891_width_steps():
+    rx.validate_mode_width(rx.RadioMode("PKTUSB", 2800, ""), expected_mode="PKTUSB",
+                           model=3088, span_hz=(380, 2620))
+
+
+def fake_rig(monkeypatch, result=None, fail=None):
+    rig = ota.Rig.__new__(ota.Rig)
+    rig.descriptor = object()
+    rig.rigctl = Path("/mock/rigctl"); rig.model = 1036
+    rig.serial = "/mock/CAT"; rig.baud = 38400; rig.ptt_port = "/mock/PTT"
+    calls = []
+    monkeypatch.setattr(rig, "_close", lambda: calls.append("close"))
+    def run(argv, timeout, *, descriptor):
+        assert descriptor is rig.descriptor
+        calls.append(argv)
+        assert calls[0] == "close" and timeout == 8
+        assert "-p" not in argv and "/mock/PTT" not in argv
+        assert argv[-3:] == ["-P", "NONE", "m"]
+        if fail: raise fail
+        return result or SimpleNamespace(stdout="PKTUSB\n2400\n", stderr="", returncode=0)
+    monkeypatch.setattr(ota, "cat_once", run)
+    return rig, calls
+
+
+def test_real_rig_getter_closes_owner_and_reads_cat_only(monkeypatch):
+    rig, calls = fake_rig(monkeypatch)
+    assert rig.get_mode().passband_hz == 2400
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("fail", [OSError("gone"), subprocess.TimeoutExpired("m", 8),
+                                  ClaimError("cleanup in progress (pid 1)")])
+def test_real_getter_timeout_error_fails_closed(monkeypatch, fail):
+    rig, _ = fake_rig(monkeypatch, fail=fail)
+    with pytest.raises(rx.ReceiverReadbackError): rig.get_mode()
+
+
+class StartupRig:
+    def __init__(self, reply="PKTUSB\n2400\n", accepted=True):
+        self.reply = reply; self.accepted = accepted; self.calls = []; self.keys = 0
+    def set_mode(self, mode, passband):
+        self.calls.append(("set", mode, passband)); return self.accepted
+    def get_mode(self):
+        self.calls.append(("read",)); return rx.parse_mode_readback(self.reply, 0)
+    def ptt(self, keyed):
+        self.keys += int(keyed)
+
+
+@pytest.mark.parametrize("reply,accepted", [("USB\n3000\n", True), ("PKTUSB\n2000\n", True),
+    ("RPRT -4\n", True), ("PKTUSB\n2400\n", False)])
+def test_startup_refusal_prevents_following_rf_and_records_reason(tmp_path, reply, accepted):
+    rig = StartupRig(reply, accepted)
+    with pytest.raises(SystemExit, match="NOT KEYING"):
+        rx.verify_receiver_startup(rig, expected_mode="PKTUSB", model=1036,
+                                   pactor1_only=False, output_dir=tmp_path)
+        rig.ptt(True)
+    assert rig.keys == 0
+    proof = json.loads((tmp_path / "radio-readback.json").read_text())
+    assert proof["status"] == "refused" and proof["reason"]
+
+
+def test_success_records_requested_actual_and_unknown_calibration(tmp_path):
+    rig = StartupRig()
+    proof = rx.verify_receiver_startup(rig, expected_mode="PKTUSB", model=1036,
+                                       pactor1_only=False, output_dir=tmp_path)
+    assert rig.calls == [("set", "PKTUSB", 3000), ("read",)] and rig.keys == 0
+    assert proof["actual"]["passband_hz"] == 2400
+    assert proof["requested"]["passband_hz"] == 3000
+    assert all(value is None for value in proof["calibration"].values())
+    assert proof["rf_authorized"] is False
+
+
+def test_p1_only_uses_its_enforced_narrower_span(tmp_path):
+    proof = rx.verify_receiver_startup(StartupRig("PKTUSB\n800\n"), expected_mode="PKTUSB",
+                                      model=1036, pactor1_only=True, output_dir=tmp_path)
+    assert proof["occupied_hz"] == [1200., 1800.]
+
+
+def test_stale_output_refuses_before_cat_request(tmp_path):
+    (tmp_path / "radio-readback.json").write_text("prior evidence")
+    rig = StartupRig()
+    with pytest.raises(SystemExit):
+        rx.verify_receiver_startup(rig, expected_mode="PKTUSB", model=1036,
+                                   pactor1_only=False, output_dir=tmp_path)
+    assert rig.calls == [] and rig.keys == 0
+
+
+class Ftdx10Rig(StartupRig):
+    def __init__(self, width=4000, roof=12000, mode='PKTUSB'):
+        super().__init__()
+        self.width, self.roof, self.mode = width, roof, mode
+
+    def get_receiver_filters(self):
+        self.calls.append(('raw',))
+        return rx.RadioMode(self.mode, self.width, 'MD0C; SH0021; RF06;'), self.roof
+
+
+def test_ftdx10_startup_only_observes_raw_filters(tmp_path):
+    rig = Ftdx10Rig()
+    proof = rx.verify_receiver_startup(rig, expected_mode='PKTUSB', model=1042,
+                                      pactor1_only=False, output_dir=tmp_path)
+    assert rig.calls == [('raw',)]
+    assert proof['actual']['passband_hz'] == 4000 and proof['roofing_hz'] == 12000
+    assert proof['requested']['setters'] is False
+    assert proof['width_source'].startswith('FTDX10 raw CAT')
+    assert json.loads((tmp_path / 'radio-readback.json').read_text()) == proof
+
+
+@pytest.mark.parametrize('width,roof', [(3000, 12000), (4000, 500), (800, 12000),
+    (800, 500)])
+def test_ftdx10_startup_warns_and_continues_on_filter_mismatch(tmp_path, capsys, width, roof):
+    rig = Ftdx10Rig(width, roof)
+    proof = rx.verify_receiver_startup(rig, expected_mode='PKTUSB', model=1042,
+                                      pactor1_only=False, output_dir=tmp_path)
+    assert rig.calls == [('raw',)]
+    assert proof['status'] == 'mode_verified_filters_warning'
+    assert proof['actual']['passband_hz'] == width and proof['roofing_hz'] == roof
+    assert proof['warnings'] and proof['requested']['setters'] is False
+    assert json.loads((tmp_path / 'radio-readback.json').read_text()) == proof
+    output = capsys.readouterr().out
+    for warning in proof['warnings']:
+        assert f'!! {warning}' in output
+    assert 'nominal width verified' not in output
+
+
+def test_ftdx10_startup_refuses_wrong_mode(tmp_path):
+    rig = Ftdx10Rig(mode='USB')
+    with pytest.raises(SystemExit):
+        rx.verify_receiver_startup(rig, expected_mode='PKTUSB', model=1042,
+                                  pactor1_only=False, output_dir=tmp_path)
+    assert rig.calls == [('raw',)]
+
+
+@pytest.mark.parametrize('reply,rc', [('MD0C; SH0021; RF06;', 0),
+    ('MD0C; SH0021; RF09;', 0), ('MD0C; SH0021;', 0),
+    ('MD1C; SH1023; RF16;', 0), ('MD0C; SH0021; RF06;', 1),
+    ('MD0C; SH0023; RF06;', 0)])
+def test_raw_receiver_getter_uses_cat_only(monkeypatch, reply, rc):
+    rig = ota.Rig.__new__(ota.Rig)
+    rig.descriptor = object()
+    rig.rigctl = Path('/mock/rigctl'); rig.model = 1042
+    rig.serial = '/mock/CAT'; rig.baud = 38400
+    calls = []
+    monkeypatch.setattr(rig, '_close', lambda: calls.append('close'))
+    def run(argv, timeout, *, descriptor):
+        assert descriptor is rig.descriptor
+        assert calls == ['close']
+        assert argv[-12:] == ['-P', 'NONE', 'w', 'VS;', 'w', 'MD0;',
+                              'w', 'MD1;', 'w', 'SH0;', 'w', 'RF0;']
+        assert timeout == 8
+        return SimpleNamespace(stdout='VS0; ' + reply, stderr='', returncode=rc)
+    monkeypatch.setattr(ota, 'cat_once', run)
+    if rc or 'RF0' not in reply or 'MD0' not in reply or 'SH0023;' in reply:
+        with pytest.raises(rx.ReceiverReadbackError): rig.get_receiver_filters()
+    else:
+        actual, roof = rig.get_receiver_filters()
+        assert actual.mode == 'PKTUSB' and actual.passband_hz == 4000
+        assert roof == (500 if 'RF09;' in reply else 12000)
+
+
+
+def test_raw_receiver_getter_observes_selected_vfo(monkeypatch):
+    rig = ota.Rig.__new__(ota.Rig)
+    rig.descriptor = object()
+    rig.rigctl = Path('/mock/rigctl'); rig.model = 1042
+    rig.serial = '/mock/CAT'; rig.baud = 38400
+    monkeypatch.setattr(rig, '_close', lambda: None)
+    monkeypatch.setattr(ota, 'cat_once', lambda *a, **k: SimpleNamespace(
+        stdout='VS1; MD01; MD1C; SH0021; RF06;', stderr='', returncode=0))
+    actual, roof = rig.get_receiver_filters()
+    assert actual.mode == 'PKTUSB' and actual.passband_hz == 4000 and roof == 12000

@@ -1,0 +1,611 @@
+{
+  "seed": 1909,
+  "frames_per_case": 64,
+  "noise_reference": "transmitted active-region mean power, 3000 Hz",
+  "rate_scope": "four codewords + CRC/length/FEC/pilots/CP/preamble/guards; excludes session controls, turnaround, retries",
+  "rows": [
+    {
+      "gear": "robust",
+      "channel": "poor",
+      "snr3k_db": -2.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 18,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 8.444,
+      "payload_burst_bps": 231.1700615821885,
+      "spectrum": {
+        "band99_hz": [
+          824.9644718143061,
+          1988.157271435339
+        ],
+        "band999_hz": [
+          750.0000000000001,
+          2208.3135954523923
+        ],
+        "outside_100_2900_db": -103.63379402308271,
+        "papr_db": 5.3303996606543524
+      }
+    },
+    {
+      "gear": "robust",
+      "channel": "poor",
+      "snr3k_db": -2.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 16,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 8.444,
+      "payload_burst_bps": 231.1700615821885,
+      "spectrum": {
+        "band99_hz": [
+          940.9047844623402,
+          2060.871624822359
+        ],
+        "band999_hz": [
+          891.8758882046425,
+          2110.6110847939367
+        ],
+        "outside_100_2900_db": -86.1480207787399,
+        "papr_db": 5.689854039594481
+      }
+    },
+    {
+      "gear": "workhorse",
+      "channel": "poor",
+      "snr3k_db": 8.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 58,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 655.6202418271384,
+      "spectrum": {
+        "band99_hz": [
+          824.8992386923422,
+          2039.7447380206002
+        ],
+        "band999_hz": [
+          750.0,
+          2199.6193461710704
+        ],
+        "outside_100_2900_db": -90.62448207399818,
+        "papr_db": 5.2483834506916445
+      }
+    },
+    {
+      "gear": "workhorse",
+      "channel": "poor",
+      "snr3k_db": 8.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 57,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 655.6202418271384,
+      "spectrum": {
+        "band99_hz": [
+          943.1258396775639,
+          2058.8893864755937
+        ],
+        "band999_hz": [
+          888.3788625167936,
+          2110.277653381102
+        ],
+        "outside_100_2900_db": -84.18741861078927,
+        "papr_db": 5.8156883127038626
+      }
+    },
+    {
+      "gear": "workhorse34",
+      "channel": "poor",
+      "snr3k_db": 12.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 33,
+      "trials": 64,
+      "payload_bytes": 372,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 999.5521719659652,
+      "spectrum": {
+        "band99_hz": [
+          824.8992386923422,
+          2041.4240931482311
+        ],
+        "band999_hz": [
+          750.0,
+          2205.329153605016
+        ],
+        "outside_100_2900_db": -83.91263788715457,
+        "papr_db": 5.165160094754389
+      }
+    },
+    {
+      "gear": "workhorse34",
+      "channel": "poor",
+      "snr3k_db": 12.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 33,
+      "trials": 64,
+      "payload_bytes": 372,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 999.5521719659652,
+      "spectrum": {
+        "band99_hz": [
+          938.0877742946709,
+          2059.561128526646
+        ],
+        "band999_hz": [
+          887.371249440215,
+          2109.2700403045233
+        ],
+        "outside_100_2900_db": -80.16893373651351,
+        "papr_db": 5.6094466170329955
+      }
+    },
+    {
+      "gear": "fast",
+      "channel": "moderate",
+      "snr3k_db": 16.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 24,
+      "trials": 64,
+      "payload_bytes": 372,
+      "burst_seconds": 0.8173333333333334,
+      "payload_burst_bps": 3641.1092985318105,
+      "spectrum": {
+        "band99_hz": [
+          275.28548123980426,
+          2865.415986949429
+        ],
+        "band999_hz": [
+          253.2626427406199,
+          2913.132137030995
+        ],
+        "outside_100_2900_db": -31.355257548184923,
+        "papr_db": 7.369635817231392
+      }
+    },
+    {
+      "gear": "fast",
+      "channel": "moderate",
+      "snr3k_db": 16.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 22,
+      "trials": 64,
+      "payload_bytes": 372,
+      "burst_seconds": 0.8173333333333334,
+      "payload_burst_bps": 3641.1092985318105,
+      "spectrum": {
+        "band99_hz": [
+          209.21696574225123,
+          2796.900489396411
+        ],
+        "band999_hz": [
+          185.97063621533442,
+          2812.8058727569332
+        ],
+        "outside_100_2900_db": -72.8594020319621,
+        "papr_db": 7.4337934640600665
+      }
+    },
+    {
+      "gear": "max",
+      "channel": "good",
+      "snr3k_db": 24.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 32,
+      "trials": 64,
+      "payload_bytes": 628,
+      "burst_seconds": 0.8173333333333334,
+      "payload_burst_bps": 6146.818923327895,
+      "spectrum": {
+        "band99_hz": [
+          275.28548123980426,
+          2861.7455138662317
+        ],
+        "band999_hz": [
+          253.2626427406199,
+          2909.4616639477977
+        ],
+        "outside_100_2900_db": -31.882750807105996,
+        "papr_db": 8.511977287276869
+      }
+    },
+    {
+      "gear": "max",
+      "channel": "good",
+      "snr3k_db": 24.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 36,
+      "trials": 64,
+      "payload_bytes": 628,
+      "burst_seconds": 0.8173333333333334,
+      "payload_burst_bps": 6146.818923327895,
+      "spectrum": {
+        "band99_hz": [
+          207.99347471451875,
+          2794.453507340946
+        ],
+        "band999_hz": [
+          185.97063621533442,
+          2809.1353996737357
+        ],
+        "outside_100_2900_db": -71.97408157756563,
+        "papr_db": 8.527376698738179
+      }
+    },
+    {
+      "gear": "sparse34",
+      "channel": "good",
+      "snr3k_db": 10.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 45,
+      "trials": 64,
+      "payload_bytes": 372,
+      "burst_seconds": 2.7373333333333334,
+      "payload_burst_bps": 1087.1894788114953,
+      "spectrum": {
+        "band99_hz": [
+          824.8904042864101,
+          2041.4028251339503
+        ],
+        "band999_hz": [
+          749.2693619094008,
+          2199.95129079396
+        ],
+        "outside_100_2900_db": -83.9744833291399,
+        "papr_db": 5.154456665452889
+      }
+    },
+    {
+      "gear": "sparse34",
+      "channel": "good",
+      "snr3k_db": 10.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 46,
+      "trials": 64,
+      "payload_bytes": 372,
+      "burst_seconds": 2.7373333333333334,
+      "payload_burst_bps": 1087.1894788114953,
+      "spectrum": {
+        "band99_hz": [
+          939.6005845104725,
+          2062.2260107160255
+        ],
+        "band999_hz": [
+          885.5333658061373,
+          2108.9868485143693
+        ],
+        "outside_100_2900_db": -78.20433850207957,
+        "papr_db": 5.727105680891004
+      }
+    },
+    {
+      "gear": "doppler",
+      "channel": "polar",
+      "snr3k_db": 14.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 53,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 3.194,
+      "payload_burst_bps": 611.1458985597997,
+      "spectrum": {
+        "band99_hz": [
+          633.6881653099562,
+          2843.143393863494
+        ],
+        "band999_hz": [
+          576.7063243581715,
+          2913.2748904195364
+        ],
+        "outside_100_2900_db": -30.419720555228814,
+        "papr_db": 6.965565183535847
+      }
+    },
+    {
+      "gear": "doppler",
+      "channel": "polar",
+      "snr3k_db": 14.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 54,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 3.194,
+      "payload_burst_bps": 611.1458985597997,
+      "spectrum": {
+        "band99_hz": [
+          392.9242329367564,
+          2605.5103318722604
+        ],
+        "band999_hz": [
+          357.5453976205385,
+          2643.0807764558544
+        ],
+        "outside_100_2900_db": -80.93217137982391,
+        "papr_db": 7.04437864556795
+      }
+    },
+    {
+      "gear": "wide256",
+      "channel": "AWGN",
+      "snr3k_db": 32.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 64,
+      "trials": 64,
+      "payload_bytes": 628,
+      "burst_seconds": 0.5906666666666667,
+      "payload_burst_bps": 8505.643340857787,
+      "spectrum": {
+        "band99_hz": [
+          272.5733634311512,
+          2854.4018058690745
+        ],
+        "band999_hz": [
+          252.2573363431151,
+          2889.9548532731374
+        ],
+        "outside_100_2900_db": -33.537848400746256,
+        "papr_db": 11.993975191260812
+      }
+    },
+    {
+      "gear": "wide256",
+      "channel": "AWGN",
+      "snr3k_db": 32.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 64,
+      "trials": 64,
+      "payload_bytes": 628,
+      "burst_seconds": 0.5906666666666667,
+      "payload_burst_bps": 8505.643340857787,
+      "spectrum": {
+        "band99_hz": [
+          199.77426636568848,
+          2784.988713318284
+        ],
+        "band999_hz": [
+          184.53724604966138,
+          2810.3837471783295
+        ],
+        "outside_100_2900_db": -75.22191613134548,
+        "papr_db": 11.995657050565958
+      }
+    },
+    {
+      "gear": "workhorse",
+      "channel": "AWGN",
+      "snr3k_db": 10.0,
+      "cfo_hz": -75.0,
+      "drift_hz_s": -3.5,
+      "placement": "offset",
+      "successes": 64,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 655.6202418271384,
+      "spectrum": {
+        "band99_hz": [
+          824.8992386923422,
+          2036.3860277653382
+        ],
+        "band999_hz": [
+          750.0,
+          2184.5051500223917
+        ],
+        "outside_100_2900_db": -89.51999451845947,
+        "papr_db": 5.146608893476402
+      }
+    },
+    {
+      "gear": "workhorse",
+      "channel": "AWGN",
+      "snr3k_db": 10.0,
+      "cfo_hz": -75.0,
+      "drift_hz_s": -3.5,
+      "placement": "center1500",
+      "successes": 64,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 655.6202418271384,
+      "spectrum": {
+        "band99_hz": [
+          941.7823555754591,
+          2059.561128526646
+        ],
+        "band999_hz": [
+          888.7147335423198,
+          2108.934169278997
+        ],
+        "outside_100_2900_db": -80.81843702149514,
+        "papr_db": 5.64347725842902
+      }
+    },
+    {
+      "gear": "workhorse",
+      "channel": "AWGN",
+      "snr3k_db": 10.0,
+      "cfo_hz": 75.0,
+      "drift_hz_s": 3.5,
+      "placement": "offset",
+      "successes": 64,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 655.6202418271384,
+      "spectrum": {
+        "band99_hz": [
+          824.8992386923422,
+          2040.0806090461265
+        ],
+        "band999_hz": [
+          751.0076130765787,
+          2208.687863860278
+        ],
+        "outside_100_2900_db": -86.5355073060436,
+        "papr_db": 5.1798437582570545
+      }
+    },
+    {
+      "gear": "workhorse",
+      "channel": "AWGN",
+      "snr3k_db": 10.0,
+      "cfo_hz": 75.0,
+      "drift_hz_s": 3.5,
+      "placement": "center1500",
+      "successes": 64,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 655.6202418271384,
+      "spectrum": {
+        "band99_hz": [
+          939.0953873712496,
+          2060.904612628751
+        ],
+        "band999_hz": [
+          889.7223466188984,
+          2105.9113300492613
+        ],
+        "outside_100_2900_db": -79.75866429645055,
+        "papr_db": 5.6576457044989406
+      }
+    },
+    {
+      "gear": "workhorse",
+      "channel": "polar",
+      "snr3k_db": 14.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 0,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 655.6202418271384,
+      "spectrum": {
+        "band99_hz": [
+          824.8992386923422,
+          2038.4012539184955
+        ],
+        "band999_hz": [
+          750.0,
+          2200.626959247649
+        ],
+        "outside_100_2900_db": -86.47878460149302,
+        "papr_db": 5.245378124023521
+      }
+    },
+    {
+      "gear": "workhorse",
+      "channel": "polar",
+      "snr3k_db": 14.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 0,
+      "trials": 64,
+      "payload_bytes": 244,
+      "burst_seconds": 2.977333333333333,
+      "payload_burst_bps": 655.6202418271384,
+      "spectrum": {
+        "band99_hz": [
+          937.0801612180924,
+          2060.904612628751
+        ],
+        "band999_hz": [
+          889.050604567846,
+          2108.5982982534706
+        ],
+        "outside_100_2900_db": -81.12468124177418,
+        "papr_db": 5.7592845811326
+      }
+    },
+    {
+      "gear": "wide256",
+      "channel": "AWGN",
+      "snr3k_db": 12.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "offset",
+      "successes": 0,
+      "trials": 64,
+      "payload_bytes": 628,
+      "burst_seconds": 0.5906666666666667,
+      "payload_burst_bps": 8505.643340857787,
+      "spectrum": {
+        "band99_hz": [
+          269.18735891647856,
+          2859.4808126410835
+        ],
+        "band999_hz": [
+          238.71331828442436,
+          2896.726862302483
+        ],
+        "outside_100_2900_db": -33.18217858198004,
+        "papr_db": 9.451066544789917
+      }
+    },
+    {
+      "gear": "wide256",
+      "channel": "AWGN",
+      "snr3k_db": 12.0,
+      "cfo_hz": 0.0,
+      "drift_hz_s": 0.0,
+      "placement": "center1500",
+      "successes": 0,
+      "trials": 64,
+      "payload_bytes": 628,
+      "burst_seconds": 0.5906666666666667,
+      "payload_burst_bps": 8505.643340857787,
+      "spectrum": {
+        "band99_hz": [
+          201.4672686230248,
+          2788.374717832957
+        ],
+        "band999_hz": [
+          187.92325056433407,
+          2812.0767494356655
+        ],
+        "outside_100_2900_db": -69.69412274864202,
+        "papr_db": 9.441600291320999
+      }
+    }
+  ],
+  "receiver": "paired-chirp acquisition, scattered pilots, one decision-directed pass, real audio ingress",
+  "spectrum_scope": "last trial of each row; whole real-audio burst without analysis window",
+  "comparison_scope": "bundled carrier placement and filter change; common current receiver and coding, not a center-only ablation"
+}

@@ -1,0 +1,23 @@
+{
+  "file": "ve3kpg-0926-1228-answers.wav",
+  "source": "captures/onair-0926-1228/stream.flac",
+  "source_start_s": 19.4,
+  "samples": 38401,
+  "rate": 12000,
+  "sha256": "cce5d4ee506712582398305426e344c20c5b5f0d31d5177842af9390e6cfc53a",
+  "link": "VE3KPG on 7089.5 kHz, 2026-09-26 17:28Z, answering the first three of four back-to-back robust shorts (v7,v38,v13 on header A from 18.805 s): X27 after the first, Y27 after the next two",
+  "words": [
+    {
+      "at_s": 0.348,
+      "word": "X27"
+    },
+    {
+      "at_s": 1.598,
+      "word": "Y27"
+    },
+    {
+      "at_s": 2.848,
+      "word": "Y27"
+    }
+  ]
+}

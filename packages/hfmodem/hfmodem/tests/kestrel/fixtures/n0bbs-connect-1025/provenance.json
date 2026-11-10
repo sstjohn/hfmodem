@@ -1,0 +1,7 @@
+{
+  "source": "station receive recording, 2026-10-25 21:56:22Z",
+  "start_sample": 12860000,
+  "end_sample": 12963328,
+  "sample_rate": 48000,
+  "description": "A BBS gateway's response after late link setup, recorded on air; local runtime had already aborted. The tests call the gateway N0BBS; this decode does not use its callsign."
+}

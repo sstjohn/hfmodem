@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+[package]
+name = "kestrel-xara-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "@HARNESS_ROOT@/build.rs"
+
+[[bin]]
+name = "kestrel-xara-probe"
+path = "@HARNESS_ROOT@/src/main.rs"
+
+[dependencies]
+xara-phy = { path = "@XARA_ROOT@/crates/xara-phy" }
+xara-arq = { path = "@XARA_ROOT@/crates/xara-arq" }
+xara-host = { path = "@XARA_ROOT@/crates/xara-host" }
+xara-ui = { path = "@XARA_ROOT@/crates/xara-ui" }
+xara-testkit = { path = "@XARA_ROOT@/crates/xara-testkit" }
+
+
+[workspace]

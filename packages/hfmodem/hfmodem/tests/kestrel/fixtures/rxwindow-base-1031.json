@@ -1,0 +1,720 @@
+{
+  "SPDX-License-Identifier": "AGPL-3.0-only",
+  "SPDX-FileCopyrightText": "2026 Saul St John (W9SSJ)",
+  "base": "31b76dcee",
+  "seed": 4145,
+  "variant": "reference",
+  "role": "initiator",
+  "generator": "harsh",
+  "trace": [
+    {
+      "event": "DATA",
+      "number": 0,
+      "offset": 0,
+      "level": 4,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "9ad3cbf9a432e1d18bce1e0e13454e238fe73a3c8282179cf39fb7a1121428aa63570e95e3a40eafc857ca8d241fdddd2f0ec833be8097ebf7720b699f4a040cb24f8e1ae2cde8f77b7fd6026aeb389752d7948ed43db2fb86"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 0,
+      "delay": 6.4,
+      "unphased": true,
+      "answer": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 1,
+      "offset": 0,
+      "level": 3,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "9ad3cbf9a432e1d18bce1e0e13454e238fe73a3c8282179cf39fb7a1121428aa63570e95e3a40eafc857ca8d241fdd"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 2,
+      "offset": 47,
+      "level": 3,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "dd2f0ec833be8097ebf7720b699f4a040cb24f8e1ae2cde8f77b7fd6026aeb389752d7948ed43db2fb86b9f061bb86"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 3,
+      "offset": 94,
+      "level": 3,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "2a7175e2fa241193dafb6924154bc674fa5e0c7d328a91abf4326b04d6c61561f6e01360b208bfef48628191dcae6b"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 1,
+      "delay": 6.4,
+      "unphased": false,
+      "answer": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 4,
+      "offset": 94,
+      "level": 2,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "2a7175e2fa241193dafb6924154bc674fa5e0c7d328a"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 0,
+      "delay": 0.2,
+      "unphased": true,
+      "answer": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 5,
+      "offset": 116,
+      "level": 2,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "91abf4326b04d6c61561f6e01360b208bfef48628191"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 6,
+      "offset": 138,
+      "level": 2,
+      "phase": 0,
+      "status": [
+        "X"
+      ],
+      "payloads": [
+        "dcae6b8c8289c188254b23d76e280f8e471bc2db589a"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 7,
+      "offset": 138,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "dcae6b8c8289c18825"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 8,
+      "offset": 147,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "4b23d76e280f8e471b"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 0,
+      "delay": 6.4,
+      "unphased": true,
+      "answer": "nak",
+      "air": true,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 0,
+      "delay": 6.4,
+      "unphased": false,
+      "answer": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 9,
+      "offset": 147,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "4b23d76e280f8e471b"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": false,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 1,
+      "delay": 0.2,
+      "unphased": true,
+      "answer": "nak",
+      "air": false,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 1,
+      "delay": 0.2,
+      "unphased": false,
+      "answer": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 10,
+      "offset": 147,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "4b23d76e280f8e471b"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 11,
+      "offset": 156,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "c2db589a3f806a2356"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": false,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 1,
+      "delay": 6.4,
+      "unphased": false,
+      "answer": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 12,
+      "offset": 156,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "c2db589a3f806a2356"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 13,
+      "offset": 165,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "61c6a947d13d8fe4cb"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 14,
+      "offset": 174,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "2d2245a0926e2a26ff"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 15,
+      "offset": 183,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "af561b127b2e5b7c68"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 16,
+      "offset": 192,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "1e5a122f96b6bbe5ce"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 0,
+      "delay": 0.2,
+      "unphased": false,
+      "answer": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 17,
+      "offset": 201,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "8e247c446367b69536"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": false,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 1,
+      "delay": 0.2,
+      "unphased": true,
+      "answer": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 18,
+      "offset": 201,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "8e247c446367b69536"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 19,
+      "offset": 210,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "26c334703e328383b4"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 20,
+      "offset": 219,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "80f68782e1042cab10"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 0,
+      "delay": 6.4,
+      "unphased": true,
+      "answer": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 21,
+      "offset": 219,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "80f68782e1042cab10"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": false,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 1,
+      "delay": 0.2,
+      "unphased": true,
+      "answer": "nak",
+      "air": false,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 1,
+      "delay": 6.4,
+      "unphased": false,
+      "answer": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 22,
+      "offset": 219,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "80f68782e1042cab10"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 23,
+      "offset": 228,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "X"
+      ],
+      "payloads": [
+        "f80f07419579eeddb8"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 24,
+      "offset": 228,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "f80f07419579eeddb8"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": false,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 0,
+      "delay": 6.4,
+      "unphased": false,
+      "answer": "nak",
+      "air": true,
+      "heard": false
+    },
+    {
+      "event": "Q",
+      "phase": 0,
+      "delay": 0.2,
+      "unphased": false,
+      "answer": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 25,
+      "offset": 228,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "f80f07419579eeddb8"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 26,
+      "offset": 237,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "X"
+      ],
+      "payloads": [
+        "48232e24fa9f62e61f"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "nak",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 27,
+      "offset": 237,
+      "level": 1,
+      "phase": 1,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "48232e24fa9f62e61f"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 28,
+      "offset": 246,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "c6380fe2ab56214889"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "continue",
+      "air": true,
+      "heard": true
+    },
+    {
+      "event": "DATA",
+      "number": 29,
+      "offset": 255,
+      "level": 1,
+      "phase": 0,
+      "status": [
+        "read"
+      ],
+      "payloads": [
+        "9c"
+      ]
+    },
+    {
+      "event": "answer",
+      "kind": "final",
+      "air": true,
+      "heard": true
+    }
+  ],
+  "report": null,
+  "base_outcome": "exact",
+  "base_host_sha256": "c9fbb310dd1bd7d20d1e20e97c27546620358de78f6564d86d9517786a760af5",
+  "amendment": "DESIGN \u00a73, second amendment: DATA after an aired NAK resets both counts; floor retry NONE, delivery exact."
+}

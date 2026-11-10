@@ -1,0 +1,10 @@
+{
+  "source": "captures/kb5lzk-after-0926/after-arm-173733Z.wav",
+  "source_start_s": 17.0,
+  "timeline": "filled by working/p4-oracle/kb5lzk-0926/fill.py; autocorrelation evaluated by FFT",
+  "inserted_buffers": 1199,
+  "rate": 12000,
+  "sha256": "299eb7f9b751672b82187ec232a264d496741c57a0d9cfeb5ab3ff786b66c46e",
+  "data": "524d53205472696d6f646520312e342e342e30204b42354c5a4b2061742074",
+  "status": 0
+}

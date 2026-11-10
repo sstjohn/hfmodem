@@ -1,0 +1,24 @@
+{
+  "source": "station receive recording, 2026-11-08 20:59:47Z",
+  "sample_rate": 48000,
+  "caller": "W9SSJ",
+  "called": "VA2OPS",
+  "files": {
+    "level6.wav": {
+      "start_sample": 64555200,
+      "end_sample": 64828800,
+      "sha256": "073a3968bbda52ea2ea70ff6344ae94e80203339f9bc86bc37e5c30d6074167b"
+    },
+    "level4.wav": {
+      "start_sample": 64944000,
+      "end_sample": 65212800,
+      "sha256": "c2423f6a39e75fe054938dfbd0e3528126f1317f3b0ee13592cae93d95611b86"
+    },
+    "level1.wav": {
+      "start_sample": 65424000,
+      "end_sample": 65740800,
+      "sha256": "ec577200ebf1cae941e94cf05a2f27c5bc8d5fb7a88414e98ff65f847879ec34"
+    }
+  },
+  "note": "VA2OPS's CRC-clean retries of its '5 <AWQ>' over at level 6 (21:22:31.95Z), level 4 (21:22:40.4Z) and level 1 (21:22:50.3Z), after our NAK of its level-6 over predicted level 5."
+}

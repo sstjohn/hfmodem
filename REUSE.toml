@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+#
+# A file takes the licence of where it sits, and every file that can carry a
+# comment states that licence in its first lines. The later of two matching
+# entries takes precedence.
+version = 1
+
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
+path = ["docs/protocols/**", "docs/viz/**", "evidence/**", "site/**", "NOTICE-REMOVED-RELEASES.md"]
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+# The one file licensed against its location, by the operator's decision: the
+# works-cited list sits at the root beside README.md, under CC BY 4.0.
+[[annotations]]
+path = "RELATED-WORK.md"
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+# The code that builds the guides and the site, and the scripts the site serves.
+[[annotations]]
+path = ["docs/viz/tools/**", "site/js/**", "site/tools/**"]
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# Recordings of on-air transmissions, any station's, and data decoded from them.
+# The project claims no copyright in and assigns no licence to these files.
+[[annotations]]
+path = ["captures/**", "packages/**/fixtures/**", "evidence/*/audio/**", "site/recordings/audio/**",
+        "site/examples/*/audio/**", "site/examples/*/data/**"]
+SPDX-License-Identifier = "NOASSERTION"
+
+# The code and notes we write beside that data are ours.
+[[annotations]]
+path = ["packages/**/fixtures/**.py", "packages/**/fixtures/**README.md"]
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+[[annotations]]
+path = "packages/**/fixtures/sigidwiki/**"
+SPDX-FileCopyrightText = "Signal Identification Wiki contributors"
+SPDX-License-Identifier = "CC-BY-SA-3.0"
+
+# Symbol decisions read from signals.taunus.de's PACTOR-IV recording
+# (PACTOR-IV_112-5_DQPSK.WAV), which that site publishes under no licence.
+[[annotations]]
+path = "packages/**/fixtures/p4-robust-taunus/*.npz"
+SPDX-License-Identifier = "NOASSERTION"
+
+[[annotations]]
+path = "packages/hfmodem/hfmodem/shrike/c2proof/cml/**"
+SPDX-FileCopyrightText = ["2005-2006 Matthew C. Valenti and Yufei Wu", "2026 Saul St John (W9SSJ)"]
+SPDX-License-Identifier = "LGPL-2.1-or-later"
+
+# The C2 interleaver tables (a generator's output, kept as swaps) and data decoded
+# from on-air sessions: no copyright is claimed, no licence assigned.
+[[annotations]]
+path = ["packages/hfmodem/hfmodem/shrike/assets/c2-*.swaps.z",
+        "packages/hfmodem/hfmodem/tests/shrike/p4-breakin-*.json", "site/examples/*/events.json"]
+SPDX-License-Identifier = "NOASSERTION"
+
+# Synthetic stand-ins for third-party content, laid out as the recorded exchanges.
+[[annotations]]
+path = ["packages/hfmodem/hfmodem/tests/contact/fixtures/forwarded-vmail-1024.json",
+        "packages/hfmodem/hfmodem/tests/contact/fixtures/n0dx-bbs-welcome.json",
+        "packages/hfmodem/hfmodem/tests/kestrel/fixtures/n0bbs-prefix-1025/payloads.json"]
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# The B2F secure-login response is a port of wl2k-go's fbb/secure.go.
+[[annotations]]
+path = "packages/hfmodem/hfmodem/winlink/session.py"
+SPDX-FileCopyrightText = ["2026 Saul St John (W9SSJ)", "Copyright (c) 2014-2017 Martin Hebnes Pedersen (LA5NTA)"]
+SPDX-License-Identifier = "AGPL-3.0-only AND MIT"
+
+# Edits applied to Frotz's GPL source, carrying fragments of it.
+[[annotations]]
+path = "packages/hfmodem/hfmodem/bbs/recipes/frotz_hook.py"
+SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
+SPDX-License-Identifier = "GPL-2.0-or-later"

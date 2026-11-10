@@ -1,0 +1,10 @@
+{
+  "source": "station receive recording, 2026-11-08 20:59:47Z",
+  "sample_rate": 48000,
+  "caller": "W9SSJ",
+  "called": "W0TRM",
+  "start_sample": 58704000,
+  "end_sample": 59088000,
+  "sha256": "203297e248e20e5e46ecc6fcad3564f6a8df4886abe4e45c08f0371cd4bf1756",
+  "note": "From 0.24 s after our level-4 link-setup ended (21:20:29.85Z): W0TRM's unread answer, then two of its frame-1 idle polls keyed to W9SSJ, ending 3.4 s and 6.4 s into the cut."
+}

@@ -1,0 +1,22 @@
+{
+  "file": "n9vc-0925-kiwi-answers.wav",
+  "source": "working/p4-oracle/kiwi/20260924/7101500/seg-0003.wav",
+  "source_start": 17463210,
+  "samples": 22798,
+  "rate": 11998.90779,
+  "header_rate": 11999,
+  "source_start_s": 1455.4,
+  "sha256": "ed8a18de1d1206511e1e0b7141185df5ba457a7af31176efdcbe611e57698bda",
+  "link": "N9VC answering its caller's two robust shorts (v7, v38 on header A) on the 09-25 Kiwi recording, +910 Hz up the passband: X27 after the first, Y27 after the second; source times are seconds into seg-0003",
+  "offset_hz": 910,
+  "words": [
+    {
+      "at_s": 0.259,
+      "word": "X27"
+    },
+    {
+      "at_s": 1.509,
+      "word": "Y27"
+    }
+  ]
+}

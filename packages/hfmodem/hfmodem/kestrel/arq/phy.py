@@ -1,0 +1,1064 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+
+"""PHY adapter: one ARQ frame <-> one synthesised VARA-HF data burst.
+
+The ARQ layer is transport-agnostic; this module is the single place it touches
+the physical codecs. It dispatches on the connection **bandwidth**:
+
+    * ``bw="500"``  -> the proven BW500 Level-4 codec (``kestrel/tx/varahf500_tx``,
+      ``kestrel/rx/varahf500``). Unchanged from the validated BW500 milestone.
+    * ``bw="2300"`` -> the BW2300 wideband OFDM codec (``kestrel/tx/varahf2300_tx``,
+      ``kestrel/rx/varahf2300``), with a selectable **speed level** for the
+      per-over gear-shift (base index-mod rec3, or the high-throughput ladder).
+
+Frame container: the ARQ marker byte (control-type / seq / last-of-over) is byte 0
+of the codec payload, uniform across bandwidths and speed levels. BW500 keeps its
+native marker-as-frame-byte layout (46-byte frame); BW2300 carries the marker as
+payload[0] of the record's payload (zero-padded up to the level's capacity), so
+one wiring covers every level. The receiver, which is not told the speed level
+out of band, CRC-confirms a trial decode over the length-compatible levels.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+
+import numpy as np
+
+from ...core.cwid import MORSE
+from ..coding.crc import crc16_genibus
+from ..rx import varahf500 as _rx500
+from ..rx.observation import CaptureContext, FrameOrigin, LocatedFrame
+from ..rx import bw500_shift as _shift500
+from ..rx import beacon as _beacon
+from ..rx import varahf2300 as _rx2300
+from ..rx import varaofdm as _ofdm
+from ..rx import varatone as _tone
+from ..tx import varahf500_tx as _tx500
+from ..tx import varahf2300_tx as _tx2300
+from ..tx import varaofdm_tx as _ofdm_tx
+from ..tx import varatone_tx as _tone_tx
+from ..vara import vara_control as _vc
+from ..vara import vara_frames as _vf
+from ..vara import vara_mfsk as _mfsk
+
+ONSET = 3000  # BW500 column-0 centre sample index (head-room for the demod pad)
+
+# VARA's real BW500 control channel is a set of short fixed DBPSK tokens
+# (spec 02 §2.6). A native kestrel control frame rides the ~4.3 s DATA waveform,
+# so burst length alone separates the two on receive.
+CONTROL_TOKEN_MAX_SAMPLES = 40000       # ~0.83 s; DATA/native-control overs are ~4.3 s
+
+#: The one short control burst BW2300 has. At BW500 the vocabulary is four fixed
+#: DBPSK tokens; at BW2300 it is a single index-modulated waveform — eleven
+#: two-tone MFSK symbols on a fixed four-symbol preamble, 0.489 s
+#: [spec 04 §4.2C] — and the responder's CONNECT-time burst and its first per-over
+#: answer are that one waveform to correlation 1.00. So the bandwidth has one name
+#: here where BW500 has four, and which member of the family it is, is the
+#: receiver's state and not the audio.
+ANSWER_2300 = "answer"
+
+
+def render_token(name: str, bw: str = "500") -> np.ndarray:
+    """Render a VARA control token to audio.
+
+    BW2300 has one, whatever it is called: one captured frame, where
+    ``vara_arq._tx_connected_ack`` keys the link's generated burst
+    [vara_frames.control_bursts].
+    """
+    if _wideband(bw):
+        return _mfsk.synth_tone_pairs(_vf.CONNECTED_ACK_2300)
+    return _vc.synth_token(name)
+
+
+def detect_token(audio: np.ndarray, bw: str = "500"):
+    """Classify a short received burst as a VARA control token, or None.
+
+    At BW2300 the classifier is the preamble reader, not the DBPSK table: no VARA
+    HF station has been recorded keying that table, and on the one BW2300 recording
+    held with VARA HF stations at both ends it matches none of the thirteen short control
+    bursts while the preamble reader takes all eleven acknowledgements among them
+    at 55-60 alignments against a threshold of 3 [see vara_control].
+    """
+    x = np.asarray(audio, float)
+    if _wideband(bw):
+        from ..vara import vara_arq as _va       # session engine; imports this module
+        hold = _va._ack_plateau(x)
+        return (_vc.TokenMatch(ANSWER_2300, 0, float(hold))
+                if hold >= _va._ACK_PLATEAU else None)
+    return _vc.detect_token(x)
+
+
+def _wideband(bw) -> bool:
+    """Whether ``bw``'s DATA over is a record of the BW2300 family.
+
+    BW2750 is: its base level is record 3's index law on a 20-bin comb, same frame
+    length, same coding chain, and the MFSK control frames are bandwidth-neutral."""
+    return str(bw) in _rx2300.BASE_LEVELS
+
+
+def base_level(bw) -> int:
+    """The robust base speed level for ``bw`` (the ARQ handshake/keepalive level)."""
+    return _rx2300.BASE_LEVELS[str(bw)] if _wideband(bw) else 4
+
+
+def speed_ladder(bw) -> list:
+    """Ascending-throughput speed levels available at ``bw`` (for the gear-shift).
+
+    The gear-shift can only reach levels this station can key, which need not be
+    every level it can read, and it may not go BELOW the base one: the ARQ block
+    is sized at the base level's capacity  [see :func:`payload_size`], so record 2
+    — keyable since its training preamble came off the tape, and the step a real
+    VARA pair drops to — cannot carry one. Its frame holds 48 bytes where a block
+    is 89, and rendering one into it loses 42 bytes an over, on an over whose CRC
+    is clean at the far end.
+
+    This legacy base-block helper returns only BW2750's base rung. It does not
+    describe current codec coverage: FRAME_BYTES, RX_CEILING/TX_CEILING and
+    render_level define the level-parametric tone/OFDM paths below."""
+    if str(bw) == "2300":
+        return [lv for lv in _rx2300.KEYABLE_LEVELS if lv >= _rx2300.BASE_LEVEL]
+    return [base_level(bw)] if _wideband(bw) else [4]
+
+
+#: The families that render and read the host levels above 4, by (bw, level)
+#: row: tone below, coherent OFDM above  [rx.varatone, rx.varaofdm].
+_FAMILIES = ((_tone, _tone_tx), (_ofdm, _ofdm_tx))
+
+
+def _family(bw, host: int):
+    key = (int(bw), host)
+    return next(((rx, tx) for rx, tx in _FAMILIES if key in rx.ROWS), None)
+
+
+#: Frame bytes — payload, the per-frame field and the CRC — at each host speed
+#: level of a high speed capable link, 4 to the bandwidth's top: level 4 is the base
+#: record's, and every level above it is its family row's.
+FRAME_BYTES = {
+    bw: {4: (_rx500.FRAME_PAYLOAD + 3 if bw == "500"
+             else _rx2300.payload_bytes(_rx2300.BASE_LEVELS[bw]) + 2),
+         **{lv: rx.ROWS[b, lv].frame_bytes for rx, _ in _FAMILIES
+            for b, lv in sorted(rx.ROWS) if str(b) == bw}}
+    for bw in ("500", "2300", "2750")}
+TOP = {bw: max(levels) for bw, levels in FRAME_BYTES.items()}
+#: The highest host level this station reads and keys at each bandwidth. A
+#: level goes in when its receiver or renderer has landed; the ARQ asks for
+#: nothing above RX_CEILING and keys nothing above TX_CEILING.
+RX_CEILING = dict(TOP)
+TX_CEILING = dict(TOP)
+
+_BW500_LOW = {1: 0, 2: 1, 3: 2}
+
+
+def level_key(bw, host: int) -> int:
+    """The record key the codecs take for host ``BITRATE`` level ``host``."""
+    bw = str(bw)
+    if bw == "500":
+        return _BW500_LOW.get(host, host)
+    return host - 1 + (100 if bw == "2750" else 0)
+
+
+def host_level(bw, key: int) -> int:
+    """Inverse of :func:`level_key`; BW500's record 3 is an alias of level 4."""
+    bw = str(bw)
+    if bw == "500":
+        return {0: 1, 1: 2, 2: 3, 3: 4}.get(key, key)
+    return key + 1 - (100 if bw == "2750" else 0)
+
+
+def payload_size(bw) -> int:
+    """ARQ block payload bytes per frame at ``bw`` (marker byte reserved separately
+    for the BW2300 family; BW500 keeps its native 43-byte payload + separate
+    marker byte)."""
+    if _wideband(bw):
+        return _rx2300.payload_bytes(base_level(bw)) - 1         # 90 - 1 marker = 89
+    return _rx500.FRAME_PAYLOAD                                   # 43
+
+
+def body_size(bw, level: int | None = None) -> int:
+    """Whole DATA body bytes at ``bw``: the payload plus the per-frame field
+    behind it, and what :func:`vara_body` and :func:`vara_payload` lay out over.
+
+    90 at BW2300 and 44 at BW500, where the field is the byte
+    ``rx.varahf500.FrameResult.marker`` reads. The frame's own CRC sits outside
+    it at both  [see :func:`vara.vara_ofdm.data_over_tx`]. ``level`` names a
+    record other than the bandwidth's base one — 48 at BW2300's record 2 and 35
+    at BW500's, which is where :func:`close_level` sends the over that ends a
+    delivery."""
+    if level is None or level == base_level(bw):
+        return payload_size(bw) + 1
+    host = host_level(bw, level)
+    if host > 4 and host in FRAME_BYTES[str(bw)]:
+        return FRAME_BYTES[str(bw)][host] - 2
+    if _wideband(bw):
+        return _rx2300.payload_bytes(level)
+    return {3: 44, 2: 35, 1: 23, 0: 10}[level]
+
+
+def lower_level(bw, level: int, steps: int = 1) -> int:
+    """Drop supported DATA records, stopping at that bandwidth's lowest record.
+
+    BW500's public base is host level 4 (3 is its old alias), but lower ARQ
+    records are numbered 2, 1, 0. The PHY codec itself uses host levels 3, 2, 1.
+    """
+    if str(bw) == "500":
+        levels = (4, 2, 1, 0)
+        return levels[min(levels.index(4 if level == 3 else level) + steps, 3)]
+    return max(100 if str(bw) == "2750" else 0, level - steps)
+
+
+def close_level(bw) -> int:
+    """The record the over that CLOSES a delivery is keyed at.
+
+    A VARA HF sender drops a speed level for it and goes straight back up for the
+    next delivery's first over, so the record is the sender's statement about
+    the block and not about the channel. It goes with the per-frame field the
+    full over in front announced  [see ``vara_arq._frame_field``]: across eight
+    deliveries on tape — six sessions, both stations, both directions — the six
+    behind a full over carrying ``0x81`` close at record 2 and the two behind
+    ``0x89`` close at the base level. ``0x89`` is not a value this station keys,
+    so its own close has one record to go to. The byte is not the whole of it: a
+    VARA HF responder closed at the base level behind ``0x81`` three times in a row
+    to this station, and was read 93 of 93 each time — what the record buys is
+    being read, and record 2 is the one a responder reads from us.
+
+    That leaves the pair we keyed until this was read — ``0x81`` and a base-level
+    close — one no recording holds, and a responder handed it answers with the
+    continue burst and waits for a message that has already ended. The body is
+    not the difference: our close is byte-identical to a VARA HF station's at
+    both records.
+
+    Record 2's body is 48 bytes against the base level's 90, so a close longer
+    than 47 payload bytes does not fit one and stays where it is; no recording
+    holds a VARA HF station in that case  [see ``_tx_data_over``].
+
+    BW500 closes the same way: a VARA HF pair's 200-byte delivery is four level-4
+    bodies behind ``95 91 8d 81`` and then a record-2 body of 35, the record the
+    narrow renderer keys as ``level=2``  [see rx.varahf500.ROBUST_LEVEL]. BW2750
+    has no record below its base one and stays there."""
+    return 2 if str(bw) in ("2300", "500") else base_level(bw)
+
+
+# --------------------------------------------------------------------------- #
+# VARA-compatible DATA over framing  [spec 04 §4.2B, confirmed off air].
+# VARA puts payload at body[0] and uses all 90 bytes; kestrel's own framing
+# reserves body[0] for an in-band control marker. The marker is unnecessary when
+# speaking VARA, whose control rides the separate DBPSK tokens, and a gateway will
+# not parse an over that carries it.
+_VARA_BODY = 90
+#: What ONE base BW2300 over carries, not what a delivery may total: a VARA HF
+#: pair handed 600 bytes steps its host reads 89/178/267/356/445/534/600, and a BW500
+#: pair steps by 43. Nothing anywhere in the modem caps a session.
+_VARA_OVER_PAYLOAD = 89        # body[89] is a per-frame field, never payload
+_VARA_TRAILER = 0x14
+
+#: What a VARA HF station writes at ``body[88:90]`` to close a SHORT over. Measured,
+#: not fitted: a VARA HF link of 2026-08-26 rendered the same 65-byte login
+#: block this station sends, and its over is byte-identical to ours through
+#: body[87] and carries ``04 82`` where we carried ``00 00``. Every short block in
+#: those three sessions holds it — 2, 3, 50 and 65 payload bytes, both stations,
+#: both directions — as does an RMS Trimode 1.4.2.0 short block off 80 m, and as
+#: does the link-setup over, which ``vara_frames.link_setup_frame`` has always
+#: ended this way. It is the whole difference the burst carries: rendered against
+#: the recorded one our over correlates 0.973 ending ``04 82`` and 0.597 ending
+#: ``00 00``, which is why every check on envelope, duration, band and symbol
+#: count passed while the peer waited for an over that had not ended.
+_VARA_SHORT_END = (0x04, 0x82)
+#: The short end's field with no room for the trailer: a VARA HF station closed
+#: eight bytes at record 0 as payload then ``04 0b``, where the field of a close with its
+#: trailer ends in binary 10.
+_NO_TRAILER = 0x09
+
+
+#: The byte a high speed capable close above level 4 carries ahead of ``82``, where
+#: :data:`_VARA_SHORT_END` carries the level  [TABLE-bw500-const, the table].
+HIGH_SPEED_CLOSE = {str(bw): b for bw, b in _ofdm_tx.SHORT_TAIL.items()}
+
+
+def vara_body(payload: bytes, callsign: str, tail: int = 0,
+              body_len: int = _VARA_BODY, level: int = _VARA_SHORT_END[0]) -> bytes:
+    """One VARA DATA body: payload at offset 0, trailer only if short.
+
+    ``body_len`` is the level's whole body  [see :func:`body_size`], and the
+    default is the BW2300 base level's 90. Payload is capped one short of it —
+    the last byte is a per-frame field, not payload. Reading it as payload
+    corrupts the join between overs (observed off air: a full over ending "…5.0"
+    carries 0x09 there, and another carries 0x51, neither of which appear in the
+    delivered text).
+
+    The layout is one law at every bandwidth and level, measured on a VARA HF
+    BW500 pair (2026-08-30, W9SSJ → W1AW, 200 bytes responder to caller):
+    four full 44-byte bodies of 43 payload plus the field, then a record-2 body
+    of 35 carrying 28 payload bytes and ``14 f6 00 00 00 04 82`` — 0x14, the
+    caller's callsign CRC high byte, zero fill, and :data:`_VARA_SHORT_END` in
+    the last two, which is the 90-byte form laid out over 35.
+
+    A short over ends on :data:`_VARA_SHORT_END`, which is what closes it: a VARA
+    HF station answers an over that carries it with one 0.470 s control burst and takes
+    the turn, and answers the same over ending ``00 00`` by acknowledging twice and
+    then waiting for the rest of a message that never comes.
+
+    The full form has no such constant — the field moves per over on every real
+    station held, 0x95/0x91/0x8d/0x81 across those four BW500 overs — so ``tail``
+    is still passed through rather than synthesised. The two ends meet two bytes
+    short of the payload cap, where the trailer runs into the field and takes it:
+    the delimiter is what the peer needs to find the payload's end, and no real
+    station has been recorded keying a short block that long.
+    """
+    cap = body_len - 1
+    pl = bytes(payload[:cap])
+    if len(pl) == cap:
+        return pl + bytes([tail & 0xFF])
+    body = bytearray(body_len)
+    body[-2:] = _VARA_SHORT_END
+    # A close names the host level its sender will read the peer's next
+    # delivery at  [vara_arq._note_close_level].
+    body[-2] = level
+    body[:len(pl)] = pl
+    # The short end owns the last two bytes whatever the payload leaves: a VARA
+    # HF station closes 8 bytes at record 0 as payload then ``04 0b``, and read ours laid
+    # the other way — the trailer written over the level byte — then faulted.
+    tail = [_VARA_TRAILER, crc16_genibus(callsign.upper().encode()) >> 8]
+    room = body_len - 2 - len(pl)
+    body[len(pl):len(pl) + min(room, 2)] = bytes(tail[:room])
+    if not room:
+        body[-1] |= _NO_TRAILER
+    return bytes(body)
+
+
+def vara_payload(body: bytes, length: int | None = None,
+                 caller: str | None = None, body_len: int = _VARA_BODY) -> bytes:
+    """Payload carried by a VARA DATA body (inverse of :func:`vara_body`).
+
+    Pass ``length`` when the ARQ layer knows it. With ``caller``, the payload
+    end is found by the whole trailer rather than by its first byte: 0x14, then
+    the high byte of the caller callsign's CRC-16/GENIBUS, then zeros up to the
+    per-frame field at body[88]. Both recorded gateway sessions carry exactly
+    that pattern on their short blocks — 0xF6 after the 0x14, the CRC byte of
+    W9SSJ, the *caller* — and a full block carries no trailer at all, so a body
+    with no such pattern is a full 89 bytes of payload. A stray 0x14 inside
+    compressed payload fails the pattern unless the payload itself ends in the
+    whole trailer, which is where the ambiguity genuinely lives — the real
+    length field (the body's last byte but one is the unreversed candidate) would
+    close it.
+
+    ``body_len`` is the speed level's whole body, and the default is the base
+    level's 90. The trailer is laid out from the END of it, so a peer that drops
+    to record 2 sends the same pattern inside 48 bytes — 0x14, 0xF6, zeros, then
+    ``\\x04\\x82`` in the last two — and reading that body against 90 finds no
+    trailer at all and hands eleven bytes of it to the host as mail. Anything
+    shorter than its record's body is a truncation rather than a level, which is
+    why the default pads rather than measures.
+
+    Without ``caller`` the end is inferred from the first 0x14 alone, which is
+    wrong for any binary payload containing one: kept for the call sites that
+    predate the pattern and read text-only material.
+    """
+    b = bytes(body[:body_len - 1])
+    if length is not None:
+        return b[:length]
+    if caller is None:
+        i = b.find(bytes([_VARA_TRAILER]))
+        return b if i < 0 else b[:i]
+    full = bytes(body).ljust(body_len, b"\0")
+    key = crc16_genibus(caller.upper().encode()) >> 8
+    markers = (key, 1) if key in (0, 0x14) else (key,)
+    nonfinal = body[-1] & 3 == 0
+    if full[-1] & 3 == 1 and key & 3 != 1:
+        return b
+    trailer_end = body_len - (1 if nonfinal else 2)
+    for i in range(body_len - 1):
+        if (full[i] == _VARA_TRAILER and full[i + 1] in markers
+                and not any(full[i + 2:trailer_end])):
+            return b[:i]
+    if nonfinal:
+        if b and b[-1] == _VARA_TRAILER:
+            return b[:-1]
+        raise ValueError('nonfinal short frame has no delimiter')
+    # A short field with no room left for the trailer: the byte in front of the
+    # field is the short end's own, not payload. A VARA HF station closed a
+    # greeting at record 0 on 2026-09-23 as `0\rF> 56\r` then 04 0b, and read whole the
+    # 0x04 reached the host as the head of the next message.
+    # These explicit terminal kinds are independent of the caller CRC's low
+    # bits. Only the kind-01 full/overlapping-CRC form above is ambiguous.
+    # In particular, a near-full W1AW close has no room for its kind-01 CRC;
+    # counting its delimiter/level as payload overstates the local host debt.
+    if full[-1] & 3 in (2, 3) and 1 <= full[-2] <= max(TOP.values()):
+        # Low bits 11: the payload runs to the level byte. 10 with the trailer
+        # cut to its first byte: that byte is the trailer's, not payload.
+        if full[-1] & 3 == 2 and b[-2] == _VARA_TRAILER:
+            return b[:-2]
+        return b[:-1]
+    return b
+
+
+def over_is_last(body: bytes, caller: str) -> bool:
+    """Whether the DATA field kind closes the delivery.
+
+    A short close whose trailer ran into the field keeps the overlapping-CRC
+    reading: a kind-00 field that is the caller's CRC byte behind 0x14.
+    """
+    if not body:
+        return False
+    key = crc16_genibus(caller.upper().encode()) >> 8
+    return bool(body[-1] & 0x02) or (
+        body[-1] & 0x03 == 0 and body[-2:] == bytes([_VARA_TRAILER, key]))
+
+
+def over_field(body: bytes) -> int:
+    """The per-frame field this DATA body carries, which is its last byte
+    [see :func:`vara_body`]."""
+    return body[-1]
+
+
+def fit_hint(field: int) -> int:
+    """The payload-fit hint, independent of reply, compression and framing bits."""
+    return (field >> 2) & 7
+
+
+def fit_code(bw: str, level: int, rest: int, lo: int, hi: int) -> int:
+    """Fit queued payload after this frame, testing one frame before two."""
+    cap = lambda lv: body_size(bw, level_key(bw, lv)) - 1
+    for k, here in ((1, 2), (2, 1)):
+        if level - 1 >= lo and rest < k * cap(level - 1):
+            return 0
+        if rest < k * cap(level):
+            return here
+        for d in range(1, 5):
+            if level + d <= hi and rest < k * cap(level + d):
+                return d + 2
+    return 6
+
+
+@dataclass
+class DecodedFrame:
+    """Bandwidth-neutral decode result (duck-typed like the BW500 FrameResult)."""
+    crc_ok: bool
+    marker: int
+    payload: bytes
+
+
+@dataclass(frozen=True)
+class LevelRead:
+    """One DATA burst read at a host level  [see :func:`decode_level`].
+
+    ``observations`` preserves frame ordinals, origins and unread holes.
+    ``frames`` is its derived clean-body view (payload then the per-frame
+    field), or the legacy caller-supplied bodies; ``located`` is how many
+    frames the burst holds, so a read with fewer clean frames than that lost
+    one. ``quality`` is the receiver's measure of the burst, higher better
+    (cell SNR in dB where the family has one), and None where it has none.
+    ``acquired`` requires a decoded frame or reference lock independently of
+    observations inferred only from an energy bracket."""
+    level: int
+    frames: tuple[bytes, ...] = ()
+    quality: float | None = None
+    located: int = 0
+    broadcast: bool = False  # Internal base classification; never emitted by decode_level.
+    end: int | None = None  # Decoded frame boundary in the input audio, before trailing samples.
+
+    observations: tuple[LocatedFrame, ...] = ()
+    non_data_origins: tuple[FrameOrigin, ...] = ()
+    acquired: bool = True
+
+    def __post_init__(self):
+        if self.observations:
+            object.__setattr__(self, 'frames', tuple(o.body for o in self.observations
+                                                    if o.body is not None))
+            object.__setattr__(self, 'located', len(self.observations))
+
+    @property
+    def control(self) -> int:
+        return self.frames[-1][-1]
+
+    @property
+    def payload(self) -> bytes:
+        return self.frames[-1][:-1]
+
+    @property
+    def lost(self) -> bool:
+        return len(self.frames) < self.located
+
+
+#: A burst that did not read counts as found only when its points sit this far,
+#: dB, over the row's lattice: noise reads about 0 at the tone rows, and the MFSK
+#: control bursts, silence either side, lock the OFDM search at -5 dB and under.
+_LOCATED_SNR = 3.0
+BASE_REFERENCE_LOCK = 0.4
+
+
+_HOST_SN = {
+    (500, 5): ((34.635,), (26.15,)),
+    (500, 6): ((39.5185,), (26.35,)),
+    (500, 7): ((63.01,), (30.7,)),
+    (500, 8): ((63.01,), (30.67,)),
+    (500, 9): ((63.01,), (29.7,)),
+    (500, 10): ((63.01,), (28.75,)),
+    (500, 11): ((63.01,), (28.3755,)),
+    (500, 12): ((58.21,), (28.7,)),
+    (500, 13): ((55.62833357349082, 59.54667484852187), (27.7, 27.7)),
+}
+
+
+def host_sn(bw, level: int, quality: float) -> float:
+    calibration = _HOST_SN.get((int(bw), level))
+    if calibration is None:
+        return quality
+    raw, reported = (np.asarray(values) for values in calibration)
+    if (int(bw), level) == (500, 13) and quality >= raw[-1]:
+        return float(reported[-1])
+    return float(quality + np.interp(quality, raw, reported - raw))
+
+
+HOST_BPS = {
+    "500": (18, 41, 61, 88, 177, 270, 441, 588, 705, 884, 1060, 1286, 1543),
+    "2300": (24, 41, 82, 175, 270, 363, 549, 735, 922, 2011, 2682, 3219,
+             4025, 4830, 5872, 7050),
+    "2750": (24, 41, 82, 175, 270, 363, 549, 735, 922, 1203, 2423, 3230,
+             3877, 4848, 5817, 7074, 8489),
+}
+
+
+def decode_level(audio: np.ndarray, bw, expected_level: int,
+                 fresh: int | None = None, under: int | None = None,
+                 hz: float = 0.0, *, expect_pair=None,
+                 context: CaptureContext | None = None,
+                 receive_observations=False) -> LevelRead | None:
+    """The DATA burst in ``audio`` read at the host level the ARQ asked the peer
+    to key it at, or None when no burst is found in it.
+
+    Level 4 and under is the base path every bandwidth already has, and there a
+    burst is found only by a clean frame, at any record: a VARA HF ISS resends at
+    a level of its own choosing, down to 1. Above it the family that owns the
+    (bw, level) row reads the burst, trying the expected row first and then the
+    rest of its class: the peer may have keyed another row of it, and ``level``
+    says which. A burst the family finds is returned whether or not its frames
+    come out clean  [see LevelRead.lost, _LOCATED_SNR, _tone_burst], except
+    that a base over is read as one, at any level asked: BW500's DBPSK sits on
+    level 5's DQPSK lattice and reads 23 dB there with no clean frame, a peer
+    that missed our step up repeats at 4, and a wideband peer may resend lower
+    still, at any base record. One still arriving is nothing yet. A buffer
+    shorter than the family's shortest burst holds nothing to read yet.
+
+    Only a burst that ends in the last ``fresh`` samples is looked for: one
+    that ended before them was in the audio a read before this one had.
+    ``under`` is the same for an over under 5, as far as ``fresh`` by default;
+    with none, one is looked for only behind a burst the family found and
+    could not read. The base records are read ``hz`` off our grid, where the
+    peer's carriers sit  [see rx.varahf2300.retune]; the families above them
+    find their own."""
+    x = np.asarray(audio, float)
+    context = context or CaptureContext(0, 0, 0, _rx500.FS)
+    if expected_level <= 4:
+        tuned = _retune(x, bw, hz)
+        base = _decode_base(tuned, bw, expect_pair=expect_pair, quality_samples=x,
+                            context=context, receive_observations=receive_observations)
+        if base is not None and base.acquired:
+            return None if base.broadcast and not receive_observations else base
+        return _read_below(tuned, bw, context=context)
+    family = _family(bw, expected_level)
+    if family is None:
+        raise LookupError(f"no BW{bw} receiver for level {expected_level}")
+    rx = family[0]
+    # Conservative wait bounds must not reject a shorter complete waveform.
+    shortest = min((_tone.H * (r.nsym - 1) + len(r.taps) if rx is _tone
+                    else _row_samples(r))
+                   for (b, _), r in rx.ROWS.items() if b == int(bw))
+    if len(x) < shortest:
+        return None
+    longest = _SINGLE_ROW[rx, int(bw)] if rx is _tone else _LONGEST_ROW[rx, int(bw)]
+    family_audio = _behind(x, longest, fresh)
+    res = rx.decode_burst(family_audio, int(bw), expected_level,
+                          context=context.shifted(len(x) - len(family_audio)))
+    frames = tuple(f[:-2] for f in res.frames)
+    found = (_tone_found(x, bw, res) if rx is _tone
+             else bool(frames) or res.quality.snr_db >= _LOCATED_SNR)
+    if rx is _tone and (found or res.lock >= 0.5 and res.quality.snr_db >= _LOCATED_SNR):
+        whole_audio = _behind(x, _LONGEST_ROW[rx, int(bw)], fresh)
+        if len(whole_audio) > len(family_audio):
+            family_audio = whole_audio
+            res = rx.decode_burst(family_audio, int(bw), expected_level,
+                                  context=context.shifted(len(x) - len(family_audio)))
+            frames = tuple(f[:-2] for f in res.frames)
+            found = _tone_found(x, bw, res)
+    if not frames and (found or under != 0 and expected_level <= 6):
+        raw = _behind(x, LONGEST_BASE[str(bw)], under or fresh)
+        wide = _retune(raw, bw, hz)
+        base = _decode_base(wide, bw, _BASE_TRIED, expect_pair=expect_pair,
+                            quality_samples=raw, context=context.shifted(len(x) - len(raw)),
+                            receive_observations=receive_observations)
+        if base is not None and base.acquired:
+            return None if base.broadcast and not receive_observations else replace(base, end=(
+                len(x) - len(raw) + base.end if base.end is not None else None))
+        if _wideband(bw) and (below := _base_below(wide, bw, context=context.shifted(len(x) - len(raw)))):
+            return replace(below, end=(len(x) - len(raw) + below.end
+                           if below.end is not None else None)) if isinstance(below, LevelRead) else None
+    if not found:
+        return None
+    located = res.located if rx is _tone else res.quality.raw_bits // rx.ROWS[int(bw), res.level].coded
+    end = res.end
+    return LevelRead(res.level, frames, res.quality.snr_db, located,
+                     end=len(x) - len(family_audio) + end if end is not None else None,
+                     observations=res.observations)
+
+
+#: Reference columns of 24 a base record must light to be an over: the ARQ's
+#: base guard, where noise reaches 7.
+_BASE_GUARD = 16
+#: ... and to be worth a decode behind the family's miss: the ARQ's own least
+#: for any record. The 98 clean base reads on the 09-26/27 tapes lit 17-24.
+_BASE_TRIED = 12
+
+#: The least each quarter of a tone burst's span stands over the power around
+#: it, as a power ratio: 1 dB. The deviation tests below assume a steady floor,
+#: and one drifting half a decibel across the window passes them on nothing.
+_TONE_SPAN_FLOOR = 10 ** 0.1 - 1
+
+
+def _tone_found(x: np.ndarray, bw, res: _tone.ToneResult) -> bool:
+    return bool(res.frames) or (ident(x) is None and (
+        _tone_burst(x, bw, res.level) or _tone_burst(x, bw, res.level, frames=2)))
+
+
+def _tone_burst(x: np.ndarray, bw, host: int, *, frames: int = 1) -> bool:
+    """Whether ``x`` holds a whole burst of the tone row's span, found by its
+    power in the row's band rather than by its lattice: a burst the channel
+    ruined locks no better than noise, and its onset reads anywhere. The
+    loudest span stands eight deviations over the power around it, each quarter
+    of it three and a decibel  [see _TONE_SPAN_FLOOR], which a short MFSK
+    control burst does not and noise, searched over every span, reaches 6.5
+    and 2.6; and the sixteen symbols behind it, 0.17 s, are back at that
+    power, or the burst is still arriving."""
+    row = _tone.ROWS[int(bw), host]
+    n, span = len(x) // _tone.H, -(-_row_samples(row, frames) // _tone.H)
+    tail = 16
+    if n < span + tail + 1:
+        return False
+    freq = np.fft.rfftfreq(_tone.H, 1 / _tone.FS)
+    band = np.abs(freq - 1500) < row.step * (row.nb + 1) / 2
+    p = (np.abs(np.fft.rfft(x[:n * _tone.H].reshape(n, _tone.H), axis=1)[:, band]) ** 2).sum(1)
+    c = np.concatenate([[0.0], np.cumsum(p)])
+    at = int(np.argmax(c[span:] - c[:-span]))
+    after = p[at + span:at + span + tail]
+    if len(after) < tail:
+        return False
+    around = np.concatenate([p[:at], p[at + span:]])
+    floor = around.mean()
+    dev = 1 / np.sqrt(band.sum())             # one symbol's power, relative
+    quarters = np.array([q.mean() for q in np.array_split(p[at:at + span], 4)])
+    # Ratios to the floor, as products: over digital silence the
+    # floor is 0 and a burst stands clear of it by any margin. The floor is
+    # measured too, and behind a short lead only on a few symbols.
+    return (quarters.mean() > floor * (1 + 8 * dev * np.sqrt(1 / span + 1 / len(around)))
+            and quarters.min() > floor * (1 + max(3 * dev * np.sqrt(4 / span + 1 / len(around)),
+                                                  _TONE_SPAN_FLOOR))
+            and after.mean() <= floor * (1 + 3 * dev / np.sqrt(tail)))
+
+
+#: A VARA HF station's closing CW ident: Morse keyed by shifting one carrier between a
+#: mark at 1500 Hz and a space at 750 Hz, 28 WPM.
+#: WI9YZA's, 2026-10-21, is 3.25 s behind its close: a level-6 span.
+_IDENT_BLOCK = 384                      # 8 ms, in 125 Hz bins: a bin for each tone
+_IDENT_MARK, _IDENT_SPACE = 1500 // 125, 750 // 125
+#: The share of the band's power on the two tones, over 64 ms, held 0.5 s.
+#: Our own bursts, MFSK to 8-DPSK, hold 0.5 for 0.16 s at most.
+_IDENT_PURE, _IDENT_SPAN = 0.7, 8
+_IDENT_LEAST = int(0.5 * _tone.FS) // _IDENT_BLOCK
+_IDENT_DIT = (4, 15)                    # blocks: 10 to 40 WPM
+_MORSE = {code: ch for ch, code in MORSE.items()}
+
+
+def ident(x: np.ndarray) -> str | None:
+    """The callsign of a VARA HF station's CW ident in ``x``, or None. Found by the two
+    tones carrying the band and the keying reading as Morse, which no VARA
+    burst does: a tone row spreads over every carrier of its row."""
+    n = len(x) // _IDENT_BLOCK
+    if n < _IDENT_LEAST:
+        return None
+    p = np.abs(np.fft.rfft(np.asarray(x[:n * _IDENT_BLOCK], float).reshape(n, _IDENT_BLOCK),
+                           axis=1)) ** 2
+    mark, space, band = p[:, _IDENT_MARK], p[:, _IDENT_SPACE], p[:, 3:22].sum(1)
+    # a shift splashes the block it falls in; the tones hold the band around it
+    near = np.ones(_IDENT_SPAN)
+    pure = ((np.convolve(mark + space, near, "same") > _IDENT_PURE * np.convolve(band, near, "same"))
+            & (band > 1e-6 * band.max(initial=0.0)))
+    edge = np.diff(pure.view(np.int8), prepend=np.int8(0), append=np.int8(0))
+    for a, b in zip(np.flatnonzero(edge > 0), np.flatnonzero(edge < 0)):
+        if b - a < _IDENT_LEAST:
+            continue
+        key = mark[a:b] > space[a:b]
+        cut = np.flatnonzero(np.diff(key.view(np.int8))) + 1
+        runs = [(bool(k[0]), len(k)) for k in np.split(key, cut)]
+        runs = runs[not runs[0][0]:len(runs) - (not runs[-1][0])]
+        marks = [r for on, r in runs if on]
+        if len(marks) < 4:
+            continue
+        # a dah is three dits; a mark the window cut short is neither
+        dit = np.median([r for r in marks if r < max(marks) / 2] or [max(marks)])
+        if not _IDENT_DIT[0] <= dit <= _IDENT_DIT[1]:
+            continue
+        text, code = "", ""
+        for on, r in runs + [(False, 7 * dit)]:
+            if on:
+                code += "." if r < 2 * dit else "-"
+            elif r >= 2 * dit:
+                if code not in _MORSE:
+                    break
+                text, code = text + _MORSE[code], ""
+        else:
+            if len(text) >= 3:
+                return text
+    return None
+
+
+def _channel_power(x: np.ndarray) -> tuple[np.ndarray, float]:
+    n = len(x) // _tone.H
+    freq = np.fft.rfftfreq(_tone.H, 1 / _tone.FS)
+    band = (freq >= _rx500.BURST_BAND[0]) & (freq <= _rx500.BURST_BAND[1])
+    p = (np.abs(np.fft.rfft(x[:n * _tone.H].reshape(n, _tone.H), axis=1)[:, band]) ** 2).sum(1)
+    return p, 1 / np.sqrt(band.sum())
+
+
+def head_end_evidence(x: np.ndarray, bw, host: int, *, head_end: int,
+                      quiet_start: int | None, boundary: int,
+                      tolerance: int) -> tuple[bool, int | None]:
+    """Return anchored unkey evidence and the last activity beyond the window."""
+    tail = 20
+    p, dev = _channel_power(x)
+    start = max(0, (head_end - burst_samples(bw, host)) // _tone.H)
+    head = p[start:min(len(p), head_end // _tone.H)]
+    if not len(head):
+        return False, None
+    around = (p[-(-quiet_start // _tone.H):start]
+              if quiet_start is not None and quiet_start >= 0 else p[:0])
+    floor = around.mean() if len(around) else None
+    threshold = (floor * (1 + 3 * dev / np.sqrt(tail)) if floor is not None
+                 else head.mean() / 2)
+    after = max(0, -(-(boundary + tolerance) // _tone.H))
+    trailing = p[after:]
+    activity = None
+    if len(trailing) >= tail:
+        c = np.r_[0., np.cumsum(trailing)]
+        lit = np.flatnonzero((c[tail:] - c[:-tail]) / tail > threshold)
+        if len(lit):
+            activity = (after + int(lit[-1]) + 1) * _tone.H
+    ended = (floor is not None and len(p) * _tone.H >= head_end + tail * _tone.H
+             and head.mean() > (1 + _TONE_SPAN_FLOOR) * floor
+             and p[-tail:].mean() <= threshold)
+    return bool(ended), activity
+
+
+def emission_ended(x: np.ndarray, bw, host: int, *, head_end: int | None = None,
+                   quiet_start: int | None = None) -> bool:
+    """Whether the whole BW500 channel is back at its floor in the last twenty
+    symbols of ``x``, the floor read outside its loudest burst-long span: an
+    over still arriving keeps it lit at any level, where the row's own band
+    test can pass on a base over that has not ended. Four symbols more than
+    that test's sixteen, so a tone burst's verdict is in once this holds
+    [see _tone_burst]. With ``head_end``, the floor is measured before the
+    head from ``quiet_start``, and the head must stand above that floor.
+    Without a known quiet interval, anchored evidence is unavailable."""
+    tail = 20
+    n, span = len(x) // _tone.H, -(-burst_samples(bw, host) // _tone.H)
+    if n < span + tail + 1:
+        return False
+    if head_end is not None:
+        return head_end_evidence(x, bw, host, head_end=head_end, quiet_start=quiet_start,
+                                 boundary=head_end, tolerance=0)[0]
+    p, dev = _channel_power(x)
+    c = np.concatenate([[0.0], np.cumsum(p)])
+    at = int(np.argmax(c[span:] - c[:-span]))
+    around = np.concatenate([p[:at], p[at + span:]])
+    return bool(p[-tail:].mean() <= around.mean() * (1 + 3 * dev / np.sqrt(tail)))
+
+
+def second_frame(audio: np.ndarray, bw, host: int) -> bool | None:
+    """Whether the single QAM frame at host level ``host`` in ``audio`` has a
+    second behind it, read off that frame's first pilot rows before it is whole:
+    None until two of them are in, or for a non-QAM row whose companion
+    is located by its family decoder."""
+    r = _ofdm.ROWS.get((int(bw), host))
+    if r is None or not r.qam:
+        return None
+    cells, _ = _ofdm.cell_grid(np.asarray(audio, float))
+    lock = _ofdm.locate(cells, int(bw))
+    if lock is None or not lock.qam:
+        return False
+    if lock.frames > 1:
+        return True
+    rows = min((len(cells) - lock.start - _ofdm.FRAME - _ofdm.QAM_LEAD - 2) // 8 + 1,
+               _ofdm.PILOT_ROWS)
+    if (rows - 1) * r.carriers < _SECOND_TERMS:
+        return None
+    # rows past the buffer are zeros, which add nothing to the pilots' coherence
+    pad = np.zeros((max(lock.start + r.nsym(2) - len(cells), 0), cells.shape[1]), complex)
+    return _ofdm._qam_score(np.vstack([cells, pad]), r, lock.start, 1) >= 0.5
+
+
+def envelope_lengths(bw, host: int) -> tuple[int, int]:
+    """Single/double nominal samples. A double is one burst behind one shared
+    lead, its second frame starting one frame span after the first."""
+    return burst_samples(bw, host), burst_samples(bw, host, 2)
+
+
+def burst_extent(audio: np.ndarray, bw, host: int) -> str:
+    """Classify the existing burst_spans envelope as single/double/inconclusive.
+
+    4096 samples cover its 2048-sample smoothing and the index silent lead-in.
+    A clipped edge or several separate emissions cannot prove a single extent.
+    """
+    lengths = envelope_lengths(bw, host)
+    x = np.asarray(audio, float)
+    band = (tuple(b * _mfsk.FS / _mfsk.NFFT for b in _mfsk.band_for(str(bw)))
+            if _wideband(bw) else _rx500.BURST_BAND)
+    spans = _rx500.burst_spans(x, band=band)
+    if len(spans) != 1:
+        return 'inconclusive'
+    a, b = spans[0]
+    if a == 0 or b >= len(x) - 1:
+        return 'inconclusive'
+    single, double = lengths
+    size = b - a
+    if size >= double - 4096:
+        return 'double'
+    return 'single' if abs(size - single) <= 4096 else 'inconclusive'
+
+
+#: Pilot pairs the second-frame test waits for: noise then scores 1/6 against a
+#: frame's 1, three deviations under the 0.5 it decides at. Two pilot rows at
+#: BW2300 and BW2750, five at BW500's eleven carriers.
+_SECOND_TERMS = 36
+
+
+def _row_samples(row, frames: int = 1) -> int:
+    if isinstance(row, _tone.ToneRecord):
+        if (row.bw, row.level) == (2300, 7):
+            single = 187152
+        else:
+            # Unmeasured edges need at least the L7 excess over pulse support.
+            single = (_tone.H * (row.nsym - 1) + len(row.taps)
+                      + max(row.stagger) + 15)
+        return single + (frames - 1) * (row.nsym - _tone.C0) * _tone.H
+    return row.nsym(frames) * _ofdm.SYM
+
+
+def burst_samples(bw, host: int, frames: int = 1) -> int:
+    """Nominal DATA extent: one shared lead and ``frames`` independent bodies.
+
+    Tone BW2300 L7 uses its measured extent; other tone rows reserve
+    pulse support, band stagger and the observed 15-sample edge excess.
+    """
+    if host <= 4:
+        if _wideband(bw):
+            r = _rx2300.RECORDS[level_key(bw, host)]
+            return (r.lead + frames * r.ncols) * r.dw50
+        if host < 4:
+            r = _rx500.INDEX_RECORDS[host]
+            return (r.lead + frames * r.ncols) * r.dw
+        return (_rx500._PREAMBLE + frames * _rx500.NSYM) * _rx500.H
+    return _row_samples(_family(bw, host)[0].ROWS[int(bw), host], frames)
+
+
+LONGEST_BURST = {bw: max(burst_samples(bw, lv, 2) for lv in range(1, TOP[bw] + 1))
+                 for bw in FRAME_BYTES}
+
+LONGEST_BASE = {bw: max(burst_samples(bw, lv, 2) for lv in range(1, 5))
+                for bw in FRAME_BYTES}
+
+_LONGEST_ROW = {(rx, b): max(_row_samples(r, 2) for (bb, _), r in rx.ROWS.items() if bb == b)
+                for rx in (_tone, _ofdm) for b in {b for b, _ in rx.ROWS}}
+_SINGLE_ROW = {(rx, b): max(_row_samples(r) for (bb, _), r in rx.ROWS.items() if bb == b)
+               for rx, b in _LONGEST_ROW}
+
+#: Audio kept ahead of the longest burst a read looks for: its onset search and
+#: the pulse's reach.
+_READ_LEAD = int(0.6 * _tone.FS)
+
+
+RECEIVE_BACKWARD_REACH = max(_rx500.BACKWARD_REACH,
+                             max(r.lead * r.dw50 for r in _rx2300.RECORDS.values()),
+                             2 * _ofdm.SYM,
+                             max(len(r.taps) // 2 for r in _tone.ROWS.values()))
+
+
+def _behind(x: np.ndarray, longest: int, fresh: int | None) -> np.ndarray:
+    """What of ``x`` can hold a burst up to ``longest`` that ends in its last
+    ``fresh`` samples."""
+    return x if fresh is None else x[-(longest + _READ_LEAD + fresh):]
+
+
+def _retune(x: np.ndarray, bw, hz: float) -> np.ndarray:
+    return _rx2300.retune(x, hz) if _wideband(bw) else _shift500.retune(x, hz)
+
+
+def _window_observations(reads) -> tuple[LocatedFrame, ...]:
+    return tuple(replace(fr.observation, ordinal=i) for i, fr in enumerate(reads)
+                 if fr.origin is not None)
+
+
+def base_non_data_origins(frames):
+    return tuple(f.origin for f in frames if f.origin is not None
+                 and (f.is_connect or _beacon.is_broadcast_frame(f)))
+
+
+def _decode_base(x: np.ndarray, bw, least: int = 0, *, expect_pair=None,
+                 quality_samples=None, context=None,
+                 receive_observations=False) -> LevelRead | None:
+    quality, level, end = None, 4, None
+    observations = ()
+    if _wideband(bw):
+        reads = _rx2300.decode_window(x, base_level(bw), least, context=context)
+        bodies = tuple(bytes(fr.payload) for fr in reads if fr.crc_ok)
+        located = len(reads)
+        quality = reads[-1].quality if reads else None
+        end = reads[-1].end if reads else None
+        observations = _window_observations(reads)
+    else:
+        result = _rx500.decode_stream(x, expect_pair=expect_pair, quality_samples=quality_samples,
+                                      context=context)
+        observations = result.observations
+        if any(_beacon.is_broadcast_frame(frame) for frame in result.frames):
+            # A recognized broadcast must also veto the high-speed false-locator
+            # fallback; plain None would let decode_level return a lost DATA read.
+            return LevelRead(_beacon.LEVEL, (), broadcast=True,
+                             observations=observations if receive_observations else (),
+                             non_data_origins=base_non_data_origins(result.frames))
+        if receive_observations and observations:
+            return LevelRead(observations[0].origin.level,
+                quality=result.frames[-1].quality if result.frames else None,
+                end=max(o.origin.end_sample - context.sample_start for o in observations),
+                observations=observations,
+                non_data_origins=base_non_data_origins(result.frames),
+                acquired=any(f.crc_ok for f in result.frames)
+                         or result.refined_lock >= BASE_REFERENCE_LOCK)
+        if (not result.observation_complete or result.frames_skipped
+                or not all(f.crc_ok for f in result.frames)):
+            return None
+        clean = result.frames
+        bodies = tuple(bytes(f.payload) + bytes([f.marker]) for f in clean)
+        level = clean[0].level if clean else level
+        quality = clean[-1].quality if clean else None
+        end = max((base_frame_end(f, i) for i, f in enumerate(clean)), default=None)
+    if not bodies:
+        return None
+    return LevelRead(level, bodies, quality,
+                     located=located if _wideband(bw) else len(bodies), end=end,
+                     observations=observations)
+
+
+def base_frame_end(frame, index: int = 0) -> int:
+    """BW500 frame end on its aligned grid, independent of the envelope."""
+    rec = _rx500.INDEX_RECORDS.get(frame.level)
+    slot, step = (rec.ncols, rec.dw) if rec else (_rx500.NSYM, _rx500.H)
+    column = frame.c0 + slot * (1 if rec else index + 1)
+    return frame.start + max(frame.onset) + column * step
+
+
+def _read_below(x: np.ndarray, bw, *, context=None) -> LevelRead | None:
+    below = _wideband(bw) and _base_below(x, bw, context=context)
+    return below if isinstance(below, LevelRead) else None
+
+
+def _base_below(x: np.ndarray, bw, *, context=None) -> LevelRead | bool:
+    """A wideband base over at any record in ``x``: its read, True while its
+    reference columns line up but have not all arrived, else False."""
+    refs = len(_rx2300._REF_COL)
+    for key, hits, of, _ in _rx2300.index_guard(x, _rx2300.INDEX_LEVELS_BW[str(bw)]):
+        if hits * refs < _BASE_GUARD * of:
+            break
+        if of < refs:
+            return True
+        if key != base_level(bw) and (reads := _rx2300.decode_window(x, key, context=context)):
+            return LevelRead(host_level(bw, key),
+                             tuple(bytes(fr.payload) for fr in reads if fr.crc_ok),
+                             reads[-1].quality, located=len(reads), end=reads[-1].end,
+                             observations=_window_observations(reads))
+    return False
+
+
+def render_level(bodies, bw, host: int, lead: _tx2300.VB6Rnd) -> np.ndarray:
+    """One DATA over at host level ``host`` above 4, keyed by the family that
+    owns the row, its lead off the session's stream. Each body is whole as
+    :func:`vara_body` lays it out — payload, the short end keyed to the
+    session's caller, then the per-frame field, which is the frame's control
+    byte — and takes its CRC here. Two bodies make the double over a QAM row
+    carries."""
+    family = _family(bw, host)
+    if family is None or lead is None:
+        raise ValueError(f"BW{bw} level {host} is keyed by a family renderer "
+                         "off the session's lead stream")
+    if any(len(b) != FRAME_BYTES[str(bw)][host] - 2 for b in bodies):
+        raise ValueError(f"a BW{bw} level {host} body is {FRAME_BYTES[str(bw)][host] - 2} bytes")
+    frames = [bytes(b) + crc16_genibus(bytes(b)).to_bytes(2, "big") for b in bodies]
+    if family[1] is _tone_tx:
+        (frame,) = frames
+        return _tone_tx.synth_frame(frame, int(bw), host, lead)
+    return _ofdm_tx.render(frames, int(bw), host, lead)
+
+
+# --------------------------------------------------------------------------- #
+def render(payload: bytes, marker: int, bw="500", level=None) -> np.ndarray:
+    """(block payload, marker) -> one real 48 kHz transmit burst at ``bw``/``level``."""
+    if _wideband(bw):
+        lv = base_level(bw) if level is None else level
+        cap = _rx2300.payload_bytes(lv)
+        block = bytes([marker & 0xFF]) + bytes(payload)
+        block = block + bytes(max(0, cap - len(block)))          # pad to capacity
+        return _tx2300.synth_burst(block[:cap], lv)
+    frame = _tx500.build_frame(payload, marker)
+    return _tx500.synth_burst(frame, onset=ONSET)
+
+
+def decode(audio: np.ndarray, bw="500") -> DecodedFrame:
+    """Decode one burst rendered by :func:`render` into a bandwidth-neutral frame."""
+    if _wideband(bw):
+        # BW2300 does not signal the level, so it is trialled; BW2750 holds one
+        # reversed record and there is nothing to trial.
+        lv = None if str(bw) == "2300" else base_level(bw)
+        fr = _rx2300.decode_burst(np.asarray(audio, float), lv)
+        pl = fr.payload
+        block_bytes = payload_size(bw)
+        marker = pl[0] if pl else 0
+        data = bytes(pl[1:1 + block_bytes])
+        data = data + bytes(max(0, block_bytes - len(data)))
+        return DecodedFrame(crc_ok=fr.crc_ok, marker=marker, payload=data)
+    fr = _rx500.decode_burst(np.asarray(audio, float), start=ONSET)
+    return DecodedFrame(crc_ok=fr.crc_ok, marker=fr.marker, payload=fr.payload)
+
+
+# ---- legacy BW500 helpers (kept for the existing BW500 tests) ---------------
+def render_frame(frame_bytes: bytes) -> np.ndarray:
+    """46-byte proven BW500 frame -> transmit audio (one burst)."""
+    return _tx500.synth_burst(frame_bytes, onset=ONSET)
+
+
+def decode_frame(audio: np.ndarray):
+    """Decode one BW500 burst rendered by :func:`render_frame` -> proven FrameResult."""
+    return _rx500.decode_burst(np.asarray(audio, float), start=ONSET)
+
+
+def build_frame(payload43: bytes, marker: int) -> bytes:
+    """43 payload bytes + marker + CRC-16/GENIBUS -> 46-byte proven BW500 frame."""
+    return _tx500.build_frame(payload43, marker)
+
+
+def tx_modulation(bw, level):
+    """The transmit renderer's modulation family, not a receiver hypothesis."""
+    family = _family(bw, level)
+    if family is None:
+        return "index modulation"
+    if family[0] is _tone:
+        return "DQPSK"
+    row = _ofdm.ROWS[int(bw), level]
+    return f"{2**row.bpc}-QAM" if row.qam else {1: "DBPSK", 2: "DQPSK"}.get(row.bpc, f"{2**row.bpc}-DPSK")
+
+
+def tx_geometry(bw, level):
+    """Additional known waveform geometry for tone and OFDM renderer rows."""
+    family = _family(bw, level)
+    if family is None:
+        return {}
+    row = family[0].ROWS[int(bw), level]
+    if family[0] is _tone:
+        return {"carrier_count": row.nb, "symbol_rate": _tone.FS / _tone.H}
+    return {"carrier_count": row.carriers, "symbol_rate": _ofdm.FS / _ofdm.SYM}

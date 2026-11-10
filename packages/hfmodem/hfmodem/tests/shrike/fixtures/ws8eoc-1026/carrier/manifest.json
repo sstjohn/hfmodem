@@ -1,0 +1,37 @@
+[
+  {
+    "hold": 20,
+    "row": 1852536,
+    "origin": 1829376,
+    "source": "operator-data/captures/onair-20261027T052009009854Z-69683032-884c-448c-a92e-9570c10bc564/hold_20.wav",
+    "pcm_sha256": "cac1941e2d4a8bf3da979243f9b3e3b514e47a78c4ae38e6a6dabba8615ec231"
+  },
+  {
+    "hold": 21,
+    "row": 1912776,
+    "origin": 1888512,
+    "source": "operator-data/captures/onair-20261027T052009009854Z-69683032-884c-448c-a92e-9570c10bc564/hold_21.wav",
+    "pcm_sha256": "d417e0a09e2f76e13443ccef0e4fc5a4b6de558edc99cf712e907db6d3751a8c"
+  },
+  {
+    "hold": 22,
+    "row": 1972656,
+    "origin": 1948160,
+    "source": "operator-data/captures/onair-20261027T052009009854Z-69683032-884c-448c-a92e-9570c10bc564/hold_22.wav",
+    "pcm_sha256": "f9e8d59a96939a84d76fc64c6bea759d2cf08dded1902085e6fc10460ef607ac"
+  },
+  {
+    "hold": 23,
+    "row": 2032656,
+    "origin": 2008448,
+    "source": "operator-data/captures/onair-20261027T052009009854Z-69683032-884c-448c-a92e-9570c10bc564/hold_23.wav",
+    "pcm_sha256": "9516b582bc08ba975a8cab64ddff6f057f4ef437bb623c388a5d1467397ea120"
+  },
+  {
+    "hold": 24,
+    "row": 2092776,
+    "origin": 2068224,
+    "source": "operator-data/captures/onair-20261027T052009009854Z-69683032-884c-448c-a92e-9570c10bc564/hold_24.wav",
+    "pcm_sha256": "5812c8ec38e6d78078b60f9708c0d742e8866acd8fd6491464b3afd9f84498fb"
+  }
+]

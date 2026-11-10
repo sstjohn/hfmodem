@@ -1,0 +1,53 @@
+{
+  "arm": "onair-0923-1933",
+  "cs4_samples": [
+    3641208,
+    3761268,
+    3881328
+  ],
+  "files": {
+    "stream.flac": {
+      "sha256": "e181f599a68192bd5580dc341ca3f31689001798abd22b185e3a2dfd7644b4f1"
+    },
+    "stream.json": {
+      "sha256": "4233a0ee2acc6551d682ede8f479807fb57e5a0e3bf3e1773b2c1e0e6df17e28"
+    },
+    "tx_34.json": {
+      "sha256": "f26b6f78097a72d183d6d603e6af5f4fbb69ece5d6384ab212e4fec96e8adb98",
+      "audio_start": 3596186,
+      "audio_end": 3636181,
+      "ptt_up": 3593376,
+      "tx_offset_hz": -15.3,
+      "pulse_offsets": [
+        664,
+        904
+      ]
+    },
+    "tx_35.json": {
+      "sha256": "734e917d5e713c5c03729a4437ba6326bb830bd1bf1a3d2e18ca10edf6556f4a",
+      "audio_start": 3716200,
+      "audio_end": 3756651,
+      "ptt_up": 3713570,
+      "tx_offset_hz": -15.3,
+      "pulse_offsets": [
+        650,
+        890
+      ]
+    },
+    "tx_37.json": {
+      "sha256": "a748a93c28b006164c6ecfdd20b8b0a0108d5a042df1fd6abd181ca9c12856d2",
+      "audio_start": 3836199,
+      "audio_end": 3876646,
+      "ptt_up": 3833761,
+      "tx_offset_hz": -15.3,
+      "pulse_offsets": [
+        651,
+        891
+      ]
+    }
+  },
+  "tx35_cs4_carrier_phase_offsets": [
+    0,
+    210
+  ]
+}

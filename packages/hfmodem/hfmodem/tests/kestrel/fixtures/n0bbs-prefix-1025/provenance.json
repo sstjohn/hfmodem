@@ -1,0 +1,8 @@
+{
+  "source": "synthetic HTML form, gzip and Base64; chunking of a 2026-10-25 BBS capture",
+  "received_sha256": "5c9d85e7ad3ed9fb16f492750e5d1f7f2fd493c762d90d20c7f3360a137b47d7",
+  "received_bytes": 12774,
+  "duplicate_bytes": 541,
+  "original_chunk_offset": 11743,
+  "note": "Synthetic content laid out as the recorded host receive stream at the application framing failure: the same offsets, chunk lengths and duplicate. The transfer is incomplete, not a valid file."
+}

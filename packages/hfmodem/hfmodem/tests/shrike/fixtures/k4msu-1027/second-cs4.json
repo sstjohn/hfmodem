@@ -1,0 +1,12 @@
+{
+  "capture_id": "5a6234ca-e8b5-4054-9013-6005c19643d4",
+  "stream_sha256": "1cd6a03293a843b015503d5a537401575fe3568763ee0549ec44286fd88ae464",
+  "phases": [
+    5387056,
+    5447086
+  ],
+  "local_phase": 6000,
+  "window_samples": 21000,
+  "offset_hz": -16,
+  "pcm_sha256": "411952f2984b636978f37f5e737a98e3a03f8a5c06018f6afce789f3f7aa2674"
+}

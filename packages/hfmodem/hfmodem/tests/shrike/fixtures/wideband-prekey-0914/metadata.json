@@ -1,0 +1,24 @@
+{
+  "source": "captures/onair-0914-1108/stream.wav",
+  "sample_rate": 48000,
+  "seed_changeover": 2388632,
+  "correction_hz": -19.9,
+  "rows": [
+    {
+      "file": "hold-21.wav",
+      "hold": 21,
+      "start": 4241822,
+      "end": 4286592,
+      "key": 4290500,
+      "sha256": "6095767688f5b6a1a04926da9583f8704550a47d07b647672fb2cefe2128ff84"
+    },
+    {
+      "file": "hold-22.wav",
+      "hold": 22,
+      "start": 4301822,
+      "end": 4407523,
+      "key": 4410500,
+      "sha256": "c83dca42e4ff2f2d19cfa5dae27a874d139127d4945000138d2503f6b92fb80e"
+    }
+  ]
+}
