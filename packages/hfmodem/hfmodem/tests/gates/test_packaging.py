@@ -249,10 +249,13 @@ def test_hfhost_wheel_is_stdlib_only(wheels):
 def test_installed_station_face(wheels, tmp_path, resources):
     target = tmp_path / 'installed'
     wheel_paths = [wheels(dist).filename for dist in DISTS]
+    # pip's user agent asks any rustc on PATH for its version, and on Linux
+    # names the distribution through lsb_release and uname.
+    probes = [['rustc', '--version']]
     if sys.platform == 'linux':
-        # pip's user agent names the distribution through these two probes.
-        for probe in (['lsb_release', '-a'], ['uname', '-rs']):
-            hermetic.guard.admit(probe, os.environ, exact=True)
+        probes += [['lsb_release', '-a'], ['uname', '-rs']]
+    for probe in probes:
+        hermetic.guard.admit(probe, os.environ, exact=True)
     installed = subprocess.run([sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps',
                                 '--no-compile', '--target', str(target), *wheel_paths],
                                capture_output=True, text=True, timeout=120)

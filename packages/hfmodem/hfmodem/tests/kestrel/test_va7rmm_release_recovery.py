@@ -87,3 +87,54 @@ def test_only_complete_addressed_grant_starts_queued_data(clock, reply):
         assert h._tx_pending is None and h._answer_owed == A._OWED_RELEASE
     # A grant is not a DATA acknowledgment.
     assert h.payload_ledger.pending == 7
+
+
+def caller(clock, *, turn=A._TURN_OURS):
+    io = _IO()
+    c = A.VaraStationHandshake(['VA7RMM'], io, bw='500', chat=True)
+    c.role, c.caller, c.called = 'initiator', 'VA7RMM', 'W9SSJ'
+    c.state, c.step, c.turn = A.VaraState.CONNECTED, A._I_CONNECTED, turn
+    return c, io
+
+
+def heard(c, clock, burst):
+    wave = np.r_[np.zeros(4800), burst, np.zeros(9600)]
+    for at in range(0, len(wave), 960):
+        clock.now += 960 / M.FS
+        c.on_rx_stream(wave[at:at+960])
+
+
+@pytest.mark.parametrize('idle', [False, True], ids=['release', 'f20'])
+def test_the_answerers_ask_behind_our_unheard_release_draws_it_again(clock, idle):
+    """Kestrel answering Kestrel, OpenSlot air loop at 3 dB moderate fading,
+    2026-11-10: our release faded, the answerer asked three times and the
+    caller keyed nothing. A VARA HF caller keys its release again (VA7RMM)."""
+    h, _ = pending(clock)
+    h._link_high_speed, h._rec500 = True, 4
+    h._lead = A.VB6Rnd(F.lead_state(h.caller, True, '500'))
+    c, cio = caller(clock)
+    assert c._release_turn(idle=idle)
+    release = cio.sent[-1]
+    clock.now += A._IDLE_POLL_S + .01
+    h.idle_keepalive()
+    heard(c, clock, h.io.sent[-1])
+    assert len(cio.sent) == 2, cio.msgs[-3:]
+    np.testing.assert_array_equal(cio.sent[-1], release)
+    assert c.turn == A._TURN_PEER and c._tx_pending is None
+    wave = np.r_[np.zeros(4800), release, np.zeros(12000)]
+    for at in range(0, len(wave), 960):
+        clock.now += .02
+        h._stream_responder_control(wave[at:at+960])
+    # The answerer took the handover it was asking after.
+    assert h._answer_owed is None, h.io.msgs[-3:]
+    assert (h._tx_pending is not None) is not idle, h.io.msgs[-3:]
+
+
+def test_the_ask_is_left_alone_while_we_hold_the_turn(clock):
+    h, _ = pending(clock)
+    clock.now += A._IDLE_POLL_S + .01
+    h.idle_keepalive()
+    c, cio = caller(clock)
+    c._released = True
+    heard(c, clock, h.io.sent[-1])
+    assert cio.sent == []

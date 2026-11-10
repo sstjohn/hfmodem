@@ -2536,7 +2536,8 @@ class VaraStationHandshake:
         self._tx_pair: tuple | None = None   # (pending, first body) of a pair
         self._asked = 0             # turn-requests keyed since the last grant
         self._receive_ack_recovery = None  # None, 'ack', or 'request'; BW500 CHAT
-        self._tail_waited = False   # [see _chat_tail_due]
+        self._hand_back_due = False   # our idle answered its last over  [see _peer_idle_hand_back]
+        self._tail_due: int | None = None   # stream count by which a named burst's tail is in  [see _chat_tail_due]
         self._release_answer_due = False  # [see _release_answer_owed]
         self._close_owed_at: float | None = None  # [see disconnect]
         self._answer_held_from: int | None = None  # [see _answer_early]
@@ -2551,6 +2552,7 @@ class VaraStationHandshake:
         #                             spent nothing of what it was handed
         self._release_owed = False  # the transport declined that handover
         self._release_traffic = False   # ... and it was granting announced traffic
+        self._release_idle = False      # ... or handing back an empty turn
         self._handed_over = False   # the turn has been ours and gone back, and
         #                             `over_continue_after` answers from here
         #                             [see _tx_over_response]
@@ -2707,6 +2709,7 @@ class VaraStationHandshake:
         # `_peer_over` when we handed the turn to a peer that said it has
         # traffic  [see _granted_over_unread].
         self._traffic_granted: int | None = None
+        self._peer_heard_at = 0.0           # the peer's last named frame, progress or not
         self._peer_received_phase: int | None = None
         self._peer_answered: int | None = None
         self._peer_fresh = False
@@ -2917,6 +2920,7 @@ class VaraStationHandshake:
         decoder that cannot read what arrived.
         """
         if on:
+            self._hand_back_due = False
             self._held_final_request = None
             self._quiet_peer_ask_at = None
             self._stream_link_setup_at = None
@@ -2940,6 +2944,7 @@ class VaraStationHandshake:
                 self._lv_owed, self._lv_prompt = True, False
         else:
             self._unkeyed_at, self._heard = time.monotonic(), 0
+            self._tail_due = None
             self._em_buf = self._em_env = np.zeros(0)
             self._em_wide, self._em_fine = _LastAbove(), _LastAbove()
             self._em_lit_at = None
@@ -3045,14 +3050,16 @@ class VaraStationHandshake:
                             "block(s) queued, asking after the activity")
             return False
         if (self._release_answer_owed() or self._rx_resend is not None or self._nak_data_due
-                or self._band_busy()):
+                or self._rx_window.W is not None or self._band_busy()):
             # The band is lit, or was a moment ago: under noise the gate missed
             # the peer's 0.48 s answer to our release and the ask started 0.28-0.38
             # s into it. It goes behind it, at the age
             # any answer of ours is keyed at  [see _ANSWER_HELD_S, _peer_poll_held].
             # A VARA HF receiver never asks while an over of the peer's is owed:
             # the sender takes the ask as that over's acknowledgement
-            # (2026-10-21, 19 VARA HF pairs).
+            # (2026-10-21, 19 VARA HF pairs). An answer held for the end of the
+            # peer's window is that debt too: under CHAT it says our traffic
+            # with frame 0 when it goes  [see _answer_over].
             if (self._rx_resend is not None or self._nak_data_due) and not self._ask_owed:
                 self._recovery_report('queued')
             self._ask_owed = True
@@ -3085,7 +3092,8 @@ class VaraStationHandshake:
             self.io.log(f"{self.called} unkeyed — asking for the turn in its "
                         f"turnaround, {len(self._txq)} block(s) queued")
 
-    def _release_turn(self, idle: bool = False, traffic: bool = False) -> bool:
+    def _release_turn(self, idle: bool = False, traffic: bool = False,
+                      recovered: bool = False) -> bool:
         """Hand the channel back: key the release, then stop holding the turn.
 
         The peer may key a DATA over only while it holds the turn  [spec 05 §5.4],
@@ -3126,6 +3134,14 @@ class VaraStationHandshake:
         high = answerer and self._last_tx_level >= _IDLE_HANDBACK_LEVEL[self.bw]
         if initial or high and not idle:
             keyed = self._tx_responder_grant()
+        elif high and recovered and self.bw == '500':
+            # The caller's 850/63 repeats a final ACK we never read. VARA HF
+            # confirms it at pair 135, and the caller's 850/1 and our grant
+            # follow (N5YYF lost-ACK bench, 2026-10-25). Pair 136 confirms
+            # nothing a VARA HF caller recovering that ACK reads.
+            keyed = self._tx_responder_reply(
+                VF.responder_recovery_confirmation(self.called, self.bw),
+                'session-recovery-confirmation')
         elif high:
             keyed = self._tx_responder_reply(
                 VF.responder_post_delivery_idle(self.called, self.bw), 'session-post-delivery-idle')
@@ -3134,6 +3150,7 @@ class VaraStationHandshake:
         # A retry keeps what the refused release was granting  [see _granted_over_unread].
         traffic = traffic or self._release_owed and self._release_traffic
         self._release_owed, self._release_traffic = not keyed, traffic
+        self._release_idle = idle
         if not keyed:
             self.io.log("turn release was not transmitted — retaining the turn "
                         "for a retry")
@@ -3991,8 +4008,15 @@ class VaraStationHandshake:
                 self._ack_turn_ask_at = max(self._ack_turn_ask_at + _ACK_UNHEARD_ASK_REPEAT_S,
                                             time.monotonic() + gap)
             return
-        if (not self._rx_window.before_data
-                and time.monotonic() - self._progress_at >= _MAX_WITHOUT_PROGRESS * _IDLE_POLL_S):
+        # An over owed before the window's first DATA, granted or NAKed, holds
+        # the ask  [see _ask_answerer_turn]; a caller gone silent behind it
+        # ends the link here instead. The setup greeting has its own cap.
+        owed = self._setup_greeting_at is None and (
+            self._granted_over_unread() or self._rx_resend is not None or self._nak_data_due)
+        since = time.monotonic() - (self._progress_at if not self._rx_window.before_data
+                                    else max(self._progress_at, self._peer_heard_at))
+        if ((not self._rx_window.before_data or owed)
+                and since >= _MAX_WITHOUT_PROGRESS * _IDLE_POLL_S):
             self._recovery_report('closing')
             self.io.log(f"nothing from {self.caller} for "
                         f"{time.monotonic() - self._progress_at:.0f} s — closing the link, "
@@ -4714,8 +4738,14 @@ class VaraStationHandshake:
 
     def _peer_over_poll_at(self, samples, track: tuple | None = None) -> int | None:
         """Where the peer's poll behind an over we did not answer sits in
-        ``samples``, or None  [vara_frames, over_poll]."""
-        return self._peer_query_pair_at(samples, VF.over_poll(self.called, self.bw), track)
+        ``samples``, or None  [vara_frames, over_poll]. It is the answerer's
+        frame-12 query as well, timed as that is: the timing bound decides it,
+        and a start left by an earlier query reads it as one from before our
+        answer."""
+        at = self._peer_query_pair_at(samples, VF.over_poll(self.called, self.bw), track)
+        if at is not None:
+            self._place_query(samples, at)
+        return at
 
     def _peer_query_pair_at(self, samples, pair: tuple, track=None) -> int | None:
         """A full exact poll with its complete last symbol and a fresh tail."""
@@ -4736,14 +4766,17 @@ class VaraStationHandshake:
         frames = (11, 12)
         for frame, pairs in VF.over_continue_frames(self.called, self.bw, frames).items():
             if (at := self._peer_query_pair_at(samples, pairs, track)) is not None:
-                # This whole-frame fit places the query's end; the band
-                # envelope can still read lit across its tail.
-                self._answer_held_from = (self._heard - len(samples) + at
-                                          + VF.OVER_CONTINUE_NSYM * MK.HOP)
-                self._query_start = self._query_audio_at() - (len(samples) - at
-                    + getattr(self, '_callback_lag', 0)) / MK.FS
+                self._place_query(samples, at)
                 return frame - 11
         return None
+
+    def _place_query(self, samples, at: int) -> None:
+        # This whole-frame fit places the query's end; the band envelope can
+        # still read lit across its tail.
+        self._answer_held_from = (self._heard - len(samples) + at
+                                  + VF.OVER_CONTINUE_NSYM * MK.HOP)
+        self._query_start = self._query_audio_at() - (len(samples) - at
+            + getattr(self, '_callback_lag', 0)) / MK.FS
 
     def _peer_pairs_at(self, samples, pair: tuple, track: tuple | None,
                        min_symbols: int = 8) -> int | None:
@@ -5525,6 +5558,77 @@ class VaraStationHandshake:
                          & (clear[idx[:, 1:], 1] >= _CLEAR_DB)).all(1)
         dead_lead = ~live[idx[:, 0]]
         return _widest(dead_lead & complete_tail & exact_tail)[1] >= _CONT_PLATEAU
+
+    def _peer_asks_behind_release(self, samples, track=None) -> bool:
+        """The BW500 answerer's 16-symbol turn-request, 1079/1, behind a release
+        of ours: it is still asking, so it never read the release. VA7RMM
+        2026-10-25: a VARA HF caller whose release faded answered this ask with
+        a fresh copy of it  [see _recover_caller_release]. Read whole and fresh,
+        since it is answered by keying."""
+        if not (self.bw == '500' and self._released and self.turn != _TURN_OURS
+                and self._tx_pending is None):
+            return False
+        x = np.asarray(samples, dtype=np.float64)
+        kind = VF.SESSION_TURN_REQUEST_RESPONDER_SHORT
+        _, at, matched = self._peer_frame(x, kind, self.caller, track)
+        if not matched:
+            return False
+        held = len(x) - at - _span(kind)
+        if held < 0:
+            self._wake_answer_scan(-held)
+            return False
+        return held + getattr(self, '_callback_lag', 0) <= _GRANT_FRESH_S * MK.FS
+
+    def _peer_idle_hand_back(self, samples, track=None, *, fresh: bool = True) -> bool:
+        """The answerer handing back an empty turn behind our frame 1 at its last
+        over: its f20, or above the hand-back level its 11-symbol idle pair
+        (s2s-2300 and s2s-2750 50.9 s, 2026-10-22). Read whole, and on the
+        stream fresh; a bracket is its turnaround."""
+        if not (self._hand_back_due and self.chat and self.turn == _TURN_PEER
+                and self._tx_pending is None and self._receive_ack_recovery is None):
+            return False
+        x = np.asarray(samples, dtype=np.float64)
+        if len(x) >= _DATA_OVER_MIN:
+            return False
+        if track is None:
+            track = self._cached_control(x, band=self._band, bin_offset=self._grid)
+        kind = VF.SESSION_TURN_IDLE_RESPONDER_SHORT
+        _, at, matched = self._peer_frame(x, kind, self.called, track)
+        if matched:
+            held = len(x) - at - _span(kind)
+        else:
+            power = self._cached_power(x, self._band, self._grid)
+            if isinstance(power, ControlView):
+                # Its own preamble-cut templates, as the recovery reader keeps its own.
+                power = ControlView(power.source, power.start, power.end, 'idle-hand-back')
+            if not self._complete_responder_pair(
+                    x, VF.responder_post_delivery_idle(self.called, self.bw), track, power):
+                return False
+            held = len(x) - self._responder_pair_at - _POLL_MIN
+        if held < 0:
+            self._wake_answer_scan(int(np.ceil(-held)))
+            return False
+        return not fresh or held + getattr(self, '_callback_lag', 0) <= _GRANT_FRESH_S * MK.FS
+
+    def _hold_handed_back_turn(self) -> None:
+        """Hold the empty turn the answerer handed back: our frame 1 was the
+        first poll, and the next comes on the cadence behind a hand-back, 11.15 s
+        on, as VARA HF keys it (s2s-2300 62.0 s). Text queued since asks with
+        frame 0 and goes out on the answerer's drained frame, as VARA HF's does
+        from a turn it holds (s2s-2300 73.0 s)  [see _ask_held_turn]."""
+        self._hand_back_due = self._handover_unheard = False
+        self.turn = _TURN_OURS
+        self._into_our_turn = 0
+        self._owe_nothing()
+        self._progressed()
+        self._idle_polls = 1
+        self._poll_at = time.monotonic() + _IDLE_POLL_FIRST_S
+        self.io.log(f"rx {self.called} handed back an empty turn — holding it, "
+                    f"{len(self._txq)} block(s) queued")
+        if self._close_asked_at is not None or self._close_owed_at is not None:
+            self.disconnect(acquire=True)
+        elif self._txq:
+            self._ask_held_turn()
 
     def _peer_receive_ack_confirmation(self, samples, track=None) -> bool:
         if (self._receive_ack_recovery != 'ack' or self.bw != '500'
@@ -6489,6 +6593,11 @@ class VaraStationHandshake:
         Behind a hand-over of ours the queue does not matter: a VARA HF peer repeats an
         unread hand-over for as long as the peer repeats 1078/1, with data
         queued, and asks behind the 1078/63 that follows (TURN-REQUEST-63).
+
+        Kestrel over the OpenSlot air loop, 3 dB moderate fading, 2026-11-10:
+        repeating 850/63 for a lost final ACK, the caller missed the answerer's
+        confirmation, and the answerer, having released, asked for the turn.
+        Held as unproven, the ask left each end waiting on the other for 78 s.
         """
         self._handover_unheard = False
         if self._final_request_granted and self.turn == _TURN_PEER:
@@ -6496,7 +6605,19 @@ class VaraStationHandshake:
         if self._released and self.turn != _TURN_OURS and self._tx_pending is None:
             self.io.log(f"rx turn-request from {self.called} behind our release — "
                         f"it went unread, releasing again, {len(self._txq)} block(s) queued")
-            return self._release_on_ask()
+            return self._release_on_ask(idle=self._release_idle)
+        if self._receive_ack_recovery is not None:
+            # A peer asks only once it has retired its delivery, so it took the
+            # final ACK we were repeating and its confirmation went unread. Its
+            # ask stands in for that confirmation; ours, 850/1, follows as it
+            # does behind the confirmation, and the grant opens our over.
+            if self._receive_ack_recovery == 'ack':
+                self._owe_nothing()
+                self._receive_ack_recovery = 'request'
+                self._progressed()
+            self.io.log(f"rx turn-request from {self.called} — it took our final "
+                        "DATA acknowledgement; requesting the turn")
+            return self._tx_turn_request()
         if self._txq or self._tx_pending is not None:
             if self._final_ack_candidate():
                 self.io.log(f"rx turn-request from {self.called} — "
@@ -6554,12 +6675,12 @@ class VaraStationHandshake:
             self._progressed_past_release()
         return keyed
 
-    def _release_on_ask(self) -> bool:
+    def _release_on_ask(self, idle: bool = False) -> bool:
         """The release the peer's 1078/1 asked for. What answers it is the
         peer's over or its 1078/63, not the poll. Waiting on the poll, the ask
         went 0.45-1.07 s into 1078/63 four times: the band dipped inside it, or never read lit under it, and the
         poll's wait ran out  [see _TURN_IDLE_WAIT_S]."""
-        keyed = self._release_turn()
+        keyed = self._release_turn(idle=idle)
         if keyed and self._release_answer_due:
             self._release_answer_due = False
             self._ask_not_before = time.monotonic() + _TURN_IDLE_WAIT_S
@@ -6730,7 +6851,8 @@ class VaraStationHandshake:
                         + ("" if self._link_high_speed else f" (record {level})"))
 
     def _took_control_burst(self, *, continue_reply: bool = False, idle: bool = False,
-                            ask: bool = False, unresolved: bool = False) -> None:
+                            ask: bool = False, unresolved: bool = False,
+                            recovered: bool = False) -> None:
         """The lawful answer to an over of ours: the turn is ours after all,
         whatever arrived into it before this  [see _over_into_our_turn].
 
@@ -6797,7 +6919,7 @@ class VaraStationHandshake:
                 self._grant_held_turn()
             return
         if closed or not self._tx_data_over():
-            if self._release_turn(idle, traffic=ask) and self._txq:
+            if self._release_turn(idle, traffic=ask, recovered=recovered) and self._txq:
                 self._ask_owed = True
 
     def _answer_final_ack_idle(self) -> None:
@@ -7128,14 +7250,22 @@ class VaraStationHandshake:
         return self._peer_control_frame(x)
 
     def _chat_tail_due(self, frame: int | None) -> bool:
-        """Wait one scan for a control burst's tail under CHAT ON; after that
-        it is taken unread, with the flown handover."""
-        if frame is not None or not self.chat or self._tail_waited:
-            self._tail_waited = False
+        """Wait for a control burst's tail under CHAT ON, on the stream, to the
+        seven tail symbols behind the preamble that named it; after that it is
+        taken unread, with the flown handover. A wake cannot push the next scan
+        later, so a one-scan wait came round before the tail was in, and the
+        answer to our last over went unread (Kestrel pair, BW500 and BW2300)."""
+        if frame is not None or not self.chat:
+            self._tail_due = None
             return False
-        self._tail_waited = True
-        self._wake_answer_scan(8 * MK.HOP)    # the seven tail symbols behind the preamble
-        return True
+        if self._tail_due is None:
+            self._tail_due = self._heard + 8 * MK.HOP
+        if self._heard < self._tail_due:
+            # Each symbol, so the frame is read as soon as its tail is in.
+            self._wake_answer_scan(MK.HOP)
+            return True
+        self._tail_due = None
+        return False
 
     def _took_peer_control(self, frame: int | None) -> None:
         """The peer's control burst in its own turn behind our release. Under
@@ -7649,9 +7779,14 @@ class VaraStationHandshake:
         burst = VF.control_bursts(self.caller, self.bw, frame)[self.role == "responder"]
         self._key(True)
         try:
-            return self._transmit_audio(MK.synth_tone_pairs(burst), packet_kind="session-control")
+            sent = self._transmit_audio(MK.synth_tone_pairs(burst), packet_kind="session-control")
         finally:
             self._key(False)
+        # Our idle at the answerer's last over, first or repeated, is the last
+        # thing keyed: its empty hand-back is due behind it  [see _peer_idle_hand_back].
+        self._hand_back_due = (sent and self.role == "initiator" and frame == 1
+                               and self.turn == _TURN_PEER and self._over_answer == ("control", 1))
+        return sent
 
     def _tx_over_continue(self) -> bool:
         """The 8-symbol answer to an over with another one behind it
@@ -7842,9 +7977,12 @@ class VaraStationHandshake:
                 # path's next delivery starts lower, as a delivered frame read
                 # at low SN steps down  [_irs_step].
                 self._irs_step(closing=True)
-            # Under CHAT a VARA HF answerer says idle with frame 1 and traffic
-            # with frame 0; plain answers frame 0 either way.
-            frame = int(self._chat_profile and not self._txq)
+            # Under CHAT a VARA HF station says idle with frame 1 and traffic
+            # with frame 0, the caller at the answerer's last over as well
+            # (BW500 pairs 2026-10-18; s2s-2300 and s2s-2750, 2026-10-22);
+            # plain answers frame 0 either way.
+            chat = self._chat_profile or self.role == 'initiator' and self.chat
+            frame = int(chat and not self._txq)
             self._over_answer = ("control", frame)
             if self._tx_control_burst(frame):
                 if self.bw in ('2300', '2750'):
@@ -8615,7 +8753,7 @@ class VaraStationHandshake:
                 self._recovery_wait_shown = snapshot
                 self._recovery_report('waiting')
         if self._release_owed:
-            keyed = self._release_turn()
+            keyed = self._release_turn(idle=self._release_idle)
             if keyed and self._txq:
                 self._ask_owed = True
         elif self.turn == _TURN_OURS:
@@ -9253,19 +9391,19 @@ class VaraStationHandshake:
             return False
         return True
 
-    def _soft_connected_ack(self) -> bool:
+    def _soft_connected_ack(self) -> int | None:
         """The BW500 connected-ack in the ack window's audio on its weaker
         carriers  [see _soft_pairs]: the responder's control burst keyed to our
         call — frame 1 from a VARA HF CHAT ON answerer (2026-10-23), frame 0 from KB0WZI  [see _ack_whole_500] — whole
-        in what the stream has held since our link-setup."""
+        in what the stream has held since our link-setup. Its frame, or None."""
         if self.bw != "500" or len(self._st_raw) < _POLL_MIN:
-            return False
+            return None
         power = _band_power(self._st_raw, self._band)
         for frame in (1, 0):
             at = self._soft_read(power, VF.control_bursts(self.caller, self.bw, frame)[1])
             if at is not None and 0 <= at and at + _POLL_MIN <= len(self._st_raw):
-                return True
-        return False
+                return frame
+        return None
 
     def _short_connected_ack(self) -> bool:
         """VARA's 17-symbol connected-ack to a greeting ask below level 4, whole
@@ -9543,6 +9681,33 @@ class VaraStationHandshake:
         contact_ended(self, reason or getattr(self, '_recording_reason', 'disconnect'))
         self.state = VaraState.DISCONNECTED
 
+    def _connected_by_ack(self, frame: int | None) -> None:
+        """Step 5 accepted on the answerer's control burst, ``frame`` read off
+        its tail under CHAT ON.
+
+        A VARA HF CHAT ON answerer acknowledges the link-setup with frame 1, its
+        idle, and the caller answers it instead of confirming: the f20 0.13 s
+        behind it, and the 851 request once its host has written (2026-10-18
+        pair, chat-w9-on-callerclose). An answerer that holds its idle until it
+        is answered so, as Xara does, otherwise repeats it until it closes.
+        Frame 0, or a tail not read, takes the confirm."""
+        self._ack_tail_due = None
+        if not (self.chat and frame == 1):
+            self._connected()
+            return
+        self._connected(confirm=False)
+        # No greeting is owed: the peer has said it holds nothing.
+        self._setup_grant_pending = False
+        if self.bw == '500' and self._setup_ask < 4:
+            # A stock caller's overs start at L4 and climb to its ask; a path
+            # whose setup was read below the base starts at that level.
+            self._rec500 = _phy.level_key(self.bw, self._setup_ask)
+        if self._txq:
+            self._hand_turn_over()
+            self._tx_turn_request()
+        else:
+            self._release_turn(idle=True)
+
     def _connected(self, confirm: bool = True) -> None:
         """Step 5 accepted: the link is up, and the initiator confirms it
         [spec 05 §5.3 steps 5-6].
@@ -9575,6 +9740,7 @@ class VaraStationHandshake:
         self._response_origin = getattr(self, "_front_heard", 0)
         self._st_buf = np.zeros(0)
         self._st_raw = np.zeros(0)       # the ack window's audio, read whole
+        self._ack_tail_due = None        # stream count by which a heard ack's tail is in
         self._setup_idle_scan_samples = 0
         self._st_track = np.zeros((0, 3), dtype=np.int32)
         self._st_clear = np.zeros((0, 2))
@@ -9895,9 +10061,14 @@ class VaraStationHandshake:
         return np.concatenate((power, tail))
 
     def _base_window_owned(self) -> bool:
+        # An ask leaves the turn with the peer until it hands over: a resend
+        # keyed across our ask is still the over we NAKed. With nothing owed,
+        # an over there is a repeat of one we answered (W5JAB).
+        owed = self._rx_resend is not None or self._nak_data_due or self._owed_block
         return (self.bw == '500' and self.state == VaraState.CONNECTED
                 and self.role in ('initiator', 'responder') and bool(self.caller)
-                and bool(self.called) and self.turn == _TURN_PEER)
+                and bool(self.called)
+                and (self.turn == _TURN_PEER or self.turn == _TURN_ASKED and owed))
 
     def on_rx_stream(self, samples, *, sample_start=None, flush: bool = False) -> None:
         previous_at = self._rx_audio_at
@@ -10148,9 +10319,20 @@ class VaraStationHandshake:
             return
         self._st_buf = np.concatenate(
             [self._st_buf, np.asarray(samples, dtype=np.float64)])
-        if self.step == _I_LINKSETUP_SENT and self.bw == "500":
+        if self.step == _I_LINKSETUP_SENT and (self.bw == "500" or self.chat):
+            # Under CHAT the ack's tail says what answers it  [see _connected_by_ack].
             self._st_raw = np.concatenate(
-                [self._st_raw, np.asarray(samples, dtype=np.float64)])[-(_ACK_WINDOW + _POLL_MIN):]
+                [self._st_raw, np.asarray(samples, dtype=np.float64)])[-(_ACK_WINDOW + (1 + self.chat) * _POLL_MIN):]
+            if self._ack_tail_due is not None:
+                if self._heard >= self._ack_tail_due:
+                    frame = self._chat_frame(self._st_raw)
+                    self._reset_stream()
+                    self.io.log("rx connected-ack on the receive stream, its tail "
+                                f"{'frame ' + str(frame) if frame is not None else 'unread'}"
+                                " — CONNECTED")
+                    self._connected_by_ack(frame)
+                return
+        if self.step == _I_LINKSETUP_SENT and self.bw == "500":
             self._setup_idle_scan_samples += len(samples)
             idle_span = _span(VF.for_bw(VF.SESSION_TURN_IDLE_RESPONDER, self.bw))
             # A complete frame plus held tail is needed before any FFT work.
@@ -10229,22 +10411,28 @@ class VaraStationHandshake:
             keep = slice(None, last + _ACK_SPAN)
             wide = _ack_hold(track[keep], clear[keep], live[keep], self._peer_shift)
             if wide >= _ACK_PLATEAU:
+                frame = self._chat_frame(self._st_raw)
+                if self.chat and frame is None and self._ack_tail_due is None:
+                    # Its tail says what answers it, and may not all be in yet.
+                    self._ack_tail_due = self._heard + _POLL_MIN
+                    return
                 self._reset_stream()
                 self.io.log(f"rx connected-ack on the receive stream (preamble "
                             f"holds for {wide} alignments) — CONNECTED")
-                self._connected()
+                self._connected_by_ack(frame)
                 return
-            if self._soft_connected_ack():
+            if (frame := self._soft_connected_ack()) is not None:
                 self._reset_stream()
                 self.io.log("rx connected-ack on the receive stream, read on its "
                             "weaker carriers — CONNECTED")
-                self._connected()
+                self._connected_by_ack(frame)
                 return
             if self._short_connected_ack():
                 self._reset_stream()
                 self.io.log(f"rx {VF.SESSION_CONNECTED_ACK_SHORT.name} on the receive "
                             "stream — CONNECTED")
-                self._connected()
+                # Frame 1 of the answerer's 16-symbol connect stream: its idle.
+                self._connected_by_ack(1)
                 return
         idx = np.arange(n)[:, None] + _RESP_OFF
         heard = track[idx][:, :, 0]
@@ -10327,6 +10515,7 @@ class VaraStationHandshake:
         """
         self._reset_answer_audio(skip)
         self._ans_wake = False
+        self._tail_due = None
         self._stale_nak_logged = False
         self._responder_nak_wait_samples = 0
 
@@ -11663,18 +11852,29 @@ class VaraStationHandshake:
             peer = self.caller if self.role == "responder" else self.called
             self.io.log(f"disconnecting — asked {peer} for the turn to close in")
 
+    def _caller_holds_released_turn(self) -> bool:
+        return (self._released_form in ('f13', 'f20', 'grant', 'idle') and self.turn != _TURN_OURS
+                and self._tx_pending is None and not self._initial_answer_turn)
+
     def _caller_holds_control(self, frame: int) -> None:
         self._handover_unheard = False
+        self._peer_heard_at = time.monotonic()
         if self._idle_contact_is_progress():
             self._progressed()
         form = self._released_form
+        if frame == 1:
+            # Its poll holds an empty turn: no over of the traffic we granted
+            # is coming.
+            self._traffic_granted = None
         if frame == 0 and form == 'idle':
             # Behind the 11-symbol idle form VARA HF hands over with its drained
-            # frame (VARA HF pair, L13 delivery, 2026-10-18).
-            self._send_burst(VF.SESSION_DRAINED_RESPONDER)
+            # frame (VARA HF pair, L13 delivery, 2026-10-18). Frame 0 is
+            # traffic: until its over is read no ask of ours may answer it.
+            if self._send_burst(VF.SESSION_DRAINED_RESPONDER):
+                self._traffic_granted = self._peer_over
         elif frame == 0:
-            self._release_turn()
-        elif form in ('f13', 'grant'):
+            self._release_turn(traffic=True)
+        elif form in ('f13', 'grant') and not self._txq:
             self._release_turn(idle=True)
         elif self._close_asked_at is not None and self.turn == _TURN_ASKED and self.bw != "500":
             # The caller's frame 1 behind our 32-symbol close ask is its go-ahead
@@ -11706,8 +11906,18 @@ class VaraStationHandshake:
     def _ask_answerer_turn(self, *, not_before: float | None = None) -> bool:
         if not_before is None:
             not_before = self._ask_not_before
+        # An over still being read, or one we NAKed, is answered first: the
+        # sender takes an ask behind it as that over's acknowledgement
+        # [see _ask_for_turn].
+        # The expected-level reader judges a burst it saw rise within its window.
+        rose = self._lv_first
+        reading = (self._pending_receive is not None or bool(self._base_ready)
+                   or self._base_rx is not None and bool(self._base_rx.pending)
+                   or self._lv_armed and rose is not None and self._lv_heard
+                   < rose * _EXPECT_STEP + self._expected_window_samples()
+                   or self._rx_resend is not None or self._nak_data_due)
         if (self._host_ask_blocked() or getattr(self.io, 'receiving', False)
-                or time.monotonic() < not_before):
+                or time.monotonic() < not_before or reading):
             self._ask_owed = True
             return False
         self._ask_owed = False
@@ -11804,9 +12014,12 @@ class VaraStationHandshake:
                 if repeat_initial_grant:
                     # A missed handover makes the caller repeat its final ACK.
                     # Re-grant without settling bytes or extending progress.
+                    self._peer_heard_at = time.monotonic()
                     self._release_turn()
                 else:
-                    self._took_control_burst()
+                    # Under CHAT frame 0 says the caller has traffic: its over
+                    # is owed, and an ask keyed now lands on it  [_granted_over_unread].
+                    self._took_control_burst(ask=self.chat)
                 return True
             # Under CHAT the caller settles a final over with frame 1 when it
             # has nothing to send, and the release is the f20 form.
@@ -11820,6 +12033,7 @@ class VaraStationHandshake:
                 and self._complete_responder_pair(
                     buf, VF.control_bursts(self.caller, self.bw, 1)[0], track, power)):
             self._reset_answer_search()
+            self._peer_heard_at = time.monotonic()
             # A VARA HF caller polls once before acting on a newly queued
             # write, then asks with frame 0. Answering this poll is neither a
             # new grant nor DATA settlement and must not wind the idle clock.
@@ -11841,6 +12055,15 @@ class VaraStationHandshake:
                 if self._tx_pending is None:
                     self._hold_released_turn()
                 return True
+            if (self._answer_owed == _OWED_RELEASE and self._over_answer == ('control', 1)
+                    and self._complete_responder_pair(
+                        buf, VF.control_bursts(self.caller, self.bw, 0)[0], track, power)):
+                # Its frame 0 behind our idle answer to its last over asks for
+                # the turn, as its 17- and 32-symbol requests do: Xara keys
+                # the 11-symbol form first.
+                self._reset_answer_search()
+                self._answer_responder_control(VF.SESSION_TURN_REQUEST)
+                return True
             if (self._complete_responder_pair(buf, VF.over_poll(self.called, self.bw)[0], track, power)
                     and 0 <= self._query_age(len(buf) - self._responder_pair_at
                     - ((VF.OVER_CONTINUE_NSYM - 1) * MK.HOP + MK.STRIDE)) <= _GRANT_FRESH_S):
@@ -11849,9 +12072,11 @@ class VaraStationHandshake:
                 self._reset_answer_search()
                 self._answer_caller_query(None, query_start=query_start)
                 return True
-        if (self._released_form in ('f13', 'f20', 'grant', 'idle') and self.turn != _TURN_OURS
-                and self._tx_pending is None and not self._initial_answer_turn):
-            for frame in (1,) if self._released_form in ('f13', 'grant') else (1, 0):
+        if self._caller_holds_released_turn():
+            # Behind a grant frame 0 is a close answer, except while the grant
+            # it asked for is unanswered: then it is that ask again.
+            grant = self._released_form in ('f13', 'grant') and not self._granted_over_unread()
+            for frame in (1,) if grant else (1, 0):
                 if self._complete_responder_pair(
                         buf, VF.control_bursts(self.caller, self.bw, frame)[0], track, power):
                     self._reset_answer_search()
@@ -12000,6 +12225,7 @@ class VaraStationHandshake:
 
     def _answer_responder_control(self, kind, *, query_held: float = 0.0):
         self._handover_unheard = False
+        self._peer_heard_at = time.monotonic()
         queries = (*VF.SESSION_ANSWER_QUERIES_SHORT, *VF.SESSION_INTERMEDIATE_ANSWER_QUERIES)
         if kind not in queries:
             self._setup_answer_for = None
@@ -12029,6 +12255,9 @@ class VaraStationHandshake:
                     # A lost grant may be repeated, but that is neither a new
                     # receive transaction nor forward progress.
                     return
+                # A request is traffic: its over follows at the level we last
+                # asked, also from a turn we held while asking for it ourselves.
+                self._lv_owed = True
                 self._hand_turn_over()
                 self._owe_nothing()
                 self._over_answer = None
@@ -12055,7 +12284,12 @@ class VaraStationHandshake:
                     and _phy.over_is_last(self._tx_pending[0], self.caller)):
                 self.io.log(f"rx {kind.name} — {self.caller} holds the turn idle, "
                             "so our last over was taken")
-                self._took_control_burst(idle=True)
+                self._took_control_burst(idle=True, recovered=True)
+            elif self._caller_holds_released_turn():
+                # The idle at 32 symbols is the poll control frame 1 is: a
+                # VARA HF answerer answers it with the 32-symbol idle response,
+                # and Xara repeats it unanswered until its watchdog closes.
+                self._caller_holds_control(1)
             elif self._idle_contact_is_progress():
                 self._progressed()
             return
@@ -12068,8 +12302,12 @@ class VaraStationHandshake:
             return
         if kind is VF.SESSION_DRAINED:
             # A caller polled from a held turn answers our frame 0 with its
-            # drained frame, and the answerer's DATA follows.
-            if self.turn == _TURN_ASKED:
+            # drained frame, and the answerer's DATA follows. Below the base
+            # level it is also the caller's hand-over behind our answer to its
+            # last over, or behind the traffic we granted it, which it had
+            # not  [see _release_turn, _granted_over_unread].
+            if (self.turn == _TURN_ASKED or self.turn == _TURN_PEER
+                    and (self._answer_owed == _OWED_RELEASE or self._granted_over_unread())):
                 self._take_caller_release()
             return
         if kind is VF.SESSION_OVER_NAK_SHORT:
@@ -12267,10 +12505,21 @@ class VaraStationHandshake:
         elif self._peer_query_turn_idle(buf, track):
             took = self._took_query_turn_idle
             aged = True
+        elif (self.turn == _TURN_PEER and self._released and self._tx_pending is None
+              and (poll := self._peer_poll_held(buf)) is not None
+              and poll[1] == VF.SESSION_TURN_IDLE_RESPONDER.name):
+            # The idle at 32 symbols, 1078/63: VARA HF holds a BW500 turn with it,
+            # Xara polls the empty turn our release handed it with it. Either way
+            # it is a poll, answered behind its end.
+            if (took := self._answer_to_poll(*poll)) is None:
+                return False
+            aged = True
         elif self._peer_intermediate_query_answer(buf, track):
             took = self._took_intermediate_query_answer
         elif self._peer_receive_ack_confirmation(buf, track):
             took = self._took_idle_response
+        elif self._peer_idle_hand_back(buf, track):
+            took = self._hold_handed_back_turn
         elif self._peer_low_record_answer(buf, track):
             self.io.log(f"rx {self.called}'s answer to a record-"
                         f"{self._tx_pending[2]} over, frame "
@@ -12328,6 +12577,8 @@ class VaraStationHandshake:
             # keying, which at this length would go out across a peer that is
             # still transmitting.
             return False
+        elif self._peer_asks_behind_release(buf, track):
+            took = self._took_turn_request
         elif ((self.turn == _TURN_OURS or self._stalled())
               and self._peer_responder_nak(buf, track)):
             # Out of turn what the peer could not read is our acknowledgement, so
@@ -13192,6 +13443,7 @@ class VaraStationHandshake:
             return False
         self._consume_located_unread()
         if recognized:
+            self._peer_heard_at = time.monotonic()
             self._peer_polled()
         machine = self._rx_window
         machine.high_speed = self._link_high_speed
@@ -13689,7 +13941,7 @@ class VaraStationHandshake:
                                 "not ours")
             elif self._ack_evidence(samples):
                 self.io.log("rx connected-ack (preamble confirmed) — CONNECTED")
-                self._connected()
+                self._connected_by_ack(self._chat_frame(samples))
                 return
             # Deliberately NOT a return. This branch used to swallow every burst that
             # arrived in this step, so one missed ack was terminal even while the
@@ -13785,6 +14037,15 @@ class VaraStationHandshake:
                 and self.turn == _TURN_PEER and not self._stream_owns_answer
                 and self._drained_hands_over(samples)):
             self._took_drained_handover()
+            return
+
+        # The answerer's empty hand-back behind our frame 1, for a transport
+        # that only brackets  [see _peer_idle_hand_back].
+        if (self.state == VaraState.CONNECTED and self.role == "initiator"
+                and not self._stream_owns_answer
+                and len(samples) <= _SESSION_NEED + 6 * MK.HOP
+                and self._peer_idle_hand_back(samples, fresh=False)):
+            self._hold_handed_back_turn()
             return
 
         # The same handover as an 11-symbol control burst, named by its tail

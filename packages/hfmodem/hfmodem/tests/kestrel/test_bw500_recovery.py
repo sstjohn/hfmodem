@@ -40,6 +40,7 @@ from hfmodem.kestrel.vara import vara_mfsk as MK
 from hfmodem.tests import evidence
 
 from . import corpora
+from .receive_answer_helpers import audio_clock
 
 FIXTURES = Path(__file__).with_name("fixtures")
 PEER = corpora.HELD_RECORDINGS / "bw500-recovery" / "peer-caller-over-nak-500"
@@ -52,6 +53,13 @@ POLL = 960
 pytestmark = pytest.mark.skipif(
     not K5FIT.is_file(),
     reason="the K5FIT greeting fixture requires the source checkout")
+
+
+@pytest.fixture(autouse=True)
+def timed_audio(monkeypatch):
+    # The station's clock is the audio it is fed, which arrives here faster
+    # than real time; a loaded machine must not move its deadlines.
+    audio_clock(monkeypatch, VA.VaraStationHandshake, MK.FS)
 
 
 class _IO(VA.VaraIO):
@@ -158,11 +166,7 @@ def test_an_owed_over_that_will_not_decode_keys_nothing_and_stays_owed():
     assert any("keying nothing into its turnaround" in m for m in io.msgs)
 
 
-def test_the_responder_idle_draws_session_over_nak_at_the_peer_lead(monkeypatch):
-    # The stream here is fed faster than real time, so a callback's processing
-    # time is not audio age; a loaded machine would otherwise move the lead.
-    now = VA.time.monotonic()
-    monkeypatch.setattr(VA.time, "monotonic", lambda: now)
+def test_the_responder_idle_draws_session_over_nak_at_the_peer_lead():
     hs, io = _owed_greeting()
     idle = _idle()
     quiet = np.zeros(int(1.5 * MK.FS))
@@ -286,10 +290,21 @@ def test_no_rung_goes_out_behind_an_over_that_will_not_decode():
 
 
 def test_a_rung_still_goes_out_when_nothing_unread_follows():
+    """A VARA HF responder that heard nothing behind its over keys its idle 1.5 s
+    past its unkey. Begun sooner behind our answer than an over could have
+    followed it, the idle says our answer went unheard, and the saved answer
+    goes again; begun later, an over of its may have gone unread, and the rung
+    is the over-NAK  [vara_arq._reack_on_idle]."""
     hs, io = _station("KC9GHZ")
     assert hs._answer_data_over(_low("bw500-level1-arm1"))
-    hs.on_rx_audio(np.concatenate([_idle("KC9GHZ"), np.zeros(int(0.2 * MK.FS))]))
-    assert len(io.sent) == 2 and hs._reacks == 1 and hs._owed_block
+    acked = io.sent[0]
+    _stream(hs, io, np.concatenate([np.zeros(int(0.8 * MK.FS)), _idle("KC9GHZ"),
+                                    np.zeros(int(0.5 * MK.FS))]))
+    assert len(io.sent) == 2 and np.array_equal(io.sent[-1], acked), io.msgs[-3:]
+    assert hs._rx_window.A.kind == 'continue' and not hs._owed_block
+    _stream(hs, io, np.concatenate([np.zeros(int(6.0 * MK.FS)), _idle("KC9GHZ"),
+                                    np.zeros(int(0.5 * MK.FS))]))
+    assert len(io.sent) == 3 and hs._reacks == 1 and hs._owed_block, io.msgs[-3:]
     assert hs._rx_window.A.kind == 'nak' and hs._rx_window.A.sent
     assert hs._rx_window.T is not None
     assert _is(io.sent[-1], VF.for_bw(VF.SESSION_OVER_NAK_SHORT, "500"), "KC9GHZ")

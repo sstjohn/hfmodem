@@ -236,7 +236,12 @@ KISS_SUBMISSION_TIMEOUT_S = 20.0
 #: code of behaviour keeps the CF and slots at 500 (deck slide 23), so 500 is the default.
 BANDWIDTHS = (500, 2300, 2750)
 DEFAULT_BW = 500
-FAREWELL_IDLE_S = {500: 25, 2300: 10, 2750: 10}
+#: How long a farewell may go without progress before the close is forced. A
+#: farewell written behind an empty hand-back takes four bursts to its ACK at
+#: every width: the hand-back, our frame-0 ask, the grant and the over, 8-9 s on
+#: VARA HF's own timing at BW2300 (2026-10-22 pairs). The bound leaves room for
+#: one burst lost and asked again.
+FAREWELL_IDLE_S = 25
 #: The slot step follows the modem, not the width: VarAC V8.2.0 sets 750 Hz for VARA HF
 #: (2550 Hz only for VARA SAT), so the ten offsets hold at every HF bandwidth.
 SLOT_OFFSETS = (-3750, -3000, -2250, -1500, -750, 750, 1500, 2250, 3000, 3750)
@@ -1443,6 +1448,9 @@ class Flow:
             target = value if match[1] == 'QF' else origin + value * 10 if origin is not None else None
         else:
             raise ValueError('Expected a measured QSY request')
+        if request == '<Q:0>' and origin is not None:
+            # Stay: OpenSlot's default, which VarAC answers with <QSYR> where it is.
+            return origin
         if (not value or target == origin
                 or target not in {CALLING_HZ[self.band] + n for n in SLOT_OFFSETS}):
             raise ValueError('QSY must select one of the ten 750 Hz slots')
@@ -1454,9 +1462,12 @@ class Flow:
 
         The modem owner acknowledges received DATA and confirms physical unkey
         before tuning. Unrelated outbound text remains queued across the move.
+        A stay (<Q:0>) is accepted at once: the inviter sends <TL> only after
+        our <QSYR>.
         """
         origin = self.dial if origin is None else origin
         target = self.received_qsy_target(request, origin)
+        stay = target == origin
         generation = self.client.link_generation if generation is None else generation
         after = self.client.message_sequence if after is None else after
         def current_link():
@@ -1464,12 +1475,14 @@ class Flow:
                     or self.client.closed):
                 raise HostError('Link changed during received QSY')
         current_link()
-        if self.received_retune_steps is None:
+        if self.received_retune_steps is None and not stay:
             raise HostError('Received QSY needs a modem-owner retune adapter')
         self.qsy_receiving = True
-        self.qsy_slot = next(slot for slot in self.codec.slots
-                             if self.codec.offset_hz(slot) == target - CALLING_HZ[self.band])
-        self.qsy_phase = 'waiting for received DATA acknowledgement and physical unkey'
+        self.qsy_slot = 0 if stay else next(
+            slot for slot in self.codec.slots
+            if self.codec.offset_hz(slot) == target - CALLING_HZ[self.band])
+        self.qsy_phase = ('accepting a stay' if stay else
+                          'waiting for received DATA acknowledgement and physical unkey')
         def wait(steps):
             try:
                 while True:
@@ -1485,23 +1498,24 @@ class Flow:
         try:
             if self.dial != origin:
                 raise HostError('Frequency changed before received QSY')
-            end = self.client.clock() + timeout
-            transaction = self.retune_steps(
-                lambda: wait(self.received_retune_steps(target, generation)))
-            try:
-                for hint in transaction:
-                    if self.client.clock() >= end:
-                        raise TimeoutError('Received QSY retune boundary timed out')
-                    yield hint
-            finally:
-                transaction.close()
-            self.received_tuned(target)
-            self.qsy_phase = 'waiting for peer arrival (<TL>)'
-            yield from wait(self.client.wait_message_steps(
-                lambda text: any(part.raw == '<TL>' for part in decode_application(text).parts),
-                after=after, timeout=timeout))
-            after = next(seq for seq, text in self.client.messages if seq > after
-                         and any(part.raw == '<TL>' for part in decode_application(text).parts))
+            if not stay:
+                end = self.client.clock() + timeout
+                transaction = self.retune_steps(
+                    lambda: wait(self.received_retune_steps(target, generation)))
+                try:
+                    for hint in transaction:
+                        if self.client.clock() >= end:
+                            raise TimeoutError('Received QSY retune boundary timed out')
+                        yield hint
+                finally:
+                    transaction.close()
+                self.received_tuned(target)
+                self.qsy_phase = 'waiting for peer arrival (<TL>)'
+                yield from wait(self.client.wait_message_steps(
+                    lambda text: any(part.raw == '<TL>' for part in decode_application(text).parts),
+                    after=after, timeout=timeout))
+                after = next(seq for seq, text in self.client.messages if seq > after
+                             and any(part.raw == '<TL>' for part in decode_application(text).parts))
             self.client.send_tag('QSYR')
             self.mail_ready()
             self.qsy_phase = 'waiting for peer opening signal report'
@@ -1586,7 +1600,7 @@ class Flow:
     def farewell_steps(self, text='73', *, timeout=None, cancelled=lambda: False):
         client = self.client
         if timeout is None:
-            timeout = FAREWELL_IDLE_S[client.bandwidth or DEFAULT_BW]
+            timeout = FAREWELL_IDLE_S
         start = client.clock()
         end, hard_end = start + timeout, start + 60
         cursor, messages = client.sequence, client.message_sequence

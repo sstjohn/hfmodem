@@ -107,7 +107,9 @@ def test_operator_log_keeps_long_candidate_before_append(voice_owner, stage4, mo
     with pytest.raises(OSError, match='contact append failure'):
         owner.session.log_contact()
     assert decisions == [True]
-    bounded(owner.session.close)
+    # Closing stores every one of the candidate's 125 segments, republishing the
+    # index after each; the bound is for a hang, not for speed.
+    bounded(owner.session.close, timeout=60)
     finish(stage4)
     kept = json.loads((directory / 'candidate.json').read_text())
     assert kept['state'] == 'keep'

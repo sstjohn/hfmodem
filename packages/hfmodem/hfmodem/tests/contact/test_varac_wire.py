@@ -299,12 +299,30 @@ def test_missing_qsyr_sends_no_profile_and_does_not_retune_back():
     assert host.data.sent == [v.frame_message('<QSYF>000014108750</QSYF>'), wire(136)]
 
 
-@pytest.mark.parametrize('invitation', ['<Q:1>', '<Q:999999>', '<Q:0>', '<Q:no>'])
+@pytest.mark.parametrize('invitation', ['<Q:1>', '<Q:999999>', '<Q:no>'])
 def test_bad_qsy_request_cannot_tune_or_emit(invitation):
     host, tunes, flow = session()
     with pytest.raises(ValueError):
         flow.answer_qsy(invitation)
     assert not tunes and not host.data.sent
+
+
+def test_q0_stays_and_answers_qsyr_before_the_inviters_tl():
+    """OpenSlot invites with <Q:0> by default and sends <TL> and its opening
+    only after the <QSYR> VarAC answers it with; never <Q:0> in our census."""
+    host, tunes, flow = session()
+    host.client._text(v.frame_message('<Q:0>'))
+    def reply(data):
+        if data == v.frame_message('<QSYR>'):
+            host.data.incoming.append(v.frame_message('<TL>') + v.frame_message('de W5TST <R+18>'))
+    host.data.respond = reply
+    request, after, generation, origin = flow.receive()
+    host.client.finish(flow.answer_qsy_steps(request, after=after, generation=generation,
+                                             origin=origin, timeout=1))
+    assert not tunes and flow.dial == v.CALLING_HZ[20]
+    assert flow.state == v.State.CONNECTED
+    assert host.data.sent[0] == v.frame_message('<QSYR>')
+    assert host.data.sent[1] == v.frame_message('de N0BBS <R-04>')
 
 
 def test_disconnected_or_wrong_frequency_qsy_cannot_tune():

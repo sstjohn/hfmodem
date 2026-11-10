@@ -994,12 +994,9 @@ def test_chat_drained_responder_grant_keeps_wholly_lost_data_pending(bw):
     replay(c, hi)
     assert ci.sent, ci.msgs
     replay(h, ci)
-    assert h._released_form == 'grant', hi.msgs
-    replay(c, hi)
-    assert c._holding_idle(), ci.msgs
-    replay(h, ci)
     assert h._released_form == 'idle', hi.msgs
     replay(c, hi)
+    assert c._holding_idle(), ci.msgs
     c.send(b'last over')
     replay(h, ci)
     np.testing.assert_array_equal(hi.sent[-1], M.synth_burst(

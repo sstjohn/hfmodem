@@ -59,7 +59,7 @@ def test_bw500_w1aw_final_close_credits_exactly_the_admitted_payload(
     emitted = []
     monkeypatch.setattr(hs, '_render_over',
                         lambda bodies, *args: emitted.append(tuple(bodies)) or np.zeros(10))
-    monkeypatch.setattr(hs, '_release_turn', lambda idle=False, traffic=False: True)
+    monkeypatch.setattr(hs, '_release_turn', lambda idle=False, traffic=False, recovered=False: True)
     original = bytes(range(256))
     hs.send(original)
     received = bytearray()
@@ -123,7 +123,7 @@ def test_only_validated_over_settlement_credits_originals(mode, monkeypatch):
     original = bytes(range(256))*2
     hs.send(original)
     monkeypatch.setattr(hs, '_tx_data_over', lambda: False)
-    monkeypatch.setattr(hs, '_release_turn', lambda idle=False, traffic=False: True)
+    monkeypatch.setattr(hs, '_release_turn', lambda idle=False, traffic=False, recovered=False: True)
     credited = []
     while hs._txq:
         wire = hs._txq.pop(0)

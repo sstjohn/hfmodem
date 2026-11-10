@@ -37,6 +37,7 @@ Software, standards and publications this project relied on, referred to, or sha
 - H.-J. Barthen (DL5DI), B. R. Eckert (W3SG) et al., *Linux RMS Gateway* (software), 2026. <https://github.com/nwdigitalradio/rmsgw>
 - N. S. Castellano (N2QZ) et al., *paclink-unix* (software), 2023. <https://github.com/nwdigitalradio/paclink-unix>
 - H. Okumura and H. Yoshizaki, *LZHUF.C* (source code), 1988; distributed by J.-P. Roubelat (F6FBB) as LZHUF_1. <ftp://ftp.f6fbb.org/pub/f6fbb/utils/lzhuf_1.zip>
+- Josef (OE3JJS), *SDRoxide* (software), v1.7.0. <https://github.com/dividebysandwich/sdroxide>
 - M. H. Pedersen (LA5NTA), *Pat* (software), v1.0.1. <https://github.com/la5nta/pat>
 - M. H. Pedersen (LA5NTA), *wl2k-go* (software), v1.0.1. <https://github.com/la5nta/wl2k-go>
 - N. Rigg (NR5P), *OpenSlot* (software), v0.2.5. <https://nr5p.com/openslot.html>

@@ -27,7 +27,7 @@ from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
 from hfmodem.tests.kestrel.test_reack_over import (CALLED, answering, idle,
-                                                   keyed, over)
+                                                   keyed, over, timed_audio)  # noqa: F401
 
 _REPLY = b"FC EM ABCDEF 100 90 0\rF> 3b\r"
 

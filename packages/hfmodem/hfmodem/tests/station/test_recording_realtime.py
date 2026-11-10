@@ -149,7 +149,7 @@ def test_close_leaves_the_final_index_on_disk(sessions, no_timer):
     assert facts['segments'] and all(d['state'] == 'finalized' for d in facts['segments'])
 
 
-def test_gaps_inside_a_coalescing_window_cost_no_storage_jobs(sessions, monkeypatch):
+def test_gaps_inside_a_coalescing_window_cost_no_storage_jobs(sessions, monkeypatch, no_timer):
     reports = []
     rec, root = sessions('everything', report=reports.append)
     lane = rec.stream('rx', rate=FS, clock='card')
@@ -160,7 +160,9 @@ def test_gaps_inside_a_coalescing_window_cost_no_storage_jobs(sessions, monkeypa
     # Two seconds of blocks, each one sample after the last ended.
     _feed(lane, 0, 750 * (BLOCK + 1), step=BLOCK + 1)
     flush(rec)
-    assert len(jobs) < 40
+    # The space check rides every batch the drainer takes, gaps or none, so
+    # its count is this machine's scheduling rather than the gaps' cost.
+    assert len([job for job in jobs if job != rec._check_space]) < 40
     bounded(rec.close)
     assert len([r for r in reports if 'coalesced' in r]) <= 3
     assert len(index(root)['segments']) <= 5

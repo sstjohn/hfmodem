@@ -86,6 +86,7 @@ def test_recorded_cutoff_and_selected_window(arm):
     ('1003-0010', False, 0, True, 1), ('1003-0010', True, 7, True, 1),
     ('1003-0012', False, 3, True, 1), ('1003-0012', True, 7, True, 1),
 ])
+@pytest.mark.wall_clock
 def test_recorded_entry_campaign(arm, known_grant, count, confirmed, level):
     """These arms flew with the entry listen; here every entry slot keys, on
     the FTDX10's clock, and each reply is read to the next entry's key. The
@@ -376,7 +377,9 @@ def held_cycle(tx, g, slot):
     first bridge `d` in front of the key and the sweep there, the read to the
     key, the regrid and the tick, each charged to the bench clock at what it
     costs here. Returns the audio keyed, and the room left in front of the
-    key's notice for the tick where the read itself did not key."""
+    key's notice for the tick where the read itself did not key. A slower or
+    busier machine keys a later slot, so every test keyed through here is
+    wall_clock."""
     live, rx, host, settle = tx.live, tx.sessrx, tx.host, 1920
     tx.aim(g, slot)
     tx.tx_end = g._p3_keyed_reply[2]
@@ -429,6 +432,7 @@ def rendered(audio, head, wave, hz):
     return got
 
 
+@pytest.mark.wall_clock
 def test_a_changeover_a_cycle_after_a_bare_answer_is_read_before_the_key():
     """An ACK at 103,200 and the RMS changeover one short cycle later, both
     at -50 Hz: the entry that answers the ACK keys, and the next one does not
@@ -484,6 +488,7 @@ def test_the_bridge_aims_the_key_s_read_at_every_recorded_p3_answer_and_nowhere_
 @pytest.mark.parametrize('head_ms,d_ms', [(986, 111), (1005, 111), (1020, 111),
                                            (1030, 111), (1045, 111),
                                            (1002, 134), (1040, 134), (1045, 134)])
+@pytest.mark.wall_clock
 def test_a_changeover_the_key_cuts_short_is_read_before_the_next_entry(head_ms, d_ms):
     """An RMS changeover whose word ends behind the key's read: 986 ms past our
     boundary is the latest of these arms' answers, and a peer turning round in
@@ -507,6 +512,7 @@ def test_a_changeover_the_key_cuts_short_is_read_before_the_next_entry(head_ms, 
 
 @pytest.mark.parametrize('head_ms', [950, 975])
 @pytest.mark.parametrize('symbols', [16, 19, None])
+@pytest.mark.wall_clock
 def test_an_answer_cut_off_inside_its_word_confirms_no_entry(head_ms, symbols):
     """Two ACKs a cycle apart, the second gone `symbols` after its head, short
     of its 21: a word read only in part corroborates nothing, and the next slot
@@ -526,6 +532,7 @@ def test_an_answer_cut_off_inside_its_word_confirms_no_entry(head_ms, symbols):
     assert keyed and keyed[0][0] == 3 * SLOT + (234 if symbols is not None else 0)
 
 
+@pytest.mark.wall_clock
 def test_a_symbol_faded_inside_a_changeover_s_head_is_read_before_the_next_entry():
     """An RMS changeover 975 ms past our boundary with its tenth symbol faded
     to a twentieth: the word is still read whole, and the next entry does not
@@ -541,6 +548,7 @@ def test_a_symbol_faded_inside_a_changeover_s_head_is_read_before_the_next_entry
     assert bytes(host.channel(host.ptchn).rx) == b'RMS'
 
 
+@pytest.mark.wall_clock
 def test_a_symbol_faded_inside_a_corroborating_ack_still_confirms_the_entry():
     """The second of two ACKs 975 ms past our boundary with its tenth symbol
     faded to a twentieth: a fade is not a cut, and the slot keys our first data
@@ -558,6 +566,7 @@ def test_a_symbol_faded_inside_a_corroborating_ack_still_confirms_the_entry():
 
 
 @pytest.mark.parametrize('end', [116552, 116900])
+@pytest.mark.wall_clock
 def test_a_burst_that_ends_before_the_key_refuses_no_slot(end):
     """Tones on both control carriers from where an answer starts, gone before
     our carrier comes up: not the peer on the air, and the entry keys."""
@@ -571,6 +580,7 @@ def test_a_burst_that_ends_before_the_key_refuses_no_slot(end):
     assert keyed and keyed[0][0] == 2 * SLOT + 234
 
 
+@pytest.mark.wall_clock
 def test_a_bare_answer_running_into_the_key_s_read_refuses_no_slot():
     """An ACK 986 ms past our boundary on a noiseless channel, still on the air
     where the read stops: the entry keys."""

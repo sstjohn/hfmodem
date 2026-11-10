@@ -51,7 +51,7 @@ def module():
     return importlib.import_module('hfmodem.core.recording')
 
 
-def bounded(fn):
+def bounded(fn, timeout=TIMEOUT):
     errors = []
     def run():
         try:
@@ -60,7 +60,7 @@ def bounded(fn):
             errors.append(exc)
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
-    thread.join(TIMEOUT)
+    thread.join(timeout)
     assert not thread.is_alive(), 'recording operation did not finish'
     if errors:
         raise errors[0]

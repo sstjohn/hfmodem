@@ -187,7 +187,7 @@ def test_bye_confirms_queued_operator_text_and_farewell_before_listen_off(endpoi
     emitted = []
     monkeypatch.setattr(hs, '_render_over',
                         lambda bodies, *args: emitted.append(tuple(bodies)) or np.zeros(10))
-    monkeypatch.setattr(hs, '_release_turn', lambda idle=False, traffic=False: True)
+    monkeypatch.setattr(hs, '_release_turn', lambda idle=False, traffic=False, recovered=False: True)
     desk.host.client.send_text('queued chat')
     modem.poll()
     before = len(desk.sent)

@@ -199,7 +199,7 @@ def test_farewell_hard_cap_aborts_despite_continuing_drain_progress(bw, drained)
     assert not desk.host.client.connected and not desk.host.client.ptt
 
 
-@pytest.mark.parametrize('bw,window', [(500, 25), (2300, 10), (2750, 10)])
+@pytest.mark.parametrize('bw,window', [(500, 25), (2300, 25), (2750, 25)])
 def test_idle_host_activity_does_not_extend_the_farewell_deadline(bw, window):
     desk = stuck_desk(bw=bw, **{'DISCONNECT': ['OK'], 'ABORT': ['OK', 'PTT OFF']})
     start = desk.host.now
@@ -213,7 +213,7 @@ def test_idle_host_activity_does_not_extend_the_farewell_deadline(bw, window):
     desk.drive()
 
 
-@pytest.mark.parametrize('bw,window', [(500, 25), (2300, 10), (2750, 10)])
+@pytest.mark.parametrize('bw,window', [(500, 25), (2300, 25), (2750, 25)])
 def test_late_progress_cannot_revive_an_expired_farewell(bw, window):
     desk = stuck_desk(bw=bw, **{'DISCONNECT': ['OK'], 'ABORT': ['OK', 'PTT OFF']})
     desk.session.command('/bye')
@@ -224,7 +224,7 @@ def test_late_progress_cannot_revive_an_expired_farewell(bw, window):
     assert 'ABORT' in desk.sent
 
 
-@pytest.mark.parametrize('bw,window', [(500, 25), (2300, 10), (2750, 10)])
+@pytest.mark.parametrize('bw,window', [(500, 25), (2300, 25), (2750, 25)])
 def test_close_completed_after_deadline_still_requires_abort_confirmation(bw, window):
     desk = stuck_desk(bw=bw, **{'DISCONNECT': ['OK'], 'ABORT': ['OK', 'PTT OFF']})
     desk.session.command('/bye')
@@ -237,7 +237,7 @@ def test_close_completed_after_deadline_still_requires_abort_confirmation(bw, wi
     assert desk.sent[at:at + 4] == ['CLEANTXBUFFER', 'DISCONNECT', 'VERSION', 'ABORT']
 
 
-@pytest.mark.parametrize('bw,window', [(500, 25), (2300, 10), (2750, 10)])
+@pytest.mark.parametrize('bw,window', [(500, 25), (2300, 25), (2750, 25)])
 def test_fresh_buffer_zero_extends_the_wait_for_unkey_without_a_positive_report(bw, window):
     desk = stuck_desk(bw=bw, **{'DISCONNECT': ['OK', 'DISCONNECTED']})
     desk.host.data.respond = lambda data: desk.host.lines('PTT ON')

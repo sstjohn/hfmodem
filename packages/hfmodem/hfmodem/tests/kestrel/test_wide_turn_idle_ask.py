@@ -84,17 +84,33 @@ def test_the_wide_idle_draws_one_ask_behind_its_last_symbol(bw, weak):
 
 
 @pytest.mark.parametrize("bw", ["2300", "2750"])
-@pytest.mark.parametrize("negative", ["wrong_call", "empty", "chat"])
+@pytest.mark.parametrize("negative", ["wrong_call", "chat"])
 def test_only_our_idle_with_a_queue_draws_an_ask(bw, negative):
     hs, io = released(bw, chat=negative == "chat")
     if negative == "chat":
         _Clock.t += VA._RELEASE_ASK_GAP_S + .01
-    if negative != "empty":
-        hs.send(bytes(range(256)))
+    hs.send(bytes(range(256)))
     sent = len(io.sent)
     audio, _ = idle(bw, call="K7ABC" if negative == "wrong_call" else hs.caller)
     _feed(hs, audio)
     assert len(io.sent) == sent, io.msgs
+
+
+@pytest.mark.parametrize("bw", ["2300", "2750"])
+def test_our_idle_with_nothing_queued_draws_keepalive_b(bw):
+    """The 32-symbol idle is a poll: a VARA HF answerer holding an empty turn keys
+    it until something answers and times out when nothing does (p1, p2), and a
+    VARA HF caller answers every poll with keepalive-B, the 32-symbol no-traffic
+    form, not an ask."""
+    hs, io = released(bw)
+    audio, end = idle(bw)
+    at = _Clock.t
+    _feed(hs, audio)
+    assert len(io.sent) == 2, io.msgs
+    np.testing.assert_array_equal(io.sent[-1], MK.synth_burst(
+        hs.called, VF.for_bw(VF.SESSION_KEEPALIVE_B, bw)))
+    assert io.at[-1] - at - end / MK.FS >= VA._ANSWER_HELD_S
+    assert hs.turn == VA._TURN_PEER
 
 
 @pytest.mark.parametrize("bw", ["2300", "2750"])

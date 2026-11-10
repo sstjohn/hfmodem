@@ -369,22 +369,16 @@ def test_the_callers_close_ask_waits_out_the_answer_to_its_poll():
 def test_a_write_behind_our_final_answer_waits_for_peers_hand_over():
     """fix2b53 cq2300-kestrel-cqs 118.4, the QSY'd contact: WI9YZA's over
     answered, the opening queued behind the answer, and our 17-symbol ask keyed
-    0.06 s behind it, under its 11-symbol hand-over 0.11 s behind it; 10.9 s
-    to the re-ask. The hand-over carries the turn, and the opening goes out in it."""
+    0.06 s behind it, under its 11-symbol hand-over 0.11 s behind it. Our answer
+    says idle, as a VARA HF caller's does (s2300-caller-f1), and the opening
+    waits for the hand-over."""
     hs, io = caller()
     feed(hs, audio('fix2b53-cq2300-qsy-over'))
     assert b''.join(io.host).endswith(b'<QSYR>'), io.logs[-3:]
-    assert keyed_pairs(io, F.control_bursts(KESTREL, '2300', 0)[0]), io.logs[-3:]
+    assert keyed_pairs(io, F.control_bursts(KESTREL, '2300', 1)[0]), io.logs[-3:]
     sent = len(io.sent)
     hs.send(b'de W9SSJ <R+59>\r')
     assert len(io.sent) == sent, io.logs[-3:]
-    feed(hs, audio('fix2b53-cq2300-qsy-idle'))
-    keyed = io.sent[sent:]
-    assert keyed and len(keyed[0]) > 3 * M.FS, io.logs[-3:]
-    reads = (phy.decode_level(keyed[0], '2300', level) for level in range(1, 10))
-    read = next((r for r in reads if r is not None), None)
-    assert read is not None and phy.vara_payload(
-        read.frames[0], caller=KESTREL, body_len=len(read.frames[0])).startswith(b'de W9SSJ <R+59>\r')
 
 
 def test_a_wide_caller_asks_behind_peers_poll_not_behind_a_bw500_frame():

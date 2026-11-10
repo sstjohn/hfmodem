@@ -386,7 +386,9 @@ claim_pending() { :; }
 claim_wait() { :; }
 claim_exit() { exit "$1"; }
 nc() { return 0; }
-sleep() { :; }
+# A sub-second sleep paces a poll of a live child, such as the witness's
+# second to exit, and keeps its real length; the long waits are skipped.
+sleep() { case "$1" in .*|0.*) command sleep "$1" ;; esac; }
 unkey_and_exit() { exit "$1"; }
 '''
     script = '\n'.join('    :' if 'exec > >(' in line else line for line in script.splitlines()) + '\n'
@@ -418,8 +420,10 @@ unkey_and_exit() { exit "$1"; }
         for launcher in (['bash'], [shutil.which('bash', path=env['PATH'])], []):
             hermetic.guard.admit([*launcher, str(path)], env)
         try:
+            # A pounce starts some twenty Python children, a quarter second each
+            # on an idle workstation; the bound is for a hang, not for speed.
             result = subprocess.run(['bash', str(path), *leading, *args, *flags], env=env,
-                                    text=True, capture_output=True, timeout=15)
+                                    text=True, capture_output=True, timeout=120)
         finally:
             assert guard_log.read_text() == '', 'unexpected command: ' + guard_log.read_text()
         events = [json.loads(line) for line in trace.read_text().splitlines()] if trace.exists() else []
