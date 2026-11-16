@@ -55,7 +55,7 @@ class BroadcastClient:
             self.session.say(f'{self.possibly_outstanding} frames written to the host may still key '
                              'on the new frequency. /all clear acknowledges them')
 
-    def idle(self, *, arming=False):
+    def check_idle(self):
         from .varac import HostError
         s, c = self.session, self.session.client
         for blocked, why in (
@@ -71,6 +71,11 @@ class BroadcastClient:
                 (s._band_fault, 'band setup is unverified')):
             if blocked:
                 raise HostError(f'Broadcast refused: {why}')
+
+    def idle(self, *, arming=False):
+        from .varac import HostError
+        s, c = self.session, self.session.client
+        self.check_idle()
         if arming and s.line_state() is None:
             # A session that is not answering holds no keyer, so its line reads only once armed.
             s.arm(True)
@@ -231,6 +236,7 @@ class BroadcastClient:
         def writing():
             nonlocal attempted
             attempted = True
+            s.semantic('broadcast_submitting')
             self.possibly_outstanding += 1
             self._retune_command = None
         def written():
@@ -272,11 +278,13 @@ class BroadcastClient:
                             identification.close()
             finally:
                 wait.close()
+            s.semantic('broadcast_sent')
             self.result = 'a host transmission matching this frame followed'
             s.say('Broadcast: ' + self.result + '; remote reception is unconfirmed')
         except InterruptedError as error:
             self.result = str(error)
             yield from self._settle()
+            s.semantic('broadcast_cancelled')
         except (HostError, OSError) as error:
             self.result = str(error)
             if attempted:

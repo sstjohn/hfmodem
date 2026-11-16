@@ -273,7 +273,7 @@ def test_an_undecoded_burst_cannot_walk_the_peers_raster_off_the_last_decode(
         is None
 
 
-# -- risk 4: `P3_LONG_REPLY_S` is inert, and right by construction ----------
+# -- risk 4: `P3_COMB_LONG_REPLY_S` is inert, and right by construction ----------
 
 def test_the_long_answer_slot_is_two_slots_on_and_needs_no_term_of_its_own():
     """3.390 - 0.890 is 2.500 s, which is the comb's own period twice over.
@@ -284,7 +284,7 @@ def test_the_long_answer_slot_is_two_slots_on_and_needs_no_term_of_its_own():
     to it, and what actually keys it there is `regear` -- `ticks` becomes three
     and `_regear_next_slot` steps the comb by that.
     """
-    assert round((onair.P3_LONG_REPLY_S - onair.P3_REPLY_S) * FS) == 2 * CYCLE
+    assert round((onair.P3_COMB_LONG_REPLY_S - onair.P3_COMB_REPLY_S) * FS) == 2 * CYCLE
     moved = []
     for long in (False, True):
         g = irs_grid()
@@ -299,7 +299,7 @@ def test_the_long_answer_slot_is_two_slots_on_and_needs_no_term_of_its_own():
         moved.append((g.anchor - before, g.boundary(slot) - A5_PEER,
                       g.boundary(slot + 2) - A5_PEER))
     assert moved[0] == moved[1]
-    assert moved[0] == (-1000, REPLY_N, round(onair.P3_LONG_REPLY_S * FS))
+    assert moved[0] == (-1000, REPLY_N, round(onair.P3_COMB_LONG_REPLY_S * FS))
 
 
 # -- risk 5: the QRT, connect and ISS paths ---------------------------------

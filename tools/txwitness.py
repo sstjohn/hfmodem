@@ -717,8 +717,14 @@ def record(seconds: float, path: str, device: str, *, ownership=None) -> int:
             f"    ./.venv/bin/python tools/txwitness.py record {seconds:g} {path}"
         ) from exc
 
+    # Inside the receive loop a signal only ends the loop: raised mid-drain it
+    # would drop blocks the sidecar has already counted.
+    stopping = {'armed': False, 'signum': None}
+
     def stop(signum, _frame):
-        raise SystemExit(128 + signum)
+        if not stopping['armed']:
+            raise SystemExit(128 + signum)
+        stopping['signum'] = signum
 
     for sig in FATAL_SIGNALS:
         signal.signal(sig, stop)
@@ -772,7 +778,8 @@ def record(seconds: float, path: str, device: str, *, ownership=None) -> int:
             with stream:
                 device_opened()
                 last, before = time.monotonic(), 0
-                while count < seconds * FS:
+                stopping['armed'] = True
+                while count < seconds * FS and stopping['signum'] is None:
                     time.sleep(DRAIN_S)
                     if receiver:
                         receiver.drain()
@@ -783,8 +790,9 @@ def record(seconds: float, path: str, device: str, *, ownership=None) -> int:
                     elif time.monotonic() - last > STALL_S:
                         stalled = True
                         break
-            completed = not stalled
+            completed = not stalled and stopping['signum'] is None
         finally:
+            stopping['armed'] = False
             if receiver:
                 receiver.drain()
                 receiver._finish()
@@ -805,6 +813,8 @@ def record(seconds: float, path: str, device: str, *, ownership=None) -> int:
                 tap.close()
             print(json.dumps(dict(samples=count, rate=FS, peak=levels.peak, rms=levels.rms,
                                   peak_dbfs=_dbfs(levels.peak), rms_dbfs=_dbfs(levels.rms))))
+        if stopping['signum'] is not None:
+            raise SystemExit(128 + stopping['signum'])
         if stalled:
             print(f"  *** the card delivered nothing for {STALL_S:g} s and the tap "
                   "stopped there — the interface went away ***")

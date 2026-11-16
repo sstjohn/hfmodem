@@ -62,7 +62,7 @@ def recover(tmp_path, *, pending=True, ack=False):
     tx.sessrx = receiver
     tx.aim(grid, 69)
     tx.live.now = tx.live.pos = tx.key_instant(grid, 69) + 480 - tx.live.key_notice
-    slot, audio, origin = onair._regrid(tx.live, grid, tx, host, receiver, 69,
+    slot, audio, origin, _ = onair._regrid(tx.live, grid, tx, host, receiver, 69,
                                        np.zeros(0, np.float32), tx.live.pos, 1920)
     return slot, tx, grid, receiver
 

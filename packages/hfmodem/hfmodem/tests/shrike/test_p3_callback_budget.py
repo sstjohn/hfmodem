@@ -119,7 +119,7 @@ def test_recovered_reply_reserves_ordinary_tick_and_render_before_last_drain(tmp
     receiver.host = recovered_host()
     receiver._p3_row0 = tx.key_instant(grid, 44) - receiver._p3_span - 1300
     stream.now = stream.pos = tx.key_instant(grid, 44) + 480 - stream.key_notice
-    slot, _, _ = onair._regrid(stream, grid, tx, receiver.host, receiver, 44,
+    slot, _, _, _ = onair._regrid(stream, grid, tx, receiver.host, receiver, 44,
                              np.zeros(0, np.float32), 0, 1920)
     assert slot > 44
     assert stream.taken[-1][1] == tx.key_instant(grid, slot) - onair._prekey_lead(

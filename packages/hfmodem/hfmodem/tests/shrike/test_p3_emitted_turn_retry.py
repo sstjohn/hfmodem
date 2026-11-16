@@ -10,48 +10,11 @@ import pytest
 from scipy.io import wavfile
 
 from hfmodem.shrike import arq, onair, p3acquire, p3rx, spec
-from hfmodem.shrike.p3trial import ReplyClock
-from hfmodem.tests.shrike.test_entry_answer import _Session
-from hfmodem.tests.shrike.test_p3_breakin_timing import duplex
+from hfmodem.tests.shrike.onair_support import _Session as _Session
+from hfmodem.tests.shrike.p3_reply_support import duplex as duplex, pending
 
 FS, CYCLE = 48000, 60000
 CAP = Path(__file__).resolve().parents[5]/'captures/onair-0919-2342'
-
-
-def pending(tmp_path):
-    g = onair._MasterGrid(32581,CYCLE,0,packet_n=38880,cs_n=10080,d_max_n=6240)
-    g.protocol,g.sending = spec.Protocol.PACTOR3,False
-    g.acquired=g.corroborated=True
-    g.d_n,g.d_ref_n=4800,38880
-    g.cycles=63
-    clock=ReplyClock(entry_phase=3964483,pulse_epoch=3993433)
-    g.reply_clock=clock
-    g.note_p3_packet(7128585,39120,CYCLE,swapped=False)
-    g.note_p3_control(7173433)
-    g.note_p3_packet(7188585,39120,CYCLE,swapped=True)
-    sess=_Session(role=arq.ISS)
-    tx=duplex(g,tmp_path)
-    tx.reply_clock=clock
-    sess.host.peer=tx
-    tx.attach(sess.host)
-    packet=arq._Packet(status=0,payload=b';FW',sl=1,breakin=True)
-    sess.host.arq._inflight=packet
-    sess.host.arq._next_seq=1
-    sess.host.arq._buffer_raw=3
-    tx.aim(g,121)
-    tx.breakin_due=True
-    tx.live.now=tx.live.pos=7280000
-    tx.send_packet(1,b';FW',0,breakin=True)
-    assert not tx.refused
-    assert tx.tx_audio_start+min(tx.tx_pulse_offsets)==7293433
-    assert tx._p3_emitted_turn is not None
-    g.reverse(to_iss=True)
-    g.turn_accepted=False
-    g.cycles=65
-    tx.aim(g,124)
-    tx.breakin_due=True
-    tx.live.now=tx.live.pos=7467800
-    return sess,tx,g,packet
 
 
 def test_recorded_cs2_repeats_same_field_after_old_irs_geometry_is_cleared(tmp_path):
@@ -142,14 +105,27 @@ def test_missed_next_control_retains_phase_but_silence_cannot_refresh_evidence(t
     assert tx._p3_retry_phase(g,134) is None
 
 
-def test_valid_repeat_never_bypasses_peer_collision_guard(tmp_path):
+@pytest.mark.parametrize('age', [0, 1])
+def test_valid_repeat_only_overrides_a_projected_peer_collision(tmp_path, capsys, age):
     sess,tx,g,packet=pending(tmp_path)
     g.note_peer_codeword(7457526,10080,'REQ','WS8EOC',protocol=spec.Protocol.PACTOR3)
     assert tx._p3_retry_phase(g,124)==7473433
-    # The pulse remains correctly placed, but this much PTT lead would key
-    # across the decoded peer control. Retaining a clock cannot authorize it.
+    # A 250 ms PTT lead crosses the decoded control; only its retained
+    # projection can be overridden on a later cycle.
+    if age:
+        g.cycles += age
+        tx.aim(g, 124 + age)
+    assert tx._p3_retry_phase(g, 124 + age) == 7473433 + age * CYCLE
     tx.settle=.250
-    tx.live.now=tx.live.pos=7450000
+    tx.live.now=tx.live.pos=7450000 + age * CYCLE
     tx.send_packet(1,b';FW',0,breakin=True)
-    assert tx.refused
-    assert len(tx.live.emissions)==1
+    said = capsys.readouterr().out
+    if age:
+        assert not tx.refused
+        assert len(tx.live.emissions)==2
+        assert 'CHANGEOVER OVERLAP -- KEYING' in said
+    else:
+        assert tx.refused
+        assert len(tx.live.emissions)==1
+        assert sess.host.arq._inflight is packet
+        assert 'CHANGEOVER NOT PLACED -- NOT KEYING' in said

@@ -3,6 +3,7 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """The contact spans a contact-only witness can be aligned against, one per line."""
 import json
+import sys
 from pathlib import Path
 
 from hfmodem.station import sessionlog
@@ -77,8 +78,8 @@ def selected(root, witness):
                         if a < b:
                             found.append((path, witness, dict(recording=rec,
                                 local=[round(a), round(b)], witness=[remote(a), remote(b)])))
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f'witness selection unavailable: {exc!r}', file=sys.stderr)
     return found
 
 

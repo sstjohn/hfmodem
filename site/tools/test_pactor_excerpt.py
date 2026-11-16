@@ -17,8 +17,11 @@ class PactorExcerpt(unittest.TestCase):
     def test_chart_draws_every_recovered_frame(self):
         page = (excerpt.ROOT/'site/index.html').read_text()
         figure = re.search(r'<div id="evidence-pactor"><figure class="cycle">.*?</figure>', page, re.S)[0]
-        self.assertIn(exchange_figure.diagram('pactor', self.events), figure)
-        self.assertEqual(set(re.findall(r'data-event="([^"]+)"', figure)), {e['id'] for e in self.window})
+        events = exchange_figure.events('pactor')
+        lo, hi = exchange_figure.FIGURES['pactor']['window']
+        self.assertIn(exchange_figure.diagram('pactor', events), figure)
+        self.assertEqual(set(re.findall(r'data-event="([^"]+)"', figure)),
+                         {e['id'] for e in events if not e.get('timestamp_only') and e['t1'] > lo and e['t0'] < hi})
 
     def test_answers_and_breakin_precede_role_reversal(self):
         peer = [e for e in self.window if e['direction']=='rx' and e.get('control_number')]

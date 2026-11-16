@@ -28,7 +28,7 @@ GREETING = (b"RMS Trimode 1.4.4.0\r\n"
             b"[WL2K-5.0-B2FWIHJM$]\r"
             b";PQ: 39917013\r"
             b"CMS via WS8EOC >\r")
-PENDING = (b";PM: W9SSJ 6C19LLAEHDZL 528 op@example.net //WL2K vara500 "
+PENDING = (b";PM: W9SSJ 1L96LAEHDZLC 528 op@example.net //WL2K vara500 "
            b"receive test 0923 B\r"
            b";PM: W9SSJ 1KUDM5V76988 547 op@example.net //WL2K p3 "
            b"receive test 0923 A\r")

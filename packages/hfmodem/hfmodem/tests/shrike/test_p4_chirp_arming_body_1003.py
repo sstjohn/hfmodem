@@ -103,7 +103,8 @@ def recorded(monkeypatch):
         row = snapshot('eligible', proposal)
         held = machine._held_answer
         row['held'] = None if held is None else dict(
-            answer=vars(held.answer).copy(), generation=held.generation)
+            answer=vars(held.answer).copy(), generation=held.generation,
+            acknowledged=held.acknowledged)
         row['epoch'] = machine._receive_epoch
         row['generation'] = machine._peer_generation
         row['allowed'] = can_key(machine, proposal)
@@ -116,7 +117,7 @@ def recorded(monkeypatch):
                                        listen=listen, shift=shift)
         return row['returned']
 
-    def timed_refusal(machine,reason):
+    def timed_refusal(machine,reason,now=None):
         proposal=machine._next
         snapshot('refusal', proposal)['reason'] = reason
         if proposal is not None and not proposal.current_slot_accepted:
@@ -126,7 +127,7 @@ def recorded(monkeypatch):
                 purpose=proposal.purpose,kind=proposal.kind,state=proposal.state,reason=reason,
                 now_sample=now,key_notice=stream.key_notice,
                 margin_samples=proposal.stream_sample-stream.key_notice-now))
-        return refuse(machine,reason)
+        return refuse(machine,reason,now=now)
 
     def tracked_header(*args, **kwargs):
         before = receivers[0].clock.cycle_s
@@ -177,7 +178,7 @@ def assert_charged_chirp_receive(result, calls, delivered, neutral):
     assert [(e['at'],e['kind'],e['state'],e['reason'])
             for e in result['events'] if e['event']=='Refused'] == [
         (e['at'],e['kind'],e['state'],e['reason']) for e in refusals]
-    assert all(e['purpose'] is None and e['margin_samples']<0
+    assert all(e['purpose'] == 'repeat-request' and e['margin_samples']<0
                and e['reason']=='deadline' for e in refusals)
     assert not {e['at'] for e in refusals} & {e['audio_start'] for e in result['emissions']}
     assert all(not (at < row['audio_start'] < at+round(p4chirp.PACKET_S*support.FS))
@@ -235,15 +236,20 @@ def assert_proposal_admission(result, neutral, refused):
         assert outcome['at'] == due and outcome['kind'] == facts['kind'], outcome
         is_neutral = not facts['current_slot_accepted']
         if is_neutral:
-            assert (facts['kind'], facts['state'], facts['payload'],
-                    facts['purpose']) == ('word', 'IRS_ANSWER', b'', None)
+            assert (facts['kind'], facts['state'], facts['payload']) == ('word', 'IRS_ANSWER', b'')
             held = first['held']
             valid = (held is not None
                      and held['answer']['receive_epoch'] == first['epoch']
                      and held['generation'] == first['generation'])
             expected = held['answer'] if valid else vars(Proposal(
-                facts['kind'], due, word='V27', state=State.IRS_ANSWER))
-            # Only placement and acceptance change when copying the held answer.
+                facts['kind'], due, word='V27', state=State.IRS_ANSWER, purpose='repeat-request'))
+            if valid and expected['peer_control'] == 5:
+                # AT Unread slots: this v5 control is not a counted ack to replay.
+                expected = dict(expected, purpose='repeat-request', peer_control=None)
+            if valid and held.get('acknowledged', False) and expected['ack_identity'] is not None:
+                expected = dict(expected, purpose='repeat-request', ack_identity=None,
+                                ack_reason=None, peer_control=None)
+            # A neutral request retains the held source's ownership.
             assert {k: v for k, v in facts.items() if k not in (
                 'stream_sample', 'current_slot', 'current_slot_accepted')} == {
                 k: v for k, v in expected.items() if k not in (
@@ -303,6 +309,8 @@ def assert_word_waveforms(result, waves, pin):
                for row in waves)
 
 
+# The live link bounds receive work by the wall clock, so a loaded host changes what it decides.
+@pytest.mark.realtime
 def test_none_body_driver_receives_chirps_with_charged_work(monkeypatch):
     refused=[]
     with neutral_keys(refused=refused) as neutral, waveform_keys() as waves:
@@ -323,7 +331,7 @@ def arming_example():
                      accepted_target=40, current_slot=90,
                      ack_identity=(0, b'field'), current_slot_accepted=False)
     late = Proposal('word', 200, word='V27', state=State.IRS_ANSWER,
-                    current_slot=190, current_slot_accepted=False)
+                    purpose='repeat-request', current_slot=190, current_slot_accepted=False)
     held = replace(keyed, stream_sample=50, current_slot=40,
                    current_slot_accepted=True)
     first = dict(decision=0, proposal=keyed, facts=vars(keyed).copy(),
@@ -333,7 +341,7 @@ def arming_example():
     source = dict(held=dict(answer=vars(held).copy(), generation=4),
                   epoch=3, generation=4)
     neutral = [dict(at=100, word='X27', purpose=None, kind='word', state='IRS_ANSWER')]
-    refused = [dict(at=200, word='V27', purpose=None, kind='word',
+    refused = [dict(at=200, word='V27', purpose='repeat-request', kind='word',
                     state='IRS_ANSWER', reason='deadline')]
     result = dict(
         events=[dict(event='Decision', proposed_at=100),
@@ -410,7 +418,7 @@ def test_neutral_history_mutation_is_rejected(monkeypatch):
 
     def mutate_history(self, *args, **kwargs):
         sent = keyed(self, *args, **kwargs)
-        self.ack_word = 'mutated history'
+        self._ack_chain = 'mutated history'
         return sent
 
     monkeypatch.setattr(P4Turn, 'keyed', mutate_history)
@@ -444,7 +452,7 @@ def test_recording_pin_fails_with_previous_transmit_option_gate(monkeypatch):
     original = 'receiver.chirp = True'
     assert original in source
     source = source.replace(original,
-        "receiver.chirp |= args.p4_ladder == 'chirp' or args.p4_data == 'chirp'", 1)
+        "receiver.chirp |= args.p4_data == 'chirp'", 1)
     namespace = dict(vars(onair))
     exec(compile(source, 'previous_chirp_arming', 'exec'), namespace)
     monkeypatch.setattr(onair, '_run_p4_link', namespace['_run_p4_link'])

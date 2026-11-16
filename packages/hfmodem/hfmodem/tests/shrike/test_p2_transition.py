@@ -151,6 +151,6 @@ def test_p3_compatibility_renderer_ignores_native_p2_delay(tmp_path):
 
 def test_p2_mail_phase_does_not_move_other_presets():
     from types import SimpleNamespace
-    args = SimpleNamespace(p2_mail=False, p1_6a9=False)
+    args = SimpleNamespace(p2_mail=False)
     onair._p1_response_defaults(args)
     assert args.p2_phase_delay_ms == 0

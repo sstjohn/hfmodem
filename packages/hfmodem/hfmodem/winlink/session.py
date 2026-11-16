@@ -526,6 +526,11 @@ class B2FSession:
         else:
             self._fail("gateway banner ended without a SID (CMS side?)")
 
+    def source_lost(self, why: str) -> None:
+        """Gateway bytes were lost before the greeting ended, so no SID can follow."""
+        if self._state == _GREETING and not self.failure:
+            self._fail(f"lost part of the gateway greeting ({why})")
+
     def _refused(self, line: str) -> None:
         self.remote_refusal = line
         self._fail(f"remote reported: {line}")

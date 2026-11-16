@@ -10,31 +10,11 @@ import pytest
 
 from hfmodem.tests.shrike.recorded_pcm import recorded_pcm
 
-from hfmodem.shrike import arq, onair, pactor1, rxfront
+from hfmodem.shrike import arq, onair, pactor1
 from hfmodem.shrike.spec import Protocol
-from hfmodem.tests.shrike.test_p3_offer import calling_station, cs_event
+from hfmodem.tests.shrike.p3_arq_support import calling_station, cs_event, grant, granted, repeat
 
 GRANTS_PATH = Path(__file__).with_name("fixtures") / "ve3kpg-0909-grants.json"
-
-
-def grant():
-    return rxfront.Event(0.1, "unassigned", "0x59A", protocol=Protocol.PACTOR1,
-                         spare=pactor1.CS_59A, sense=0)
-
-
-def granted():
-    host, keyed = calling_station()
-    host.p1_grant_only = True
-    host.arq.on_host_data(b"pending application bytes")
-    host.on_rx_event(grant())
-    host.tick()  # Finish the initial grant/entry cycle before its replies arrive.
-    assert host.arq.entry_pending
-    return host, keyed
-
-
-def repeat(host):
-    host.on_rx_event(grant())
-    host.tick()
 
 
 def test_four_grants_do_not_abandon_the_only_entry_waveform():

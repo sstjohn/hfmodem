@@ -6,16 +6,18 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from functools import partial
 import io
+from importlib.util import find_spec
 import json
 import os
 from pathlib import Path
 import queue
 import re
 import select
+import signal
 import sys
 import threading
 import time
@@ -30,7 +32,8 @@ termios = posix.module("termios")
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--ui', choices=('auto', 'line'), default='auto')
+    p.add_argument('--ui', choices=('auto', 'textual', 'line'), default='auto',
+                   help='chat interface (default: sense a rich terminal)')
     p.add_argument('--mycall', type=str.upper, required=True,
                    help='the digital call, as the fly path takes it: a tactical call such as X-W9SSJ is fine')
     p.add_argument('--idcall', help='CW call for the closing ID; default IDCALL, [station] idcall, then --mycall')
@@ -94,9 +97,9 @@ class _ConnectionLine(str):
 def chat_server(recording_events=None):
     """A host that reports CQ frames whatever its listen state, so the session can
     monitor with auto-answer off; its port bytes are otherwise VARA's."""
-    from hfmodem.kestrel.host.server import HostSession, SessionState, VaraServer
+    from hfmodem.kestrel.host.server import ReportingSession as BaseSession, SessionState, VaraServer
 
-    class ReportingSession(HostSession):
+    class ReportingSession(BaseSession):
         transmission_count = 0
 
         def modem_ptt(self, on):
@@ -113,11 +116,6 @@ def chat_server(recording_events=None):
             if recording_events is not None and isinstance(value, _ConnectionLine):
                 recording_events.append(value.recording_id)
             super()._write_event(kind, value)
-
-        def modem_cqframe(self, call, bw, sn):
-            self.modem_bitrate(1, 18, False)
-            self.modem_snr(sn)
-            self._event('command', f'CQFRAME {call} {bw}')
 
     class ChatServer(VaraServer):
         session_class = ReportingSession
@@ -577,7 +575,7 @@ class WindowsTerminal(Terminal):
 
 def line_terminal(held, history, ui='auto'):
     if ui not in ('auto', 'line'):
-        raise ValueError('Textual UI is unavailable on this branch; use --ui line')
+        raise ValueError('Textual runs through textual_session, not a line terminal')
     return (WindowsTerminal if os.name == 'nt' else Terminal)(held, history)
 
 
@@ -629,6 +627,10 @@ class Diagnostics:
 
 def terminal(session, tty):
     """Operator lines go to the session between its ticks; EOF or /quit ends it."""
+    if isinstance(session, Session):
+        from hfmodem.contact.chat_controller import LineAdapter
+        from hfmodem.contact.chat_session import SessionAdapter
+        session = LineAdapter(lambda session=session: SessionAdapter(session, legacy=True))
     failure = None
     try:
         while True:
@@ -654,35 +656,7 @@ def terminal(session, tty):
             raise
 
 
-def received_retune_adapter(runtime, client, tuner, unkeyed, *, completed=None, quitting=lambda: False):
-    """Bridge cooperative application work to the sole modem owner's boundary."""
-    def retune_steps(target, generation):
-        modem = runtime.modem
-        if modem is None:
-            raise HostError('Receiver retune has no modem owner')
-        valid = lambda: (client.link_generation == generation
-                         and client.connected and not client.closed and not quitting())
-        try:
-            request = runtime.request_retune(
-                lambda: tuner(target), modem=modem, station=modem.station,
-                receive_cursor=modem.received_cursor, unkeyed=unkeyed, valid=valid)
-        except (ValueError, queue.Full) as error:
-            raise HostError(f'Receiver retune cannot be queued: {error}') from error
-        try:
-            while not request.done:
-                if not valid():
-                    raise HostError('Link changed during receiver retune')
-                yield .05
-            if request.error is not None:
-                raise HostError(f'Receiver retune failed: {request.error}') from request.error
-            if request.cancelled:
-                raise HostError('Receiver retune cancelled')
-        finally:
-            request.cancel(timeout=.1 if quitting() else -1)
-            if request.done and not request.cancelled and request.error is None:
-                if completed is not None:
-                    completed(target)
-    return retune_steps
+from hfmodem.contact.chat_session import received_retune_adapter
 
 
 def close_reporter(reporter, say, emit):
@@ -699,17 +673,22 @@ ESCAPES = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]|\a')
 
 def logging_say(screen, log):
     """The operator's screen, each line also kept UTC-stamped in the session's console.log."""
-    def say(text):
-        screen.write(text + '\n')
-        screen.flush()
+    def log_only(text):
         for line in ESCAPES.sub('', text).split('\n'):
             log.write(f'{utc()} {line}\n')
         log.flush()
 
+    def say(text):
+        screen.write(text + '\n')
+        screen.flush()
+        log_only(text)
+
+    say.log_only = log_only
     return say
 
 
-def run(args, rig, admission, bbs_service=None):
+@contextmanager
+def open_chat(args, rig, admission, bbs_service=None, *, output=None):
     with ExitStack() as held:
         radio = ExitStack()
         radio.callback(rig.shutdown)
@@ -735,7 +714,7 @@ def run(args, rig, admission, bbs_service=None):
             catalog = HostCatalog()
             held.callback(catalog.close)
             catalog.enable(root)
-        tty = line_terminal(held, args.session.parent.parent / 'history', getattr(args, 'ui', 'auto'))
+        tty = output if output is not None else line_terminal(held, args.session.parent.parent / 'history', 'line')
         transcript = held.enter_context((args.session / 'host.jsonl').open('w', encoding='utf-8'))
         events = held.enter_context((args.session / 'events.jsonl').open('a', encoding='utf-8'))
         console = held.enter_context((args.session / 'console.log').open('a', encoding='utf-8'))
@@ -794,6 +773,8 @@ def run(args, rig, admission, bbs_service=None):
         host_owner = Host(audio)
         host_owner.release = radio.close
         host = held.enter_context(host_owner)
+        subscribe = getattr(getattr(host, 'runtime', None), 'subscribe_payload_evidence', None)
+        delivery_evidence = held.enter_context(subscribe()) if subscribe is not None else None
         if offset:
             say(f'monitor-wide: the dial sits {abs(offset)} Hz {"below" if offset < 0 else "above"} '
                 f'each channel; we key and hear the channel at {1500 - offset} Hz audio')
@@ -848,6 +829,9 @@ def run(args, rig, admission, bbs_service=None):
 
             session = Session(client, flow, say=say, emit=emit, arm=host.arm,
                               line_state=rig.line_state, bandwidth=args.bw, reporter=reporter,
+                              delivery_evidence=delivery_evidence,
+                              delivery_boundary=getattr(getattr(host.server, '_session', None),
+                                                        'delivery_boundary', None),
                               identify=identify, idcall=idcall, ident_report=report,
                               id_interval_s=station.id_interval_s, closing_cwid=station.closing_cwid,
                               power=partial(rig.power_w, scale_w=scale_w), power_clamp_w=clamp_w,
@@ -868,8 +852,7 @@ def run(args, rig, admission, bbs_service=None):
                                     '/pskreporter status or off' if reporter is not None else 'off'))
             say('commands: ' + ', '.join(Session.COMMANDS) + '; anything else is sent when linked')
             try:
-                session.monitor()
-                terminal(session, tty)
+                yield session, tty
             except BaseException as error:
                 if isinstance(error, Exception):
                     say(f'error: {error}')
@@ -877,7 +860,163 @@ def run(args, rig, admission, bbs_service=None):
                 raise
             finally:
                 session.parking.store.close()
-        return 0
+
+
+def sense_ui(requested):
+    from hfmodem.ui import choose_chat_ui
+    available = requested == 'line' or find_spec('textual') is not None
+    stdin_tty = requested != 'line' and os.isatty(0)
+    tty, columns, rows = False, 0, 0
+    if stdin_tty or requested == 'textual':
+        try:
+            fd = os.open('/dev/tty', os.O_RDWR)
+            try:
+                tty = True
+                try:
+                    columns, rows = os.get_terminal_size(fd)
+                except OSError:
+                    pass
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
+    return choose_chat_ui(requested, textual_available=available, stdin_tty=stdin_tty,
+                          controlling_tty=tty, term=os.environ.get('TERM'),
+                          inside_emacs=os.environ.get('INSIDE_EMACS'), columns=columns, rows=rows)
+
+
+class TextualOutput:
+    def __init__(self):
+        self.pending = []
+        self.port = None
+
+    def write(self, text):
+        from hfmodem.contact.chat_state import Notice
+        if self.port is None:
+            self.pending.append(text)
+        else:
+            self.port._queue(Notice(text.rstrip('\n'), 'info'))
+
+    def write_bbs(self, text):
+        # Structured BBS documents arrive through SessionAdapter's semantic hook.
+        pass
+
+    def flush(self):
+        pass
+
+    def attach(self, port):
+        self.port = port
+        # SessionAdapter already publishes Session.say; direct runtime notices
+        # still use this sink, including final reporter and recording notices.
+        port._old_say = port._old_say.log_only
+        for text in self.pending:
+            self.write(text)
+        self.pending.clear()
+
+
+@contextmanager
+def textual_tty():
+    from hfmodem.ui.textual_chat import defer_interrupts
+    fd = os.open('/dev/tty', os.O_RDWR)
+    with defer_interrupts(), open(fd, 'w', buffering=1) as stream:
+        attrs = termios.tcgetattr(stream.fileno())
+        try:
+            yield stream
+        finally:
+            termios.tcsetattr(stream.fileno(), termios.TCSANOW, attrs)
+
+
+def textual_session(args, rig, admission, tty, bbs_service=None):
+    from hfmodem.ui.textual_chat import defer_interrupts
+    with defer_interrupts():
+        return _textual_session(args, rig, admission, tty, bbs_service)
+
+
+def _textual_session(args, rig, admission, tty, bbs_service=None):
+    from hfmodem.contact.chat_controller import Controller
+    from hfmodem.contact.chat_session import OwnedSessionAdapter
+    from hfmodem.ui.textual_chat import ChatApp, finish_controller
+    failure = None
+    app = None
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        # Runtime print callbacks share the line console's evidence-pipe guarantee.
+        sys.stdout.reconfigure(line_buffering=True)
+
+    def screen_failure():
+        return failure or (app.failure if app is not None else None)
+
+    def factory():
+        cleanup = ExitStack()
+        port = None
+        try:
+            output = TextualOutput()
+            session, _ = cleanup.enter_context(open_chat(args, rig, admission, bbs_service, output=output))
+            observed_line = session.line_state
+
+            def line_state():
+                # A closed keyer has no live readback; hand_back retains its proof.
+                if rig.retired and not rig.line_held:
+                    return False if rig.released_low is True else None
+                return observed_line()
+
+            session.line_state = line_state
+            port = OwnedSessionAdapter(session, cleanup=cleanup, failure=screen_failure)
+            output.attach(port)
+            session.monitor()
+            return port
+        except BaseException as error:
+            try:
+                if port is not None:
+                    port._runtime_failure = error
+                    port.quit()
+                else:
+                    cleanup.__exit__(*sys.exc_info())
+            except BaseException as cleanup_error:
+                if cleanup_error is not error:
+                    raise error from cleanup_error
+            raise
+
+    controller = Controller(factory)
+    try:
+        app = ChatApp(controller, title='Kestrel chat', terminal=tty, stdout=sys.stdout,
+                      stderr=sys.stderr, exit_on_failure=True,
+                      interrupt=lambda: os.kill(os.getpid(), signal.SIGINT))
+        app.run()
+        if app.failure is not None:
+            raise app.failure
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        try:
+            finish_controller(controller)
+        except BaseException as cleanup_error:
+            if failure is not None and cleanup_error is not failure:
+                raise failure from cleanup_error
+            raise
+
+
+def run(args, rig, admission, bbs_service=None):
+    ui, reason = sense_ui(getattr(args, 'ui', 'auto'))
+    if reason:
+        print(reason, file=sys.stderr, flush=True)
+    if ui == 'textual':
+        # A terminal can disappear between sensing and opening the driver.
+        try:
+            tty_context = textual_tty()
+            tty = tty_context.__enter__()
+        except (OSError, termios.error) as error:
+            print(f'Textual terminal unavailable: {error}; using line console.', file=sys.stderr, flush=True)
+        else:
+            try:
+                textual_session(args, rig, admission, tty, bbs_service)
+            finally:
+                tty_context.__exit__(*sys.exc_info())
+            return 0
+    with open_chat(args, rig, admission, bbs_service) as (session, tty):
+        session.monitor()
+        terminal(session, tty)
+    return 0
 
 
 def main(argv=None):

@@ -187,7 +187,7 @@ def test_invalid_render_mode(mode):
 
 
 @pytest.mark.parametrize('refused', [False, True])
-@pytest.mark.parametrize('policy', ['fixed-x27', 'counter-odd-t27', 'counter-even-t27'])
+@pytest.mark.parametrize('policy', ['counter-even-t27'])
 def test_b1_repeated_refused_answers_keep_selection_timing_and_source(refused, policy):
     from hfmodem.tests.shrike.test_p4_late_long_ack_1010 import accepted, held_machine
     from hfmodem.tests.shrike.test_p4_irs_nak_1002 import unread
@@ -226,7 +226,13 @@ def test_driver_mode_records_and_prepared_emissions(mode, monkeypatch, capsys):
     stream = Stream(audio)
     tx = Tx(stream)
     tx.p4_link_options.p4_word_render = mode
-    tx.p4_link_options.p4_text = 'dynamic data'
+    tx.p4_link_host.arq.on_host_data(b'dynamic data')
+    from hfmodem.shrike import p4turn
+    original = p4turn.P4Turn
+    def completed(*args, **kwargs):
+        return original(*args, **{**kwargs, 'app_done': True})
+    monkeypatch.setattr(p4turn, 'P4Turn', completed)
+
     tx.p4_link_options.p4_data = 'body'
     for module, name in ((p4robusttx, 'robust_word'), (p4breakintx, 'changeover_packet')):
         render = getattr(module, name)

@@ -164,7 +164,7 @@ def test_capture_samples_are_not_scaled_by_gain(gain):
     captured = np.array([[-.5], [-.25], [0], [.25], [.5]], dtype=np.float32)
     output = np.ones((5, 1), np.float32)
     station._callback(captured, output, 5, SimpleNamespace(
-        inputBufferAdcTime=0., outputBufferDacTime=1268 / 48000), SimpleNamespace())
+        currentTime=0., inputBufferAdcTime=0., outputBufferDacTime=1268 / 48000), SimpleNamespace())
     assert station.failure is None
     assert len(blocks) == 1
     assert blocks[0].n0 == 0

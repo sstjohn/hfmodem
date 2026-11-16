@@ -50,7 +50,11 @@ class _Keyed:
     def __init__(self) -> None:
         self.cs: list[str] = []
 
-    def send_cs(self, index: int) -> None:
+    def p3_slot_keyed(self) -> bool | None:
+        return None
+
+    def send_cs(self, index: int, *, p1_codeword=False, unread=False, maxdown=False,
+                packet_phase=None, cycle_long=None) -> None:
         self.cs.append(P3_NAMES.get(index, str(index)))
 
     def send_p1_cs(self, index: int) -> None:

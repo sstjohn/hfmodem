@@ -247,3 +247,26 @@ def test_outgoing_direct_mail_is_not_displayed_as_relayed():
     d.do('.')
     d.do('/vmail 1')
     assert not any('relayed by' in line for line in d.said)
+
+
+def test_collection_emits_attempt_before_outbound_connect():
+    from hfmodem.contact.chat_session import SessionAdapter
+    from hfmodem.contact import chat_state as s
+    from hfmodem.tests.contact.test_chat_controller import execute
+    desk = Desk()
+    notice(desk)
+    events = []
+    desk.session.semantic = lambda kind, **fields: events.append((kind, fields))
+    desk.host.replies['CONNECT W9SSJ N0BBS'] = ['OK', 'CONNECTED W9SSJ N0BBS 500']
+    port = SessionAdapter(desk.session)
+    req, _ = execute(port, s.VMailCollect('N0BBS'))
+    for _ in range(30):
+        port.poll(.1)
+        if desk.host.client.connected:
+            break
+    assert [(kind, fields) for kind, fields in events if kind == 'attempt_started'] == [
+        ('attempt_started', {'peer': 'N0BBS'})]
+    attempt = port._attempts[port._attempt]
+    assert attempt['request_id'] == req.id
+    assert attempt['generation'] == desk.host.client.link_generation
+    assert not attempt['ended']

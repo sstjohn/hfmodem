@@ -19,6 +19,7 @@ import threading
 import time
 from types import SimpleNamespace
 
+from hfmodem.core import gil
 from hfmodem.core.identification import CallIdentity
 from hfmodem.core.operations import LeaseTimeout
 
@@ -412,6 +413,7 @@ class StationPtcRuntime:
             elif not host.arq.scan_held:
                 self._retire_port()
 
+    @gil.joined()
     def _run(self):
         request = None
         try:

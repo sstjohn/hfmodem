@@ -8,7 +8,7 @@ export async function checkPactor4(page, baseURL) {
   assert.equal(await page.locator('main svg').count(), 5);
   assert.equal(await page.locator('main details[open]').count(), 0, 'Numerical tables start collapsed');
   for (const [id, value, output, text] of [
-    ['p4-waveform-mode', 'long', 'p4-waveform-summary', /157735.*3\.286/],
+    ['p4-waveform-mode', 'long', 'p4-waveform-summary', /158249.*3\.296/],
     ['p4-level', '10', 'p4-constellation-summary', /32 ideal points/],
     ['p4-layout', 'long', 'p4-layout-summary', /4968.*5768/],
     ['p4-rate', '5/6', 'p4-puncture-summary', /C1 indices 0, 10.*C2 indices 4, 14/],

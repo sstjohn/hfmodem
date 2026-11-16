@@ -7,31 +7,7 @@ import pytest
 from hfmodem.shrike import arq, pactor1, spec
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.tests.shrike.test_no_p3_fallback import Recorder, cs
-
-
-class Sink(arq.ArqIO):
-    def __init__(self):
-        self.sent = []
-        self.delivered = []
-        self.buffers = []
-        self.refuse = False
-
-    def send_packet(self, sl, payload, status, breakin=False):
-        self.sent.append(("packet", bytes(payload[:3]), status, breakin))
-        return arq.REFUSED if self.refuse else min(3, len(payload))
-
-    def send_cs(self, index):
-        self.sent.append(("cs", index))
-        return arq.REFUSED if self.refuse else None
-
-    def defer_rx_close(self):
-        return True
-
-    def deliver(self, data):
-        self.delivered.append(data)
-
-    def buffer(self, size):
-        self.buffers.append(size)
+from hfmodem.tests.shrike.p3_arq_support import Sink
 
 
 def packet(a, seq=0, **kw):
@@ -204,7 +180,7 @@ def yielded_p3():
     host.protocol = spec.Protocol.PACTOR3
     a = host.arq
     a._enter_connected()
-    a.cfg.speed_up_after = 100          # keep the ladder out of the codeword
+    a.cfg.p3_speed_up_after = 100          # keep the ladder out of the codeword
     a.role = arq.ISS
     a._yield_link()
     return host, tx, a

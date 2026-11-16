@@ -32,6 +32,7 @@ import pytest
 from hfmodem.shrike import arq, rxfront, spec
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.shrike.spec import Protocol
+from hfmodem.tests.shrike.p3_arq_support import Seam
 
 #: The byte the gateway repeated: counter 1, ASCII, status bit 5 up -- the
 #: long-cycle ask declined in the historical short-cycle fixture below. The
@@ -43,38 +44,6 @@ STALL_STATUS = 0x21
 STALL_SL = 1
 
 FIELD = b" Trim"
-
-
-class Seam:
-    """A transmit seam that keys nothing and remembers every codeword.
-
-    `send_p1_cs` exists so `PtcHost.send_cs` routes through `_counter_cs_for`:
-    a seam without it takes the FSM's own alphabet unchanged, and the
-    alternation is exactly what these scenes are reading.
-    """
-
-    # Recording a word is the synchronous emission in this fixture, not a
-    # deferred queue requiring a later driver on_cs_emitted callback.
-    defer_p3_cs = False
-
-    def __init__(self) -> None:
-        self.words: list[int] = []
-        self.packets: list[tuple[int, int]] = []
-
-    def attach(self, host) -> None: ...
-
-    def send_cs(self, index: int) -> None:
-        self.words.append(index)
-
-    def send_p1_cs(self, index: int) -> None:
-        self.words.append(index)
-
-    def send_packet(self, sl, payload, status, breakin=False) -> int:
-        self.packets.append((sl, status))
-        return len(payload)
-
-    def __getattr__(self, name):
-        return lambda *a, **k: None
 
 
 def linked(*, repeat_gear: int = 0,
@@ -90,7 +59,7 @@ def linked(*, repeat_gear: int = 0,
     seam = Seam()
     host = PtcHost(peer=seam, mycall="W9SSJ")
     host.arq.cfg.repeat_gear = repeat_gear
-    host.arq.cfg.speed_up_after = speed_up_after
+    host.arq.cfg.p3_speed_up_after = speed_up_after
     host.arq.cfg.long_cycle = long_cycle
     host.arq.role, host.arq.dxcall = arq.IRS, "WS8EOC"
     host.arq._enter_connected()

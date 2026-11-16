@@ -28,6 +28,7 @@ Winlink message that had been offered and accepted.
 from __future__ import annotations
 
 import hashlib
+import re
 
 import numpy as np
 import pytest
@@ -388,7 +389,7 @@ def test_the_repeats_are_folded_through_the_rolling_windows():
 
 
 #: The 2026-08-29 18:54Z W6IDS link, at the stint where the CMS offered
-#: `JWKY65C2OZES`: the gateway's BREAK to its first IDLE. Everything this station
+#: `WKYC52O6ZESJ`: the gateway's BREAK to its first IDLE. Everything this station
 #: keyed inside it is a bodyless control, which the memory takes no key from, so
 #: the slice reproduces what the whole 302 s replay does at a ninth of the cost.
 #: The surviving tap is sliced at +273 s for 400 s, preserving this stint's zero.
@@ -442,7 +443,7 @@ def _muted_stint() -> list[bytes]:
 def test_a_block_the_peer_moved_on_from_is_not_put_back_into_the_next_one():
     """W6IDS, 2026-08-29 18:56Z: the proposal block, read as the station read it.
 
-    The gateway sent `;PM: W9SSJ JWKY65C2OZES 524 <address> testing 8/26 this
+    The gateway sent `;PM: W9SSJ WKYC52O6ZESJ 524 <address> testing 8/26 this
     is a test` in five `4PSK.200.100S` blocks, alternating `.E` and
     `.O`. The station delivered the first three and then a fourth that was the
     *second* over again: sixteen bytes already received took the place of the
@@ -466,6 +467,7 @@ def test_a_block_the_peer_moved_on_from_is_not_put_back_into_the_next_one():
     assert len(blocks) == 5, blocks
     assert len(set(blocks)) == len(blocks), f"a block was delivered twice: {blocks}"
     head = b"".join(blocks)[:48]
-    assert head.startswith(b";PM: W9SSJ JWKY65C2OZES 524 "), blocks
     assert hashlib.sha256(head).hexdigest() == (
         "bf8586b3bd4e6bfcb2b5068f91a6359a90581a5dd8a9b0b00c2fd61abcc5f149"), blocks
+    proposal = re.sub(rb"(?<=;PM: W9SSJ )[A-Z0-9]{12}", b"WKYC52O6ZESJ", head)
+    assert proposal.startswith(b";PM: W9SSJ WKYC52O6ZESJ 524 "), blocks

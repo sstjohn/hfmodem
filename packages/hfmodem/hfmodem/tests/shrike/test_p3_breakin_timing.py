@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 
 from hfmodem.shrike import arq, onair, placement, rxfront, spec
+from hfmodem.shrike.p3trial import ReplyClock
 from hfmodem.tests.shrike.test_cs6_stalls import ElapsedPCM
-from hfmodem.tests.shrike.test_entry_answer import _Session
 
 FS = 48000
 
@@ -179,6 +179,7 @@ def test_observed_tx_phase_cannot_be_replaced_with_requested_boundary(tmp_path):
     g.note_p3_control(2551434 + 864)
     g.note_p3_packet(2568704, 38880, 60000)
     tx = tx_at(g, 44, tmp_path)
+    old_clamp(tx)
     assert g._p3_reply_timing() is not None
     assert "18 ms" in tx._clamp_refusal(g.peer_packet_end(44))
     assert tx._place_breakin() == " on the held grid" and tx.placed
@@ -325,6 +326,7 @@ def test_collision_guard_refuses_and_the_clamp_keys_on_the_held_grid(tmp_path):
     # being answered, even with corroborated reply timing.
     assert g.key_refusal(2569000, 40000, changeover=True) is not None
     g.anchor -= 1000
+    old_clamp(tx)
     assert tx._place_breakin() == " on the held grid" and tx.placed
     assert "boundary sits" in tx.unplaceable
 
@@ -464,8 +466,9 @@ def test_only_new_decoded_p3_bare_control_invalidates_packet_timing(evidence, tm
 # The coordinates below are that arm's: the placement at +82 ms past the peer's
 # packet end, and the overruns the transcript measured.
 
-from hfmodem.tests.shrike.test_grid import _Bench, _Rig            # noqa: E402
 from hfmodem.tests.shrike import test_p3_reply_placement as reply  # noqa: E402
+from hfmodem.tests.shrike.onair_support import _Bench as _Bench, _Rig as _Rig, _Session
+from hfmodem.tests.shrike.p3_reply_support import duplex, host_stub, old_clamp
 
 SETTLE_N = round(.04 * FS)
 
@@ -476,28 +479,6 @@ SETTLE_N = round(.04 * FS)
 # its +7.2.
 LATE_N = (80, 208)          # inside what the reader forgives
 PAST_N = 336                # ...and past it
-
-
-def host_stub(role=arq.IRS):
-    # Render-only host uses the current ARQ owner, not invented permission.
-    io = arq.ArqIO()
-    io.protocol = spec.Protocol.PACTOR3
-    a = arq.PactorArq(io, arq.ArqConfig())
-    a.state = arq.State.CONNECTED
-    a.role = role
-    a.entry_pending = False
-    a._rx_seen = True
-    return SimpleNamespace(protocol=spec.Protocol.PACTOR3, arq=a)
-
-
-def duplex(g, tmp_path, seconds=200.0):
-    """A real transmitter on the bench stream, with PTT going nowhere."""
-    tx = onair.RadioTx(_Rig(), transmit=True, out_dev=0, outdir=tmp_path,
-                       settle=.04)
-    tx.live = _Bench(seconds=seconds)
-    tx.raster = g
-    tx.host = host_stub()
-    return tx
 
 
 PAYLOAD, STATUS = b"ABC", 3
@@ -685,7 +666,7 @@ def stint(tmp_path, cycles=40, prompt_at=None):
         # between that read and the grid's gate.
         live.now = live.pos = tx.key_instant(g, slot) - SETTLE_N
         live.spend(PREKEY_N)
-        slot, seg, seg_start = onair._regrid(live, g, tx, host_stub(), sessrx,
+        slot, seg, seg_start, _ = onair._regrid(live, g, tx, host_stub(), sessrx,
                                              slot, seg, seg_start, SETTLE_N)
         live.spend(CHANGEOVER_WORK_N if tx.breakin_due else 0)
         before = len(live.emissions)
@@ -835,3 +816,151 @@ def test_render_host_uses_current_arq_owner_and_refuses_stale_authority(change):
     else:
         a._expected_seq += 1
     assert not a.p3_tx_allowed(owner)
+
+
+@pytest.mark.parametrize('changeover', [False, True])
+@pytest.mark.parametrize('kind', ['observed', 'projected'])
+def test_linked_p3_packet_only_overrides_projected_overlap(
+        tmp_path, monkeypatch, capsys, changeover, kind):
+    from hfmodem.core.tx_events import read_line
+
+    g, tx, key, _ = breakin_cycle(tmp_path, 0)
+    if not changeover:
+        g.sending = True
+        tx.host.arq.role = arq.ISS
+        tx.breakin_due = False
+    monkeypatch.setattr(g, 'key_refusal', lambda *args, **kw:
+                        onair._KeyRefusal('test packet overlap', kind))
+    tx.live.now = tx.live.pos = tx.boundary - FS // 2
+    slot = tx.slot
+    capsys.readouterr()
+    tx.send_packet(3, PAYLOAD, STATUS, breakin=changeover)
+    said = capsys.readouterr().out
+    events = [row for line in said.splitlines() if (row := read_line(line))
+              and row['event'] == 'completed']
+    if kind == 'observed':
+        assert not any(row['outcome'] == 'sent' for row in events)
+        assert tx.refused and not tx.live.emissions
+        assert 'NOT KEYING' in said
+    else:
+        assert any(row['outcome'] == 'sent' and row['slot'] == slot
+                   and row['audio_start_sample'] == tx.boundary for row in events)
+        guard = 'CHANGEOVER OVERLAP' if changeover else 'QRM GUARD'
+        assert f'{guard} -- KEYING' in said and 'ANYWAY:' in said
+        assert 'test packet overlap' in said
+        assert tx.guard_drops == 0 and not tx.refused
+
+
+@pytest.mark.parametrize('kind', ['p1', 'p2', 'entry', 'cw', 'p4'])
+def test_overlap_refusal_outside_linked_p3_is_unchanged(tmp_path, monkeypatch, capsys, kind):
+    g, tx, key, _ = breakin_cycle(tmp_path, 0)
+    g.sending = True
+    tx.host.arq.role = arq.ISS
+    tx.breakin_due = False
+    if kind in ('p1', 'p2'):
+        tx.host.protocol = g.protocol = (spec.Protocol.PACTOR1 if kind == 'p1'
+                                        else spec.Protocol.PACTOR2)
+    if kind == 'entry':
+        tx.host.arq.entry_pending = True
+    if kind == 'p4':
+        tx.p4_probe = SimpleNamespace(emitting=True, requested=True, counter_experiment=False)
+    monkeypatch.setattr(g, 'key_refusal', lambda *args, **kw: 'test excluded overlap')
+    tx.live.now = tx.live.pos = tx.boundary - FS // 2
+    capsys.readouterr()
+    if kind == 'entry':
+        tx.send_entry_packet(1, b'', 0x1a)
+    else:
+        tx._tx(np.ones(480, np.float32), kind, strict_guard=kind == 'cw')
+    said = capsys.readouterr().out
+    guard = {'cw': 'CW ID GUARD', 'p4': 'P4 PROBE GUARD'}.get(kind, 'QRM GUARD')
+    assert f'{guard} -- NOT KEYING' in said
+    assert tx.refused and not tx.live.emissions
+    assert '"outcome":"sent"' not in said
+    if kind in ('p1', 'p2', 'entry'):
+        for _ in range(onair.GUARD_MAX_DROPS - 1):
+            assert tx._refused(tx.boundary, 480, kind)
+        assert not tx._refused(tx.boundary, 480, kind)
+        assert 'STOOD DOWN -- KEYING' in capsys.readouterr().out
+
+
+def test_retained_breakin_after_clock_step_does_not_suppress_owed_cs1(tmp_path, capsys):
+    # The 00:15Z WS8EOC hold 5 owes CS1: its 19 ms overlap comes from a
+    # retained CS3 after capture loss, not a newly decoded burst.
+    g = onair._MasterGrid(31564, 60000, 8880, packet_n=46080,
+                          cs_n=5760, d_max_n=6240)
+    g.keyed_slot = 7
+    g.keying(spec.Protocol.PACTOR3, entry_pending=True, entry_variant='template')
+    g.sending = False
+    g.cycles = 2
+    g.note_peer_codeword(529696, onair.P3_CS_N, 'BREAK-IN', 'WS8EOC',
+                         protocol=spec.Protocol.PACTOR3)
+    g.note_p3_head(529696, 60000)
+    g._move_indices(-1647)
+    g.cycles = 3
+    g.note_peer_codeword(529696, onair.P3_CS_N, 'BREAK-IN', 'WS8EOC',
+                         protocol=spec.Protocol.PACTOR3)
+    g._move_indices(-148)
+    g.note_p3_packet(587068, onair.P3_PACKET_N, 60000,
+                     identity=(True, 1, 0, b'RMS'))
+    g.cycles = 5
+    assert g._peer_air_evidence()[:2] == (529548, 38880)
+    assert g.boundary(13) == 809769
+    refusal = g.key_refusal(807513, 2256 + 11379)
+    assert '19 ms' in refusal
+    assert refusal.kind == 'projected'
+    tx = duplex(g, tmp_path)
+    tx.settle = 2256 / FS
+    tx.aim(g, 13)
+    # The held comb must survive rendering; an unseated clock would re-place
+    # this answer and erase the overlap the retained CS3 projects.
+    tx.reply_clock = g.reply_clock = ReplyClock(
+        pulse_epoch=tx.boundary + tx._p3_control_lead(arq.CS_ACK))
+    tx.live.now = tx.live.pos = tx.boundary - 30000
+    tx._send_p3_control(arq.CS_ACK)
+    assert not tx.refused
+    assert tx.slots_used == [13] and len(tx.live.emissions) == 1
+    assert tx._p3_emitted_cs == arq.CS_ACK
+    assert tx.tx_audio_start == 809769
+    assert 'ACK GUARD -- KEYING' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('source', ['packet', 'codeword'])
+@pytest.mark.parametrize('age', [0, 1])
+@pytest.mark.parametrize('extra_cycles', [0, 1])
+def test_overlap_kind_uses_selected_evidence_age(source, age, extra_cycles):
+    g = onair._MasterGrid(0, 60000, 0, packet_n=38880,
+                          cs_n=10080, d_max_n=6240)
+    g.protocol = spec.Protocol.PACTOR3
+    g.sending = False
+    g.cycles = 3
+    g.note_p3_packet(100000, 38880, 60000)
+    g.note_peer_codeword(200000, onair.P3_CS_N, 'REQ', 'WS8EOC',
+                         protocol=spec.Protocol.PACTOR3)
+    g.cycles = 4
+    if source == 'packet':
+        g.note_p3_packet(300000, 38880, 60000)
+    else:
+        g.note_peer_codeword(300000, onair.P3_CS_N, 'REQ', 'WS8EOC',
+                             protocol=spec.Protocol.PACTOR3)
+    g.cycles += age
+    assert g._peer_air_evidence()[0] == 300000
+    refusal = g.key_refusal(300000 + (age + extra_cycles) * 60000 + 1, 12000)
+    assert refusal.kind == ('observed' if age == extra_cycles == 0 else 'projected')
+
+
+@pytest.mark.parametrize('source', ['packet', 'codeword'])
+@pytest.mark.parametrize('next_copy', [False, True])
+def test_overlap_at_burst_head_distinguishes_observation_from_prediction(source, next_copy):
+    g = onair._MasterGrid(0, 60000, 0, packet_n=38880,
+                          cs_n=10080, d_max_n=6240)
+    g.protocol = spec.Protocol.PACTOR3
+    g.sending = False
+    g.note_p3_packet(100000, 38880, 60000)
+    if source == 'packet':
+        g.note_p3_packet(300000, 38880, 60000)
+    else:
+        g.note_peer_codeword(300000, onair.P3_CS_N, 'REQ', 'WS8EOC',
+                             protocol=spec.Protocol.PACTOR3)
+    carrier = 300000 + int(next_copy) * 60000 - 1
+    refusal = g.key_refusal(carrier, 2)
+    assert refusal.kind == ('projected' if next_copy else 'observed')

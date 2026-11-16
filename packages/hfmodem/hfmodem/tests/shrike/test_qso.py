@@ -84,7 +84,11 @@ class AudioSide:
         self._tx(f"connect->{dxcall}",
                  pactor1.connect_signal(dxcall, invert=self._flip()))
 
-    def send_cs(self, cs_index: int) -> None:
+    def p3_slot_keyed(self) -> bool | None:
+        return None
+
+    def send_cs(self, cs_index: int, *, p1_codeword=False, unread=False, maxdown=False,
+                packet_phase=None, cycle_long=None) -> None:
         # THE PACTOR-3 CONTROL SIGNAL, because this seam is only reached once the
         # link has been upgraded -- `PtcHost.send_cs` routes a PACTOR-1 link to
         # `send_p1_cs` below. It rendered PACTOR-1 here, so an upgraded link

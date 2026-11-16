@@ -253,7 +253,8 @@ def test_send_after_refused_nak_waits_for_unread_data_and_answers_its_query(high
     assert b''.join(ci.host) == delivered
     hear_with_tail(c, hi)
     assert c._rx_resend is None and c._over_answer is not None
-    assert c._ask_for_turn() and c.turn == A._TURN_ASKED
+    # The resend was full and drew a continue: the ask waits for the next over.
+    assert not c._ask_for_turn() and c._ask_owed and c.turn == A._TURN_PEER
 
 
 @pytest.mark.parametrize('high_speed', [False, True])

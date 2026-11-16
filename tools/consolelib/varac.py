@@ -45,7 +45,8 @@ PROFILE = ('name', 'qth', 'loc', 'services')
 def parser():
     p = argparse.ArgumentParser(prog='console vara chat', description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--ui', choices=('auto', 'line'), default='auto')
+    p.add_argument('--ui', choices=('auto', 'textual', 'line'), default='auto',
+                   help='chat interface (default: sense a rich terminal)')
     p.add_argument('--band', type=int, choices=tuple(CALLING_HZ), default=20,
                    help='the band whose calling frequency to monitor (default 20)')
     p.add_argument('--dial', type=int, metavar='HZ',

@@ -81,6 +81,7 @@ class _Peer:
 
     def pump(self) -> None: ...
     def cycle(self) -> None: ...
+    def p3_slot_keyed(self) -> None: return None
 
     def connect_burst(self, mycall, dxcall) -> None:
         self.emissions.append("connect")

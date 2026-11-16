@@ -13,7 +13,7 @@ from hfmodem.tests.shrike.test_p4_part_a_1011 import AT, KEY, CYCLE, packet
 
 def context(*, managed=False, explicit=False, data=None):
     kw = dict(role='irs', managed_application=managed)
-    if explicit: kw['data'] = 'hold'
+    if explicit: kw['data'] = 'none'
     if data is not None: kw['data'] = data
     m, a = machine(**kw)
     delivered = []
@@ -49,29 +49,30 @@ def key_answer(m, rx, p):
 @pytest.mark.parametrize('explicit', [False, True])
 @pytest.mark.parametrize('managed', [False, True])
 @pytest.mark.parametrize('kind', [Kind.BODY, Kind.NORMAL])
-def test_ordinary_hold_keyed_ack_then_queue_requests_body(explicit, managed, kind):
+def test_ordinary_hold_keyed_ack_then_queue_acks_the_repeat_again(explicit, managed, kind):
+    # WS8EOC 04:48Z: a break-in on the repeat of an acked packet went unanswered.
     m, a, rx, delivered = context(managed=managed, explicit=explicit)
     assert not m.sends_data
     first, now = feed(m,rx,kind,FS)
-    p = m.decide(now)
-    assert (p.kind,p.state,p.accepted_target) == (Kind.WORD,State.IRS_ANSWER,FS)
-    assert m._accepted_proposal[0] is p
-    key_answer(m,rx,p)
+    ack = m.decide(now)
+    assert (ack.kind,ack.state,ack.accepted_target) == (Kind.WORD,State.IRS_ANSWER,FS)
+    assert m._accepted_proposal[0] is ack
+    key_answer(m,rx,ack)
     epoch = m._receive_epoch
     a.on_host_data(b'ready')
     r, now = feed(m,rx,kind,FS+60000)
     assert not m._long_peer_open()
     assert m.pending[r.observation.stream_sample]['accepted']
     p = m.decide(now)
-    assert (p.kind,p.status,p.state,p.payload) == (Kind.BODY,0x40,State.IRS_BREAKIN,b'')
+    assert (p.kind,p.word,p.state) == (Kind.WORD,ack.word,State.IRS_ANSWER)
     assert p.ack_identity == (r.observation.frame.status.byte,r.observation.frame.data)
     assert bytes(a._outbuf) == b'ready' and not m.outbox.inflight and a.tx_acked_bytes == 0
     assert m._receive_epoch == epoch and delivered == [b'hello']
     m.keyed(p.stream_sample)
-    assert m.breakins == 1 and not m.grants and a.tx_acked_bytes == 0
+    assert m.breakins == 0 and not m.grants and a.tx_acked_bytes == 0
 
 
-@pytest.mark.parametrize('kind,status,expected', [(Kind.LONG,0x42,'T27'),(Kind.CHIRP,0x41,'X27')])
+@pytest.mark.parametrize('kind,status,expected', [(Kind.LONG,0x42,'X27'),(Kind.CHIRP,0x41,'X27')])
 @pytest.mark.parametrize('managed', [False, True])
 @pytest.mark.parametrize('explicit', [False, True])
 def test_constructor_hold_long_phase_survives_empty_body(kind,status,expected,managed,explicit):
@@ -180,7 +181,7 @@ def test_long_hold_inflight_or_terminal_does_not_become_queued_data(kind,managed
     m.app_done=terminal
     _,now=feed(m,rx,kind,AT,0x42 if kind==Kind.LONG else 0x41,b'peer\r')
     p=m.decide(now)
-    assert (p.kind,p.word,p.state)==(Kind.WORD,'T27' if kind==Kind.LONG else 'X27',State.IRS_ANSWER)
+    assert (p.kind,p.word,p.state)==(Kind.WORD,'X27',State.IRS_ANSWER)
     assert p.accepted_target==AT and p.current_slot_accepted
     assert not m.outbox.queued and m.outbox.inflight==b'ready'
     assert not m.sends_data and m.breakins==m.grants==0 and a.tx_acked_bytes==0

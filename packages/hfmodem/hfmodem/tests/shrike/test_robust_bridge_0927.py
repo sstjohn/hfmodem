@@ -291,6 +291,7 @@ def test_bridge_phase_hint_expires_after_corroborated_p3_acquisition(monkeypatch
 def _bridge_keys(bridge, cycles):
     tx = onair.RadioTx.__new__(onair.RadioTx)
     tx.seq_sent, tx.breakin_at, tx.refused = [], set(), False
+    tx.p4_probe = None
     seen = []
     tx._tx_p2 = lambda audio, what: seen.append((audio, what))
     for n in range(cycles):

@@ -63,7 +63,9 @@ def test_r1_primary_dispatch_entry_and_complete_charged_work(branch, cost, monke
     record('primary_dispatch_work', branch=branch, cost=cost, rows=trace.rows)
 
 
-@pytest.mark.parametrize('kind', ['long', 'chirp'])
+# The long is read by the LONG engine, whose Python fallback answers on time only
+# when the machine keeps up.
+@pytest.mark.parametrize('kind', [pytest.param('long', marks=pytest.mark.realtime), 'chirp'])
 def test_r1_word_origin_real_packet_evidence_still_completes(kind):
     onset, origin = 480000, 456000
     wave = (p4chirp.entry_packet(b'ordinary promoted\r', 0x62) if kind == 'chirp' else
@@ -75,7 +77,7 @@ def test_r1_word_origin_real_packet_evidence_still_completes(kind):
     tx = Tx(live)
     tx.settle = .025
     tx.p4_probe.emissions, tx.p4_probe.peer_breakin = [], True
-    tx.p4_link_options.p4_ladder, tx.p4_link_options.p4_data = 'none', 'body'
+    tx.p4_link_options.p4_data = 'body'
     tx.p4_link_options.p4_link_timeout = len(audio)/FS
     rx = tx.sessrx.p4
     # Semantic prior history is a genuine selected/keyed ordinary BODY grant,
@@ -113,10 +115,23 @@ def test_r1_word_origin_real_packet_evidence_still_completes(kind):
         onair._run_p4_link(tx, live, GRID)
     record('word_speculation', kind=kind, reads=reads, branches=trace.rows, charges=live.charges,
            heard=tx.p4_probe.heard, emissions=tx.p4_probe.emissions)
+    print(dict(kind=kind, reads=reads, branches=trace.rows, charges=live.charges))
     assert any(r['before']['expects'] == Expect.WORD for r in reads)
     assert any(r['end'] >= packet_at+157440 and r['records'] for r in reads)
+    if kind == 'long':
+        # The ordinary grant's WORD owner promotes through real prefix PCM.
+        # Its new LONG deadline must schedule preparation before the final
+        # engine grant, rather than retaining the former SHORT decision time.
+        events = rx.live_events
+        prepared = next(i for i, event in enumerate(events)
+                        if event['event'] == 'sf8 prepare'
+                        and abs(event['at']-packet_at) < FS//20)
+        finalized = next(i for i, event in enumerate(events)
+                         if event['event'] == 'long-engine'
+                         and abs(event['at']-packet_at) < FS//20)
+        assert prepared < finalized
     assert any(r.get('status') == 0x62 and not r['provisional'] for r in tx.p4_probe.heard)
     assert tx.p4_probe.emissions and tx.p4_probe.emissions[0]['word'] in (
-        ('T27',) if kind == Kind.LONG else ('X27', 'V27'))
+        ('X27',) if kind == Kind.LONG else ('X27', 'V27'))
     assert any(r['before']['expects'] == Expect.WORD and r['after']['expects'] == Expect.PACKET for r in reads)
     assert tx.p4_link_host.arq.tx_acked_bytes == 0

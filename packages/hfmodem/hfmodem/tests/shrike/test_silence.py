@@ -641,7 +641,8 @@ def the_hold_may_listen_past_its_link() -> None:
     was = max(int(m) for m in re.findall(r"\[grid\] hold (\d+) slot", plain))
     check("without the flag the run still stops in the cycle the link went "
           "down in", bool(down) and was == int(down.group(1)) - 1
-          and "OBSERVING" not in plain and "observed" not in plain,
+          and "OBSERVING" not in plain
+          and not re.search(r"observed \d+ further cycles", plain),
           f"{was} hold cycles run, link down in {down.group(1) if down else '?'}")
 
 

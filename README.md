@@ -61,7 +61,8 @@ station operation and `docs/CONFIG.md` describes the station file.
 Explore recorded Winlink mail transfers in the [curated logbook](https://hfmodem.ssj.lol/examples/logbook/):
 [VARA send](https://hfmodem.ssj.lol/examples/vara-send/) and
 [receive](https://hfmodem.ssj.lol/examples/vara-receive/),
-[PACTOR-3 send](https://hfmodem.ssj.lol/examples/pactor3-send/) and
+[PACTOR-3 mail both ways](https://hfmodem.ssj.lol/examples/pactor3-mail/),
+[send](https://hfmodem.ssj.lol/examples/pactor3-send/) and
 [receive](https://hfmodem.ssj.lol/examples/pactor3-receive/), plus
 [ARDOP send](https://hfmodem.ssj.lol/examples/ardop-send/) and
 [receive](https://hfmodem.ssj.lol/examples/ardop-receive/).
@@ -77,8 +78,8 @@ WW2MI and three received through W6IDS. The WW2MI session's subsequent receive
 failed, and END was not confirmed.
 
 The station uses a Yaesu FTDX10. The FT-891 remains supported through rig
-profiles. X6100 and G90 support is planned through the same profiles; their
-profile entries are not qualified station support.
+profiles, and so is the Xiegu X6100 over its one USB cable. The X6100 is
+receive-only until its keying is qualified. G90 support is planned.
 
 The on-air procedure this station flies — pre-flight, dry run, and a connect
 attempt — is its own operating log and is not published.

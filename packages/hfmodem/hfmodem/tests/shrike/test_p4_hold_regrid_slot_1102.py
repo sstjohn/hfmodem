@@ -34,7 +34,7 @@ def _regrid(s, slot):
 def test_an_on_time_slot_given_to_the_p4_word_is_logged_held(tmp_path, monkeypatch, capsys):
     s = _scene(tmp_path, monkeypatch)
     assert not onair._late_at_key(s.live, s.tx.key_instant(s.raster, 2), s.tx.cycle_cost_n())
-    slot, _, _ = _regrid(s, 2)
+    slot, _, _, _ = _regrid(s, 2)
     out = capsys.readouterr().out
     assert slot > 2 and not s.live.emissions
     assert f"SLOT 2 {onair.SLOT_HELD}" in out

@@ -97,6 +97,17 @@ def test_a_window_inside_the_cap_is_untouched(capsys):
     assert 'skipped unread' not in capsys.readouterr().out
 
 
+def test_the_window_after_one_lost_slot_is_carried_whole(capsys):
+    bench = _Bench(seconds=20)
+    bench.now = round(1.5 * FS)             # delivered and unread
+    want = 2 * SLOT_N
+    rx = _Rx()
+    seg = onair._listen_until_answer(bench, want, _Host(), rx, SLOT_N,
+                                     carry_n=onair.CARRY_MAX_CYCLES * SLOT_N)
+    assert seg.size == want and rx.skipped == 0
+    assert 'skipped unread' not in capsys.readouterr().out
+
+
 def test_no_cap_holds_everything(capsys):
     bench = _Bench(seconds=20)
     bench.now = 6 * FS

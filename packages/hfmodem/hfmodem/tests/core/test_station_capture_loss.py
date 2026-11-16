@@ -39,6 +39,7 @@ from hfmodem.tests.core.test_capture_loss import (
 
 class _Times:
     def __init__(self, adc):
+        self.currentTime = adc
         self.inputBufferAdcTime = adc
         self.outputBufferDacTime = adc + 1152 / audio.CARD_RATE_HZ
 

@@ -73,12 +73,24 @@ class Registry:
         self._expires = 0
         self._recovered = False
         self.provenance = {}
+        self._control_observers = []
 
     def _owner(self):
         return next((s for s in tuple(self._sessions.values())
                      if s.holds_rig and s.state != 'ended'), None)
 
+    def watch_control(self, observer):
+        with self.lock:
+            self._control_observers.append(observer)
+            observer(deepcopy(self._control), self._expires)
+
+    def unwatch_control(self, observer):
+        with self.lock:
+            self._control_observers.remove(observer)
+
     def _changed(self):
+        for observer in tuple(self._control_observers):
+            observer(deepcopy(self._control), self._expires)
         owner = self._owner()
         self.publish('owner', {'owner': owner.record() if owner else None,
                                'control': deepcopy(self._control)})
@@ -204,6 +216,11 @@ class Registry:
         # The arbiter calls this under admission; never invert that lock with the registry.
         session = self._owner() if id is None else self._sessions.get(id)
         return bool(session and session.attended and session.state in ('starting', 'running'))
+
+    def attended_chat(self, id):
+        session = self._owner() if id is None else self._sessions.get(id)
+        return bool(session and session.kind == 'chat' and session.attended
+                    and session.state in ('starting', 'running'))
 
     def expire(self):
         with self.lock:

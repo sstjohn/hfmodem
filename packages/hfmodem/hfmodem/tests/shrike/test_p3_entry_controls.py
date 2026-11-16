@@ -153,7 +153,7 @@ def test_confirmed_response_is_not_delivered_again_from_old_audio():
 def test_acquired_answer_clock_does_not_outlive_its_sending_turn(change):
     sess = entry_session()
     sess.rx._p3_answer_at = 48000
-    sess.rx._p3_head_candidate = (1, 48000, -65)
+    sess.rx._p3_head_candidate = (1, 48000, -65, arq.CS_ACK)
     if change == 'role':
         sess.host.arq.role = arq.IRS
     elif change == 'protocol':

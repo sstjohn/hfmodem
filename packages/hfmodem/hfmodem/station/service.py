@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from contextlib import nullcontext
 from datetime import datetime, timezone
 import errno
@@ -23,6 +23,7 @@ import uuid
 from hfmodem.core import claim
 from hfmodem.core.operations import LeaseTimeout
 from . import wire
+from .chat_transport import Events, MiB, TerminalResults, TokenBucket, encode_event
 from .sessions import Refused
 
 
@@ -30,38 +31,10 @@ def utc():
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
-class Events:
-    def __init__(self, *, capacity=10000, age=3600, clock=time.monotonic):
-        self.capacity, self.age, self.clock = capacity, age, clock
-        self.condition = threading.Condition(threading.RLock())
-        self.ring = deque()
-        self.seq = 0
-
-    def publish(self, type, payload):
-        if type not in wire.EVENT_TYPES:
-            raise ValueError(f'unknown event type: {type}')
-        with self.condition:
-            self.seq += 1
-            event = dict(seq=self.seq, utc=utc(), type=type, data=payload)
-            self.ring.append((self.clock(), event))
-            self._trim()
-            self.condition.notify_all()
-            return event
-
-    def _trim(self):
-        while self.ring and (len(self.ring) > self.capacity
-                             or self.ring[0][0] <= self.clock() - self.age):
-            self.ring.popleft()
-
-    def after(self, seq):
-        with self.condition:
-            self._trim()
-            oldest = self.ring[0][1]['seq'] if self.ring else self.seq + 1
-            if seq < oldest - 1 or seq > self.seq:
-                gap = dict(seq=oldest - 1, utc=utc(), type='gap',
-                           data={'from': seq, 'to': oldest})
-                return [gap, *(event for _, event in self.ring)]
-            return [event for _, event in self.ring if event['seq'] > seq]
+class ReadBusy(ValueError):
+    def __init__(self, retry_after):
+        self.retry_after = retry_after
+        super().__init__('bulk read budget busy; retry later')
 
 
 class BindConflict(RuntimeError):
@@ -89,6 +62,14 @@ class Service:
         self.started_utc = utc()
         self.commands = queue.Queue(64)
         self._ids = OrderedDict()
+        self._chat_payloads = OrderedDict()
+        self.results = TerminalResults()
+        self.chat = None
+        self._bulk_lock = threading.Lock()
+        self._bulk_budget = TokenBucket.bulk()
+        self._sse_slots = threading.BoundedSemaphore(8)
+        self._chat_pump_failed = False
+        self._failed_subscription = None
         self._submit_lock = threading.Lock()
         self._closed = threading.Event()
         self._mounts = {}
@@ -109,6 +90,14 @@ class Service:
                 station_url=f'http://127.0.0.1:{self.port}', incarnation=self.incarnation)
             if self._http is not None:
                 station.sessions.recover()
+        if station is not self._station:
+            if self.chat is not None:
+                self.chat.revoke()
+            if station is not None:
+                from .chat import Chat
+                self.chat = Chat(self, station)
+            else:
+                self.chat = None
         self._station = station
 
     def mount(self, prefix, handler):
@@ -125,7 +114,40 @@ class Service:
                                     incarnation=self.incarnation, started_utc=self.started_utc)
             state.setdefault('station', {})['station_file'] = self.station_file
             state.update(seq=self.events.seq, utc=utc())
-            return state
+        if self.chat is not None:
+            state['chat_lifecycle'] = self.chat.lifecycle()
+            state['chat'] = self.chat.live()
+        return state
+
+    def read_bulk(self, path, query):
+        """Preflight the maximum response before copying recovery state."""
+        if not self._bulk_lock.acquire(blocking=False):
+            raise ReadBusy(0.1)
+        try:
+            retry_after = self._bulk_budget.retry_after(4 * MiB)
+            if retry_after:
+                raise ReadBusy(retry_after)
+            def value(key):
+                values = query.get(key, [])
+                if len(values) != 1 or not values[0]:
+                    raise ValueError(f'expected {key}')
+                return values[0]
+            if path == wire.COMMAND_RESULT:
+                payload = self.results.lookup(value('incarnation'), value('client'), value('id'))
+            elif path in wire.CHAT_READ_PATHS and self.chat is not None:
+                payload = self.chat.read(path, query)
+            else:
+                raise ValueError('chat unavailable or unknown read path')
+            encoded = json.dumps(payload, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+            if len(encoded) > 4 * MiB:
+                raise ValueError('bulk response exceeds 4 MiB; use a result page')
+            # Charge when output is ready. Charging before serialization lets
+            # a slow capture refill its own reservation before the write.
+            if not self._bulk_budget.consume(len(encoded)):
+                raise ReadBusy(self._bulk_budget.retry_after(len(encoded)))
+            return encoded
+        finally:
+            self._bulk_lock.release()
 
     def bind(self):
         service = self
@@ -138,10 +160,12 @@ class Service:
             def log_message(self, *_):
                 pass
 
-            def reply(self, status, payload):
-                body = json.dumps(payload).encode()
+            def reply(self, status, payload, *, retry_after=None):
+                body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
                 self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
+                if retry_after is not None:
+                    self.send_header('Retry-After', str(max(1, int(retry_after + 0.999))))
                 self.send_header('Cache-Control', 'no-store')
                 self.send_header('Content-Length', str(len(body)))
                 self.end_headers()
@@ -166,6 +190,8 @@ class Service:
                     route = urlsplit(self.path)
                     if method in ('GET', 'HEAD') and route.path == wire.STATE:
                         self.reply(200, service.snapshot())
+                    elif method in ('GET', 'HEAD') and route.path in (*wire.CHAT_READ_PATHS, wire.COMMAND_RESULT):
+                        self.reply(200, service.read_bulk(route.path, parse_qs(route.query)))
                     elif method == 'GET' and route.path == wire.EVENTS:
                         after = self.headers.get('Last-Event-ID',
                                   parse_qs(route.query).get('after', [str(service.events.seq)])[0])
@@ -189,6 +215,10 @@ class Service:
                                 service._mounts[prefix](self)
                                 return
                         self.reply(404, {'error': 'no face mounted' if route.path == '/' else 'not found'})
+                except ReadBusy as exc:
+                    self.reply(429, {'error': str(exc)}, retry_after=exc.retry_after)
+                except Refused as exc:
+                    self.reply(409, {'error': exc.reason, 'detail': str(exc)})
                 except (OSError, ConnectionError):
                     return
                 except (ValueError, TypeError) as exc:
@@ -200,27 +230,34 @@ class Service:
                         pass
 
             def stream(self, after):
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/event-stream')
-                self.send_header('Cache-Control', 'no-store')
-                self.end_headers()
-                while not service._closed.is_set():
-                    with service.events.condition:
-                        events = service.events.after(after)
-                        if not events:
-                            service.events.condition.wait(15)
-                            events = service.events.after(after)
-                    if events:
-                        for event in events:
-                            self.wfile.write((f"id: {event['seq']}\nevent: {event['type']}\n"
-                                              f"data: {json.dumps(event)}\n\n").encode())
-                            after = event['seq']
+                if not service._sse_slots.acquire(blocking=False):
+                    self.reply(429, {'error': 'subscriber limit'}, retry_after=1)
+                    return
+                try:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.end_headers()
+                    budget = TokenBucket.sse()
+                    while not service._closed.is_set():
                         with service.events.condition:
-                            service._delivered = max(service._delivered, after)
-                            service.events.condition.notify_all()
-                    else:
-                        self.wfile.write(b': keepalive\n\n')
-                    self.wfile.flush()
+                            events = service.events.after(after)
+                            if not events:
+                                service.events.condition.wait(15)
+                                events = service.events.after(after)
+                        body = b''.join(encode_event(event) for event in events) if events else b': keepalive\n\n'
+                        while not budget.consume(len(body)):
+                            if service._closed.wait(min(.25, budget.retry_after(len(body)))):
+                                return
+                        self.wfile.write(body)
+                        self.wfile.flush()
+                        if events:
+                            after = events[-1]['seq']
+                            with service.events.condition:
+                                service._delivered = max(service._delivered, after)
+                                service.events.condition.notify_all()
+                finally:
+                    service._sse_slots.release()
 
         try:
             self._http = ThreadingHTTPServer(('127.0.0.1', self.port), Handler)
@@ -280,9 +317,12 @@ class Service:
         self._worker = threading.Thread(target=self._dispatch, name='station-commands', daemon=True)
         self._worker.start()
 
-    def _result(self, command, state, **fields):
-        return self.events.publish('command', dict(id=command['id'], state=state,
-                                                   detail=fields.pop('detail', ''), **fields))
+    def _result(self, command, state, *, retain=True, **fields):
+        result = dict(id=command['id'], client=command['client'], state=state,
+                      detail=fields.pop('detail', ''), **fields)
+        if retain and state in ('done', 'failed', 'refused'):
+            self.results.remember(self.incarnation, command['client'], command['id'], result)
+        return self.events.publish('command', result)
 
     def submit(self, command):
         if (not isinstance(command, dict)
@@ -290,27 +330,36 @@ class Service:
                        for k in ('id', 'client', 'kind'))
                 or not isinstance(command.get('args', {}), dict)):
             raise ValueError('expected id, client, kind and object args')
-        command = json.loads(json.dumps(command))
+        encoded = json.dumps(command, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+        if len(encoded) > 4096:
+            raise ValueError('command exceeds 4096 bytes')
+        command = json.loads(encoded)
+        signature = json.dumps(command, sort_keys=True).encode('utf-8')
         station = self.station
         with self._submit_lock, (station.sessions.lock
                                 if station is not None and command['kind'] != 'stop'
                                 else nullcontext()):
             kind = command['kind']
-            key = command['id']
+            chat_kind = kind in wire.CHAT_COMMAND_KINDS
+            key = (command['client'], command['id']) if chat_kind else command['id']
             authorized = False
             try:
                 if station is None:
                     raise Refused(wire.REFUSAL_STARTING)
                 if self._closed.is_set() or station._stop.is_set():
                     raise Refused(wire.REFUSAL_SHUTTING_DOWN)
-                if kind not in ('control', 'stop', 'shutdown'):
+                if not chat_kind and kind not in ('control', 'stop', 'shutdown'):
                     station.sessions.authorize(command)
                 authorized = True
                 if key in self._ids:
+                    if chat_kind and self._chat_payloads.get(key) != signature:
+                        raise Refused('command-id-conflict')
                     ack = self._ids[key]
                     if kind == 'control':
                         station.sessions.authorize(dict(kind='control', client=command['client'], **ack))
                     return dict(ack)
+                if chat_kind:
+                    self.chat.validate(command)
                 if kind not in ('stop', 'control', 'heartbeat', 'ack'):
                     if station.transitioning:
                         raise Refused(wire.REFUSAL_TRANSITIONING)
@@ -318,17 +367,21 @@ class Service:
                         station.sessions.check_holder()
                     if self.commands.full():
                         raise Refused(wire.REFUSAL_QUEUE_FULL)
+                if chat_kind:
+                    self.chat.reserve(command)
                 if kind in ('heartbeat', 'ack'):
                     heartbeat = station.sessions.heartbeat(command)
             except Refused as exc:
                 event = self._refused(command, exc)
-                ack = {'id': command['id'], 'seq': event['seq']}
+                ack = {'id': command['id'], 'seq': event['seq'], 'incarnation': self.incarnation}
                 if authorized and exc.reason not in (wire.REFUSAL_NOT_CONTROLLER,
-                                                     wire.REFUSAL_SUPERSEDED):
+                                                     wire.REFUSAL_SUPERSEDED, 'command-id-conflict'):
                     self._remember(key, ack)
+                    if chat_kind:
+                        self._chat_payloads[key] = signature
                 return ack
             event = self._result(command, 'accepted')
-            ack = {'id': command['id'], 'seq': event['seq']}
+            ack = {'id': command['id'], 'seq': event['seq'], 'incarnation': self.incarnation}
             if kind == 'control':
                 result = station.sessions.control(command['client'])
                 ack.update(control_id=result['control_id'], generation=result['generation'])
@@ -341,21 +394,40 @@ class Service:
             else:
                 self.commands.put_nowait(command)
             self._remember(key, ack)
+            if chat_kind:
+                self._chat_payloads[key] = signature
             return ack
 
     def _remember(self, id, ack):
         self._ids[id] = dict(ack)
         if len(self._ids) > 1000:
-            self._ids.popitem(last=False)
+            removed, _ = self._ids.popitem(last=False)
+            self._chat_payloads.pop(removed, None)
 
     def _refused(self, command, exc):
-        return self._result(command, 'refused', reason=exc.reason, detail=str(exc),
+        return self._result(command, 'refused', retain=exc.reason not in ('command-id-conflict', 'chat-lifecycle-stale'),
+                            reason=exc.reason, detail=str(exc),
                             **({'claim_holder': str(exc)} if exc.holder is not None else {}))
 
     def _dispatch(self):
         while not self._closed.is_set():
             if self.station is not None:
                 self.station.sessions.expire()
+                subscription = getattr(self.chat, '_subscription', None)
+                if not self._chat_pump_failed or subscription is not self._failed_subscription:
+                    try:
+                        self.chat.pump()
+                    except Exception as error:
+                        # The controller still owns its journal/snapshot. Stop
+                        # publishing the failed batch, fence its attachment and
+                        # signal recovery without killing station safety STOP.
+                        self._chat_pump_failed = True
+                        self._failed_subscription = subscription
+                        self.chat.revoke()
+                        self.events.publish('gap', {'from': self.events.seq,
+                            'to': self.events.seq + 1, 'reason': 'chat-event-publication-failed'})
+                        self.events.publish('warning', {'reason': 'chat-event-publication-failed',
+                            'detail': str(error)[:512]})
             try:
                 command = self.commands.get(timeout=0.1)
             except queue.Empty:
@@ -365,8 +437,18 @@ class Service:
                 with self.station.sessions.lock:
                     if kind == 'own' and self.station._stop.is_set():
                         raise Refused(wire.REFUSAL_SHUTTING_DOWN)
-                    self.station.sessions.authorize(command)
+                    if kind in wire.CHAT_COMMAND_KINDS:
+                        if kind != 'chat.start':
+                            self.chat.validate(command)
+                    else:
+                        self.station.sessions.authorize(command)
                     self._result(command, 'running')
+                if kind in wire.CHAT_COMMAND_KINDS:
+                    self.chat.dispatch(command, lambda status, _command=command, **fields:
+                                       self._result(_command, status, **fields))
+                    continue
+                if kind in ('release', 'shutdown'):
+                    self.chat.revoke()
                 if kind == 'own':
                     result = self.station.own(receive=args.get('receive', False))
                 elif kind in ('release', 'shutdown'):
@@ -406,13 +488,26 @@ class Service:
                 self.events.condition.wait_for(
                     lambda: self._delivered >= self._shutdown_seq, timeout=0.25)
         self._closed.set()
-        with self.events.condition:
-            self.events.condition.notify_all()
-        if self._http is not None:
-            self._http.shutdown()
-            self._http.server_close()
-        for thread in (self._worker, self._http_thread):
-            if thread is not None:
-                thread.join(timeout)
-                if thread.is_alive():
-                    raise LeaseTimeout(thread.name)
+        chat_failure = None
+        if self.chat is not None:
+            try:
+                self.chat.revoke()
+                self.chat.close(deadline=time.monotonic() + timeout)
+            except BaseException as exc:
+                chat_failure = exc
+        try:
+            with self.events.condition:
+                self.events.condition.notify_all()
+            if self._http is not None:
+                self._http.shutdown()
+                self._http.server_close()
+            for thread in (self._worker, self._http_thread):
+                if thread is not None:
+                    thread.join(timeout)
+                    if thread.is_alive():
+                        raise LeaseTimeout(thread.name)
+        except BaseException:
+            if chat_failure is None:
+                raise
+        if chat_failure is not None:
+            raise chat_failure

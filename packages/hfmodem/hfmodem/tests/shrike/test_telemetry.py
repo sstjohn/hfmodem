@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hfmodem.shrike import onair, telemetry
+from hfmodem.shrike import arq, onair, telemetry
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.shrike.spec import Protocol
 
@@ -54,7 +54,7 @@ def test_retired_p1_words_still_constrain_later_p3_frequency_following(tmp_path)
     assert rx.cs_log.retained == 2 and len(rx.cs_log) == 10001
     assert all(event.protocol == Protocol.PACTOR3 for event in rx.cs_log)
     assert rx.cs_log.p1_words == 1
-    rx._follow_p3_offset(75.)
+    rx._follow_p3_offset(75., word=arq.CS_ACK)
     assert rx._p3_offset_contradicts_p1
 
 

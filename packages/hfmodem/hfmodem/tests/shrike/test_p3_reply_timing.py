@@ -188,7 +188,7 @@ def test_cycle_switch_preserves_the_last_reply_epoch(was,long,last_slot,next_slo
 def test_duplicate_cycle_request_is_acknowledged_without_repeating_cs6():
     s = _Session(role=arq.IRS)
     s.host.arq.cfg.long_cycle = True
-    s.host.arq.cfg.speed_up_after = 1  # A duplicate must still be acknowledged.
+    s.host.arq.cfg.p3_speed_up_after = 1  # A duplicate must still be acknowledged.
     for _ in range(2):
         s.host.on_rx_event(rxfront.Event(0, "packet", "short frame requests long",
             # SL3 supports both lengths, isolating duplicate-request handling.
@@ -197,7 +197,7 @@ def test_duplicate_cycle_request_is_acknowledged_without_repeating_cs6():
     assert s.host.peer.sent == [("cs", arq.CS_CYCLE_TOG), ("cs", arq.CS_ACK + 1)]
     assert s.host.arq.cycle_request is None
     assert bytes(s.host.channel(s.host.ptchn).rx) == b" Trim"
-    s.host.arq.cfg.speed_up_after = 100
+    s.host.arq.cfg.p3_speed_up_after = 100
     s.host.on_rx_event(rxfront.Event(0, "packet", "physical long frame",
         protocol=spec.Protocol.PACTOR3, packet=(2, 0x22, b"next", True),
         cycle_long=True))
@@ -242,7 +242,7 @@ def test_collision_guard_uses_received_length_and_expires():
     assert g.peer_onset == 100000
     g.update([], np.zeros(1), 200000)
     assert g.peer_onset is None
-    assert g._peer_air() is None
+    assert g._peer_air_evidence() is None
 
 
 def test_p3_observation_cannot_guard_a_p1_link():
@@ -250,7 +250,7 @@ def test_p3_observation_cannot_guard_a_p1_link():
     g.note_p3_packet(100000, 39120, 60000)
     g.protocol = spec.Protocol.PACTOR1
     g.peer_onset = None
-    assert g._peer_air() is None
+    assert g._peer_air_evidence() is None
 
 
 def test_fresh_crc_collision_evidence_cannot_be_overridden_by_retries(tmp_path):
@@ -292,6 +292,6 @@ def test_long_reply_recovery_does_not_repeat_a_blind_scan_at_each_key(tmp_path):
     tx.defer_p3_cs = True
     tx.aim(g, 1)
     old = bench.read(g.boundary(1) + round(.100 * FS))
-    slot, _, _ = onair._regrid(bench, g, tx, host, receiver, 1, old, 0, 1920)
+    slot, _, _, _ = onair._regrid(bench, g, tx, host, receiver, 1, old, 0, 1920)
     assert slot == 4  # Exactly the next long-cycle reply, no 14.7 s chase.
     assert bench.clamp_late(tx.key_instant(g, slot)) == 0

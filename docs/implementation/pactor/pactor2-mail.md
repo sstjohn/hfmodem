@@ -34,8 +34,7 @@ on modern air, and gateway status-bit correlation remains a live hypothesis
 rather than a settled reading; and no arm flown here has ever logged a live
 PACTOR-2 upgrade.
 The older `--offer-pactor2` tries P3 first and then P2; it does not implement a
-level-2 ceiling. Likewise `--p1-6a9 --p3-entry p2sl1` selects a P2-shaped entry
-inside a P3 session. The new preset enters the actual P2 protocol and ladder.
+level-2 ceiling. The preset enters the actual P2 protocol and ladder.
 
 ## Preset
 

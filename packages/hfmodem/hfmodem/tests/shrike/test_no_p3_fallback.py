@@ -49,7 +49,11 @@ class Recorder:
         self.emissions.append((spec.Protocol.PACTOR3, "entry", bytes(payload), status))
         return len(payload)
 
-    def send_cs(self, index):
+    def p3_slot_keyed(self) -> bool | None:
+        return None
+
+    def send_cs(self, index, *, p1_codeword=False, unread=False, maxdown=False,
+                packet_phase=None, cycle_long=None):
         self.emissions.append((spec.Protocol.PACTOR3, "cs", b"", index))
 
 
@@ -116,11 +120,14 @@ def test_repeated_grants_keep_entry_and_retry_monitoring_past_twice_the_limit():
     assert all(row[1] == 'entry' for row in tx.emissions[mark:])
     only_p3(tx, mark)
     assert host.arq.transfer_unconfirmed['suffix'] == queued
+    retained = host.arq.transfer_unconfirmed
+    assert host.arq.unconfirmed_transfers == [retained]
     assert not host.arq.entry_pending and host.protocol is spec.Protocol.PACTOR1
     host.tick()
     assert host.arq.said_goodbye and host.arq.state is arq.State.DISCONNECTING
     assert tx.emissions[-1][0] is spec.Protocol.PACTOR1
     assert len(host.arq.unconfirmed_transfers) == 1
+    assert host.arq.transfer_unconfirmed is retained
     host.tick(elapsed_ticks=arq.GOODBYE_CYCLES + 1)
     assert host.arq.state is arq.State.DISCONNECTED and not host.arq.goodbye_acked
     assert host.arq.transfer_unconfirmed['suffix'] == queued

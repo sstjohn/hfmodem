@@ -109,18 +109,20 @@ def parser():
     result = argparse.ArgumentParser(prog='console sabir', description=__doc__)
     actions = result.add_subparsers(dest='action', required=True)
     prepare = actions.add_parser('prepare', help='render a proof and manifest offline')
-    prepare.add_argument('directory', type=Path)
-    prepare.add_argument('--callsign', required=True)
+    prepare.add_argument('directory', type=Path, help='where to write the proof and its manifest')
+    prepare.add_argument('--callsign', required=True, help='the callsign the proof carries')
     prepare.add_argument('--gears', '--profiles', dest='profiles', nargs='+',
-                         choices=PROOF_PROFILES, default=['workhorse'])
-    prepare.add_argument('--bytes', type=int, default=256, dest='payload_bytes')
+                         choices=PROOF_PROFILES, default=['workhorse'],
+                         help='the gears to render, in order (default workhorse)')
+    prepare.add_argument('--bytes', type=int, default=256, dest='payload_bytes',
+                         help='payload bytes per packet (default %(default)s)')
     prepare.add_argument('--seed', type=int, help='deterministic rehearsal; omit for fresh proof IDs')
     verify = actions.add_parser('verify', help='decode an existing remote recording offline')
-    verify.add_argument('manifest', type=Path)
-    verify.add_argument('capture', type=Path)
-    verify.add_argument('--report', type=Path)
+    verify.add_argument('manifest', type=Path, help='the manifest of the proof that was sent')
+    verify.add_argument('capture', type=Path, help='the remote recording to decode')
+    verify.add_argument('--report', type=Path, help='also write the report to this file')
     proof = actions.add_parser('proof', help='record a remote receiver around one bounded transmission')
-    proof.add_argument('manifest', type=Path)
+    proof.add_argument('manifest', type=Path, help='the manifest of the proof to send')
     proof.add_argument('--gears', nargs='+', choices=PROOF_PROFILES,
                        help='prepare fresh packets in these gears, in order, using the manifest callsign')
     proof.add_argument('--repeat', type=int, default=1,
@@ -138,11 +140,12 @@ def parser():
     proof.add_argument('--ready-timeout', type=float, default=30, help='maximum remote-receiver startup, seconds')
     proof.add_argument('--tail', type=float, default=3, help='remote recording after the transmitter exits, seconds')
     occupancy = proof.add_mutually_exclusive_group(required=True)
-    occupancy.add_argument('--sense', action='store_true')
-    occupancy.add_argument('--force', action='store_true')
+    occupancy.add_argument('--sense', action='store_true', help='check occupancy once; refuse if busy')
+    occupancy.add_argument('--force', action='store_true',
+                           help='bypass the measured busy status; every other guard stands')
     execution = proof.add_mutually_exclusive_group(required=True)
-    execution.add_argument('--dry-run', action='store_true')
-    execution.add_argument('--execute', action='store_true')
+    execution.add_argument('--dry-run', action='store_true', help='print the plan and stop')
+    execution.add_argument('--execute', action='store_true', help='key the rig')
     return result
 
 

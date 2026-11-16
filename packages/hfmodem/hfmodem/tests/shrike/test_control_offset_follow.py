@@ -21,7 +21,7 @@ import json
 import numpy as np
 import pytest
 
-from hfmodem.shrike import arq, onair, p3acquire, p3rx, placement, spec
+from hfmodem.shrike import arq, onair, p3acquire, p3frame, p3rx, placement, rxfront, spec
 from hfmodem.tests.shrike import test_entry_answer as entry
 from hfmodem.tests.shrike import test_p3_reply_placement as reply
 
@@ -263,6 +263,19 @@ def test_a_moved_control_reports_its_own_pulse_centers(tmp_path, monkeypatch):
     lead = placement.pulse_lead(audio)
     assert lead != placement.historical_control_pulse_lead(5)
     assert tx.tx_pulse_offsets == (lead, lead)
+
+
+def test_a_hostless_cs6_still_dates_the_command_slot(tmp_path, monkeypatch):
+    """A bench transmitter has no ARQ to ask, and its CS6 still dates the
+    long-frame hypothesis `_p3_transition_window` reads."""
+    g, tx, slot, _ = bench(tmp_path, monkeypatch, 0.0)
+    assert tx.host is None
+    assert key(tx, g, slot, lambda: tx._send_p3_control(arq.CS_CYCLE_TOG)) is None
+    at, _, cycle_n, _ = g._p3_peer
+    row0 = g._p3_command_row0
+    assert g._p3_command_slot == slot
+    assert row0 - p3frame.DATA_OFFSET * rxfront.SPS == at + (
+        (g.boundary(slot) - at) // cycle_n + 1) * cycle_n
 
 
 # -- and what may MOVE it: one frame is a candidate, not a correction -------

@@ -64,14 +64,18 @@ class EmailClient:
         if not ready:
             raise HostError('this link has not advertised email gateway service (<E> or <S:...E...>)')
 
+    def check_compose(self, recipient, reply_to, subject):
+        if self.sent_generation == self.session.client.link_generation:
+            raise ValueError('one email per link; reconnect before another send to avoid ambiguous late confirmations')
+        self._guard()
+        email = Email(recipient, reply_to, subject)
+        email.wire()
+        return email
+
     def command(self, words):
         s = self.session
         if words[:1] == ['send'] and len(words) >= 4:
-            if self.sent_generation == s.client.link_generation:
-                raise ValueError('one email per link; reconnect before another send to avoid ambiguous late confirmations')
-            self._guard()
-            email = Email(words[1], words[2], ' '.join(words[3:]))
-            email.wire()
+            email = self.check_compose(words[1], words[2], ' '.join(words[3:]))
             self.phase = None
             self.draft = (s.client.link_generation, email, [])
             s.say(f'Email via {s.peer} to {email.recipient}; replies to {email.reply_to}. '
@@ -118,6 +122,7 @@ class EmailClient:
             while True:
                 self._guard(generation, owned=True)
                 if self.results & {'EJ', 'SMF', 'SMFP'}:
+                    s.semantic('email_rejected')
                     raise HostError('gateway rejected the email/VMail; no automatic retry')
                 if not delivered and 'BUFFER 0' in c.since(sent_after) and c.buffer == 0:
                     delivered = True
@@ -133,7 +138,8 @@ class EmailClient:
             s.say(self.phase)
             s.emit('email', event='wait_cancelled', peer=s.peer)
             raise
-        except (HostError, TimeoutError):
+        except (HostError, TimeoutError) as error:
+            s.mail_ack.interrupt(str(error))
             self.phase = 'failed or unconfirmed; inspect session evidence before retrying'
             s.emit('email', event='unconfirmed', peer=s.peer)
             raise

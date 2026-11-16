@@ -249,3 +249,38 @@ def test_a_held_turns_repeated_frame_0_behind_a_lost_grant_is_granted_again():
     ask = M.synth_tone_pairs(F.control_bursts(hs.caller, '500', 0)[0])
     feed(hs, np.r_[np.zeros(2400), ask, np.zeros(9600)])
     assert len(io.sent) == granted + 1 and hs._granted_over_unread(), io.msgs[-3:]
+
+
+def test_a_caller_silent_behind_its_last_over_is_closed_on_the_stock_timeout():
+    """Kestrel self-pair, 3/moderate, 2026-11-10: the caller aborted behind
+    its 73<DISC>, and the answerer was still up 72 s after answering it. A VARA
+    HF station gives up about 60 s after the peer's last frame."""
+    hs, io = _answered(1)
+    hs._txq.clear()
+    feed(hs, np.r_[np.zeros(1200), _over(hs, b'73<DISC>', 4), np.zeros(12000)])
+    assert io.host == [b'73<DISC>'], io.msgs[-4:]
+    heard = hs._progress_at
+    _silence_until_closed(hs, io, 90)
+    assert hs.state is not A.VaraState.CONNECTED, io.msgs[-4:]
+    assert 59 <= _Clock.t - heard <= 61, io.msgs[-4:]
+
+
+def test_a_caller_silent_behind_our_empty_hand_back_is_closed_on_the_stock_timeout():
+    """Same pair, the caller now closing gracefully: our answerer missed its
+    close asks, took the empty turn the caller handed over after our answer to
+    its 73<DISC>, gave it back, and missed the close frame. With nothing owed
+    it waited on a caller that never keyed again. VARA HF closes 60 s after the
+    peer's last frame whatever the turn (BENCH-GATES-B2, answerer run)."""
+    hs, io = _answered(1)
+    hs._txq.clear()
+    feed(hs, np.r_[np.zeros(1200), _over(hs, b'73<DISC>', 4), np.zeros(4800)])
+    handover = M.synth_burst(hs.called, F.for_bw(F.SESSION_TURN_IDLE_SHORT, '500'))
+    feed(hs, np.r_[handover, np.zeros(2400)])
+    assert any('empty turn' in m for m in io.msgs), io.msgs[-4:]
+    heard = hs._peer_heard_at
+    feed(hs, np.zeros(8 * M.FS))
+    assert hs._release_turn()
+    assert hs.turn == A._TURN_PEER and hs._rx_window.before_data
+    _silence_until_closed(hs, io, 120)
+    assert hs.state is not A.VaraState.CONNECTED, io.msgs[-4:]
+    assert 59 <= _Clock.t - heard <= 61, io.msgs[-4:]

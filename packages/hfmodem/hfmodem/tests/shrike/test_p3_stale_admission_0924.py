@@ -29,7 +29,7 @@ def test_an_admission_that_keyed_nothing_is_not_the_next_keys_cost(tmp_path, cap
     live = tx.live
     tx.breakin_due = True                       # `taking_link`: the changeover is inflight
     stand_late(live, g, tx, 40, 0)
-    got, _, _ = onair._regrid(live, g, tx, s.host, s.rx, 40, EMPTY, live.pos, 1920)
+    got, _, _, _ = onair._regrid(live, g, tx, s.host, s.rx, 40, EMPTY, live.pos, 1920)
     assert got == 40 and not tx.slots_used      # admitted, and the ISS held its packet
 
     tx.aim(g, 43)                               # hold 13: CS1 read inside the window
@@ -40,7 +40,7 @@ def test_an_admission_that_keyed_nothing_is_not_the_next_keys_cost(tmp_path, cap
     capsys.readouterr()
     slot = 50                                   # hold 33: a changeover cycle on time
     stand_late(live, g, tx, slot, 0)
-    got, _, _ = onair._regrid(live, g, tx, s.host, s.rx, slot, EMPTY, live.pos, 1920)
+    got, _, _, _ = onair._regrid(live, g, tx, s.host, s.rx, slot, EMPTY, live.pos, 1920)
     out = capsys.readouterr().out
     assert got == slot and onair.SLOT_GONE not in out
     assert tx.breakin_cost_n < round(onair.BREAKIN_CLAMP_TOL_S * FS)

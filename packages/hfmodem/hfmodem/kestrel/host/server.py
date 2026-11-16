@@ -26,6 +26,7 @@ Scope / seams:
 from __future__ import annotations
 
 import socket
+import queue
 import threading
 from collections import deque
 from hfmodem.core.socketpair import SocketPairAcceptor
@@ -63,11 +64,12 @@ class HostSession(ModemObserver):
 
     def __init__(self, cmd_conn: socket.socket, data_conn: socket.socket,
                  modem: ModemCore, *, iamalive_interval: float = 60.0,
-                 log=None, kiss=None) -> None:
+                 log=None, kiss=None, data_admission=None) -> None:
         self._cmd = Connection(cmd_conn, line=True) if isinstance(cmd_conn, socket.socket) else cmd_conn
         self._data = Connection(data_conn) if isinstance(data_conn, socket.socket) else data_conn
         self._modem = modem
         self._kiss = kiss
+        self._data_admission = data_admission
         self._iamalive_interval = iamalive_interval
         self._log = log or (lambda *a: None)
 
@@ -115,20 +117,30 @@ class HostSession(ModemObserver):
         for th in self._threads[1:]:
             th.join(timeout=1)
 
-    def close(self) -> None:
-        with self._operation_lock:
+    def close(self, *, deadline=None) -> None:
+        if deadline is None:
+            with self._operation_lock:
+                self._close()
+            return
+        import time
+        if not self._operation_lock.acquire(timeout=max(0., deadline - time.monotonic())):
+            raise RuntimeError('VARA host close operation still pending')
+        try:
             self._close()
+        finally:
+            self._operation_lock.release()
 
-    def ensure_retired(self):
+    def ensure_retired(self, *, deadline=None):
         """Verify a managed attachment can release its exclusive station lease."""
+        import time
         for worker in self._threads:
             if worker is not threading.current_thread():
-                worker.join(2.)
+                worker.join(2. if deadline is None else max(0., deadline-time.monotonic()))
                 if worker.is_alive():
                     raise RuntimeError('VARA host reader did not retire')
         for conn in (self._cmd, self._data):
             if isinstance(conn, Connection):
-                conn.join_workers()
+                conn.join_workers(deadline=deadline)
         if self.retirement_error is not None:
             raise RuntimeError('VARA adapter stop did not retire') from self.retirement_error
 
@@ -535,6 +547,8 @@ class HostSession(ModemObserver):
                 with self._operation_lock:
                     if self._closed:
                         break
+                    if self._data_admission is not None:
+                        self._data_admission()
                     self._modem.transmit(chunk)
         except OSError:
             pass
@@ -551,6 +565,36 @@ class HostSession(ModemObserver):
                         self._modem.request_heartbeat(lambda: self._event('command', 'IAMALIVE'))
                     except OSError:
                         self._close()
+
+
+class ReportingSession(HostSession):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.payload_boundaries = queue.Queue(128)
+        self.boundary_failed = False
+
+    def modem_payload_boundary(self, boundary):
+        try:
+            self.payload_boundaries.put_nowait(boundary)
+        except queue.Full:
+            self.boundary_failed = True
+
+    def delivery_boundary(self, line):
+        if self.boundary_failed:
+            return None
+        try:
+            boundary = self.payload_boundaries.get_nowait()
+        except queue.Empty:
+            return None
+        if boundary.line != line:
+            self.boundary_failed = True
+            return None
+        return boundary
+
+    def modem_cqframe(self, call, bw, sn):
+        self.modem_bitrate(1, 18, False)
+        self.modem_snr(sn)
+        self._event('command', f'CQFRAME {call} {bw}')
 
 
 class VaraServer:

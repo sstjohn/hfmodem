@@ -16,8 +16,14 @@ import pytest
 from hfmodem.shrike import onair, placement, spec
 from hfmodem.shrike.p3trial import CYCLE, ROTATION, ReplyClock
 from hfmodem.tests.shrike.test_p3_answer_slot_1107 import ANSWER_N, answered
-from hfmodem.tests.shrike.test_p3_reply_armed_ahead import WIDTH, owe
-from hfmodem.tests.shrike.test_p3_timing_trial import receive, setup
+from hfmodem.tests.shrike.p3_reply_support import (
+    READ_LAG as READ_LAG,
+    WIDTH,
+    owe,
+    receive as receive,
+    setup as setup,
+    turned,
+)
 
 FS = onair.FS
 
@@ -31,17 +37,6 @@ TAPES = {
 }
 # `receive` places a synthetic head's pulse centre; the decoder reads it this
 # much later, so the head is placed that much early to read where the tape's did.
-READ_LAG = 90
-
-
-def turned(tmp_path, gap, waveform):
-    s, tx, live, grid = setup(tmp_path, 'B', delay=234)
-    entry = tx.timing_trial.entry_phase
-    tx.timing_trial = None
-    tx.reply_clock = ReplyClock(entry_phase=entry)
-    tx.p3_control_waveform = waveform
-    receive(s, tx, live, grid, entry + gap - READ_LAG)
-    return s, tx, live, grid, entry
 
 
 @pytest.mark.parametrize('waveform', ['historical', 'current'])
@@ -67,6 +62,7 @@ def test_every_changeover_copy_is_answered_on_our_raster(tmp_path, tape, wavefor
 @pytest.mark.parametrize('tape', sorted(TAPES))
 def test_the_new_isss_data_packets_are_answered_890_ms_past_them(tmp_path, tape):
     s, tx, live, grid, entry = turned(tmp_path, TAPES[tape], 'historical')
+    tx.p3_control_instant = 'peer'
     head = grid._p3_peer[0]
     answered(s, tx, live, grid, 1)
     for slot in range(2, 5):
@@ -168,7 +164,6 @@ def test_a_placement_that_would_miss_the_slot_arms_where_the_comb_stood(tmp_path
     first answer behind the clock, and the arm failed. It arms on the comb it
     found, and the next cycle's placement moves it."""
     s, tx, live, grid, entry = turned(tmp_path, TAPES['ws8eoc-1920'], 'historical')
-    head = grid._p3_peer[0]
     answered(s, tx, live, grid, 1)
     ours = tx.reply_clock.pulse_epoch
     grid.reverse(to_iss=True)

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 export async function checkInspectors(page, baseURL) {
  const checked=[];
- for(const route of ['vara-send','vara-receive','pactor3-send','pactor3-receive','ardop-send','ardop-receive']){
+ for(const route of ['vara-send','vara-receive','pactor3-mail','pactor3-send','pactor3-receive','ardop-send','ardop-receive']){
   await page.goto(new URL(`examples/${route}/`,baseURL).href);
   await page.locator('#workspace').waitFor({state:'visible'});
   const spectrum=await(await page.waitForFunction(()=>document.getElementById('waterfall').dataset.frequencyHigh)).jsonValue();

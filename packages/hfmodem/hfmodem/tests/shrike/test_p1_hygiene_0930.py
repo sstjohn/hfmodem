@@ -15,7 +15,7 @@ import pytest
 
 from hfmodem.shrike import onair, pactor1, p1rx
 from hfmodem.tests.shrike.test_p1_jump_to_p4_0929 import (
-    BURSTS, FS, PAD, _arm, _gateway,
+    BURSTS, FS, JUMP, PAD, _arm, _gateway,
 )
 
 CAPTURES = Path(__file__).resolve().parents[5] / 'captures'
@@ -98,9 +98,10 @@ def test_2208_packet_one_is_rendered_before_the_first_candidate(tmp_path, monkey
 
 
 def test_2208_pending_announcement_does_not_fall_back_locally(tmp_path, monkeypatch):
-    # Silent mode leaves the real phase jump unacted on, exposing the old
-    # retry-count speed-down. The peer has never requested CS4 on this tape.
-    keyed, log, _ = _arm(tmp_path, monkeypatch, _gateway(range(len(BURSTS))), 'silent')
+    # with the phase jump left out of the tape every CS1 is a repeat request;
+    # the retry count must still not trigger a local 100 Bd fallback
+    keyed, log, _ = _arm(tmp_path, monkeypatch,
+                         _gateway([k for k in range(len(BURSTS)) if k != JUMP]), 'silent')
     p1 = [what for _, what in keyed if what.startswith('P1 ')]
     assert len(p1) > 4
     assert set(p1) == {'P1 pkt#1 200Bd 7B'}, (p1, log)

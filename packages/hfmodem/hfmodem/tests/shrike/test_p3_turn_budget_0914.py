@@ -53,10 +53,14 @@ class _Rx(_Sessrx):
     _p3_reading_ahead, _p3_corrected = False, None
     _p3_read_ahead = onair._SessionRx._p3_read_ahead
     _corrected = onair._SessionRx._corrected
+    # Header work shares the owed key's deadline so it cannot delay the reply.
+    _p3_acquisition_fits = onair._SessionRx._p3_acquisition_fits
+    P3_SL1_RESERVE_S = onair._SessionRx.P3_SL1_RESERVE_S
 
     def __init__(self):
         self.sync = rxfront.SyncedRx()
         self._p3_ahead = {}
+        self._p3_long_candidate = None
 
     def deep_scan(self, audio) -> None:
         pass
@@ -105,7 +109,7 @@ def turn_cycle(tmp_path, *, owed_n, slot=44):
     # drain below is what sets the cycle's position.
     rx._p3_row0 = tx.key_instant(g, slot) - rxfront._packet_span(SPAN) - 1300
     live.now = live.pos = tx.key_instant(g, slot) + 480 - live.key_notice
-    slot, seg, seg_start = onair._regrid(
+    slot, seg, seg_start, _ = onair._regrid(
         live, g, tx, rx.host, rx, slot,
         np.zeros(0, np.float32), 0, SETTLE_N)
     return g, tx, slot

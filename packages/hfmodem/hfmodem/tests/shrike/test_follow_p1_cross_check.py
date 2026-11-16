@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hfmodem.shrike import modem, onair, p1rx, p3acquire, pactor1, rxfront, spec
+from hfmodem.shrike import arq, modem, onair, p1rx, p3acquire, pactor1, rxfront, spec
 from hfmodem.tests.shrike.test_granted_entry_retry import granted
 
 FS = spec.SAMPLE_RATE
@@ -41,7 +41,7 @@ def p1_word(rx, *, errors=0):
 def test_a_follow_the_pactor1_read_contradicts_does_not_reach_the_transmitter():
     rx = sessrx()
     p1_word(rx)
-    rx._follow_p3_offset(74.6)
+    rx._follow_p3_offset(74.6, word=arq.CS_ACK)
     assert rx.p3_receive_offset_hz == 74.6      # the frames decoded there
     assert rx.p3_transmit_offset_hz == 0.0      # ...and we do not key there
 
@@ -49,28 +49,28 @@ def test_a_follow_the_pactor1_read_contradicts_does_not_reach_the_transmitter():
 def test_a_follow_the_pactor1_read_allows_is_applied():
     rx = sessrx()
     p1_word(rx)
-    rx._follow_p3_offset(-25.0)
+    rx._follow_p3_offset(-25.0, word=arq.CS_ACK)
     assert rx.p3_receive_offset_hz == -25.0
     assert rx.p3_transmit_offset_hz == -25.0
 
 
 def test_a_session_with_no_pactor1_codeword_follows_unchecked():
     rx = sessrx()
-    rx._follow_p3_offset(74.6)
+    rx._follow_p3_offset(74.6, word=arq.CS_ACK)
     assert rx.p3_transmit_offset_hz == 74.6
 
 
 def test_a_codeword_read_with_bit_errors_is_not_a_frequency_measurement():
     rx = sessrx()
     p1_word(rx, errors=2)
-    rx._follow_p3_offset(74.6)
+    rx._follow_p3_offset(74.6, word=arq.CS_ACK)
     assert rx.p3_transmit_offset_hz == 74.6
 
 
 def test_the_log_line_names_both_offsets(capsys):
     rx = sessrx()
     p1_word(rx)
-    rx._follow_p3_offset(74.6)
+    rx._follow_p3_offset(74.6, word=arq.CS_ACK)
     line = capsys.readouterr().out
     assert '+74.6' in line and 'PACTOR-1' in line and '60' in line
 

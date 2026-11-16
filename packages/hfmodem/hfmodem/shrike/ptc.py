@@ -53,7 +53,7 @@ from typing import Callable, Optional
 
 from . import compress, host_cwid, p1rx, pactor1, placement, spec
 from hfmodem.core import hostmode
-from .arq import (CS_ACK, CS_BREAKIN, CS_REQUEST, CS_SPEED_UP, ENTRY_GRANT_CYCLES,
+from .arq import (CS_ACK, CS_BREAKIN, CS_NAK, CS_REQUEST, CS_SPEED_UP, ENTRY_GRANT_CYCLES,
                   IRS, ISS, LADDERS, P1_SPEED_LEVEL, P3_CS6_HOLD_REPEATS, REFUSED,
                   SEQ_MOD, ArqIO, PactorArq, State)
 from .p4host import P4LateFrame
@@ -335,10 +335,9 @@ class PtcHost(ArqIO):
         # asked for packet 1 every cycle, and left P1 for P4 on their own once
         # we fell silent. 0 never gives up on the packet.
         self.p1_robust_stall = 0
-        self.p1_stall_goodbye = False
         self.p1_stalled = 0
         self._first_packet_requests = 0
-        # ...or, with `--p1-robust-stall-then shorts`, a CS1 whose shift phase
+        # ...or, with `--p1-robust-stall`, a CS1 whose shift phase
         # repeats the cycle before: a Trimode gateway that decoded our bit-5
         # packet 1 answers that way and waits for our P4 short (KY2D->N9VC).
         self.p1_stall_shorts = False
@@ -459,8 +458,7 @@ class PtcHost(ArqIO):
         to P1. The driver's hold limit and ARQ teardown still end the contact.
         """
         self._p3_fallback_reported = False
-        self.p3_changeover_cs5 = False
-        """Opt-in reference-CS5 reply experiment for CRC-valid P3 changeovers."""
+        self.p3_changeover_answer = "cs1"
         self.p3_qrt_confirm = False
         """Opt-in post-QRT marker experiment; wait for its separate ACK reply."""
         self.p3_changeover_p1_cs = False
@@ -472,8 +470,9 @@ class PtcHost(ArqIO):
         its CS4 is a speed-DOWN to 100 Bd where PACTOR-3's demands a speed-up,
         and it has no CS5 or CS6 at all, so a gear command keyed in PACTOR-1
         would say something other than what the FSM asked for."""
-        self._p3_changeover_answer = False
-        self.p1_6a9 = False  # Alternate P1 response experiment, off by default.
+        self._p3_answering_changeover = False
+        self._p3_reply_phase = None
+        self._p3_reply_long = None
         self.p1_act_on_grant = True
         """Take the peer's `0x59A` as the command to key PACTOR-3 that it is.
 
@@ -721,6 +720,10 @@ class PtcHost(ArqIO):
         """
         if self.phase_power is not None:
             self.phase_power.select(protocol, why)
+
+    @property
+    def uninvited_entry(self) -> bool:
+        return self._uninvited_entry
 
     @property
     def breakin_due(self) -> bool:
@@ -1271,7 +1274,7 @@ class PtcHost(ArqIO):
         """
         p2_grant = (self.p2_grant_6a9 and not self.pactor2_only
                     and ev.spare == pactor1.CS_6A9)
-        experimental = self.p1_6a9 or self.pactor2_only or p2_grant
+        experimental = self.pactor2_only or p2_grant
         target = Protocol.PACTOR2 if experimental else Protocol.PACTOR3
         if not self.allows_protocol(target):
             return
@@ -1603,7 +1606,11 @@ class PtcHost(ArqIO):
             progress = getattr(self.app, 'progress', None)
             if progress is not None:
                 progress.poll()
-        self.arq.on_cycle(elapsed_ticks=elapsed_ticks, cycle_ticks=cycle_ticks)
+        response_emitted = (self.peer.p3_slot_keyed()
+                            if self.protocol == Protocol.PACTOR3 and self.peer is not None
+                            else None)
+        self.arq.on_cycle(elapsed_ticks=elapsed_ticks, cycle_ticks=cycle_ticks,
+                          response_emitted=response_emitted)
         if self.peer is not None:
             self.peer.pump()
             self.peer.cycle()
@@ -1914,13 +1921,6 @@ class PtcHost(ArqIO):
             # `arq.PactorArq.on_rx_packet` yields on one: it is the same answer,
             # read a cycle later, and it says the same thing about the waveform.
             entry = self.arq.entry_pending
-            if ok and ev.protocol == Protocol.PACTOR3 and not ev.breakin \
-                    and self.arq.role == IRS and ev.cycle_long is not None:
-                # A CS6 we sent may have been lost. The variable header, not
-                # status bit 5, tells us which cycle the peer actually used.
-                # Reconcile before answering so an unfulfilled request gets
-                # CS6 again, rather than a speed-up on the assumed new length.
-                self.arq.observe_peer_cycle(ev.cycle_long)
             previous_role = self.arq.role
             repeated_stint = False
             if ok and ev.breakin and ev.protocol == Protocol.PACTOR3 \
@@ -1929,16 +1929,20 @@ class PtcHost(ArqIO):
                 recover = getattr(self.peer, "recover_p3_turn", None)
                 if recover is not None:
                     repeated_stint = bool(recover(ev))
-            self._p3_changeover_answer = (ev.breakin
+            self._p3_answering_changeover = (ev.breakin
                                           and ev.protocol == Protocol.PACTOR3)
+            self._p3_reply_phase = ev.t
+            self._p3_reply_long = False if ev.breakin else ev.cycle_long
             if ok and ev.baud:
                 self._follow_peer_rate(ev.baud, breakin=ev.breakin)
             try:
                 self.arq.on_rx_packet(sl, payload, status, ok,
                                       breakin=ev.breakin, protocol=ev.protocol,
-                                      repeated_stint=repeated_stint)
+                                      cycle_long=ev.cycle_long,
+                                      repeated_stint=repeated_stint, packet_phase=ev.t)
             finally:
-                self._p3_changeover_answer = False
+                self._p3_answering_changeover = False
+                self._p3_reply_phase = self._p3_reply_long = None
             if previous_role == ISS and self.arq.role == IRS:
                 # A whole changeover packet can arrive without its head ever
                 # passing _logical_cs. Its accepted role change ends our trial
@@ -1957,7 +1961,7 @@ class PtcHost(ArqIO):
                 # for as long as it is waiting for the entry packet, so a copy
                 # arriving after we have keyed one is the far end saying it did
                 # not read what we sent.
-                selected = (pactor1.CS_6A9 if self.p1_6a9 or self.pactor2_only
+                selected = (pactor1.CS_6A9 if self.pactor2_only
                             else pactor1.CS_59A)
                 if ev.spare == selected:
                     self.arq.note_upgrade_unread(
@@ -3067,7 +3071,7 @@ class PtcHost(ArqIO):
         PACTOR-3 about it but its old name.
 
         `p3_changeover_p1_cs` is the one place the link's protocol and the
-        burst's are allowed to differ, and `_p3_changeover_answer` is the cycle
+        burst's are allowed to differ, and `_p3_answering_changeover` is the cycle
         it is allowed in.
         """
         if self.peer is None:
@@ -3081,9 +3085,13 @@ class PtcHost(ArqIO):
             return self.peer.send_p2_cs(self._counter_cs_for(cs_index))
         else:
             index = self._counter_cs_for(cs_index)
-            if (self.p3_changeover_p1_cs and self._p3_changeover_answer
-                    and index in (CS_ACK, CS_REQUEST)):
-                return self.peer.send_cs(index, p1_codeword=True)
+            if self.protocol is Protocol.PACTOR3:
+                return self.peer.send_cs(index,
+                    p1_codeword=(self.p3_changeover_p1_cs and self._p3_answering_changeover
+                                 and index in (CS_ACK, CS_REQUEST)),
+                    unread=cs_index == CS_REQUEST,
+                    maxdown=self.arq.p3_maxdown,
+                    packet_phase=self._p3_reply_phase, cycle_long=self._p3_reply_long)
             return self.peer.send_cs(index)
 
     def _answer_link_setup(self, cs_index: int) -> None:
@@ -3541,7 +3549,7 @@ class PtcHost(ArqIO):
         the speed-UP offer -- the rate is what disambiguates it -- and there is
         nothing below to ask for, so the request is the held codeword as before.
         """
-        from .arq import CS_BREAKIN, CS_CYCLE_TOG, CS_NAK, CS_REQUEST, CS_SPEED_UP
+        from .arq import CS_BREAKIN, CS_CYCLE_TOG, CS_REQUEST, CS_SPEED_UP
         if cs_index == CS_BREAKIN:
             return pactor1.CS_CHANGEOVER
         if cs_index in (CS_SPEED_UP, CS_CYCLE_TOG):
@@ -3856,13 +3864,8 @@ class PtcHost(ArqIO):
             return
         self.p1_stalled = self._first_packet_requests
         self.log(f"first P1 packet unacknowledged after {self._first_packet_requests} "
-                 "repeat requests -> "
-                 + ("the goodbye, then" if self.p1_stall_goodbye else "falling silent")
-                 + " to listen for the peer's P4 words")
-        if not self.p1_stall_goodbye:
-            # The probe's request refuses every other keying from here, so the
-            # retransmission this request asks for never airs.
-            self.peer.send_p4_entry_packet(b"", 0)
+                 "repeat requests -> keying the P4 opening shorts")
+        self.peer.send_p4_entry_packet(b"", 0)
 
     def acknowledged(self, n: int) -> None:
         if n == 1 and self.p4_after_first_ack:
@@ -4006,6 +4009,9 @@ class SimPeer:
 
     def send_cs(self, cs_index):
         self._to_far.append(("cs", (cs_index,)))
+
+    def p3_slot_keyed(self) -> bool | None:
+        return None
 
     def cycle(self) -> None:
         """Clock the far end's cycle grid, then settle the exchange."""

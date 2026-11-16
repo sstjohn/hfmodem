@@ -69,6 +69,8 @@ import os
 import re
 import sys
 
+from hfmodem.shrike.p4turn import LADDER_MEANING
+
 #: Measurement with no meaning in one cycle. The transcript keeps all of it.
 TELEMETRY = re.compile(
     r"\[p\d timing\]"                                   # sixteen callback tuples
@@ -181,6 +183,11 @@ def counted(line: str) -> str:
 
 
 P4_BEGINS = re.compile(r"\[p4 (?:probe|link|experiment)\]|^\s*TX\[\d+\] P4 ")
+def ladder_meaning(short):
+    value = re.match(r"v(\d+)", short or '')
+    return value and LADDER_MEANING.get(int(value.group(1)), 'meaning unknown')
+
+
 P4_OBS = re.compile(
     r"\[p4 link\] (\w+) (\S+) (new|enriched|duplicate|confirmed|contradicted|expired|extended) "
     r"at ([\d.]+) (provisional|full) .*cfo=([-+]?[\d.]+)Hz(?: status=0x([0-9a-f]{2}) CRC=valid)?")
@@ -491,7 +498,7 @@ class P4Link:
         elif heard.get('word') or heard.get('short'):
             name = heard.get('word') or f"short {heard['short']}"
             said = self._repeat(('word', name.split('/')[0]), name.split('/')[0])
-            extra = [s for s in (said, heard.get('progress')) if s]
+            extra = [s for s in (ladder_meaning(heard.get('short')), said, heard.get('progress')) if s]
             line = at + name + (f" ({', '.join(extra)})" if extra else '')
         elif heard['kinds'] - {'word', 'short'}:
             kind = sorted(heard['kinds'] - {'word', 'short'})[0]
@@ -556,7 +563,7 @@ class P4Link:
         if word and unmeasured:
             control = f"v{unmeasured['value']}/{unmeasured['header']}"
             held = f"; held from {target_at:.2f}" if over and over.get('slot_accepted') == 'false' else ''
-            return at + label + f" (unverified fallback for {control}{held})"
+            return at + label + f" (no recorded stock answer for {control}; guessing{held})"
         acked = ' (repeat request)' if word and purpose == 'repeat-request' else ''
         if word and over and over.get('slot_accepted') == 'false':
             if over.get('held_status') is not None:

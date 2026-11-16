@@ -87,6 +87,8 @@ def test_a_link_on_the_slot_a_cq_named_reads_busy_once_with_both_stations():
     # before the later level-1 frame and idle reply at the one-minute boundary.
     assert seen[1].at - seen[1].since == pytest.approx(1.5)
     assert v.slot_line(seen[1]) == 'slot 1 busy: KD5LEE? ↔ AI7EQ chatting, level 3'
+    # A numpy S/N crashed the 11-14 chat session's snapshot when a beacon met a busy slot.
+    assert {type(a.sn) for a in seen} == {float}
     lines = [(s.kind, s.text) for s in said(found, 1)]
     assert lines[:4] == [('stage', 'link heard at level 4'), ('text', '73 My information:'),
                          ('text', '<NAME:Sean>'), ('text', '<QTH:Crooked River')]
@@ -219,6 +221,17 @@ def test_the_session_says_the_measured_passband():
     assert desk.said[-1] == ('passband -3 dB 117-2531, -6 dB 94-3023, -10 dB 82-3562 Hz; '
                              'watching slot 1, CF, slot 11, slot 12')
     assert desk.kinds('passband')[-1]['slots'] == [1, None, 11, 12]
+
+
+def test_a_numpy_measured_passband_reaches_the_chat_state_as_plain_floats():
+    desk, watch = watched()
+    measured = S.Measured(S.Passband({3: (np.float64(117.5), np.float64(2531.))}),
+                          (1,), 0, np.int64(300))
+    watch.found = [('passband', None, measured)]
+    desk.tick()
+    event = desk.kinds('passband')[-1]
+    assert {type(hz) for edge in event['edges'].values() for hz in edge} == {float}
+    assert type(event['wide_offset']) is float
 
 
 def test_moved_audio_streams_as_a_burst_moves_and_comes_back():

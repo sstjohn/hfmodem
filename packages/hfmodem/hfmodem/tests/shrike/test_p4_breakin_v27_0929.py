@@ -28,7 +28,7 @@ DECISION_2349 = 1592074 - LEAD_2349
 
 
 def breaking_in(key, ladder="none"):
-    m, a = machine(role="irs", data="body", ladder=ladder, prekey_lead=LEAD_2349 / FS)
+    m, a = machine(role="irs", data="body" if ladder == "none" else ladder, prekey_lead=LEAD_2349 / FS)
     a.on_host_data(B2F)
     m._body(key, 0x40, State.IRS_BREAKIN)
     m.keyed()
@@ -51,8 +51,8 @@ def test_2349_partial_v27_to_our_breakin_body_holds_the_repeat_and_the_full_word
         assert p.kind == Kind.BODY and p.state == State.ISS_DATA
         assert p.status == 0x40 and p.payload == FIELDS[0]
     else:
-        assert (p.kind, p.value, p.state) == (Kind.SHORT, 13, State.ISS_LADDER)
-        assert not m.outbox.inflight and bytes(a._outbuf) == B2F
+        assert (p.kind, p.status, p.state) == (Kind.BODY, 0, State.ISS_DATA)
+        assert p.payload == FIELDS[0] and m.outbox.inflight == FIELDS[0]
     assert p.stream_sample == BREAKIN_2349 + 2 * 60000
     assert any(e["event"] == "turn" and e["responds_to"] == BREAKIN_2349 for e in m.link_events)
 
@@ -95,7 +95,7 @@ def replay_2349(monkeypatch):
     tx = Tx(stream)
     tx.settle = .044
     tx.p4_probe.emissions.clear()
-    tx.p4_link_options.p4_ladder = "none"
+
     tx.p4_link_options.p4_data = "body"
     tx.p4_link_options.p4_link_timeout = (1652074 - end) / FS
     tx.p4_link_host.arq.on_host_data(B2F)

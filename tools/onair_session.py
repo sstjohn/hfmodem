@@ -476,10 +476,14 @@ def listen(secs: float, device: str, record: Path | None = None,
         return measured
 
 
-def play(samples: np.ndarray, device: str) -> None:
+def play(samples: np.ndarray, device: str, *, emitted=None) -> None:
     """Into the transmit device, filling its channel count — a mono stream is
     silent on a multi-channel codec, and a silent identification is no
-    identification."""
+    identification.
+
+    `emitted` runs the moment the device has played the last sample, ahead of the
+    claim bookkeeping that follows: that costs tenths of a second on a busy host,
+    and seconds under load, which is an unmodulated key if the unkey waits on it."""
     with device_claim("onair_session output", devices=claim.Devices(playback=device)):
         channels = int(sd.query_devices(device, "output")["max_output_channels"])
         block = np.zeros((len(samples), channels), np.float32)
@@ -487,6 +491,8 @@ def play(samples: np.ndarray, device: str) -> None:
         if channels > 1:
             block[:, 1] = block[:, 0]
         play_drained(block, FS, device)
+        if emitted is not None:
+            emitted()
         device_opened()
 
 
@@ -855,11 +861,16 @@ def session() -> int:
                     owes_id = False
                     return
                 print(f"  identifying {args.mycall.upper()} ({why})", flush=True)
+                unkeyed = False
+
+                def unkey() -> None:
+                    nonlocal unkeyed
+                    cat.unkey("station ID sent")
+                    unkeyed = True
                 try:
                     if not cat.key(True, "station ID"):
                         print("  *** COULD NOT KEY TO IDENTIFY — send it by hand ***", flush=True)
                         return                              # still owed, and said so
-                    play(id_audio, args.device)
                     # `play` returns only once the device has emitted the audio, so the
                     # callsign is whole before the key is even considered; this is the same
                     # idle hold a burst gets, and for the same reason. It used to be a
@@ -867,12 +878,14 @@ def session() -> int:
                     # a dah at 20 WPM is 0.18 s, and an unkey on the old `sd.play` return
                     # sent W9SSJ as W9SSW. A callsign missing its last element identifies
                     # somebody else.
-                    time.sleep(TX_IDLE_HOLD_S)
+                    play(id_audio, args.device,
+                         emitted=lambda: (time.sleep(TX_IDLE_HOLD_S), unkey()))
                     owes_id = False
                 except Exception as e:                      # noqa: BLE001 - never fatal
                     print(f"  *** IDENTIFICATION FAILED ({e!r}) — send it by hand ***", flush=True)
                 finally:
-                    cat.unkey("station ID sent")
+                    if not unkeyed:
+                        unkey()
 
             def panic(*_) -> None:
                 """An interrupt is an emergency stop, and it stops at the transmitter.

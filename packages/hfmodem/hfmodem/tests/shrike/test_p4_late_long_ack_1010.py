@@ -8,13 +8,27 @@ import numpy as np
 import pytest
 from scipy.signal import hilbert
 
-from hfmodem.shrike import onair, p4oracle, p4receiver, p4robustrx, p4robusttx, p4rx, p4turn, session
+from hfmodem.shrike import onair, p4longdecode, p4longnative, p4oracle, p4receiver, p4robustrx, p4robusttx, p4rx, p4turn, session
+from hfmodem.shrike.p4budget import LongDeadline
 from hfmodem.shrike.p4receiver import Clock, Emission, Expect, Kind, P4Receiver, Registered, Role
 from hfmodem.shrike.p4observation import RegisteredObservation
 from hfmodem.tests.evidence import CAPTURES
+from hfmodem.tests.shrike.p4_declared_clock_1111 import declared_time
 
 FS = 48000
 C = 'onair-20261010T233501182327Z-54a54140-3f95-46d2-856b-daed7e6f24f7'
+
+
+def fail_crc_through_engine(monkeypatch):
+    """Give the real engine a complete, non-codeword channel domain."""
+    build = p4robustrx.build_members
+    def unreadable(*a, **kw):
+        members = build(*a, **kw)
+        assert members
+        return tuple(replace(member, fields=np.ones_like(member.fields)) for member in members)
+    monkeypatch.setattr(p4robustrx, 'build_members', unreadable)
+
+
 DATA_62 = (b'K4MSU Winlink Gateway at Murray State University\r\n'
            b'W9SSJ has 107 daily')
 DATA_03 = b' minutes remaining with K4MSU (EM56UO)\r' + b'\x1e' * 30
@@ -55,7 +69,12 @@ def test_recording_negative_sf8_runs_once(monkeypatch):
     rx = receiver(at)
     calls = count_sf8(monkeypatch)
     prefix = audio[:24000+round(3.230*FS)]
+    # Weak physical alternatives remain ranked input;
+    # low SF8 coherence alone no longer constitutes a negative recovery.
     assert rx.prepare_sf8(prefix, origin) is None
+    prepared = rx._sf8_prepared[(at, -5.01)]
+    assert prepared.coherence < .40
+    assert not rx.sf8_prepared()
     rx.prepare_sf8(prefix, origin)
     rx.prepare_long(prefix, origin)
     rows = rx.read_window(audio, origin, whole=True)
@@ -65,17 +84,22 @@ def test_recording_negative_sf8_runs_once(monkeypatch):
     assert not obs.sf8 and obs.frame.status.byte == 0x62
     assert obs.frame.data == DATA_62 and len(DATA_62) == 69
     assert abs(obs.stream_sample-at) <= 48
-    assert rx._sf8_prepared[(at, -5.01)].reason == 'below-coherence'
+    assert rx._sf8_prepared[(at, -5.01)] is prepared
 
 
 def test_recording_uncached_sf8_gate():
     at = 1428171
-    audio, _ = recording(C, at)
+    audio, origin = recording(C, at)
     z = p4rx.audio_to_baseband(audio[19200:24000+round(3.230*FS)], FS)
     observed = p4rx.recover_robust(z, reference_start=8000, spread_factor=8,
         data_symbols=680, timing_offsets=range(-48, 49), cfo_hz=(-5.01,))
     print(f'uncached SF8 coherence={observed.coherence:.6f}')
     assert observed.coherence < .40
+    rx = receiver(at)
+    assert rx.prepare_sf8(audio[:24000+round(3.230*FS)], origin) is None
+    assert rx._sf8_long(audio, origin) is None
+    assert rx._sf8_cache.get((at, -5.01)) is None
+    assert not any(row.frame is not None for row in rx.observations)
 
 
 @pytest.mark.parametrize('reason', ['below-coherence', 'energy', 'recovery-error'])
@@ -89,21 +113,43 @@ def test_complete_negative_is_cached_but_incomplete_is_retryable(monkeypatch, re
         calls.append(kw)
         if reason == 'recovery-error':
             raise ValueError('complete support failure')
-        return SimpleNamespace(coherence=.2 if reason == 'below-coherence' else .9)
+        count = kw['data_symbols']+1
+        return SimpleNamespace(coherence=.2 if reason == 'below-coherence' else .9,
+                               reference_start=kw['reference_start'],
+                               symbols=np.ones(count, complex),
+                               symbol_coherence=np.full(count, .2))
 
     monkeypatch.setattr(p4rx, 'recover_robust', recover)
-    monkeypatch.setattr(rx, '_sf8_energy_present', lambda *a: False)
+    monkeypatch.setattr(rx, '_sf8_energy_present', lambda *a: reason == 'below-coherence')
     prefix = audio[:24000+round(3.230*FS)]
     origin = at-24000
     assert rx.prepare_sf8(prefix[:-1], origin) is None
     assert not rx._sf8_prepared and not calls
     assert rx.prepare_sf8(prefix, at) is None
     assert not rx._sf8_prepared and not calls
+    if reason == 'below-coherence':
+        # Coherence is a ranking feature. Keep the
+        # immutable weak prefix available for exact C2 rather than cache a ban.
+        assert rx.prepare_sf8(prefix, origin) is None
+        observed = rx._sf8_prepared[(at, rx.clock.cfo_hz)]
+        assert observed.coherence == .2 and not rx.sf8_prepared()
+        assert rx.prepare_sf8(prefix, origin) is None
+        assert rx._sf8_prepared[(at, rx.clock.cfo_hz)] is observed
+        assert len(calls) == 1
+        assert rx._sf8_long(audio, origin) is None
+        assert len(calls) == 2
+        return
     for _ in range(2):
         assert rx.prepare_sf8(prefix, origin) is None
         assert rx._sf8_long(audio, origin) is None
     assert len(calls) == 1
     assert rx._sf8_prepared[(at, rx.clock.cfo_hz)].reason == reason
+    # A genuine negative belongs to its actual support/input;
+    # repaired input must receive a fresh opportunity in the same physical slot.
+    repaired = prefix.copy()
+    repaired[24000] += .1
+    assert rx.prepare_sf8(repaired, origin) is None
+    assert len(calls) == 2
 
 
 def test_negative_keys_phase_gap_pruning_and_positive_selection(monkeypatch):
@@ -115,9 +161,11 @@ def test_negative_keys_phase_gap_pruning_and_positive_selection(monkeypatch):
 
     def recover(*a, **kw):
         calls.append(kw)
-        return SimpleNamespace(coherence=.2)
+        return SimpleNamespace(coherence=.2, reference_start=kw['reference_start'],
+                               symbols=np.ones(kw['data_symbols']+1, complex))
 
     monkeypatch.setattr(p4rx, 'recover_robust', recover)
+    monkeypatch.setattr(rx, '_sf8_energy_present', lambda *a: False)
     rx.prepare_sf8(audio, origin)
     assert not rx.sf8_prepared()
     rx.clock.cfo_hz += 1
@@ -153,12 +201,12 @@ def test_recording_split_matches_full_without_deadline_full_recovery(
     assert full is not None and full.frame.data == data
     rx = receiver(at, cfo)
     assert rx.prepare_long(audio[:24000+round(3.230*FS)], origin) is not None
-    full_calls, tail_calls, decode_calls = [], [], []
+    full_calls, tail_calls, decode_calls, engine_calls = [], [], [], []
     despread, finish, decode = (p4oracle.placed_despread, p4oracle.finish_despread_long,
-                               p4robustrx.decode_symbols)
+                               p4robustrx.build_members)
 
     def counted_full(*a, **kw):
-        if kw.get('count') == 373:
+        if kw.get('count') in (369, 373):
             full_calls.append(kw)
         return despread(*a, **kw)
 
@@ -171,14 +219,24 @@ def test_recording_split_matches_full_without_deadline_full_recovery(
         return finish(*a, **kw)
 
     monkeypatch.setattr(p4oracle, 'placed_despread', counted_full)
-    monkeypatch.setattr(p4robustrx, 'decode_symbols', counted_decode)
+    # LongSearch owns correction; member construction
+    # remains the causal one-call seam. The locked
+    # 369-symbol packet finalizes as soon as its actual support exists.
+    monkeypatch.setattr(p4robustrx, 'build_members', counted_decode)
+    advance = p4longdecode.LongSearch.advance
+    def counted_advance(search, *a, **kw):
+        result = advance(search, *a, **kw)
+        engine_calls.append((result.state, result.component_calls, result.completed_tier))
+        return result
+    monkeypatch.setattr(p4longdecode.LongSearch, 'advance', counted_advance)
     monkeypatch.setattr(p4oracle, 'finish_despread_long', counted_tail)
     rows = rx.read_window(audio, origin, whole=True)
     obs = next(r.observation for r in rows if r.observation.frame is not None)
     rx.read_window(audio, origin, whole=True)
     assert not full_calls
     assert len(tail_calls) == 1
-    assert decode_calls == [373]
+    assert decode_calls == [369]
+    assert len(engine_calls) == 1 and engine_calls[0][0] == 'unique'
     assert obs.frame == full.frame and obs.frame.status.byte == status
     assert obs.speedlevel == full.speedlevel == '3'
     assert obs.stream_sample == full.stream_sample
@@ -211,15 +269,22 @@ def test_crc_hint_provenance_lifecycle_and_failed_slot(monkeypatch):
     calls = count_sf8(monkeypatch)
     next_at = rx.clock.next_due
     assert rx.prepare_sf8(audio, next_at-24000) is None
+    weak = rx._sf8_prepared[(next_at, rx.clock.cfo_hz)]
+    assert weak.coherence < .40
+    assert not rx.sf8_prepared()
     rx.prepare_long(audio[:24000+round(3.230*FS)], next_at-24000)
     with monkeypatch.context() as failed:
-        failed.setattr(p4robustrx, 'decode_symbols', lambda *a, **kw: None)
+        fail_crc_through_engine(failed)
         rx.read_window(audio, next_at-24000, whole=True)
-    assert not calls
+    job = rx._long_jobs[(next_at, rx.clock.cfo_hz, 'sf16')]
+    assert job['result'].state == 'unread' and job['result'].completed_tier == 9
+    # A negative SF8 cache does not follow an SF16 hint: the next
+    # window gets its own opportunity, even while the SF16 hint is retained.
+    assert calls == [680, 24]
     assert rx._long_hint is None
     rx.new_cycle()
     rx.prepare_sf8(audio, rx.clock.next_due-24000)
-    assert len(calls) == 1
+    assert calls == [680, 24, 680]
     rx._long_hint = 'sf16'
     rx.register(replace(obs, kind=Kind.NORMAL, stream_sample=rx.clock.next_due,
                         first_chip=rx.clock.next_due-origin))
@@ -244,7 +309,7 @@ def test_only_positive_sf8_selects_early_driver_read(monkeypatch, format):
     tx.p4_probe.handoff_audio = (0, audio[:0])
     tx.p4_link_options.p4_link_timeout = 4.2
     tx.p4_link_options.p4_data = 'body'
-    tx.p4_link_options.p4_ladder = 'none'
+
     tx.p4_link_options.p4_rx_timing_trace = True
     rx = tx.sessrx.p4
     rx.clock = Clock(Expect.PACKET, at, .330, 3.75, cfo)
@@ -252,7 +317,6 @@ def test_only_positive_sf8_selects_early_driver_read(monkeypatch, format):
     if format == 'normal':
         monkeypatch.setattr(rx, '_normal_eligible', lambda: True)
     turn = p4turn.P4Turn
-    monkeypatch.setattr(p4turn, 'P4Turn', lambda *a, **kw: turn(*a, **{**kw, 'role': 'irs'}))
     monkeypatch.setattr(onair, '_prekey_lead', lambda *a: round(.049*FS))
     calls = count_sf8(monkeypatch)
     preparations = []
@@ -262,14 +326,26 @@ def test_only_positive_sf8_selects_early_driver_read(monkeypatch, format):
             preparations.append(_format)
             return _method(*a, **kw)
         monkeypatch.setattr(rx, f'prepare_{preparation}', counted)
-    onair._run_p4_link(tx, live, onair._MasterGrid(
-        0, 60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800))
-    final = at+round((3.280 if sf8 else 3.306)*FS)
+    # Instantaneous capture and uncharged decode work share one
+    # fixture clock, retaining the exact family, support and recovery assertions.
+    with declared_time(live.sample_now, fs=FS):
+        monkeypatch.setattr(p4turn, 'P4Turn', lambda *a, **kw: turn(*a, **{**kw, 'role': 'irs'}))
+        onair._run_p4_link(tx, live, onair._MasterGrid(
+            0, 60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800))
+    # Capture covers each known form's complete physical support.
+    final = at+round((3.280 if sf8 else 3.300 if format == 'normal' else 3.306)*FS)
     assert any(row['stage'] == 'read_window' and row['support_end'] == final
                for row in tx.p4_probe.timing_trace)
     assert calls == ([680, 24] if sf8 else [680])
-    assert preparations == (['sf8', 'long'] if format == 'sf16' else ['sf8'])
-    assert any(row['event'] == ('sf8-long' if sf8 else 'long-decode' if format == 'normal' else 'long decode')
+    # Repeated cached access shares one
+    # preparation owner and unchanged support cannot repeat expensive recovery.
+    actual = [event for event in rx.live_events
+              if event['event'] == 'long prepare' and event['result'] == 'prepared']
+    # Both viable spreading families are prepared by A+3.230.
+    assert len(actual) == (0 if format == 'normal' else 1)
+    assert preparations == dict(normal=['sf8'], sf8=['sf8', 'long'],
+                                sf16=['sf8', 'long', 'long'])[format]
+    assert any(row['event'] == ('sf8-long' if sf8 else 'long-engine' if format == 'normal' else 'long decode')
                and row['crc_valid'] for row in rx.live_events)
 
 
@@ -354,7 +430,7 @@ def test_missing_tail_and_unusable_overlap_defer_full_fallback(monkeypatch):
     full = p4oracle.placed_despread
 
     def counted(*a, **kw):
-        if kw.get('count') == 373:
+        if kw.get('count') in (369, 373):
             calls.append(kw)
         return full(*a, **kw)
 
@@ -391,6 +467,7 @@ def test_misaligned_prefix_is_rejected(monkeypatch):
 def test_post_decision_sf16_recovery_registers_crc_valid_late_observation(
         monkeypatch, prepared, expiry):
     from hfmodem.tests.shrike.test_p4turn import machine
+    from time import monotonic
 
     at = 1428171
     audio, origin = recording(C, at)
@@ -399,61 +476,137 @@ def test_post_decision_sf16_recovery_registers_crc_valid_late_observation(
     rx.prepare_sf8(prefix, origin)
     if prepared:
         assert rx.prepare_long(prefix, origin) is not None
-    clock = [0.]
-    monkeypatch.setattr(p4receiver, 'monotonic', lambda: clock[0])
-    rx.sf8_deadline = lambda _: 1.
-    decode = p4robustrx.decode_symbols
+    else:
+        # The shared preparation owner may also prepare SF16 from weak SF8;
+        # this arm explicitly models loss of that retained SF16 prefix.
+        rx._long_prepared.clear()
+    # The admission gate applies to every LONG.
+    # A late SF16 CRC is retained; its expired physical copy cannot register,
+    # deliver bytes, or authorize an ACK. The real next copy owns a fresh gate.
+    clock = dict(wall=monotonic(), sample=at+round(3.300*FS))
+    monkeypatch.setattr(p4receiver, 'monotonic', lambda: clock['wall'])
+    # This explicit expiry fixture advances its clock only at the chosen
+    # seam. The reference engine must observe that same work clock.
+    monkeypatch.setattr(p4longdecode.time, 'monotonic', lambda: clock['wall'])
+    monkeypatch.setattr(p4longdecode, '_python_step_seconds', lambda *args: 0.)
+    monkeypatch.setattr(p4longdecode, '_python_check_seconds', lambda _: 0.)
+    monkeypatch.setattr(p4longnative, 'backend', None)
+    frozen = {}
+    def deadline(onset, *, sf8=False):
+        key = (onset, sf8)
+        if key not in frozen:
+            frozen[key] = LongDeadline(FS, onset, lambda: clock['sample'],
+                lead_s=.049, sf8=sf8, wall_now=lambda: clock['wall'])
+        return frozen[key]
+    rx.long_deadline = deadline
+    deadline(at)
+    def expire():
+        clock['sample'] = at+round(3.500*FS)
     calls = []
     full = p4oracle.placed_despread
 
     def counted(*a, **kw):
-        if kw.get('count') == 373:
+        if kw.get('count') in (369, 373):
             calls.append(kw)
-            if expiry == 'placement':
-                clock[0] = 2.
+            result = full(*a, **kw)
+            if expiry == 'placement' and len(calls) == 1:
+                expire()
+            return result
         return full(*a, **kw)
 
     monkeypatch.setattr(p4oracle, 'placed_despread', counted)
     if prepared:
         with monkeypatch.context() as failed:
-            failed.setattr(p4robustrx, 'decode_symbols', lambda *a, **kw: None)
+            fail_crc_through_engine(failed)
             assert rx._long(audio, origin)[0] is None
+        failed_result = rx._long_jobs[(at, -5.01, 'sf16')]['result']
+        assert failed_result.state == 'unread' and failed_result.completed_tier == 9
         assert rx._robust_long_cache[(at, -5.01)]['splice_failed']
     assert not calls
     if expiry == 'before':
-        clock[0] = 2.
-
-    def recovered(*a, **kw):
-        result = decode(*a, **kw)
-        if expiry == 'decode':
-            clock[0] = 2.
+        # Expire the previously frozen live allowance before finalization.
+        expire()
+    advance = p4longdecode.LongSearch.advance
+    advanced = []
+    def recovered(search, *a, **kw):
+        result = advance(search, *a, **kw)
+        # Preserve the original SF16 decoder stall/count seam; a weak SF8
+        # alternative must not trigger the SF16 expiry injection.
+        if any(member.geometry.speedlevel in (2, 3) for member in search.members):
+            if expiry == 'decode' and not advanced:
+                expire()
+            advanced.append(result)
         return result
 
-    monkeypatch.setattr(p4robustrx, 'decode_symbols', recovered)
+    # The shared engine grant accounts for the decoder stall.
+    monkeypatch.setattr(p4longdecode.LongSearch, 'advance', recovered)
     rows = rx.read_window(audio, origin, whole=True, long_fallback=True)
-    reg, = [r for r in rows if r.observation.frame is not None]
-    obs = reg.observation
-    assert reg.outcome == Registered.NEW and obs in rx.observations
-    assert obs.kind == Kind.LONG and not obs.sf8 and not obs.provisional
-    assert obs.frame.data == DATA_62
-    turn, _ = machine(role='irs')
-    turn.sf8_eligible = lambda _: False
-    due = obs.stream_sample+round(turn.t[Kind.LONG]*FS)
-    decision = due-turn.lead
-    assert turn.decide(decision) is None
-    turn.observe(reg, now=due+1)
-    assert turn.adapter.result.delivery == DATA_62
-    deferred, = [e for e in turn.link_events if e['event'] == 'answer-deferred']
-    assert deferred['at'] == obs.stream_sample
-    assert deferred['due'] == due+round(3.75*FS)
-    answer = turn.decide(deferred['due']-turn.lead)
-    assert answer is not None and answer.stream_sample == deferred['due']
+    if expiry == 'none':
+        reg, = [row for row in rows if row.observation.frame is not None]
+        obs = reg.observation
+        assert reg.outcome == Registered.NEW and obs in rx.observations
+        assert obs.kind == Kind.LONG and not obs.sf8 and not obs.provisional
+        assert obs.frame.status.byte == 0x62 and obs.frame.data == DATA_62
+        assert len(calls) == 1 and len(advanced) == 1
+        assert any(e['event'] == 'long-engine' and e['crc_valid'] and e['timely']
+                   for e in rx.live_events)
+        assert not rx.read_window(audio, origin, whole=True, long_fallback=True)
+        assert rx._long(np.pad(audio, (0, FS)), origin)[0] is obs
+        assert len(calls) == 1 and len(advanced) == 1
+        turn, _ = machine(role='irs', data='body', prekey_lead=.049)
+        turn.observe(reg, now=clock['sample'])
+        assert turn.adapter.result.delivery == DATA_62
+        due = obs.stream_sample+round(turn.t[Kind.LONG]*FS)
+        answer = turn.decide(due-turn.lead)
+        assert answer is not None and answer.stream_sample == due
+        assert not [e for e in turn.link_events if e['event'] == 'answer-deferred']
+        return
+    assert not any(row.observation.frame is not None for row in rows)
+    assert not rx.refine(deadline=monotonic()+1)
+    assert not any(obs.frame is not None for obs in rx.observations)
+    remembered = [row[0] for row in rx._remembered_longs.values()]
+    assert len(remembered) == 1
+    assert remembered[0].status.byte == 0x62 and remembered[0].data == DATA_62
+    assert any(event['event'] == 'long-engine' and event['crc_valid']
+               and not event['timely'] for event in rx.live_events)
     event = next(e for e in reversed(rx.live_events) if e['event'] == 'long decode')
-    assert event['preparation'] == 'unprepared' and event['crc_valid']
+    assert event['preparation'] == 'unprepared' and not event['crc_valid']
     rx.read_window(audio, origin, whole=True, long_fallback=True)
     assert len(calls) == 1
-    assert rx._long(np.pad(audio, (0, FS)), origin)[0] is obs
-    assert len(calls) == 1
+    assert rx._long(np.pad(audio, (0, FS)), origin)[0] is None
+    assert len(calls) == 1 and len(advanced) == (2 if expiry == 'placement' else 1)
+
+    turn, _ = machine(role='irs', data='body',
+                      prekey_lead=.049, long_ack='counter-even-t27')
+    turn.require_long_crc = True
+    delivered = []
+    turn.adapter.host = SimpleNamespace(deliver=delivered.append, supervisor=lambda *a: None)
+    turn.sf8_eligible = lambda obs: deadline(obs.stream_sample, sf8=obs.sf8).keyable()
+    expired_due = at+round(turn.t[Kind.LONG]*FS)
+    assert turn.decide(expired_due-turn.lead) is None and not delivered
+
+    repeat = at+round(3.75*FS)
+    repeat_audio, repeat_origin = recording(C, repeat)
+    clock.update(wall=monotonic(), sample=repeat+round(3.300*FS))
+    rx.clock = Clock(Expect.PACKET, repeat, .330, 3.75, -5.01)
+    rx.prepare_sf8(repeat_audio[:24000+round(3.230*FS)], repeat_origin)
+    rx.prepare_long(repeat_audio[:24000+round(3.230*FS)], repeat_origin)
+    rows = rx.read_window(repeat_audio, repeat_origin, whole=True)
+    reg, = [row for row in rows if row.observation.frame is not None]
+    obs = reg.observation
+    assert reg.outcome == Registered.NEW and obs.kind == Kind.LONG and not obs.sf8
+    assert not obs.provisional and abs(obs.stream_sample-repeat) <= 48
+    assert obs.frame.status.byte == 0x62 and obs.frame.data == DATA_62
+    turn.observe(reg, now=clock['sample'])
+    assert delivered == [DATA_62]
+    due = obs.stream_sample+round(turn.t[Kind.LONG]*FS)
+    answer = turn.decide(due-turn.lead)
+    assert answer is not None and answer.stream_sample == due
+    assert answer.stream_sample != expired_due and answer.word == 'T27'
+    assert answer.ack_identity == (0x62, DATA_62) and turn.can_key(answer)
+    turn.keyed(due)
+    assert not rx.read_window(repeat_audio, repeat_origin, whole=True)
+    assert delivered == [DATA_62]
 
 
 def test_long_negative_cache_matches_moved_due_but_retries_more_support(monkeypatch):
@@ -491,8 +644,8 @@ def accepted(at, data, status, kind=Kind.LONG):
 
 def held_machine():
     from hfmodem.tests.shrike.test_p4turn import machine
-    m, _ = machine(role='irs', data='body', ladder='none', normal_ack='parity',
-                   long_ack='fixed-x27', prekey_lead=.049)
+    m, _ = machine(role='irs', data='body', normal_ack='parity',
+                   long_ack='toggle', prekey_lead=.049)
     m.require_long_crc = True
     delivered = []
     m.adapter.host = SimpleNamespace(deliver=delivered.append, supervisor=lambda *a: None)
@@ -511,6 +664,7 @@ def seed_v60(m, key_at):
 @pytest.mark.parametrize('key_at', [1412434, 1412448])
 @pytest.mark.parametrize('refuse_first', [False, True])
 def test_b1_recorded_long_latest_held_and_synthetic_refusal(key_at, refuse_first):
+    """A late-decoded packet whose answer was refused is re-decided against the current slot."""
     from hfmodem.tests.shrike.test_p4_irs_nak_1002 import unread
     m, delivered = held_machine()
     seed_v60(m, key_at)
@@ -522,11 +676,12 @@ def test_b1_recorded_long_latest_held_and_synthetic_refusal(key_at, refuse_first
     assert answer.accepted_target == 1428171 and answer.current_slot_accepted
     if refuse_first:
         m.refused('deadline')
-        assert m._last_ack is None and m._packet_ack is None
+        assert m._last_ack is None and m._ack_chain is None
         at = 1428171+180000
         m.observe(unread(Kind.LONG, at), now=at+158400)
         held = m.decide(at+163200-m.lead)
         assert held.word == 'X27' and held.ack_identity == (0x62, DATA_62)
+        assert held.purpose is None
         assert not m.pending[at]['accepted']
         m.keyed()
     else:
@@ -534,23 +689,27 @@ def test_b1_recorded_long_latest_held_and_synthetic_refusal(key_at, refuse_first
     assert m._last_ack[0] == (0x62, DATA_62)
     m.observe(accepted(1788166, DATA_03, 0x03), now=1950320)
     answer = m.decide(1950320)
-    assert (answer.word, answer.stream_sample, answer.ack_identity) == ('X27', 1951366, (3, DATA_03))
+    next_word = 'V27'
+    assert (answer.word, answer.stream_sample, answer.ack_identity) == (next_word, 1951366, (3, DATA_03))
     live = SimpleNamespace(pos=1950320, clamp_late=lambda at: max(0, 1950320+1796-at))
     grid = onair._MasterGrid(1951366, 60000, 0, packet_n=11712, cs_n=11712, d_max_n=4800)
     assert onair._keyable_slot(live, grid, 0, 0, listen=False, shift=False) != 0
-    history = m._last_ack, m._packet_ack
+    history = m._last_ack, m._ack_chain
     m.refused('deadline')
-    assert m._next is None and (m._last_ack, m._packet_ack) == history
+    assert m._next is None and (m._last_ack, m._ack_chain) == history
     assert m._deferred[1]['due'] == 2131366
     fallback = m.decide(2131366-m.lead)
-    assert (fallback.word, fallback.stream_sample, fallback.purpose) == ('X27', 2131366, None)
+    assert (fallback.word, fallback.stream_sample, fallback.purpose) == (
+        next_word, 2131366, None)
+    assert fallback.ack_identity == (3, DATA_03) and not fallback.current_slot_accepted
     m.keyed()
+    assert (m._last_ack, m._ack_chain) == (((3, DATA_03), fallback), (3, next_word))
     at = 1788166+360000
     m.observe(accepted(at, DATA_03, 3), now=at+158400)
-    assert m.decide(at+163200-m.lead).word == 'X27'
+    assert m.decide(at+163200-m.lead).word == next_word
     m.keyed()
     m.silence(at+343200-m.lead, answer_due=at+343200)
-    assert m.decide(at+343200-m.lead).word == 'X27'
+    assert m.decide(at+343200-m.lead).word == next_word
     assert delivered == [DATA_62, DATA_03[:39]]
 
 
@@ -578,10 +737,11 @@ def test_b1_recorded_normal_missed_slots_wrap_and_delivery():
         else:
             m.observe(accepted(at, data, status, Kind.NORMAL))
         answer = m.decide(due-m.lead)
-        assert answer.stream_sample == due and answer.purpose is None
+        assert answer.stream_sample == due
+        assert answer.purpose == ('repeat-request' if status is None else None)
         assert answer.current_slot_accepted == (status is not None)
         if status is None:
-            assert answer.accepted_target == 1547665 and answer.ack_identity == (3, fields[0])
+            assert answer.accepted_target == 1547665 and answer.ack_identity is None
             assert not m.pending[at]['accepted'] and delivered == before
         assert recorded_keys[due] == answer.word
         words.append(m.keyed().word)
@@ -597,12 +757,15 @@ def test_b1_due_equality_bounded_fallback_and_held_survives(when):
     m.observe(reg, now=due if when == 'observe' else FS+158400)
     assert m.decide(due) is None
     assert m._deferred[1]['due'] == due+180000
-    assert m.decide(due+180000-m.lead).word == 'X27'
+    repeat = m.decide(due+180000-m.lead)
+    assert repeat.word == 'X27' and repeat.ack_identity == (0x62, DATA_62)
+    assert repeat.purpose is None
     m.refused('deadline')
     assert m._deferred is None and m._next is None and m._last_ack is None
     m.silence(due+360000-m.lead, answer_due=due+360000)
     answer = m.decide(due+360000-m.lead)
     assert answer.word == 'X27' and answer.ack_identity == (0x62, DATA_62)
+    assert answer.purpose is None
     assert delivered == [DATA_62]
 
 
@@ -636,7 +799,8 @@ def test_b1_refused_short_supersedes_body_before_any_key():
     m.refused('deadline')
     m.observe(unread(Kind.BODY, at+60000))
     answer = m.decide(at+104160-m.lead)
-    assert answer.word == 'U27' and answer.accepted_target == at
+    assert answer.word == 'X27' and answer.accepted_target == at
+    assert answer.purpose == 'repeat-request' and answer.peer_control is None
     assert not answer.current_slot_accepted
 
 
@@ -666,7 +830,8 @@ def test_b1_chirp_h_unread_steps_repeat_held_v_and_x():
             due = at+163200
             m.observe(unread(Kind.CHIRP, at))
         answer = m.decide(due-m.lead)
-        assert answer.purpose is None and answer.accepted_target == target
+        assert answer.purpose == (None if at == target else 'repeat-request')
+        assert answer.accepted_target == target
         if at != target:
             assert not answer.current_slot_accepted and not m.pending[at]['accepted']
         words.append(m.keyed(key_at).word)
@@ -749,10 +914,12 @@ def test_b1_unread_fallback_key_preserves_receiver_hold_and_slot():
     assert (rx.hold.epoch, rx.hold.last, m.first_body) == before
     assert at not in rx._answered
     assert rx.last_emission.stream_sample == due and rx.clock.next_due == due+15840
-    assert m._last_ack[0] == (0x62, DATA_62) and delivered == [DATA_62]
+    assert sent.word == 'X27' and sent.ack_identity == (0x62, DATA_62)
+    assert m._last_ack[0] == (0x62, DATA_62) and m._ack_chain == (2, 'X27')
+    assert delivered == [DATA_62]
 
 
-@pytest.mark.parametrize('policy', [None, 'alternate', 'parity', 'x27'])
+@pytest.mark.parametrize('policy', [None, 'toggle', 'parity'])
 def test_b1_held_chirp_selects_its_own_counter_before_first_key(policy):
     from hfmodem.tests.shrike.test_p4_irs_nak_1002 import unread
     m, _ = held_machine()
@@ -761,13 +928,14 @@ def test_b1_held_chirp_selects_its_own_counter_before_first_key(policy):
     reg = accepted(FS, b'held counter zero'.ljust(22, b'\x1e'), 0, Kind.CHIRP)
     m.observe(reg)
     answer = m.decide(FS+163200-m.lead)
-    expected = 'X27' if policy == 'x27' else 'V27'
+    expected = 'V27' if policy == 'parity' else 'X27'
     assert answer.word == expected
     m.refused('deadline')
     at = FS+180000
     m.observe(unread(Kind.CHIRP, at))
     repeated = m.decide(at+163200-m.lead)
-    assert repeated.word == expected and repeated.ack_identity == answer.ack_identity
+    assert repeated.word == expected
+    assert repeated.ack_identity == answer.ack_identity and repeated.purpose is None
     assert not repeated.current_slot_accepted and repeated.accepted_target == FS
 
 
@@ -788,7 +956,8 @@ def test_b1_timely_repeat_of_late_deferred_sf8_long_keys_from_the_answering_copy
     m.observe(RegisteredObservation(repeat, Registered.NEW), now=660000+158400)
     answer = m.decide(823200-m.lead)
     assert (answer.word, answer.stream_sample, answer.current_slot_accepted) == ('X27', 823200, True)
-    assert m.sf8_source(answer) is (repeat if sf8 else None)
+    # This admission seam applies to every LONG.
+    assert m.sf8_source(answer) is repeat
     assert m.can_key(answer)
     assert m.keyed().ack_identity == (0x61, data)
 
@@ -844,6 +1013,7 @@ def test_b1_grant_answering_accepted_long_defers_by_long_cadence():
             repeated.current_slot_accepted, repeated.ack_identity,
             repeated.receive_epoch, repeated.source_root) == (
         FS, 228000, False, (0x40, b''), epoch[0], root)
+    assert repeated.purpose is None
     assert m._accepted_proposal[0] is repeated
     assert m._accepted_proposal[2]['body'] is admitted
     assert m.adapter.result is source and m._held_answer is held

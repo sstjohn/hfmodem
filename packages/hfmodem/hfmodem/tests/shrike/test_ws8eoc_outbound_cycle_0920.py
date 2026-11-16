@@ -66,16 +66,37 @@ def test_recorded_grant_keys_first_long_on_old_next_boundary(tmp_path, already_a
     assert tx.tx_audio_start + min(tx.tx_pulse_offsets) == 2553442 + LONG
 
 
-def test_cycle_commit_does_not_disable_overlap_guard(tmp_path):
+@pytest.mark.parametrize('standdown', [None, 'off', 'on'])
+def test_cycle_commit_does_not_disable_overlap_guard(tmp_path, standdown):
     s, tx, g = sender(tmp_path)
-    tx.aim(g, 42)
-    tx.live.now = tx.live.pos = 2537598 + 11000
-    # A peer burst at our actual carrier instant still forbids transmission.
-    g.note_peer_codeword(2553442 - 2600, 10080, 'CYCLE-TOG', 'WS8EOC',
-                         protocol=spec.Protocol.PACTOR3)
-    tx.send_long_packet(1, b'X' * 36, 0x22)
-    assert g.cycle_long and tx.refused
-    assert not tx.live.emissions
+    if standdown is not None:
+        tx.p3_observed_overlap_standdown = standdown
+    pcm = recording('outbound-cs6.wav')[:13400]
+    for cycle in range(4):
+        g.cycles += 1
+        tx.aim(g, 42 + 3 * cycle)
+        tx.live.now = tx.live.pos = 2537598 + 11000 + cycle * LONG
+        # Each decoded control establishes occupied air independently of any
+        # earlier refusal, so repeated collisions cannot justify standing down.
+        at = 2553442 - 2600 + cycle * LONG
+        word = s.rx.sync.control_signal_at(pcm, 2400)
+        assert word is not None and word.cs == arq.CS_CYCLE_TOG
+        assert word.protocol == spec.Protocol.PACTOR3
+        # Replaying the captured control at the carrier exposes a collision
+        # even though the capture's original turnaround was clear.
+        onair._note_peer_word(onair.replace(word, t=at / FS), tx, g)
+        assert g.peer_cs.at == at and g.peer_cs.width == 10080
+        assert g.key_refusal(at + 12, 160000).kind == 'observed'
+        tx.send_long_packet(1, b'X' * 36, 0x22)
+        assert g.cycle_long
+        if standdown == 'on' and cycle == 3:
+            assert not tx.refused and len(tx.live.emissions) == 1
+            start, _ = tx.live.emissions[0]
+            assert start - round(tx.settle * FS) == 3090854
+            assert at <= start - round(tx.settle * FS) < at + 10080
+        else:
+            assert tx.refused, cycle
+            assert not tx.live.emissions, cycle
 
 
 def test_long_silence_recovers_once_without_broad_decoding(tmp_path, monkeypatch):
@@ -99,7 +120,7 @@ def test_long_silence_recovers_once_without_broad_decoding(tmp_path, monkeypatch
     monkeypatch.setattr(onair, '_scan_frame', scan)
     monkeypatch.setattr(s.rx, 'control_signal_in', control)
     monkeypatch.setattr(s.rx, 'flush', flush)
-    slot, _, _ = onair._regrid(tx.live, g, tx, s.host, s.rx, 45,
+    slot, _, _, _ = onair._regrid(tx.live, g, tx, s.host, s.rx, 45,
                               np.zeros(0, np.float32), tx.live.pos, 1920)
     assert slot == 48
     assert calls == [('control', True), ('scan', True)]

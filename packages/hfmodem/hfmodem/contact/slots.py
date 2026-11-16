@@ -286,6 +286,7 @@ class Said:
     kind: str
     text: str
     station: str = ''
+    duration_s: float | None = None
 
 
 @dataclass
@@ -448,7 +449,7 @@ class SlotMonitor:
         one is passed over, as filling it would only put the watch further behind."""
         for ev in self._evidence.values():
             ev.text, ev.last_chunk = '', None
-        out = [self._said(ch, 'coverage', f'passive audio gap: {n / FS:.2f} seconds skipped')
+        out = [self._said(ch, 'coverage', f'passive audio gap: {n / FS:.2f} seconds skipped', duration_s=n / FS)
                for ch in self._channels]
         if n > GAP_FILL_S * FS:
             self.samples += n
@@ -535,8 +536,8 @@ class SlotMonitor:
             ev.text, ev.last_chunk = '', None
         return [self._said(ch, 'coverage', notice) for notice in notices]
 
-    def _said(self, ch, kind, text, station=''):
-        return 'qso', ch.slot, Said(ch.slot, self.now, kind, text, station)
+    def _said(self, ch, kind, text, station='', duration_s=None):
+        return 'qso', ch.slot, Said(ch.slot, self.now, kind, text, station, duration_s)
 
     def _lit(self, ev, decoded=False):
         if self.now - ev.signal >= SIGNAL_HOLD_S:
@@ -547,7 +548,8 @@ class SlotMonitor:
         ch.ratios.append(ratio)
         if len(ch.ratios) < WINDOW_BLOCKS:
             return
-        excess = ratio - np.percentile(ch.ratios, FLOOR_PERCENTILE)
+        # A numpy scalar would reach the chat state's snapshot, which takes only plain values.
+        excess = float(ratio - np.percentile(ch.ratios, FLOOR_PERCENTILE))
         ch.excess.append(excess)
         ch.hot.append(excess > SIGNAL_DB)
         if ch.hot[-1] and sum(ch.hot) >= SIGNAL_SHARE * WINDOW_BLOCKS:

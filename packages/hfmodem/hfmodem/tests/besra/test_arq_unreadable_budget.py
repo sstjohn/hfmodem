@@ -3,7 +3,7 @@
 
 """The 2026-08-26 W6IDS stint, and the budget that ended it four frames early.
 
-W9SSJ connected W6IDS on 7061.5 kHz at BW500, took `WWTD6QMC61TV` — the first
+W9SSJ connected W6IDS on 7061.5 kHz at BW500, took `WTDQ6MCT16VW` — the first
 message this station has ever received off the air — and had accepted two more by
 name when it disconnected itself mid-message. Three consecutive frames failed to
 read, the NAK budget expired, and the link went down with the gateway still

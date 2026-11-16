@@ -129,3 +129,54 @@ def test_external_host_holds_a_connected_contact_without_cli_idle_or_hold_cutoff
     assert all(state == State.CONNECTED and not qrt for state, qrt in ticks)
     assert host.arq.state == State.LISTENING and not owner.contact_active
     assert args.hold == 0 and not args.p3_timing_unbounded
+
+
+@pytest.mark.parametrize('failure', [RuntimeError, KeyboardInterrupt, onair.PttError])
+@pytest.mark.parametrize('close_fails', [False, True])
+def test_interrupted_reader_retires_its_window_even_if_capture_close_fails(
+        tmp_path, monkeypatch, failure, close_fails):
+    from hfmodem.shrike import p1rx
+    clock = Clock(seconds=30)
+    clock.read(p1rx.CALL_N)
+    tx = onair.RadioTx(_Rig(), transmit=True, outdir=tmp_path, settle=.04)
+    tx.live, tx.p4_probe = clock, None
+    host = PtcHost(tx, mycall='N0CALL')
+    host._store('MYLEVEL', '1')
+    host._store('MAXERROR', '255')
+    host.set_listen(True)
+    host.enable_owner(defer_connect=True)
+    tx.sessrx = onair._SessionRx(host)
+    args = onair.build_parser().parse_args(['--mycall', 'N0CALL', '--hold', '0'])
+    seen = []
+    def failed_reader(*unused):
+        seen.append(host.arq._receive_opportunity.token)
+        raise failure('reader interrupted')
+    monkeypatch.setattr(onair, '_read_unread_before_key', failed_reader)
+    monkeypatch.setattr(onair, '_save_capture_async', lambda *a, **kw: None)
+    closed = []
+    def close():
+        closed.append(True)
+        if close_fails:
+            raise OSError('capture close failed')
+    clock.close = close
+    identity = SimpleNamespace(cw_call='N0CALL', closing_required=lambda *a, **kw: False)
+    def drive():
+        return onair._drive_session(args, tx=tx, host=host, sessrx=tx.sessrx,
+            live=clock, rig=None, dx='', reply=None, outdir=tmp_path, identity=identity,
+            called=(0, p1rx.Connect('Normal', 'N0CALL', False)), host_controlled=True)
+    expected = (KeyboardInterrupt if failure is KeyboardInterrupt else
+                OSError if close_fails else failure)
+    if failure is onair.PttError and not close_fails:
+        assert drive() == 1
+    else:
+        with pytest.raises(expected):
+            drive()
+    assert len(seen) == 1 and closed == [True]
+    assert host.arq._receive_opportunity is None
+    emissions = list(clock.emissions)
+    host.arq.on_host_abort()
+    host.arq._enter_connected()
+    next_token = host.arq.begin_receive_opportunity()
+    assert next_token > seen[0]
+    host.arq.finish_receive_opportunity(next_token)
+    assert clock.emissions == emissions

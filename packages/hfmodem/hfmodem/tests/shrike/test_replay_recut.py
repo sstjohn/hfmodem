@@ -76,7 +76,11 @@ class Seam:
 
     def attach(self, host) -> None: ...
 
-    def send_cs(self, index: int) -> None:
+    def p3_slot_keyed(self) -> bool | None:
+        return None
+
+    def send_cs(self, index: int, *, p1_codeword=False, unread=False, maxdown=False,
+                packet_phase=None, cycle_long=None) -> None:
         self.words.append(index)
 
     def send_p1_cs(self, index: int) -> None:
@@ -92,14 +96,14 @@ class Seam:
 def linked(*, role: int = arq.IRS, repeat_gear: int = 0) -> tuple[PtcHost, Seam]:
     """A PACTOR-3 link in the state the gateway's break-in left.
 
-    `speed_up_after` is parked out of reach and `long_cycle` is off, as both
+    `p3_speed_up_after` is parked out of reach and `long_cycle` is off, as both
     arms flew them, so the only codewords these scenes can produce are the
     alternation's own and whatever the repeat gear substitutes for one.
     """
     seam = Seam()
     host = PtcHost(peer=seam, mycall="W9SSJ")
     host.arq.cfg.repeat_gear = repeat_gear
-    host.arq.cfg.speed_up_after = 1000
+    host.arq.cfg.p3_speed_up_after = 1000
     host.arq.cfg.long_cycle = False
     host.arq.role, host.arq.dxcall = role, "WS8EOC"
     host.arq._enter_connected()

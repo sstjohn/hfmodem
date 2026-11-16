@@ -10,6 +10,7 @@ class MailAckOwner:
         self.kind = None
         self.result = None
         self.callback = None
+        self.reason = None
         self.last_sequence = -1
 
     def linked(self):
@@ -19,22 +20,26 @@ class MailAckOwner:
             self.generation = generation
             self.state, self.kind, self.result = 'idle', None, None
             self.callback = None
+            self.reason = None
 
     @property
     def busy(self):
         return self.generation == self.session.client.link_generation and self.state != 'idle'
 
-    def reserve(self, kind, attempt, callback):
+    def check(self):
         from .varac import HostError
-        self.linked()
         if self.busy:
             raise HostError('Another VMail acknowledgement owns this link; resolve it or reconnect')
-        c = self.session.client
-        if c._messages.pending:
+        if self.session.client._messages.pending:
             raise HostError('VMail waits for the incomplete incoming application frame')
+
+    def reserve(self, kind, attempt, callback):
+        self.linked()
+        self.check()
+        c = self.session.client
         self.kind, self.attempt, self.callback = kind, attempt, callback
         self.peer, self.after = self.session.peer, c.message_sequence
-        self.state, self.result = 'active', None
+        self.state, self.result, self.reason = 'active', None, None
         self.started = self.progress_at = c.clock()
         self.progress = None
         self.drained_at = None
@@ -42,16 +47,18 @@ class MailAckOwner:
     def release_unsent(self):
         self.state, self.kind, self.result = 'idle', None, None
         self.callback = None
+        self.reason = None
 
     def interrupt(self, reason):
-        if self.state != 'active':
+        if self.state != 'active' and not (self.state == 'email-reserved' and self.result == 'SMR'):
             return
-        self.state = 'unresolved'
+        self.state, self.reason = 'unresolved', reason
         if self.callback:
             try:
                 self.callback(None, reason)
             except (OSError, ValueError) as error:
                 self.session.say(f'VMail uncertainty could not be committed; link remains reserved: {error}')
+        self.session.semantic('mail_ack_outcome', mail_kind=self.kind, tag=None, reason=reason)
 
     def message(self, application, sequence, generation):
         if (not self.busy or generation != self.generation or sequence <= self.after
@@ -71,11 +78,16 @@ class MailAckOwner:
             try:
                 self.callback(tag, None)
             except (OSError, ValueError) as error:
-                self.state = 'unresolved'
+                self.state, self.reason = 'unresolved', str(error)
+                self.session.semantic('mail_ack_outcome', mail_kind=self.kind, tag=None, reason=str(error))
                 self.session.say(f'VMail outcome could not be committed; link remains reserved: {error}')
                 return True
-            self.result = tag
+            if self.kind == 'email' and tag == 'SMR' and self.result in ('ER', 'EJ', 'SMF', 'SMFP'):
+                # VMail acceptance cannot replace a terminal gateway confirmation.
+                continue
+            self.result, self.reason = tag, None
             self.state = 'email-reserved' if self.kind == 'email' else 'idle'
+            self.session.semantic('mail_ack_outcome', mail_kind=self.kind, tag=tag, reason=None)
             if self.kind != 'email':
                 break
         return True

@@ -69,7 +69,7 @@ def test_f3_captured_request_is_canceled_by_recovery(managed, recovery):
         m.silence(KEY+60000)
     assert not m.can_key(captured)
     live = m.decide((8911870 if recovery == 'exhaustion' else KEY+CYCLE)-m.lead)
-    assert live is not captured and live.word == ('T27' if recovery == 'continuation' else 'X27')
+    assert live is not captured and live.word == 'X27'
     assert live.state == State.IRS_ANSWER
     assert m.can_key(live) and a.tx_acked_bytes == 0
 
@@ -309,7 +309,8 @@ def transaction(m):
              'peer_watch', 'peer_phase', '_peer_consumed', '_offer_at', 'next_offer_at',
              '_waiting_ack', '_waiting_until', '_waiting_observation', '_deferred_ack',
              '_deferred_slot', '_held_word_yield', '_data_episode', '_peer_word', '_peer_word_at',
-             '_train_heads', '_irs_silent_start', '_irs_silent_until', '_irs_silent_done',
+             '_train_heads', '_ack_chain', '_ack_form', '_ack_epoch', '_ack_boundary',
+             '_chain_epoch', '_chain_reason', 'keyed_ack',
              '_unsupported_copies', '_close_held_v27')
     def value(v):
         if isinstance(v, dict): return {k: value(x) for k, x in v.items()}
@@ -365,7 +366,7 @@ def test_f8_denied_recovery_restores_deferred_transaction(after_callback):
 def ordinary_captured_request(*, managed=False):
     from hfmodem.tests.shrike.test_p4turn import machine
     from hfmodem.tests.shrike.test_p4_greeting_resegment_1010 import packet as ordinary_packet
-    m, a = machine(role='irs', data='body', ladder='none', prekey_lead=.025,
+    m, a = machine(role='irs', data='body',  prekey_lead=.025,
                    managed_application=managed)
     reg = ordinary_packet(Kind.LONG, 10., 0x01, b'peer source', width=69)
     assert reg.observation.frame.status.protocol == 0

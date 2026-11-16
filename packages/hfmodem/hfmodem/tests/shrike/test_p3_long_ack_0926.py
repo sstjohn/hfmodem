@@ -42,11 +42,11 @@ SCAN_MS, RENDER_MS = 25.0, 2.0
 # `_PeerSpectrum.hear` on the arm's own hold windows, (seconds, ms).
 HEARD = ((3.405, 8.1), (7.137, 34.4), (14.662, 90.6))
 # The first packet's data row, one cycle in; its phase reference is the header
-# in front of that, and our reply slot sits `P3_LONG_REPLY_S` past it.
+# in front of that, and our reply slot sits `P3_COMB_LONG_REPLY_S` past it.
 ROW0 = 7200 + LONG_N
 FIRST_SLOT = 6
 ANCHOR = (ROW0 - p3frame.DATA_OFFSET * rxfront.SPS
-          + round(onair.P3_LONG_REPLY_S * FS) - FIRST_SLOT * 60000)
+          + round(onair.P3_COMB_LONG_REPLY_S * FS) - FIRST_SLOT * 60000)
 GREETING = b'utes remaining with WS8EOC (EN72QQ)\r'
 
 
@@ -171,13 +171,13 @@ def cycle(s, tx, g, bench, judge, slot, *, flown: bool, stall_n: int = 0):
     whole, seg_start, _ = onair._take(bench, sessrx, whole, seg_start, until)
     if whole.size:
         onair._scan_frame(sessrx, whole, seg_start, tracked_only=True)
-    slot, whole, seg_start = onair._p3_transition_window(
+    slot, whole, seg_start, long_crc = onair._p3_transition_window(
         bench, g, tx, host, sessrx, slot, whole, seg_start, SETTLE_N)
     _, _, whole, seg_start = onair._read_held_window(
-        bench, g, tx, sessrx, slot, whole, seg_start)
+        bench, g, tx, sessrx, slot, whole, seg_start, long_crc=long_crc)
     if stall_n:
         bench.spend(stall_n)
-    slot, whole, seg_start = onair._regrid(
+    slot, whole, seg_start, _ = onair._regrid(
         bench, g, tx, host, sessrx, slot, whole, seg_start, SETTLE_N)
     decoded = sessrx.count != before
     if flown or not hasattr(judge, 'verdict'):
@@ -225,11 +225,12 @@ def test_as_flown_the_recovered_window_costs_every_second_slot(tmp_path, monkeyp
     RENDER` on the bare clamp (slots 54, 69, 78), and the ordinary slot behind
     it `IS GONE ... (+0.0 ms on the bare clamp)` (33, 39, 45, ...)."""
     s, tx, g, bench, judge = station(tmp_path, monkeypatch)
-    def as_flown(cs_index, *, p1_codeword=False):
+    def as_flown(cs_index, *, p1_codeword=False, policy_slot=None, **kwargs):
         # Historical single render, with truthful current emission bookkeeping.
         tx._p3_emitted_cs = None
         before = tx.tx_end
-        result = tx._render_p3_control(cs_index, p1_codeword=p1_codeword)
+        result = tx._render_p3_control(cs_index, p1_codeword=p1_codeword,
+                                       policy_slot=policy_slot, **kwargs)
         if result != onair.REFUSED and tx.tx_end != before:
             tx._p3_emitted_cs = cs_index
         return result

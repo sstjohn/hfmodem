@@ -3,13 +3,11 @@
 """Finite filesystem-only capture repairs; no receiver or hardware calls."""
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from hfmodem.core import capture_identity as ci
-from hfmodem.shrike import onair, p3trial, p4experiment
+from hfmodem.shrike import onair, p3trial
 
 
 def _capture(path):
@@ -17,17 +15,6 @@ def _capture(path):
     return capture, writer
 
 
-def _probe(monkeypatch):
-    arrays = [np.arange(4, dtype=np.float32), np.arange(6, dtype=np.float64)]
-    probe = SimpleNamespace(received=[(i, i * 100, x) for i, x in enumerate(arrays)],
-        emissions=[], listen_seconds=1, trigger_word=None, requested=False,
-        grant_sample=None, payload=bytes(), status=None, guard_exceptions=[],
-        windows=[], reason='synthetic incomplete')
-    def observe(audio, start, fs):
-        return dict(start_sample=start, end_sample=start+len(audio),
-                    p1_controls=[], p4_candidate=None)
-    monkeypatch.setattr(p4experiment, 'observe', observe)
-    return probe, arrays
 
 
 def _assert_binding(path, capture, writer):
@@ -174,69 +161,12 @@ def test_reserved_publication_rechecks_descendant_boundary(tmp_path):
     assert not artifact.path.exists() and temporary.read_bytes() == bytes(range(3))
 
 
-def test_experiment_exact_json_npz_content_and_both_bindings(tmp_path, monkeypatch):
-    probe, arrays = _probe(monkeypatch)
-    legacy=tmp_path/'legacy';legacy.mkdir()
-    capture, writer = _capture(tmp_path/'owned')
-    expected = p4experiment.write_report(probe, legacy, mode='replay')
-    actual = p4experiment.write_report(probe, writer.root, mode='replay', capture_writer=writer)
-    assert actual == expected
-    report=writer.root/'p4-mail-experiment.json';receive=writer.root/'p4-mail-rx.npz'
-    assert report.read_bytes() == (legacy/report.name).read_bytes()
-    assert json.loads(report.read_text()) == actual
-    for path in (report, receive):_assert_binding(path, capture, writer)
-    with np.load(receive, allow_pickle=False) as stored:
-        assert stored.files == [f'probe{i}' for i in range(len(arrays))]
-        for i, expected in enumerate(arrays):
-            actual=stored[f'probe{i}']
-            assert actual.dtype == expected.dtype and actual.shape == expected.shape
-            assert np.array_equal(actual, expected)
-    assert writer._status['components']['p4-mail-experiment'] == dict(
-        state='finalized', pending=0, written=2, lost=0, partial=0)
 
 
-@pytest.mark.parametrize('foreign_name', ['p4-mail-experiment.json', 'p4-mail-rx.npz'])
-def test_experiment_reserves_both_before_publication(tmp_path, monkeypatch, foreign_name):
-    probe, _ = _probe(monkeypatch);capture, writer=_capture(tmp_path/'owned')
-    foreign = writer.root/foreign_name;raw=bytes(range(8));foreign.write_bytes(raw)
-    with pytest.raises(FileExistsError):
-        p4experiment.write_report(probe, writer.root, capture_writer=writer)
-    assert foreign.read_bytes() == raw
-    other = 'p4-mail-rx.npz' if foreign_name.endswith('.json') else 'p4-mail-experiment.json'
-    assert not (writer.root/other).exists()
-    assert writer._status['failed']
 
 
-def test_experiment_ended_creates_neither_output(tmp_path, monkeypatch):
-    probe, _ = _probe(monkeypatch);capture, writer=_capture(tmp_path/'owned');capture.end()
-    with pytest.raises(ci.IdentityError):
-        p4experiment.write_report(probe, writer.root, capture_writer=writer)
-    assert not (writer.root/'p4-mail-rx.npz').exists()
-    assert not (writer.root/'p4-mail-experiment.json').exists()
 
 
-@pytest.mark.parametrize('failure', ['serialize', 'report'])
-def test_experiment_original_error_preserves_partial_evidence(tmp_path, monkeypatch, failure):
-    probe, _ = _probe(monkeypatch);capture, writer=_capture(tmp_path/'owned')
-    if failure == 'serialize':
-        def refuse(*args, **kwargs):raise OSError('synthetic serialization failure')
-        monkeypatch.setattr(p4experiment.np, 'savez_compressed', refuse)
-    else:
-        original = ci.Artifact.publish
-        def refuse(artifact, raw, *, published=None):
-            if artifact.path.name.endswith('experiment.json'):raise OSError('synthetic report failure')
-            return original(artifact, raw)
-        monkeypatch.setattr(ci.Artifact, 'publish', refuse)
-    with pytest.raises(OSError, match='synthetic'):
-        p4experiment.write_report(probe, writer.root, capture_writer=writer)
-    assert not (writer.root/'p4-mail-experiment.json').exists()
-    if failure == 'report':
-        _assert_binding(writer.root/'p4-mail-rx.npz', capture, writer)
-        assert writer._status['components']['p4-mail-experiment']['written'] == 1
-    else:
-        assert not (writer.root/'p4-mail-rx.npz').exists()
-        assert len(list(writer.root.glob('.*.partial'))) == 1
-    assert writer._status['failed']
 
 
 @pytest.mark.parametrize('winner', ['allocator', 'writer'])
@@ -488,49 +418,13 @@ def test_trial_link_success_cleanup_failure_retains_publication_credit(tmp_path,
     assert state['pending'] == 0 and state['partial'] == 1
 
 
-@pytest.mark.parametrize('output_name', ['p4-mail-rx.npz', 'p4-mail-experiment.json'])
-def test_experiment_link_success_cleanup_failure_retains_exact_count(tmp_path, monkeypatch, output_name):
-    capture, writer = _capture(tmp_path / 'capture')
-    legacy = tmp_path / 'legacy'
-    legacy.mkdir()
-    probe, _ = _probe(monkeypatch)
-    p4experiment.write_report(probe, legacy)
-    expected = (legacy / output_name).read_bytes()
-    events = []
-    _publication_witness(monkeypatch, writer.root / output_name, events)
-    original_unlink = type(writer.root).unlink
-    primary = OSError('synthetic post-link cleanup failure')
-    retained = []
-    def unlink(path, *args, **kwargs):
-        if path.parent == writer.root and path.name.startswith('.' + output_name + '.') and path.suffix == '.partial':
-            retained.append(path)
-            events.append('cleanup')
-            raise primary
-        return original_unlink(path, *args, **kwargs)
-    monkeypatch.setattr(type(writer.root), 'unlink', unlink)
-    with pytest.raises(OSError) as caught:
-        p4experiment.write_report(probe, writer.root, capture_writer=writer)
-    output = writer.root / output_name
-    written = 1 if output_name.endswith('.npz') else 2
-    assert caught.value is primary and len(retained) == 1
-    assert events == ['publication', 'cleanup']
-    assert output.read_bytes() == expected == retained[0].read_bytes()
-    _assert_binding(output, capture, writer)
-    state = capture.lifecycle()['writers'][writer.role]
-    assert state['state'] == 'partial' and state['written'] == written
-    assert state['pending'] == 2 - written and state['partial'] == 1
-    if output_name.endswith('.npz'):
-        assert not (writer.root / 'p4-mail-experiment.json').exists()
-    else:
-        _assert_binding(writer.root / 'p4-mail-rx.npz', capture, writer)
 
 
-@pytest.mark.parametrize('route', ['timing', 'entry', 'npz', 'json'])
+@pytest.mark.parametrize('route', ['timing', 'entry'])
 def test_failed_link_has_no_publication_notification_credit(tmp_path, monkeypatch, route):
     capture, writer = _capture(tmp_path / 'capture')
     trial = (p3trial.TimingTrial if route == 'timing' else p3trial.EntryTimingTrial)('B')
-    probe, _ = _probe(monkeypatch)
-    output_name = trial.filename if route in ('timing', 'entry') else ('p4-mail-rx.npz' if route == 'npz' else 'p4-mail-experiment.json')
+    output_name = trial.filename
     events = []
     _publication_witness(monkeypatch, writer.root / output_name, events)
     original_link = ci.os.link
@@ -543,17 +437,11 @@ def test_failed_link_has_no_publication_notification_credit(tmp_path, monkeypatc
         return original_link(source, destination, *args, **kwargs)
     monkeypatch.setattr(ci.os, 'link', link)
     with pytest.raises(OSError) as caught:
-        if route in ('timing', 'entry'):
-            trial.write(writer.root, capture_writer=writer)
-        else:
-            p4experiment.write_report(probe, writer.root, capture_writer=writer)
-    expected_written = 1 if route == 'json' else 0
-    total = 1 if route in ('timing', 'entry') else 2
+        trial.write(writer.root, capture_writer=writer)
+    expected_written, total = 0, 1
     assert caught.value is primary and len(attempted) == 1
     assert events == []
     assert attempted[0].is_file() and not (writer.root / output_name).exists()
     state = capture.lifecycle()['writers'][writer.role]
     assert state['state'] == 'partial' and state['written'] == expected_written
     assert state['pending'] == total - expected_written and state['partial'] == 1
-    if route == 'json':
-        _assert_binding(writer.root / 'p4-mail-rx.npz', capture, writer)

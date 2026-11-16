@@ -14,7 +14,7 @@ import sys
 
 import numpy as np
 
-from hfmodem.shrike import onair, pactor1, rxfront, spec
+from hfmodem.shrike import onair, p4probe, pactor1, rxfront, spec
 
 FS = rxfront.FS
 SLOT_N = round(spec.CYCLE_SHORT_S * FS)
@@ -45,13 +45,15 @@ def test_the_first_acked_p1_packet_starts_the_robust_shorts(tmp_path, monkeypatc
             keyed.append((self.slot, what))
 
     monkeypatch.setattr(onair.RadioTx, "_tx", tx)
+    monkeypatch.setattr(onair, "_run_p4_link", lambda *a, **kw: "opening handed to link")
     monkeypatch.setattr(onair, "_save_capture_async", lambda *a, **kw: None)
+    monkeypatch.setattr(p4probe, "code_revision", lambda *_: None)
     monkeypatch.setattr(sys, "argv", [
         "shrike.onair", "--replay", str(wav), "--max-cycles", "3",
         "--mycall", "W9SSJ", "--dxcall", "N9VC", "--dial", "7100910",
-        "--outdir", str(tmp_path / "out"), "--after-connect", "p1-robust",
-        "--p1-status-bits45", "2", "--p4-probe-values", "7,38",
-        "--p4-probe-headers", "A,A", "--p4-probe-cadence", "consecutive"])
+        "--outdir", str(tmp_path / "out"), "--p4-link", "--after-connect", "p1-robust",
+        "--p1-status-bits45", "2", "--p4-opening", "7,38",
+        ])
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         onair.main()
@@ -64,5 +66,5 @@ def test_the_first_acked_p1_packet_starts_the_robust_shorts(tmp_path, monkeypatc
     assert len(aired) == 3, aired
     probe = json.loads((tmp_path / "out" / "p4-probe.json").read_text())
     assert probe["trigger_word"] == "P1 ACK"
-    assert [e["slot"] for e in probe["emissions"]] == [aired[0][0] + 1, aired[0][0] + 2], (
+    assert [e["slot"] for e in probe["emissions"]] == [aired[0][0] + 2, aired[0][0] + 3], (
         keyed, log)

@@ -65,8 +65,9 @@ class Settings:
                                   self.ptt_port) if port}
 
     def cat_proof(self):
-        if self.backend == 'none':
-            print('CAT none', flush=True)
+        # The X6100 onboard guard owns the base's flow port and unkeys on its child's exit.
+        if self.backend in ('none', 'guard'):
+            print(f'CAT {self.backend}', flush=True)
             return 'none'
         try:
             if self.backend == 'serial':

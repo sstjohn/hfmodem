@@ -23,7 +23,7 @@ def test_charged_checked_body_release_keeps_primary_920_opportunity():
     tx = Tx(live)
     tx.settle = .025
     tx.p4_probe.emissions, tx.p4_probe.peer_breakin = [], True
-    tx.p4_link_options.p4_ladder, tx.p4_link_options.p4_data = 'none', 'body'
+    tx.p4_link_options.p4_data = 'body'
     tx.p4_link_options.p4_link_timeout = (stop-start)/FS
     tx.p4_link_host.arq.on_host_data(b'TEST\r')
     rx, supports, machines, keys = tx.sessrx.p4, [], [], []

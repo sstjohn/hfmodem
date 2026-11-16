@@ -101,7 +101,7 @@ def test_recorded_crc_restores_changeover_in_next_available_cycle(
     if overrun:
         tx.live.now = max(tx.live.now,
                           tx.key_instant(g, slot) - tx.live.key_notice + round(.0306*FS))
-        slot, _, _ = onair._regrid(tx.live, g, tx, s.host, s.rx, slot,
+        slot, _, _, _ = onair._regrid(tx.live, g, tx, s.host, s.rx, slot,
                                   np.zeros(0, np.float32), tx.live.pos, 1920)
     else:
         read_packet(s, tx, g, audio, fresh[0])
@@ -139,7 +139,7 @@ def test_late_ack_is_rendered_in_next_slot_carrier_order(
                      identity=(False, 1, 2, b'>\r'))
     tx = driver(g, tmp_path)
     tx.p3_control_waveform = 'current'
-    slot = (phase + round((onair.P3_LONG_REPLY_S if long else onair.P3_REPLY_S)*FS)
+    slot = (phase + round((onair.P3_COMB_LONG_REPLY_S if long else onair.P3_COMB_REPLY_S)*FS)
             - g.anchor) // CYCLE
     slot = onair._p3_place_reply(g, tx, slot)
     tx.aim(g, slot)
@@ -383,7 +383,7 @@ def test_recorded_ack_replaces_after_loss_in_wait(recorded, stage, tmp_path,
                                bytes.fromhex(case['payload_hex'])))
     s.rx._p3_row0 = s.rx._p3_delivered_at = row - CYCLE
     slot = onair._p3_place_reply(g, tx,
-                                round((phase + round(onair.P3_REPLY_S*FS)
+                                round((phase + round(onair.P3_COMB_REPLY_S*FS)
                                        - g.anchor) / CYCLE))
     tx.aim(g, slot)
     tx.live.now = tx.live.pos = tx.key_instant(g, slot) - 1920
@@ -416,7 +416,7 @@ def test_recorded_ack_replaces_after_loss_in_wait(recorded, stage, tmp_path,
     assert peer[0] >= row - 4320
     # On the raster the hole moved, within a millisecond, not on one reading.
     raster = g._peer_raster_position(peer[0], peer[2]) or peer[0]
-    assert abs(tx.tx_audio_start - raster - round(onair.P3_REPLY_S*FS)) <= round(.001*FS)
+    assert abs(tx.tx_audio_start - raster - round(onair.P3_COMB_REPLY_S*FS)) <= round(.001*FS)
     assert tx.tx_key_up >= peer[0] + peer[1]
 
 

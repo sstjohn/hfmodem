@@ -38,27 +38,26 @@ state (1,0,0) 918 and 896, the symbol interleaver omitted 790 to 857, and the
 eight extra bits taken as plain zeros instead of five-plus-termination 659 and
 639 -- that last one costs C1 nothing, which is why C2 is what settles it.
 
-THE HEADER -- MEASURED, NOT PUBLISHED, AND NOT THE SHORT ONE. `_HEADER_IQ` is
-the first recorded long frame's header, lifted chip by chip through the channel
-estimate its own trainings support, quantised to int16 re/im over 32767. Its
-140 chips and their 77.8 ms are the short packet's, measured again on these
-recordings. The two long frames send the SAME header -- 0.970 correlation after
-equalisation, against 0.03 and 0.15 for their bodies and 0.08 and 0.10 for the
-noise ahead of them -- and their status counters differ, 3 and 0, where the
-header does not.
+THE HEADER. `_HEADER_IQ` is the complete 160-chip header of WS8EOC's
+normal LONG at sample 2628637 in the 2026-10-27 capture, recovered through the
+channel fitted to its own twenty-five trainings. The stock packet reference
+puts its first training at baseband sample 2548. Its first header pulse begins
+twelve samples before that reference; the returned audio trims those twelve
+leading pulse samples. The earlier Sigidwiki clone retained only 140 chips and
+put the body 308 baseband samples ahead of the live stock raster.
 
-It is NOT `p4shorttx.HEADER`: 0.245 against it, and 0.412 at the best of a
-+/-900 Hz frequency scan, where permuting the short header's own chips already
-reaches 0.215 median and 0.262 worst over the same scan. Some structure is
-shared; what distinguishes them is unread. A cloned header remains a claim this
-station cannot read -- packet type, speed level and ARQ role are unknown -- and
-rendering it is not evidence that a Dragon accepts it.
+Every recorded stock SL5 normal LONG on the census ledger (twenty frames,
+six captures) carries header energy over all 160 chips with its first
+training at 2548, but their header chips differ from frame to frame: the other
+nineteen correlate 0.08 to 0.56 with this one. Header meanings remain unknown. Cloning
+a recorded SL5 header for a different payload or speed level does not
+establish stock acceptance.
 
 The fill behind a short payload is `spec.field_fill`'s, PACTOR-3's measured
 convention carried over as it is for the chirp; no P4 source framing
 underwrites it.
 
-Source recording and provenance: `tests/shrike/sigidwiki-p4-long.md`.
+Body coding provenance: `tests/shrike/sigidwiki-p4-long.md`.
 """
 from __future__ import annotations
 
@@ -67,7 +66,7 @@ from math import gcd
 import numpy as np
 from scipy.signal import resample_poly
 
-from . import p4coding, p4frame, p4long, p4normal, p4rx, placement, spec, tablegen
+from . import p4coding, p4frame, p4long, p4normal, p4rx, p4short, placement, spec, tablegen
 
 LAYOUT = p4long.LAYOUT
 """6.4's normal long: twenty-four 207-symbol data blocks, each behind its own
@@ -81,51 +80,54 @@ PAD_BITS = SYSTEMATIC_BITS - 8 * NET_BYTES - 3
 
 INITIAL_STATE = (0, 0, 0)
 
-HEADER_CHIPS = 140
-"""Measured, not published: 77.8 ms of header ahead of the first training."""
+HEADER_CHIPS = 160
+HEADER_SAMPLES = p4short.GEOM
 
 PULSE_S = (p4rx.RRC_TAPS.size - 1) / p4rx.SAMPLE_RATE
 
-EMISSION_S = (HEADER_CHIPS + LAYOUT.total_symbols - 1) / p4rx.CHIP_RATE + PULSE_S
-"""3.286 s: 5907 chip periods from the first pulse to the last, and the 4.44 ms
-the section 10 pulse spans. The packet sits on the published 3.75 s raster."""
+EMISSION_S = HEADER_SAMPLES / p4rx.SAMPLE_RATE + (LAYOUT.total_symbols - 1) / p4rx.CHIP_RATE + PULSE_S
 
 _HEADER_IQ = np.array([
-    -688, 6206, 14224, -4426, 10043, -13408, -17453, -13366,
-    2800, 20397, -2877, -9728, -1163, 16597, -6873, -877,
-    16703, -2714, 11023, -19650, 17679, -20205, -21968, -517,
-    12129, 13152, -1855, -7170, 11876, 21389, -6663, 11991,
-    12829, -11796, -11571, -25254, 4986, -13085, -14495, -559,
-    -3430, 14636, 6059, -13896, -5112, 3781, -2565, -4522,
-    7111, -10848, -4964, -29181, 14587, -9801, -15403, -8070,
-    12713, 228, -12279, -5983, 15175, 21958, -8009, 28095,
-    11053, -11464, -17373, -15465, -5414, -13116, 7968, 18463,
-    -12545, -17462, 4237, 12675, 9320, -20900, 29307, 4002,
-    -4113, -1467, -7377, 10344, 507, 13841, 18159, -19406,
-    -13596, -3128, 1183, -2030, -25596, 234, -1028, -3690,
-    -9372, 19668, 8711, 16171, 6686, 9751, 430, -3372,
-    -2146, -13919, -15975, 8725, 5200, 11093, 1240, 12997,
-    -364, 8681, 3540, 4329, -19089, 3965, 12990, 22520,
-    22951, 5725, -7040, -12688, 6983, -1964, -14184, -13913,
-    -4198, -5936, -16581, -8167, -8278, -22620, -21182, -181,
-    -1103, 6187, 15914, -6779, -9115, -10194, 14064, -10950,
-    -12695, -6786, 9966, 1848, 18480, 2862, -10850, -24672,
-    -13892, 32515, 14801, -3160, -11832, 19931, -3570, 756,
-    24280, -2141, 16095, -16328, 23435, -4899, -8058, 1025,
-    2126, -7984, -13380, 14630, 28905, 13687, 6921, 22533,
-    18762, -6921, -10167, -14733, -12741, -451, 20467, 17802,
-    -7847, -13341, -5054, 8614, -8620, -24709, 3730, -3720,
-    -12321, 4808, -7672, 14410, -5783, 11818, 11052, -3461,
-    1180, -22561, -15368, 7785, -5502, -7086, -3707, 11712,
-    -14033, 11606, -6093, 32767, -18518, 6983, 13652, 17145,
-    -1106, -14210, 4941, 7882, 2696, -26101, 10969, -10861,
-    -18448, 9754, -3504, 27575, -8373, 14146, 21310, -5597,
-    1225, -10672, 6019, 2071, -14432, -19586, -1329, -4441,
-    -18865, 13092, 945, 27484, -17471, 14388, 6387, 3224,
-    11196, -5573, -6600, 1197, 4623, 4495, -13001, 1443,
-    -1656, 9065, -293, 9955, -18476, -7085, -842, 26037,
-    18567, 1307, -3680, 4035, 23846, -8651, -6907, -8959,
-    -8861, -8173, -21266, 1599, -17371, -17499, -11637, 15716,
+    19373, 1097, -14946, -5310, 15439, -8594, 15766, 9406,
+    -19700, 12190, 4428, -6106, -3524, 1414, 1094, 16338,
+    25110, -2707, -29561, 3670, 24909, -6410, 13635, 3597,
+    -30332, 10654, -992, 336, 9637, 4706, 10605, 32767,
+    -1572, -3785, 4246, 8864, -4405, 2913, -14771, -10323,
+    5710, 4348, -2642, 9599, -1128, 11969, 11589, -16283,
+    -1408, -5578, -9776, -4619, 6817, -1931, 5738, 17244,
+    -10480, -8535, 3456, -13978, -4312, 1215, -11150, 12888,
+    -259, 27847, 654, -7853, 601, 20487, -8653, 9484,
+    -6704, -13436, -4926, 7535, 2937, 7359, -17286, 8258,
+    -10978, -61, 7033, -4421, -14084, 4498, -9065, -12410,
+    12366, -7851, -12053, 2282, -6424, 1578, 1821, -13307,
+    -13152, 1459, 16099, -9538, -10439, 41, -10260, 822,
+    17627, -15963, 5571, 20, -3791, -4154, -9801, -15762,
+    -22496, 2530, 22180, -12875, -13031, 1489, -8520, -2175,
+    16734, -14668, -5805, 799, -7193, -5291, -8031, -16419,
+    -4669, 12162, 5758, -21449, 2446, 5664, -1727, 15337,
+    -2826, -14885, 338, -3297, -316, -325, -18075, -8925,
+    3820, 17034, -9545, -19797, 10458, 17033, 1963, 9951,
+    -17945, -10973, -5232, 8032, -7710, 6715, -19592, 12280,
+    8910, -6334, -13540, 215, 1364, -5776, 14199, -4536,
+    -7344, 3393, -2937, -3536, 2923, 3290, 13012, 11051,
+    13763, -18959, -8276, 17176, 7144, -18136, 8984, -8382,
+    4982, 21324, 7855, 3848, 5070, -4732, 20919, 5919,
+    -8660, -11762, 14318, 16735, -11308, 1339, -13368, -7146,
+    20094, 8045, -1998, -2068, 825, -5589, 8029, -18850,
+    -25377, -16114, 18839, 10380, -16921, 1364, -8077, -7170,
+    19626, -1048, -7069, -5291, 1294, -7776, 6869, -12838,
+    -13072, 365, 25033, 3004, -9082, 5934, -12183, -1819,
+    22501, -8020, 209, -5282, 1654, -6408, -7766, -15499,
+    -13250, -11153, 10507, 11544, -17427, -11911, 12032, -8893,
+    11327, 9778, 236, -99, 2565, -11915, 10585, -5002,
+    16569, -11609, -7128, 12441, 5583, -11947, 12264, 4936,
+    4168, 14606, 2664, 650, 13600, 1641, 14723, 8311,
+    -10887, -8, 8233, 10749, -3576, 7334, -14419, -5613,
+    11479, -829, 4627, 7397, 5938, 4264, -1977, -12618,
+    1535, -6788, -4770, -2964, 4166, -1526, 13199, 9155,
+    -15112, 3512, 3398, -7589, -609, -3227, -7480, 9560,
+    20576, 11126, -8598, 962, 12324, -574, 10929, 5491,
+    -15060, 7892, -2928, 3094, 3172, 8503, 114, 16985,
 ], np.float64)
 
 HEADER = _HEADER_IQ[0::2] + 1j * _HEADER_IQ[1::2]
@@ -173,6 +175,8 @@ def long_packet(payload: bytes, status: int,
     impulses[::p4rx.SAMPLES_PER_CHIP] = symbols
     up, down = int(fs), p4rx.SAMPLE_RATE
     g = gcd(up, down)
-    bb = resample_poly(np.convolve(impulses, p4rx.RRC_TAPS), up // g, down // g)
+    shaped = np.convolve(impulses, p4rx.RRC_TAPS)
+    shaped = shaped[HEADER_CHIPS * p4rx.SAMPLES_PER_CHIP - HEADER_SAMPLES:]
+    bb = resample_poly(shaped, up // g, down // g)
     out = (bb * np.exp(2j * np.pi * p4rx.CENTRE_HZ * np.arange(bb.size) / fs)).real
     return out / np.max(np.abs(out))

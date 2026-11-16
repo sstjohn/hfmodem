@@ -19,7 +19,7 @@ import os
 import numpy as np
 import pytest
 
-from hfmodem.shrike import onair, p4oracle
+from hfmodem.shrike import onair, p4oracle, p4probe
 from hfmodem.tests.shrike.test_armdefaults import _parsed
 from hfmodem.tests.shrike.test_call_cadence import _Clock
 from hfmodem.tests.shrike.test_grid import _Rig
@@ -28,10 +28,10 @@ SLOT_N = round(1.25 * onair.FS)
 SCAN_S_PER_S = 0.2
 TAIL_S = 0.020
 ARM = ("--after-connect", "p1-robust", "--after-connect-cycles", "6",
-       "--p1-robust-stall", "12", "--p1-robust-stall-then", "goodbye",
+       "--p1-robust-stall", "12",
        "--p1-status-bits45", "2", "--no-p3-fallback", "--p3-traffic-sl", "1",
-       "--p3-speed-up", "hold", "--p4-link", "--p4-probe-cadence", "consecutive",
-       "--p4-probe-values", "7,38", "--p4-probe-headers", "A,A")
+       "--p3-speed-up", "hold", "--p4-link",
+       "--p4-opening", "7,38")
 
 
 def _calls(tmp_path, monkeypatch, connect):
@@ -42,6 +42,7 @@ def _calls(tmp_path, monkeypatch, connect):
     monkeypatch.setattr(onair, 'find_device', lambda *a, **kw: 0)
     monkeypatch.setattr(onair, '_LiveInput', lambda *a, **kw: clock)
     monkeypatch.setattr(onair, '_save_capture_async', lambda *a, **kw: None)
+    monkeypatch.setattr(p4probe, 'code_revision', lambda *_: None)
     scan, tail = p4oracle.word_scan, p4oracle.word_tail
 
     def charged_scan(audio, fs=onair.FS, *a, **kw):

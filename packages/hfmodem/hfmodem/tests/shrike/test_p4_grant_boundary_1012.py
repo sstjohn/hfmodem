@@ -39,7 +39,7 @@ def test_real_two_short_receive_prefix_then_normal_no_output_grant(queued,return
     tx=Tx(stream);tx.settle=.025
     tx.p4_probe.emissions=[];tx.p4_probe.peer_breakin=True
     opts=tx.p4_link_options
-    opts.p4_data='body';opts.p4_ladder='none';opts.p4_hold_cycles=16
+    opts.p4_data='body';opts.p4_hold_cycles=16
     opts.p4_normal_ack='parity';opts.p4_link_timeout=35
     rx=tx.sessrx.p4
     rx.note_emission(Emission(Kind.WORD,Role.IRS,first-round(.330*FS),.242))
@@ -156,7 +156,7 @@ def test_actual_long_invitation_then_explicit_synthetic_short_f6_grant():
     from hfmodem.tests.evidence import CAPTURES, require_input
     from hfmodem.shrike.p4receiver import P4Receiver, Clock
     from hfmodem.tests.shrike.test_p4turn import machine, word
-    m,a=machine(role='irs',data='body',ladder='none',prekey_lead=.025)
+    m,a=machine(role='irs',data='body',prekey_lead=.025)
     a.on_host_data(b'TEST\r')
     r=P4Receiver(FS,admitted=True,chirp=True,breakin=True)
     r.enable_hold()
@@ -223,7 +223,7 @@ def test_actual_long_invitation_then_explicit_synthetic_short_f6_grant():
 def test_synthetic_boundary_negatives_never_install_receive_origin(bad):
     from hfmodem.shrike.p4receiver import P4Receiver, Clock
     from hfmodem.tests.shrike.test_p4turn import machine
-    m,a=machine(role='irs',data='body',ladder='none')
+    m,a=machine(role='irs',data='body',)
     r=P4Receiver(FS,admitted=True)
     if bad=='prior-local-data':
         a.on_host_data(b'prior data')
@@ -259,7 +259,7 @@ def semantic_receive_origin():
     """Synthetic pre-key owner fixture; consumed keys, no PCM/RF claim."""
     from hfmodem.shrike.p4receiver import P4Receiver, Clock
     from hfmodem.tests.shrike.test_p4turn import machine
-    m,a=machine(role='irs',data='body',ladder='none')
+    m,a=machine(role='irs',data='body',)
     r=P4Receiver(FS,admitted=True)
     r.expected=True;r.clock=Clock(Expect.PACKET,2*FS,.330,1.25,0.)
     r.peer_onset=2*FS;r._peer_heads=[2*FS-60000,2*FS]
@@ -481,9 +481,9 @@ def test_registered_long_policy_and_real_constructor_eligibility(kind,width,mode
     from hfmodem.tests.shrike.test_p4turn import machine
     from hfmodem.tests.shrike.test_p4_late_long_ack_1010 import accepted
     hold=mode=='hold'
-    m,a=machine(role='irs',data='hold' if hold else 'body',
-        ladder='long' if hold else 'none',prekey_lead=.025,
-        breakin='y27' if mode=='eligible-y27' else 'body',chirp_ack='parity')
+    m,a=machine(role='irs',data='none' if hold else 'body',
+        prekey_lead=.025,
+        breakin='y27' if mode=='eligible-y27' else 'body',chirp_ack='parity', long_ack='counter-even-t27')
     if mode!='empty':a.on_host_data(b'queued application\r')
     m.allow_breakin=mode!='greeting-gated'
     delivered=[]

@@ -45,28 +45,36 @@ def parser():
                         "without one, sessions are ranked without distance)")
     p.add_argument('--feed-file', type=Path, help='saved Winlink PropagationRecords JSON; no network')
     p.add_argument('--centers', type=int, nargs='+', help='explicit center frequencies in Hz, ranked in given order')
-    p.add_argument('--hours', type=int, default=24)
-    p.add_argument('--reach-km', type=float, default=4200)
-    p.add_argument('--min-hz', type=int, default=3000000)
-    p.add_argument('--max-hz', type=int, default=30000000)
-    p.add_argument('--channels', type=int, default=8)
+    p.add_argument('--hours', type=int, default=24,
+                   help='rank channels by Winlink sessions completed in this many hours (default %(default)s)')
+    p.add_argument('--reach-km', type=float, default=4200,
+                   help='leave out gateways farther than this, in km (default %(default)s)')
+    p.add_argument('--min-hz', type=int, default=3000000,
+                   help='lowest channel frequency to consider, in Hz (default %(default)s)')
+    p.add_argument('--max-hz', type=int, default=30000000,
+                   help='highest channel frequency to consider, in Hz (default %(default)s)')
+    p.add_argument('--channels', type=int, default=8,
+                   help='how many of the ranked channels to visit (default %(default)s)')
     p.add_argument('--refresh', type=float, default=900, help='refresh completed-session ranking every N seconds')
-    p.add_argument('--dwell', type=float, default=60)
+    p.add_argument('--dwell', type=float, default=60,
+                   help='seconds to listen on each channel (default %(default)s)')
     p.add_argument('--quiet', type=float, default=120, help='release after this many seconds without useful evidence (default 120)')
     p.add_argument('--candidate', type=float, default=15, help='one bounded candidate extension per visit')
-    p.add_argument('--max-hold', type=float, default=1800)
+    p.add_argument('--max-hold', type=float, default=1800,
+                   help='most seconds to stay on one busy channel (default %(default)s)')
     p.add_argument('--max-offset', type=float, default=60, help='maximum fitted FSK offset in Hz')
     p.add_argument('--visits', type=int, default=0, help='stop after N channel visits; 0 runs until interrupted')
-    p.add_argument('--device', default=None)
+    p.add_argument('--device', default=None, help='the receive input; default the station input')
     p.add_argument('--cat-port', default=None,
                    help='defaults to CAT_PORT or the console station port')
-    p.add_argument('--model', type=int, default=None)
-    p.add_argument('--baud', type=int, default=None)
+    p.add_argument('--model', type=int, default=None, help='rig model number for the CAT daemon')
+    p.add_argument('--baud', type=int, default=None, help='CAT serial speed')
     p.add_argument('--rigctld', help='use an existing daemon at host:port instead of starting one')
     p.add_argument('--out', type=Path, help='new output directory')
-    p.add_argument('--min-free-gb', type=float, default=2)
+    p.add_argument('--min-free-gb', type=float, default=2,
+                   help='stop recording when free disk space falls below this many GB (default %(default)s)')
     from hfmodem.core.rigs import RIGS
-    p.add_argument("--rig", choices=tuple(RIGS))
+    p.add_argument("--rig", choices=tuple(RIGS), help="rig profile to use; default the station's")
     return p
 
 

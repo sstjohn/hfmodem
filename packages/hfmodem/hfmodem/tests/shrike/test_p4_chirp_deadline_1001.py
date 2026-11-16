@@ -36,7 +36,7 @@ def test_first_chirp_keys_admitting_slot_with_charged_misses(monkeypatch, deadli
     tx.settle = .037
     lead = onair._prekey_lead(stream, round(tx.settle*FS))
     assert lead == 2276
-    tx.p4_link_options.p4_ladder = tx.p4_link_options.p4_data = 'chirp'
+    tx.p4_link_options.p4_data = 'chirp'
     tx.p4_link_options.p4_link_timeout = 8
     tx.p4_probe.emissions = [dict(audio_start=anchor, audio_end=anchor+36367)]
     stream.pos = anchor+36367
@@ -96,9 +96,9 @@ def test_first_chirp_keys_admitting_slot_with_charged_misses(monkeypatch, deadli
         critical = False
     tx._tx = emit
     refuse = P4Turn.refused
-    def deferred(m, reason):
+    def deferred(m, reason, now=None):
         nonlocal critical
-        refuse(m, reason)
+        refuse(m, reason, now=now)
         critical = False
     monkeypatch.setattr(P4Turn, 'refused', deferred)
     onair._run_p4_link(tx, stream, onair._MasterGrid(anchor, 60000, 0,

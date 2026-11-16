@@ -62,7 +62,7 @@ DISTS = {
 # Every subpackage of hfmodem, by equality. Adding one is a deliberate act and has
 # to be recorded here; `host` joins this set when the dialects are extracted.
 TOP = {"ax25", "bbs", "brubru", "core", "station", "besra", "kestrel", "lanner", "monitor", "sabir", "shrike",
-       "bateleur", "winlink", "operator", "_operator", "contact", "macagua", "merlin"}
+       "bateleur", "winlink", "operator", "_operator", "contact", "macagua", "merlin", "ui"}
 
 # Per protocol, so an explicit-list regression cannot ship a modem's top-level
 # modules with nothing under them.
@@ -83,6 +83,8 @@ SUB = {
 # recipes travel with the generator and its licence notices. Private recordings
 # do not ship in wheels.
 WHEEL_DATA = {
+    "hfmodem/ui/assets/station_chat.mjs",
+    "hfmodem/ui/assets/hfdesk_chat.mjs",
     "hfmodem/shrike/c2proof/cml/cml_generate.c",
     "hfmodem/shrike/c2proof/cml/COPYING.LESSER",
     "hfmodem/shrike/c2proof/NOTICE.md",

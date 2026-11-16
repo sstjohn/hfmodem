@@ -64,14 +64,14 @@ def test_recorded_levelstep_registers_and_gets_normal_ack(pin):
     frame = reg.observation.frame
     assert reg.outcome in (Registered.NEW, Registered.ENRICHED)
     assert (frame.status.byte, frame.crc, len(frame.data)) == (pin[4], pin[5], pin[6])
-    turn, _ = machine(role='irs')
+    turn, _ = machine(role='irs', normal_ack='parity')
     received = []
     turn.adapter.host = SimpleNamespace(deliver=received.append, supervisor=lambda *a: None)
     at = reg.observation.stream_sample
     turn.observe(reg, now=at+round(.810*FS))
     proposal = turn.decide(at+round(.920*FS)-turn.lead)
     assert proposal is not None and proposal.kind == Kind.WORD
-    assert proposal.word == 'V27'
+    assert proposal.word == ('V27' if reg.observation.frame.status.counter & 1 else 'X27')
     if pin[0] == '1859':
         from hfmodem.winlink import B2FSession
         mail = B2FSession('W9SSJ', target='WS8EOC', password='offline-test-password')
@@ -84,7 +84,7 @@ def test_recorded_levelstep_registers_and_gets_normal_ack(pin):
 
 def test_1859_recorded_greeting_reaches_mail_after_counter_wrap():
     from hfmodem.winlink import B2FSession
-    turn, _ = machine(role='irs')
+    turn, _ = machine(role='irs', normal_ack='parity')
     mail = B2FSession('W9SSJ', target='WS8EOC', password='offline-test-password')
     turn.adapter.host = SimpleNamespace(deliver=mail.feed, supervisor=lambda *a: None)
     for seconds, status in ((20.996, 1), (23.496, 2), (28.496, 3), (29.746, 0)):
@@ -92,7 +92,7 @@ def test_1859_recorded_greeting_reaches_mail_after_counter_wrap():
         reg, = [r for r in records if r.observation.frame]
         at = reg.observation.stream_sample
         turn.observe(reg, now=at+round(.810*FS))
-        assert turn.decide(at+round(.920*FS)-turn.lead).word == 'V27'
+        assert turn.decide(at+round(.920*FS)-turn.lead).word == ('V27' if reg.observation.frame.status.counter & 1 else 'X27')
         turn.keyed()
     assert 'CMS via WS8EOC >' in mail.remote_text
     assert mail.remote_sid and mail.challenge and mail.sent_text and not mail.failure
@@ -111,11 +111,11 @@ def test_2200_peer_raster_still_read_while_request_waits_for_grant():
     assert reg.observation.frame.status.byte == 0
     assert rx.clock.expects == Expect.WORD and rx.clock.next_due == grant_due
     from hfmodem.shrike.p4turn import State
-    turn, _ = machine(role='irs')
+    turn, _ = machine(role='irs', normal_ack='parity')
     turn.state = State.IRS_BREAKIN
     turn.observe(reg, now=at+round(.810*FS))
     proposal = turn.decide(reg.observation.stream_sample+round(.920*FS)-turn.lead)
-    assert proposal.kind == Kind.WORD and proposal.word == 'V27'
+    assert proposal.kind == Kind.WORD and proposal.word == 'X27'
     assert proposal.state == State.IRS_ANSWER
 
 
@@ -281,7 +281,7 @@ def test_recorded_read_and_turn_ack_fit_the_receiver_budget(monkeypatch, pin, co
     at = round(pin[2]*FS)
     source = audio(pin[0], pin[1])
     rx = receiver(at, pin[3], pin[4])
-    turn, _ = machine(role='irs')
+    turn, _ = machine(role='irs', normal_ack='parity')
     # Charged costs pin iteration counts and the V27 slot; the realtime case
     # checks actual read-through-decode latency. Binding admission is below.
     if cost_ms is not None:
@@ -299,7 +299,7 @@ def test_recorded_read_and_turn_ack_fit_the_receiver_budget(monkeypatch, pin, co
     assert now <= reg.observation.stream_sample+round(.920*FS)-turn.lead
     turn.observe(reg, now=now)
     proposal = turn.decide(reg.observation.stream_sample+round(.920*FS)-turn.lead)
-    assert proposal and proposal.word == 'V27'
+    assert proposal and proposal.word == ('V27' if reg.observation.frame.status.counter & 1 else 'X27')
     assert proposal.stream_sample == reg.observation.stream_sample+round(.920*FS)
 
 
@@ -368,9 +368,9 @@ def test_repeated_levelstep_ack_leaves_request_state():
     _, records = replay(PINS[0])
     reg, = [r for r in records if r.observation.frame]
     at = reg.observation.stream_sample
-    turn, _ = machine(role='irs')
+    turn, _ = machine(role='irs', normal_ack='parity')
     turn.observe(reg, now=at+round(.810*FS))
-    assert turn.decide(at+round(.920*FS)-turn.lead).word == 'V27'
+    assert turn.decide(at+round(.920*FS)-turn.lead).word == ('V27' if reg.observation.frame.status.counter & 1 else 'X27')
     turn.keyed()
     turn.state = State.IRS_BREAKIN
     repeated = replace(reg, observation=replace(reg.observation, stream_sample=at+60000))

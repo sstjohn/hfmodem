@@ -32,14 +32,14 @@ def idle_long(at):
 
 def granted(ladder, *, queued=True):
     """1024 at 89.749: the peer's idle protocol-2 long draws our answer."""
-    m, a = machine(data="body", ladder=ladder, role="irs")
+    m, a = machine(data="body" if ladder == "none" else ladder, role="irs")
     if queued:
         a.on_host_data(SID)
     offer = 4307951
     m.observe(idle_long(offer), now=offer + round(3.3 * FS))
     grant = m.decide(offer + round(3.4 * FS) - m.lead)
     assert (grant.kind, grant.word, grant.state, grant.stream_sample) == (
-        Kind.WORD, 'Y27' if queued else 'T27',
+        Kind.WORD, 'Y27' if queued else 'X27',
         State.IRS_BREAKIN if queued else State.IRS_ANSWER, offer+163200)
     assert not grant.payload and not m.outbox.inflight and a.tx_acked_bytes == 0
     epoch = m._receive_epoch
@@ -60,9 +60,9 @@ def test_peer_v27_to_our_request_starts_the_ladder_or_sid_body(ladder):
         assert proposal.kind == Kind.BODY and proposal.state == State.ISS_DATA
         assert proposal.status == 0x40 and proposal.payload == SID[:31]
     else:
-        assert (proposal.kind, proposal.value, proposal.state) == (Kind.SHORT, 13, State.ISS_LADDER)
-        assert not m.outbox.inflight and bytes(a._outbuf) == SID
-    assert proposal.stream_sample == grant + round(3.75 * FS)
+        assert (proposal.kind, proposal.status, proposal.state) == (Kind.BODY, 0, State.ISS_DATA)
+        assert m.outbox.inflight == SID[:31] and proposal.payload == SID[:31]
+    assert proposal.stream_sample == grant + 2 * round(1.25 * FS)
     assert any(e["event"] == "turn" and e["responds_to"] == grant for e in m.link_events)
 
 
@@ -93,10 +93,10 @@ def test_unanswered_word_request_recovers_after_four_actual_keys():
     m.silence(at + 60000)
     proposal = m.decide(at + 180000 - m.lead)
     assert (proposal.kind, proposal.word, proposal.state) == (
-        Kind.WORD, 'T27', State.IRS_ANSWER)
+        Kind.WORD, 'X27', State.IRS_ANSWER)
     assert m.state == State.IRS_ANSWER and m.breakins == 4
     assert m.peer_watch.attempts == 4 and m.next_offer_at == at+960000
-    assert m._held_answer.answer.word == 'T27'
+    assert m._held_answer.answer.word == 'X27'
     assert not m.outbox.inflight and bytes(a._outbuf) == SID
     assert a.tx_acked_bytes == 0 and not proposal.payload
     other, _, first = granted('none')
@@ -109,7 +109,7 @@ def test_unanswered_word_request_recovers_after_four_actual_keys():
 @pytest.mark.parametrize("queued", [True, False])
 def test_peer_empty_grant_after_our_v60_answers_with_data_when_bytes_wait(queued):
     """1024 at 100.349: Y27 + idle 0x40 answered our v60, not a grant of ours."""
-    m, a = machine(data="body")
+    m, a = machine(data="long")
     if queued:
         a.on_host_data(SID)
     v60 = round(99.399 * FS)
@@ -139,18 +139,18 @@ def test_bytes_arriving_while_irs_request_and_wait_for_associated_release():
     m.keyed()
     yielded = request.stream_sample+44880
     m.observe(word('V27', yielded, extent=.245, responds_to=request.stream_sample), now=yielded+12000)
-    proposal = m.decide(request.stream_sample+180000-m.lead)
+    proposal = m.decide(request.stream_sample+120000-m.lead)
     assert (proposal.kind, proposal.payload, proposal.status) == (Kind.BODY, b'FF\r', 0x40)
-    assert proposal.stream_sample == request.stream_sample+180000
+    assert proposal.stream_sample == request.stream_sample+120000
     assert a.tx_acked_bytes == 0
 
 
-def test_ladder_none_requires_bodies():
-    with pytest.raises(ValueError):
-        machine(data="hold", ladder="none")
+def test_none_has_no_ladder_or_data():
+    m, _ = machine(data='none')
+    assert not m.ladder and not m.sends_data
 
 
-def _data_exchange(lost, ladder):
+def _data_exchange(lost):
     """A peer invitation, then a peer that acks each counted packet by parity at +0.950 except `lost`
     and answers a ladder short as the tape does."""
     audio = np.zeros(24 * FS)
@@ -159,7 +159,6 @@ def _data_exchange(lost, ladder):
     audio[grant:grant + len(wave)] = wave
     stream = Stream(audio)
     tx = Tx(stream)
-    tx.p4_link_options.p4_ladder = ladder
     tx.p4_link_options.p4_data = "body"
     tx.p4_link_options.p4_link_timeout = 21.
     arq = tx.p4_link_host.arq
@@ -190,22 +189,26 @@ def _data_exchange(lost, ladder):
     return tx, arq, text, bodies
 
 
-@pytest.mark.parametrize("ladder", ["none", "long"])
-def test_body_then_normals_through_counter_wrap_with_a_lost_ack(ladder):
-    tx, arq, text, waves = _data_exchange({2}, ladder)
+def test_body_then_normals_through_counter_wrap_with_a_lost_ack():
+    tx, arq, text, waves = _data_exchange({2})
     sent = [e for e in tx.p4_probe.emissions[1:] if e["payload"]]
     fields = [bytes.fromhex(e["payload"]) for e in sent]
     assert [e["status"] for e in sent] == [0, 1, 2, 2, 3, 0]
     assert fields == [text[0:31], text[31:71], text[71:111], text[71:111], text[111:151], text[151:191]]
     from hfmodem.shrike import p4shorttx
     for i, (e, wave) in enumerate(zip(sent, waves)):
-        expected = (p4breakintx.changeover_packet if i == 0 else p4shorttx.short_packet)(bytes.fromhex(e["payload"]), e["status"])
+        if i == 0:
+            expected = p4breakintx.changeover_packet(bytes.fromhex(e["payload"]), e["status"])
+        else:
+            # Stock keys header B on every copy after the first (k0003 N9VC).
+            header = "B" if i > 1 and sent[i - 1]["status"] == e["status"] else "A"
+            expected = p4shorttx.short_packet(bytes.fromhex(e["payload"]), e["status"], header=header)
         assert e["waveform_sha256"] == hashlib.sha256(expected.tobytes()).hexdigest()
         assert np.array_equal(wave, expected)
     gaps = np.diff([e["audio_start"] for e in sent]).tolist()
     assert gaps[2] == 60000 and all(g % 60000 == 0 for g in gaps)
     shorts = [e["value"] for e in tx.p4_probe.emissions[1:] if e.get("value") is not None]
-    assert shorts == ([] if ladder == "none" else [13, 60])
+    assert shorts == []
     assert not [e for e in tx.p4_probe.link_events if e["event"] == "Refused"]
     keyed = [e for e in tx.p4_probe.link_events if e["event"] == "Keyed" and e["kind"] in (Kind.BODY, Kind.NORMAL)]
     assert [(e["status"], e["payload"]) for e in keyed][:6] == [(e["status"], e["payload"]) for e in sent]
@@ -234,7 +237,7 @@ def replay_1024(monkeypatch):
     tx = Tx(stream)
     tx.settle = .044
     tx.p4_probe.emissions.clear()
-    tx.p4_link_options.p4_ladder = "none"
+
     tx.p4_link_options.p4_data = "body"
     tx.p4_link_options.p4_link_timeout = 13.
     tx.p4_link_host.arq.on_host_data(SID)
@@ -363,7 +366,7 @@ def test_partial_grant_answer_waits_for_full_confirmation_in_driver(monkeypatch,
     tx = Tx(live)
     tx.p4_probe.emissions.clear()
     tx.p4_link_options.p4_data = 'body'
-    tx.p4_link_options.p4_ladder = ladder
+    tx.p4_link_options.p4_data = 'body' if ladder == 'none' else ladder
     tx.p4_link_options.p4_link_timeout = 3.
     tx.p4_link_host.arq.on_host_data(SID)
     receiver = tx.sessrx.p4
@@ -382,7 +385,7 @@ def test_partial_grant_answer_waits_for_full_confirmation_in_driver(monkeypatch,
     if ladder == 'none':
         assert sent[0]['payload'] == SID[:31].hex()
     else:
-        assert sent[0]['value'] == 13 and not sent[0]['payload']
+        assert sent[0]['payload'] == SID[:31].hex() and sent[0]['status'] == 0
         assert tx.p4_link_host.arq._buffer_raw == len(SID)
     assert sent[0]['audio_start'] == 120000
     assert not [e for e in tx.p4_probe.link_events if e['event'] == 'Refused']
@@ -401,7 +404,7 @@ def test_default_hold_policy_does_not_send_queued_bytes_after_grant_v27():
 
 @pytest.mark.parametrize('status', [0, 0x20])
 def test_hold_wakeup_preserves_pending_peer_data_or_close(status):
-    m, a = machine(data='body', ladder='none')
+    m, a = machine(data='body')
     m.state = State.ISS_HOLD
     a.on_host_data(SID)
     m.observe(body(FS, b'peer', status), now=FS+38000)
@@ -413,7 +416,7 @@ def test_hold_wakeup_preserves_pending_peer_data_or_close(status):
 
 
 def test_repeated_empty_grant_rechecks_new_application_bytes():
-    m, a = machine(data='body', ladder='none', role='irs')
+    m, a = machine(data='body',  role='irs')
     m.observe(body(0, b'', 0x40), now=38000)
     m.decide(44160-m.lead)
     m.keyed()

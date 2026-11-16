@@ -704,7 +704,7 @@ def parse(raw: dict, *, rig_name=None, environ=None) -> StationConfig:
     ptt_raw = dict(rig_raw.pop("ptt", {}))
     rig_raw.setdefault("cat", profile_cat(name))
     # The model token also matches Hamlib identities that omit the manufacturer.
-    rig_raw.setdefault("identity", "" if name == "generic" else name)
+    rig_raw.setdefault("identity", selected.get("identity", "" if name == "generic" else name))
     if name == "generic":
         rig_raw.setdefault("mode", "USB")
         ptt_raw.setdefault("settle_s", selected["settle"])
@@ -720,6 +720,8 @@ def parse(raw: dict, *, rig_name=None, environ=None) -> StationConfig:
         ptt_raw.pop("port", None)  # legacy mobile port never crosses rigs
         ptt_raw["port"] = selected.get("ptt_port", "")
         ptt_raw["settle_s"] = selected["settle"]
+        if "ptt_backend" in selected:
+            ptt_raw["backend"] = selected["ptt_backend"]
     ptt = build_section(Ptt, ptt_raw, "[rig.ptt]")
     if "filter_hz" in rig_raw:
         lo_hi = rig_raw["filter_hz"]
@@ -895,4 +897,8 @@ def _validate(cfg: StationConfig) -> None:
             "station would key RTS regardless — a transmitter keyed by a route "
             "other than the configured one. Use backend = \"rts\" with the PTT "
             "interface's own port.")
-    choice(rig.ptt.backend, ("rts",), "[rig.ptt]", "backend")
+    choice(rig.ptt.backend, ("rts", "i2c"), "[rig.ptt]", "backend")
+    # Register 12 belongs to the X6100's own board, and only under its guard.
+    if (rig.ptt.backend == "i2c") != (rig.cat == "x6100_base"):
+        raise ConfigError('[rig]: cat = "x6100_base" and [rig.ptt] backend = "i2c" '
+                          'go together, as the x6100_onboard profile sets them')

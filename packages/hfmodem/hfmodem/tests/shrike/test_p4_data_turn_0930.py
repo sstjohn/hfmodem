@@ -23,7 +23,7 @@ def receive(m, at, data=b'', status=0x40, responds_to=None):
 
 
 def sending(payload=b'F> 3B\r', **kw):
-    m, a = machine(data='body', ladder='none', **kw)
+    m, a = machine(data='body',  **kw)
     a.on_host_data(payload)
     m._data(0)
     m.keyed()
@@ -32,7 +32,7 @@ def sending(payload=b'F> 3B\r', **kw):
 
 @pytest.mark.parametrize('role', ['irs', 'iss'])
 def test_k0003_fs_status_40_is_delivered_once_and_acked_even_during_a_request(role):
-    m, a = machine(data='body', ladder='none', role=role)
+    m, a = machine(data='body',  role=role)
     m.first_body = False
     received = []
     m.adapter.host = SimpleNamespace(deliver=received.append, supervisor=lambda *a: None)
@@ -41,7 +41,7 @@ def test_k0003_fs_status_40_is_delivered_once_and_acked_even_during_a_request(ro
         m.keyed()
     for at in (FS, FS+CYCLE):
         p = receive(m, at, b'FS YY\r')
-        assert p.kind == Kind.WORD and p.word == 'V27'
+        assert p.kind == Kind.WORD and p.word == 'X27'
         m.keyed()
         assert m.state == State.IRS_ANSWER
     assert received == [b'FS YY\r']
@@ -62,10 +62,7 @@ def test_y27_data_reply_commits_last_field_before_delivering_fs(status):
     m.keyed()
     assert delivered == [b'FS Y\r'] and bytes(a._outbuf) == b'message bytes'
     repeat = receive(m, T+CYCLE, b'FS Y\r', status)
-    if status == 0:
-        assert repeat.kind == Kind.BODY and repeat.state == State.IRS_BREAKIN
-    else:
-        assert repeat.word == p.word
+    assert repeat.kind == Kind.WORD and repeat.word == p.word
     assert delivered == [b'FS Y\r']
 
 
@@ -155,10 +152,10 @@ def test_k0003_tape_counter_evidence_and_fs_body_is_data():
     frames = [p4oracle.body_after(audio, FS, 0, h) for h in heads if h.word == 'Y27']
     frame = next(f for f in frames if f is not None)
     assert frame.status.byte == 0x40 and frame.data.rstrip(b'\x1e') == b'FS YY\r'
-    m, a = machine(role='irs', data='body', ladder='none')
+    m, a = machine(role='irs', data='body')
     m.first_body = False
     p = receive(m, FS, frame.data.rstrip(b'\x1e'), frame.status.byte)
-    assert p.word == 'V27' and p.kind == Kind.WORD
+    assert p.word == 'X27' and p.kind == Kind.WORD
 
 
 @pytest.mark.parametrize('fs_reply', ['last-body', 'hold', 'normal-grant'])
@@ -194,7 +191,7 @@ def test_2327_recording_then_real_b2f_round_trip(monkeypatch, fs_reply):
     tx.p4_probe.emissions = probe['emissions'][:1]
     tx.p4_probe.handoff_audio = stream.pos-FS, audio[stream.pos-FS:stream.pos].copy()
     tx.p4_link_options = options(monkeypatch, '--mail-fetch', '--mail-wait-greeting',
-        '--p4-ladder', 'none', '--p4-hold-cycles', '16', '--p4-link-timeout', '270')
+        '--p4-hold-cycles', '16', '--p4-link-timeout', '270')
     host = PtcHost(SimPeer(), mycall='W9SSJ')
     host.arq.state = arq.State.CONNECTED
     host.arq.role = arq.IRS
@@ -338,7 +335,7 @@ def test_empty_grant_replies_do_not_extend_the_hold_backstop():
 
 
 def test_late_close_word_after_a37_repeat_closes_the_link():
-    m, a = machine(data='body', ladder='none', app_done=True)
+    m, a = machine(data='body',  app_done=True)
     m._data(0)
     m.keyed()
     m.silence(CYCLE-m.lead)

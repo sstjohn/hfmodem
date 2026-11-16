@@ -51,7 +51,7 @@ class IO(arq.ArqIO):
 def linked(*, deferred=True, repeat_gear=3):
     io = IO(deferred)
     a = io.arq = arq.PactorArq(io, arq.ArqConfig(
-        repeat_gear=repeat_gear, long_cycle=False, speed_up_after=1000))
+        repeat_gear=repeat_gear, long_cycle=False, p3_speed_up_after=1000))
     a._enter_connected()
     a.role = arq.IRS
     a._reset_rx_seq()
@@ -275,3 +275,33 @@ def test_finishing_after_disconnect_does_not_restart_link_or_transmit():
     a.finish_receive_opportunity(token)
     assert a.state == arq.State.DISCONNECTED
     assert not a._qrt_pending and io.packets == []
+
+
+def test_cancelled_reader_does_not_charge_partial_evidence_or_emit():
+    a, io, token = threshold_window()
+    before = (a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks,
+              list(io.emissions), list(io.packets), io.pending)
+    a.note_unreadable_answer()
+    a.cancel_receive_opportunity(token)
+    assert a._receive_opportunity is None and not a._burst_at_anchor
+    assert before == (a._silent_cycles, a._dark_windows, a._p3_crc_wait_ticks,
+                      io.emissions, io.packets, io.pending)
+    a.on_host_abort()
+    a._enter_connected()
+    next_token = a.begin_receive_opportunity()
+    assert next_token > token
+    a.finish_receive_opportunity(next_token)
+
+
+def test_cancelled_reader_cannot_retire_a_different_live_window():
+    a, _ = linked()
+    token = a.begin_receive_opportunity()
+    a.finish_receive_opportunity(token)
+    a.cancel_receive_opportunity(token)  # Ordinary completed window.
+    later = a.begin_receive_opportunity()
+    for invalid in (token, later + 1, True, 0, None):
+        with pytest.raises(ValueError):
+            a.cancel_receive_opportunity(invalid)
+        assert a._receive_opportunity.token == later
+    a.cancel_receive_opportunity(later)
+    a.cancel_receive_opportunity(later)  # Repeated teardown emits nothing.

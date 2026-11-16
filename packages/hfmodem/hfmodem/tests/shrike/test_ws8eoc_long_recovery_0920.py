@@ -10,10 +10,11 @@ import pytest
 
 from hfmodem.shrike import arq, onair, p3acquire, p3rx, placement, rxfront, spec
 from hfmodem.shrike.p3trial import ReplyClock
-from hfmodem.tests.shrike.test_cs6_driver import _arm, _window
-from hfmodem.tests.shrike.test_cs6_stalls import _duplex
+from hfmodem.tests.shrike.p3_cycle_support import _arm
+from hfmodem.tests.shrike.test_cs6_driver import _window
+from hfmodem.tests.shrike.p3_cycle_support import _duplex
 from hfmodem.tests.shrike.test_entry_answer import _Session
-from hfmodem.tests.shrike.test_p3_breakin_timing import duplex
+from hfmodem.tests.shrike.test_p3_breakin_timing import duplex, host_stub
 
 FIX = Path(__file__).parent / 'fixtures/ws8eoc-long-recovery-0920'
 META = json.loads((FIX / 'metadata.json').read_text())
@@ -46,7 +47,7 @@ def test_first_long_ack_meets_its_own_slot_with_decoder_cost(tmp_path, monkeypat
         return result
 
     monkeypatch.setattr(p3rx, 'decode_at', charged)
-    slot, _, _ = _window(s, tx, g, clock)
+    slot, _, _, _ = _window(s, tx, g, clock)
     assert slot == 3 and g.ticks == 3
     assert len(s.packets) == 1 and s.packets[0].packet[2].startswith(b'ode 1.4.3.0')
     assert not clock.clamp_late(tx.key_instant(g, slot))
@@ -67,7 +68,7 @@ def test_long_header_alone_cannot_ack_or_commit_cycle(tmp_path, damage):
     s.rx.sync.packet_level = 1
     g.anchor = -13171
     clock = _duplex(tx, s, pcm, 2612)
-    slot, _, _ = _window(s, tx, g, clock)
+    slot, _, _, _ = _window(s, tx, g, clock)
     assert slot == 3
     assert not s.packets and not s.host.arq.cycle_long
     assert tx._pending_p3_cs is None
@@ -87,6 +88,9 @@ def old_long_grid():
 
 def emit_toggle(g, tmp_path, monkeypatch):
     tx = onair.RadioTx(None, transmit=False, outdir=tmp_path, settle=.04)
+    tx.host = host_stub()
+    tx.host.arq._cycle_long = True
+    tx.host.arq._cycle_request = False
     tx.reply_clock = ReplyClock(entry_phase=544493, pulse_epoch=573443)
     g.reply_clock = tx.reply_clock
     tx.aim(g, 29)
@@ -95,7 +99,8 @@ def emit_toggle(g, tmp_path, monkeypatch):
         tx.n += 1
         tx.refused = False
         tx.tx_pulse_offsets = (852, 852)
-        tx.tx_audio_start = 1773443 - min(kwargs["pulse_offsets"])
+        tx.tx_audio_start = (1773443 + (tx.slot - 29) * SHORT
+                             - min(kwargs["pulse_offsets"]))
 
     monkeypatch.setattr(tx, '_tx', emitted)
     tx._send_p3_control(arq.CS_CYCLE_TOG)
@@ -228,3 +233,22 @@ def test_an_operator_listening_cycle_is_not_cancelled_by_an_answer(tmp_path):
     s.rx._on(replace(ev, t=phase/FS), anchored=True)
     assert tx.listening
     assert len(tx.live.emissions) == 1
+
+
+def test_repeated_cs6_preserves_measured_pair_and_updates_control_phase(tmp_path, monkeypatch):
+    g = old_long_grid()
+    tx = emit_toggle(g, tmp_path, monkeypatch)
+    measured, control = g._p3_cycle_timing
+    interval = g._p3_interval
+    assert control == 1773443 and measured.reverse_gap == 5119
+    assert g._p3_reply_timing() is None
+    tx.host.arq.on_cs_emitted(arq.CS_CYCLE_TOG)
+    g.cycles += 1
+    tx.aim(g, 32)
+    tx._send_p3_control(arq.CS_CYCLE_TOG)
+    assert g._p3_command_slot == 32 and g._p3_command_row0 == 1972962
+    assert g._p3_interval is interval
+    assert g._p3_cycle_timing == (measured, 1953443)
+    assert g._p3_cycle_timing[0] is measured
+    g.note_p3_packet(1968642, 39120, SHORT)
+    assert g._p3_reply_timing().reverse_gap == 5119

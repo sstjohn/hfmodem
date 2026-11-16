@@ -21,6 +21,11 @@ if not (TRACE).exists():
 FIXTURE = json.loads(TRACE.read_text())
 INPUTS = FIXTURE['nomination_inputs']
 
+W6IDS_CARRIER_HZ = -9.6 - onair.placement.DIAGONAL_HZ
+"""Where the gateway keyed: its changeover head reads -9.6 Hz, the diagonal's
+-12.5 included, and the whole changeover (head and body) fits our rendering of
+the same field at +3.1 to +3.3 Hz on holds 16 and 17."""
+
 
 def held(n, arm='onair-1001-0215'):
     path = evidence.CAPTURES / arm / f'hold_{n:02d}.flac'
@@ -110,7 +115,6 @@ def test_w6ids_empty_handback_takes_one_turn_with_fq():
     assert s.host.arq.role == arq.ISS
     assert s.host.arq._inflight.breakin
     assert s.host.arq._inflight.payload == b'FQ\r'
-
 
 
 def test_recorded_handback_train_queues_fq_on_the_sixth_new_packet():
@@ -225,7 +229,7 @@ def first_stint(tmp_path):
     # The recorded RMS copies precede the ordinary greeting. The grid
     # and frequency come from the reader; only the held capture windows are
     # supplied by this test. No peer reply is synthesized.
-    reads = []
+    reads, replies = [], []
     for n in range(16, 120):
         audio, origin = held(n)
         end = origin + len(audio)
@@ -238,31 +242,47 @@ def first_stint(tmp_path):
         if len(s.packets) > before:
             reads.append(n)
         slot = onair._p3_place_reply(g, tx, slot)
+        previous_tx = tx.n
         tx.emit_pending_cs()
-    return s, fixed_before_key, reads
+        fresh = len(s.packets) > before
+        if fresh:
+            assert tx.n == previous_tx + 1
+        if tx.n > previous_tx:
+            replies.append(dict(fresh=fresh, slot=tx.slot, cs=tx._p3_emitted_cs,
+                                at=tx.tx_audio_start, phase=g._p3_peer[0],
+                                period=g._p3_peer[2]))
+    return s, fixed_before_key, reads, replies
 
 
 def test_first_stint_prekey_reads_and_controls_follow_the_first_frame(tmp_path, capsys):
-    _, fixed_before_key, reads = first_stint(tmp_path)
+    _, fixed_before_key, reads, replies = first_stint(tmp_path)
     assert not fixed_before_key
     log = capsys.readouterr().out
     (tmp_path/'replay.log').write_text(log)
     assert 'SL1 pre-key' in log
-    assert reads
-    ordinary_log = log[log.index('SL1 pre-key'):]
-    assert '1 whole cycle(s)' not in ordinary_log
+    assert len(reads) == 98
+    # Unread boundaries still owe the held word; only a fresh packet's answer
+    # must land within that packet's cycle.
+    assert all(0 <= row['at'] - row['phase'] < row['period']
+               for row in replies if row['fresh'])
+    held_replies = [row for row in replies if not row['fresh']]
+    assert [(row['slot'], row['cs']) for row in held_replies] == [(67, 0), (69, 0)]
+    preceding = next(row for row in replies if row['slot'] == 66)
+    assert preceding['fresh'] and preceding['cs'] == 0
+    for row in held_replies:
+        assert row['at'] == preceding['at'] + (row['slot'] - 66) * 60000
     assert '0 whole cycle(s)' in log
     controls = [meta for meta in (json.loads(p.read_text())
                 for p in sorted(tmp_path.glob('tx_*.json')))
                 if meta.get('control','').startswith('CS')]
     assert controls[0]['tx_offset_hz'] == 0
     assert len(controls) > 1
-    assert all(meta['tx_offset_hz'] == pytest.approx(-9.6, abs=.25)
+    assert all(meta['tx_offset_hz'] == pytest.approx(W6IDS_CARRIER_HZ, abs=.25)
                for meta in controls[1:])
 
 
 def test_first_stint_delivery_is_preserved(tmp_path):
-    s, _, _ = first_stint(tmp_path)
+    s, _, _, _ = first_stint(tmp_path)
     delivered = []
     for ev in s.packets:
         row = [ev.packet[1], ev.packet[2].hex()]
@@ -417,7 +437,8 @@ def test_tracked_nomination_cost_is_after_key(
     assert tx.n == 2 and not tx.refused and tx.slot == slot + 1
     assert tx.tx_audio_start == next_due
     assert [name for name, _ in trace] == ['decode', 'key', 'search', 'key']
-    assert json.loads((tmp_path/'tx_02.json').read_text())['tx_offset_hz'] == pytest.approx(hz, abs=.2)
+    assert json.loads((tmp_path/'tx_02.json').read_text())['tx_offset_hz'] == pytest.approx(
+        hz - onair.placement.DIAGONAL_HZ, abs=.2)
 
 
 def test_failed_nomination_retries_only_after_the_next_key(tmp_path, monkeypatch):

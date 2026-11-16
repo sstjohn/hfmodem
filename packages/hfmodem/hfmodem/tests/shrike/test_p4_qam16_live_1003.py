@@ -300,7 +300,7 @@ def test_recorded_repeats_deliver_once(recording):
             at = registered.observation.stream_sample
             turn.observe(registered, now=at+round(.810*FS))
             proposal = turn.decide(at+round(.920*FS)-turn.lead)
-            assert proposal and proposal.word == 'V27'
+            assert proposal and proposal.word == 'X27'
             turn.keyed(proposal.stream_sample)
         rx.new_cycle()
     assert len(delivered) == 1
@@ -321,10 +321,10 @@ def test_refused_qam_answer_keeps_key_history_and_deduplicates_source(recording)
         at = records[0].observation.stream_sample
         turn.observe(records[0], now=at+round(.810*FS))
         proposal = turn.decide(at+round(.920*FS)-turn.lead)
-        assert proposal is not None and proposal.word == 'V27'
-        previous = turn.ack_word, turn._last_ack
+        assert proposal is not None and proposal.word == 'X27'
+        previous = turn._ack_chain, turn._last_ack
         turn.refused('deadline')
-        assert (turn.ack_word, turn._last_ack) == previous
+        assert (turn._ack_chain, turn._last_ack) == previous
         assert arq._buffer_raw == before
     assert len(delivered) == 1
 

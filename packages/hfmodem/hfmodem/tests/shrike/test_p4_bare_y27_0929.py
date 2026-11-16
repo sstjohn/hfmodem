@@ -102,28 +102,28 @@ def test_body_policy_requests_the_idle_turn_with_a_body():
 def test_idle_packet_without_bytes_is_acked():
     m, _ = machine(role='irs', data='body', breakin='y27')
     m.first_body = False
-    assert decide(m, normal(status=0, data=IDLE)).word == 'V27'
+    assert decide(m, normal(status=0, data=IDLE)).word == 'X27'
 
 
 def test_data_packet_is_acked_not_broken_in_on():
     m, _ = queued()
     m.first_body = False
-    assert decide(m, normal(status=0)).word == 'V27'
+    assert decide(m, normal(status=0)).word == 'X27'
 
 
 def test_unread_packet_cannot_draw_the_bare_y27():
     m, a = queued()
-    before = bytes(a._outbuf), a._buffer_raw, m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack
+    before = bytes(a._outbuf), a._buffer_raw, m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack
     obs = replace(normal(status=0, data=IDLE), frame=None)
     p = decide(m, obs)
     # An unread packet earns only the approved seed repeat, never a turn.
     assert (p.kind, p.word, p.state, p.purpose) == (
-        Kind.WORD, 'V27', State.IRS_ANSWER, None)
+        Kind.WORD, 'V27', State.IRS_ANSWER, 'repeat-request')
     assert not p.current_slot_accepted and p.accepted_target is None
     assert p.ack_reason is p.ack_identity is None and not p.payload
     m.keyed()
     assert m.last.word == 'V27' and not m.outbox.inflight
-    assert (bytes(a._outbuf), a._buffer_raw, m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack) == before
+    assert (bytes(a._outbuf), a._buffer_raw, m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack) == before
     assert not [e for e in m.link_events if e['event'] in ('turn', 'data-reply-ack')]
 
 
@@ -275,7 +275,8 @@ def test_ws8eoc_idle_requires_a_checked_packet_for_a_bare_y27(
                if e["event"] == "Keyed" and not e.get('current_slot_accepted', True)}
     after = [e for e in run.keyed if e['audio_start'] > idle*FS
              and e['audio_start'] not in repeats]
-    assert [e['word'] for e in after] == (['Y27']*3 if crc else ['V27'])
+    # The repeat at 73.5 is acked again, so all four requests follow the idle.
+    assert [e['word'] for e in after] == (['Y27']*4 if crc else ['X27'])
     if crc:
         assert abs(after[0]['audio_start']-(idle*FS+T)) <= 48
     grants = [h for h in run.probe.heard if h.get('status') == 0x40 and h['kind'] == Kind.BODY]
@@ -284,7 +285,7 @@ def test_ws8eoc_idle_requires_a_checked_packet_for_a_bare_y27(
 
 
 def test_no_ladder_link_sends_body_then_normal_after_the_granted_y27():
-    m, _ = queued(ladder='none')
+    m, _ = queued()
     ours = request(m)
     grant = ours+T
     m.observe(word('Y27', grant, extent=.8, responds_to=ours))
@@ -300,7 +301,7 @@ def test_no_ladder_link_sends_body_then_normal_after_the_granted_y27():
 
 
 def test_refused_unread_grant_retry_keeps_the_four_key_budget():
-    m, _ = queued(ladder='none')
+    m, _ = queued()
     at = request(m)
     grant = at+round(.935*FS)
     m.observe(word('Y27', grant, extent=.8, responds_to=at))
@@ -355,7 +356,7 @@ def test_k0003_long_request_grant_sequence_keeps_one_turn_machine(answer):
     long = r._packet(audio[:round((1533.23-base)*FS)], 0)
     assert long.kind == Kind.LONG and long.frame.data.startswith(b'FF\r')
     assert long.frame.status.byte == 0x42
-    m, _ = queued(ladder='none')
+    m, _ = queued()
     m.observe(RegisteredObservation(long, Registered.NEW), now=long.stream_sample+round(3.31*FS))
     due = long.stream_sample+round(3.4*FS)
     p = m.decide(due-m.lead)

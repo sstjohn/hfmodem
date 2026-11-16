@@ -20,7 +20,7 @@ from hfmodem.tests.shrike.test_p3_input_loss import LOST, corroborated
 from hfmodem.tests.shrike.test_p3level_session import _Session
 
 
-AUDIO = object()
+AUDIO = np.zeros(0, np.float32)
 PACKETS = ('_p3_packet', '_p2_packet', '_p1_packet')
 
 
@@ -565,7 +565,7 @@ def test_existing_receiver_p4_probe_and_input_loss_routing_order(route):
 
     def p4_read(samples, origin, **kwargs):
         assert samples is audio and origin == 1700
-        assert kwargs == {'carrier_end': 1900, 'whole': True}
+        assert kwargs == {'carrier_end': 1900, 'whole': True, 'behind_key': False}
         trace.append('p4')
         if route == 'consumed':
             p4.consumed = object()

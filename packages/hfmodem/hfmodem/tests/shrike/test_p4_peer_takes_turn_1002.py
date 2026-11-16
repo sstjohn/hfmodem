@@ -212,7 +212,7 @@ def test_1018_replay_keeps_grant_retry_budget_without_peer_tail():
 
 
 def grant_machine(normal_ack='parity'):
-    m, a = machine(data='chirp', ladder='chirp', normal_ack=normal_ack, breakin='body')
+    m, a = machine(data='chirp',  normal_ack=normal_ack, breakin='body')
     short = round(38.803*FS)
     m._short(short, 0)
     m.keyed()
@@ -228,7 +228,7 @@ def grant_machine(normal_ack='parity'):
 
 def take(m):
     at = 1968576
-    shared = (m.ack_word, m._last_ack, m.acked_counter,
+    shared = (m._ack_chain, m._last_ack, m.acked_counter,
               m.first_body, m._peer_generation)
     obs = Observation(Kind.NORMAL, FS, 0, at, at, .805, 0., 0., placed=True,
                       peer_raster_tail=True)
@@ -236,7 +236,7 @@ def take(m):
     m.silence(round(41.932*FS)-m.lead)
     assert m.decide(round(41.932*FS)-m.lead) is None
     assert m.state == State.IRS_YIELD and m.grants == 1
-    assert (m.ack_word, m._last_ack, m.acked_counter,
+    assert (m._ack_chain, m._last_ack, m.acked_counter,
             m.first_body, m._peer_generation) == shared
 
 
@@ -298,7 +298,7 @@ def test_1018_muted_take_restores_grant_clock(monkeypatch):
 
 
 def test_0058_slot_reply_keeps_existing_grant_path():
-    m, _ = machine(data='hold', ladder='long', normal_ack='v27')
+    m, _ = machine(data='none', normal_ack='parity')
     at = round(67.516*FS)
     m._body(at, 0x40, State.ISS_GRANT)
     m.keyed()
@@ -309,7 +309,7 @@ def test_0058_slot_reply_keeps_existing_grant_path():
 
 
 def test_0355_two_empty_grants_still_reach_third_slot_reply():
-    m, _ = machine(data='hold', ladder='long')
+    m, _ = machine(data='none')
     grant_at = round(34.412*FS)
     m._body(grant_at, 0x40, State.ISS_GRANT)
     m.keyed()
@@ -325,7 +325,7 @@ def test_0355_two_empty_grants_still_reach_third_slot_reply():
     m.observe(word('V27', at, extent=.245, responds_to=grant.stream_sample),
               now=at+round(.28*FS))
     p = m.decide(at+round(.30*FS))
-    assert p is not None and p.state == State.ISS_LADDER
+    assert p is not None and p.state == State.ISS_HOLD and p.kind == Kind.NORMAL
     assert any(e['event'] == 'turn' and e['responds_to'] == grant.stream_sample
                for e in m.link_events)
 

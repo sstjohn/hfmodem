@@ -28,7 +28,8 @@ def test_step_after_an_ack_is_on_our_raster(tau, late):
 
 @pytest.mark.parametrize('step', ['ladder', 'body', 'chirp', 'breakin', 'grant'])
 def test_every_word_triggered_packet_is_on_our_raster(step):
-    m, a = machine(data='chirp' if step == 'chirp' else 'body', prekey_lead=2131/FS)
+    m, a = machine(data={'ladder': 'long', 'chirp': 'chirp'}.get(step, 'body'),
+                   prekey_lead=2131/FS)
     a.on_host_data(b'A'*90)
     if step == 'ladder':
         m._short(0, 1)
@@ -38,7 +39,7 @@ def test_every_word_triggered_packet_is_on_our_raster(step):
         name = 'V27'
     else:
         m._data(0)
-        name = 'X27' if step == 'chirp' else 'V27'
+        name = 'X27'
     m.keyed()
     onset = round((3.4232 if step == 'chirp' else .9432)*FS)
     now = onset+round(.250*FS)
@@ -47,7 +48,7 @@ def test_every_word_triggered_packet_is_on_our_raster(step):
 
 
 def test_deferred_confirmation_skips_only_the_missed_slot():
-    m, a = machine(data='body', prekey_lead=2131/FS)
+    m, a = machine(data='long', prekey_lead=2131/FS)
     a.on_host_data(b'A'*31)
     m._short(0, 1)
     m.keyed()

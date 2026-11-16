@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from hfmodem.shrike import p4host, p4long, p4oracle, p4robustrx, p4rx, p4short, p4turn, session
+from hfmodem.shrike import p4frame, p4host, p4long, p4longdecode, p4longrates, p4longtx, p4oracle, p4robustrx, p4rx, p4short, p4turn, session
 from hfmodem.shrike.p4receiver import Clock, Expect, P4Receiver
 from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.tests.shrike.p4_chirp_deadline_support import FS, replay
@@ -31,12 +31,20 @@ def receiver():
 @pytest.mark.parametrize('partial', [False, True])
 def test_failed_robust_long_cannot_be_reused_as_a_normal_placement(monkeypatch, coherence, partial):
     rx = receiver()
-    decode = Mock(return_value=None)
+    # Receiver integration constructs a retained shared-engine job; it no
+    # longer calls the standalone compatibility decoder. A CRC miss must keep
+    # that robust job separate from normal placement just as before.
+    g = p4longdecode.geometry(3)
+    members = Mock(return_value=(p4longdecode.LongMember(g, np.ones(g.serialized_size)),))
+    advance = Mock(return_value=None)
     monkeypatch.setattr(p4oracle, 'placed_despread',
                         lambda *a, **kw: (coherence, np.zeros(373), 0))
-    monkeypatch.setattr(p4robustrx, 'decode_symbols', decode)
+    monkeypatch.setattr(p4robustrx, 'build_members', members)
+    monkeypatch.setattr(rx, '_advance_long', advance)
     assert rx._long(np.zeros(round(3.3*FS)), AT) == (None, coherence)
-    assert decode.call_count == int(coherence >= p4oracle.ROBUST_FRACTION_KNEE)
+    # Coherence ranks work; it no longer excludes parity recovery.
+    members.assert_called_once()
+    advance.assert_called_once()
     entry = rx._robust_long_cache[(AT, rx.clock.cfo_hz)]
     place = Mock(return_value=(.1, p4short.GEOM, rx.clock.cfo_hz))
     monkeypatch.setattr(p4short, 'place_long', place)
@@ -44,6 +52,8 @@ def test_failed_robust_long_cannot_be_reused_as_a_normal_placement(monkeypatch, 
                     partial=partial) == (None, .1)
     assert rx._robust_long_cache[(AT, rx.clock.cfo_hz)] is entry
     assert not rx._long_cache
+    job, = rx._long_jobs.values()
+    assert job['obs'].frame is None and job['search'].members == members.return_value
     assert not rx.observations and not rx.registrations
     place.assert_called_once()
 
@@ -73,6 +83,33 @@ def test_rejected_full_normal_long_stays_unplaced_on_later_reads(monkeypatch):
         obs, _ = rx._long(np.zeros(4*FS), AT, placed=True, partial=partial)
         assert obs is None
     assert place.call_count == 2
+
+
+@pytest.mark.parametrize('valid', [False, True])
+def test_weak_full_normal_long_observation_requires_crc(monkeypatch, valid):
+    rx = receiver()
+    monkeypatch.setattr(p4rx, 'audio_to_baseband', lambda *a: np.zeros(100000))
+    place = Mock(side_effect=[(.7, p4short.GEOM, 2.62), (.2, p4short.GEOM, 2.62)])
+    monkeypatch.setattr(p4short, 'place_long', place)
+    observe = Mock(return_value=object())
+    monkeypatch.setattr(p4longrates, 'observe_body', observe)
+    wire = p4frame.encode_field(bytes(range(203)), p4frame.Status.from_byte(2))
+    fields = 8*(1-2.0*p4longtx.coded_bits(wire)) if valid else np.ones(4968)
+    monkeypatch.setattr(p4longrates, 'build_members', lambda observed:
+                        (p4longdecode.LongMember(p4longdecode.geometry(5), fields),))
+    pending, _ = rx._long(np.zeros(FS), AT, placed=True, partial=True)
+    # Prefix readiness alone cannot claim complete-body carrier liveness.
+    assert pending.provisional and not pending.placed and pending.frame is None
+    full, coherence = rx._long(np.zeros(round(3.355*FS)), AT, placed=True)
+    assert full is not None and coherence == .2
+    assert full.placed == valid and full.provisional != valid
+    assert (full.frame is not None) == valid
+    if valid:
+        assert full.frame == p4frame.decode_field(wire, data_bytes=203)
+    assert rx._long(np.zeros(4*FS), AT, placed=True)[0] is full
+    observe.assert_called_once()
+    assert place.call_count == 2
+    assert not rx.observations and not rx.registrations
 
 
 @pytest.mark.parametrize('complete', [False, True])
@@ -123,7 +160,7 @@ def test_refinement_skips_a_missing_observation(monkeypatch, kind, missing_key):
     decode.assert_not_called()
 
 
-def test_1112_replay_deduplicates_c2_and_requests_queued_turn(monkeypatch):
+def test_1112_replay_deduplicates_c2_and_acks_each_repeat_again(monkeypatch):
     # A different reader may already have allocated many ownership nonces.
     monkeypatch.setattr(p4turn, '_peer_watch_generations', count(1000))
     arm = 'onair-1003-1112'
@@ -138,21 +175,29 @@ def test_1112_replay_deduplicates_c2_and_requests_queued_turn(monkeypatch):
         return work
 
     accepted = []
-    recovery = []
+    turns, expired = [], []
     observe = p4turn.P4Turn.observe
 
     def observed(self, reg, **kwargs):
-        watch = self.peer_watch
-        result = observe(self, reg, **kwargs)
-        obs = reg.observation
-        if obs.stream_sample == 1608445 and obs.frame is not None and not obs.provisional:
-            held = self._held_answer
-            recovery.append(dict(reg=reg, watch=watch, now=kwargs['now'], state=self.state,
-                last=self.last, held=held, deferred=self._deferred, next=self._next,
-                inflight=self.outbox.inflight, credit=self.outbox.arq.tx_acked_bytes))
-        return result
+        if not turns:
+            turns.append(self)
+        assert self is turns[0]
+        return observe(self, reg, **kwargs)
 
     monkeypatch.setattr(p4turn.P4Turn, 'observe', observed)
+    work_expired = P4Receiver._long_work_expired
+
+    def checked_expiry(self, onset, **kwargs):
+        result = work_expired(self, onset, **kwargs)
+        if abs(onset-1608445) < FS//20:
+            limits = self.long_deadline(onset, sf8=True)
+            expired.append(dict(onset=onset, expired=result,
+                now=limits.work.sample_now(), publishable=limits.publishable(),
+                watch=self.peer_watch,
+                jobs=[key for key in self._long_jobs if abs(key[0]-onset) < FS//20]))
+        return result
+
+    monkeypatch.setattr(P4Receiver, '_long_work_expired', checked_expiry)
     accept = p4host.P4Host.accept
 
     def tracked(self, frame, **kwargs):
@@ -168,51 +213,57 @@ def test_1112_replay_deduplicates_c2_and_requests_queued_turn(monkeypatch):
 
     assert max(e.get('cycle_end_sample', 0) for e in result['events']) > round(36.8*FS)
     c2 = [e for e in result['heard'] if e.get('status') == 2 and not e['provisional']]
-    assert len(c2) == 3
-    assert [e['onset_sample'] for e in c2] == [1068446, 1248445, 1608445]
+    # The causal 369-symbol fit moves the second onset by one sample. Each
+    # repeat is acked again (WS8EOC 04:48Z), never broken into, so the watch
+    # reads every copy.
+    assert [e['onset_sample'] for e in c2] == [1068446, 1248444, 1428449, 1608444]
     assert len({e['data'] for e in c2}) == 1
-    assert len(accepted) == 3
-    assert accepted[0] == (True, False)
-    assert all(row == (False, True) for row in accepted[1:])
-    # Recovery is received after the third real request has already keyed.
+    assert accepted == [(True, False)] + [(False, True)]*3
     keys = [e for e in result['events'] if e['event'] == 'Keyed']
     first_answer, = [e for e in keys if e['at'] == 1231646]
-    assert first_answer['word'] == 'T27' and first_answer['state'] == 'IRS_ANSWER'
+    assert first_answer['word'] == 'V27' and first_answer['state'] == 'IRS_ANSWER'
     first_decision, = [e for e in result['events']
                        if e['event'] == 'Decision' and e['at'] == 1068446]
     assert first_decision['now_sample'] <= first_decision['decision_at']
     assert first_decision['proposed_at'] == 1231646
-    requests = [e for e in keys if e.get('state') == 'IRS_BREAKIN']
-    assert [e['at'] for e in requests] == [1411645, 1591645, 1771645]
-    assert all(e.get('kind') == 'word' and e.get('word') == 'Y27'
-               and not e.get('payload') for e in requests)
+    assert not [e for e in keys if e.get('state') == 'IRS_BREAKIN']
+    acks = [e for e in keys if e['at'] > 1231646]
+    assert [e['at'] for e in acks] == [1411644, 1591649, 1771644]
+    assert all(e.get('kind') == 'word' and e.get('word') == 'V27'
+               and e.get('state') == 'IRS_ANSWER' for e in acks)
     for emission, protected in zip(
-            [e for e in result['emissions'] if e.get('word') == 'Y27'],
-            [1428445, 1608445, 1788445]):
+            [e for e in result['emissions'] if e.get('word') == 'V27' and e['audio_start'] > 1231646],
+            [1428444, 1608444, 1788444]):
         assert emission['audio_end'] < protected
-    snapshot, = recovery
-    reg = snapshot['reg']
-    assert reg.outcome == p4turn.Registered.CONFIRMED
-    # Generation numbers are process-wide nonces, not this replay's ordinal.
-    # The recovering observation must belong to the watch live when it arrived.
-    assert snapshot['watch'] is not None
-    assert reg.peer_watch_generation == snapshot['watch'].generation
-    assert reg.responds_to is None
-    assert reg.replaced.kind == p4turn.Kind.SHORT and reg.replaced.provisional
-    assert reg.replaced.stream_sample == 1609723
-    assert snapshot['now'] == 1786044 and snapshot['last'].stream_sample == 1771645
-    assert snapshot['last'].word == 'Y27' and snapshot['state'] == p4turn.State.IRS_ANSWER
-    held = snapshot['held']
-    assert held.onset == 1608445 and held.context['accepted']
-    assert held.context['body'] is reg.observation
-    assert held.answer.ack_identity == (2, reg.observation.frame.data)
-    assert snapshot['deferred'][0] == 1608445
-    assert snapshot['deferred'][1]['due'] == 1951645
-    assert snapshot['deferred'][1]['body'] is reg.observation
-    assert not snapshot['inflight'] and snapshot['credit'] == 0
-    assert not [e for e in keys if e['at'] == 1951645]
-    assert c2[-1]['received_at_sample'] == 1786044
-    assert c2[-1]['capture_end_sample'] == 1783354
+    assert expired
+    watch_cycle, = [e for e in result['events']
+                    if e['event'] == 'PeerWatchCycle' and e['at'] == 1608444]
+    assert watch_cycle['support_end'] == 1767213
+    # The watched prefix is prepared while input arrives. Those
+    # checks precede the parent's V27 and may not construct/publish a body job.
+    # Complete-body work still waits behind that actual key and stays expired.
+    prefix = [snapshot for snapshot in expired if snapshot['now'] < 1771644]
+    complete = [snapshot for snapshot in expired if snapshot['now'] >= 1771644]
+    assert prefix and complete
+    assert any(snapshot['now'] == 1608449+round(.810*FS) for snapshot in prefix)
+    assert any(snapshot['now'] == watch_cycle['support_end'] for snapshot in prefix)
+    for snapshot in prefix:
+        assert snapshot['onset'] == 1608449
+        assert 1608449+round(.810*FS) <= snapshot['now'] <= watch_cycle['support_end']
+        assert not snapshot['expired'] and snapshot['publishable'] and not snapshot['jobs']
+        assert snapshot['watch'] is not None
+        assert snapshot['watch'].generation == watch_cycle['generation']
+    for snapshot in complete:
+        assert snapshot['onset'] == 1608444 and snapshot['expired']
+        assert snapshot['now'] > 1771644 and not snapshot['publishable']
+        assert not snapshot['jobs']
+        assert snapshot['watch'] is not None
+        assert snapshot['watch'].generation == watch_cycle['generation']
+    turn, = turns
+    assert not turn.outbox.inflight and turn.outbox.arq.tx_acked_bytes == 0
+    assert turn._deferred is None
+    assert turn._held_answer is None or turn._held_answer.onset == 1248444
+    assert not [e for e in keys if e['at'] >= 1951644]
     assert all(not e.get('payload') for e in keys)
     assert result['buffered'] == len(bytes.fromhex(result['source']))
     assert not [e for e in result['events'] if e['event'] == 'Refused']

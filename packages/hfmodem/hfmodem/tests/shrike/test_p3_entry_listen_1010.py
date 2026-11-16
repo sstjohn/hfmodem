@@ -16,6 +16,10 @@ from hfmodem.tests.shrike.test_granted_entry_retry import granted
 from hfmodem.tests.shrike.test_grid import _Bench
 from hfmodem.tests.shrike.test_late_entry_loop import run_late, MESSAGE, SLOT
 
+# The ISS turns below open on a changeover with no fresh pair, which the
+# default answers instead of keying; these keep the held-grid keying.
+HELD = ('--p3-breakin-unplaced', 'held')
+
 FS = onair.FS
 FOLDER = evidence.CAPTURES / 'onair-20261010T234613641109Z-f8689e8a-9847-4b5c-a8b7-988694aa49ef'
 
@@ -333,7 +337,7 @@ def test_a_sweep_too_slow_for_the_key_runs_behind_it(monkeypatch, tmp_path):
     clip, anchor = grant_train()
     got = run_late(monkeypatch, tmp_path, 3, False, d=.111,
                    grant_pcm=clip, grant_anchor=anchor, acquire_cost=.05,
-                   match_cost=.001)
+                   match_cost=.001, options=HELD)
     entries = got['peer'].entries
     assert len(entries) >= 3 and np.diff(entries[:3]).tolist() == [SLOT, SLOT]
     # Since 1c06c57c4 the tape's end draws our changeover on the held grid.
@@ -353,7 +357,7 @@ def test_a_slow_answer_search_keeps_every_slot_through_the_iss_turn(monkeypatch,
     clip, anchor = grant_train()
     got = run_late(monkeypatch, tmp_path, 3, False, d=.111,
                    grant_pcm=clip, grant_anchor=anchor, acquire_cost=.03,
-                   match_cost=.001)
+                   match_cost=.001, options=HELD)
     assert 'changeover -> ISS' in got['log']
     assert not re.search(rf'SLOT \d+ {onair.SLOT_GONE}', got['log']), got['log']
     assert onair.LATE_KEY not in got['log'], got['log']
@@ -375,15 +379,15 @@ def test_repeat_match_uses_observed_prefix_weight_in_both_senses(sense):
     assert p1rx.cs_anchored(signal, 960/FS) is None
 
 
-@pytest.mark.parametrize('condition', ['uninvited', 'robust', '6a9', 'fallback', 'reset'])
+@pytest.mark.parametrize('condition', ['uninvited', 'robust', 'pactor2-only', 'fallback', 'reset'])
 def test_entry_grant_state_boundaries(condition):
     host, rx, g, _, origin, _ = setup_entry()
     if condition == 'uninvited':
         host._uninvited_entry = True
     elif condition == 'robust':
         host.robust_entry_from_bridge = True
-    elif condition == '6a9':
-        host.p1_6a9 = True
+    elif condition == 'pactor2-only':
+        host.pactor2_only = True
     elif condition == 'fallback':
         host.fall_back('pin fallback')
         assert host._entry_grant is None
@@ -704,7 +708,10 @@ def test_cached_complete_grant_keeps_p4_admission_preemption(admitted, expected)
     origin = g._p3_keyed_reply[2]
     audio = np.pad(onair._trim_silence(pactor1.control_signal(pactor1.CS_59A)),
                    (at-origin, 720))
+    # Admission without P4 heard is the probe's: a called station's only
+    # watches, behind the key (`_SessionRx.p4_watching`).
     host.arq.p4_admitted = admitted
+    host.peer.p4_probe = SimpleNamespace(requested=False) if admitted else None
     requests = host.arq._upgrade_requests
     with patch.object(rx, 'p4', SimpleNamespace(expected=expected, consumed=True)), \
             patch.object(rx, '_p4_read') as read, patch.object(rx, '_on') as deliver:

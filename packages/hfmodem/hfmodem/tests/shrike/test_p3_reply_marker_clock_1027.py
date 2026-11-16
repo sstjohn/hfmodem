@@ -4,7 +4,7 @@
 import pytest
 
 from hfmodem.shrike import onair, placement
-from hfmodem.shrike.p3trial import ReplyClock, CYCLE
+from hfmodem.shrike.p3trial import ReplyClock, CYCLE, ROTATION
 from hfmodem.tests.shrike.test_p3_timing_trial import setup, receive
 
 
@@ -54,8 +54,11 @@ def test_k4msu_0546_returning_turn_does_not_reuse_old_data_marker_gap(period):
     assert residue(clock.target(0, data+period-120, form=(False, 1))-anchor) == -30
 
 
-def test_ws8eoc_0528_replies_sit_on_the_aim_past_the_smoothed_raster(tmp_path):
+@pytest.mark.parametrize('instant', ['raster', 'peer'])
+def test_ws8eoc_0528_replies_sit_on_the_aim_past_the_smoothed_raster(tmp_path, instant):
     s, tx, live, grid = setup(tmp_path, 'B', delay=234)
+    if instant == 'peer':
+        tx.p3_control_instant = instant
     entry = tx.timing_trial.entry_phase
     tx.timing_trial = None
     tx.reply_clock = ReplyClock(entry_phase=entry)
@@ -79,7 +82,12 @@ def test_ws8eoc_0528_replies_sit_on_the_aim_past_the_smoothed_raster(tmp_path):
         onair._p3_place_reply(grid, tx, index)
         moves.append(residue(grid.boundary(index)+lead-initial))
         smoothed = tx.reply_clock.smoothed((False, 1), grid._p3_peer[0])
-        assert grid.boundary(index) + lead == smoothed + round(onair.P3_ANSWER_S * 48000)
+        peer_pulse = smoothed + round(onair.P3_ANSWER_S * 48000)
+        assert tx.reply_clock.pulse_epoch == peer_pulse
+        # Keep the smoothed aim for peer and CS3;
+        # default short controls hold our own +600 ms pulse raster.
+        expected = entry + index * CYCLE + ROTATION if instant == 'raster' else peer_pulse
+        assert grid.boundary(index) + lead == expected
     # The ordinary decoder alternates between positions 120 samples apart, and
     # its own raster takes each reading at a quarter: no reply moves by more
     # than a quarter of that, and none inherits the 240-sample offset between
@@ -87,10 +95,13 @@ def test_ws8eoc_0528_replies_sit_on_the_aim_past_the_smoothed_raster(tmp_path):
     assert all(abs(b - a) <= 60 for a, b in zip(moves[1:], moves[2:])), moves
 
 
-def test_k4msu_0538_long_transition_keeps_the_aimed_phase_and_body_clear(tmp_path):
+@pytest.mark.parametrize('instant', ['raster', 'peer'])
+def test_k4msu_0538_long_transition_keeps_the_aimed_phase_and_body_clear(tmp_path, instant):
     from hfmodem.tests.shrike.test_p3_reply_placement import key_ack
 
     s, tx, live, grid = setup(tmp_path, 'B', delay=234)
+    if instant == 'peer':
+        tx.p3_control_instant = instant
     entry = tx.timing_trial.entry_phase
     tx.timing_trial = None
     tx.reply_clock = ReplyClock(entry_phase=entry)
@@ -117,13 +128,20 @@ def test_k4msu_0538_long_transition_keeps_the_aimed_phase_and_body_clear(tmp_pat
         key_ack(tx, grid, slot)
         assert not tx.refused
         gap = (tx.tx_audio_start-phase) % period
+        pulse = tx.tx_audio_start + min(tx.tx_pulse_offsets)
         assert width < gap < period-11332
         if not long_cycle:
-            assert gap + min(tx.tx_pulse_offsets) == round(onair.P3_ANSWER_S * 48000)
+            # Only the short data instant changes;
+            # peer retains this capture's old aim, and long answers keep theirs.
+            if instant == 'peer':
+                assert gap + min(tx.tx_pulse_offsets) == round(onair.P3_ANSWER_S * 48000)
+            else:
+                assert pulse == entry + slot * CYCLE + ROTATION
+        else:
+            smoothed = tx.reply_clock.smoothed((False, 1), phase)
+            assert pulse == smoothed + round(onair.P3_LONG_ANSWER_S * 48000)
         moves.append(residue(tx.tx_audio_start-initial))
-    # The short reply sits on its answer slot, and the long ones on the same
-    # comb. In the recording, the short ACK moved -60 samples and the
-    # first long another -180; neither movement belongs to these same-phase
-    # packets, and the long replies keep the aimed phase to the clock's own
-    # quarter-gain tracking.
+    # In the recording, the short ACK moved -60 samples and the first long
+    # another -180; neither movement belongs to these same-phase packets.
+    # Long replies keep the peer aim under both short-instant policies.
     assert all(abs(m - moves[1]) <= 30 for m in moves[1:]), moves

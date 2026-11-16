@@ -14,7 +14,9 @@ from __future__ import annotations
 import ast
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
@@ -22,6 +24,7 @@ import numpy as np
 import pytest
 
 from hfmodem.core import audio
+from hfmodem.tests import hermetic
 from hfmodem.core.audio import (
     AudioError, Block, BurstInvalidated, CycleLane, RollingLane, StationAudio,
     ReplayAudio, drop_output, play_drained,
@@ -75,6 +78,7 @@ class _Status:
 
 class _Times:
     def __init__(self, adc, dac):
+        self.currentTime = adc
         self.inputBufferAdcTime = adc
         self.outputBufferDacTime = dac
 
@@ -82,10 +86,13 @@ class _Times:
 class FakeStream:
     """Enough of sounddevice.Stream to drive the callback deterministically."""
 
-    def __init__(self, cb, *, blocksize=128, lat=1152, latency=(0.01, 0.01)):
+    def __init__(self, cb, *, blocksize=128, lat=1152, latency=(0.01, 0.01),
+                 channels=1):
         self.cb, self.blocksize, self.lat, self.latency = cb, blocksize, lat, latency
+        self.channels = channels
         self.t = 0.0
         self.out_history: list[np.ndarray] = []
+        self.out_channels_history: list[np.ndarray] = []
 
     def start(self):
         return None
@@ -99,32 +106,117 @@ class FakeStream:
     def run(self, blocks=1, *, data=None, status=None, lat=None):
         for i in range(blocks):
             n = self.blocksize
-            indata = np.zeros((n, 1), np.float32)
+            indata = np.zeros((n, self.channels), np.float32)
             if data is not None:
                 chunk = data[i * n:(i + 1) * n]
-                indata[:len(chunk), 0] = chunk
-            outdata = np.zeros((n, 1), np.float32)
+                if chunk.ndim == 1:
+                    indata[:len(chunk), 0] = chunk
+                else:
+                    indata[:len(chunk)] = chunk
+            outdata = np.zeros((n, self.channels), np.float32)
             offset = (self.lat if lat is None else lat) / audio.CARD_RATE_HZ
             # `status if None` rather than `status or ...`: a priming-only status
             # is falsy, so `or` would silently replace the state under test.
             self.cb(indata, outdata, n, _Times(self.t, self.t + offset),
                     _Status() if status is None else status)
             self.out_history.append(outdata[:, 0].copy())
+            self.out_channels_history.append(outdata.copy())
             self.t += n / audio.CARD_RATE_HZ
 
 
-def station(monkeypatch, **kw) -> tuple[StationAudio, FakeStream]:
+def station(monkeypatch, *, channels=1, output_device="fake-out", **kw
+            ) -> tuple[StationAudio, FakeStream]:
     made = {}
 
     class FakeSd:
         @staticmethod
-        def Stream(callback=None, blocksize=128, **_):
-            made["s"] = FakeStream(callback, blocksize=blocksize, **kw)
+        def Stream(callback=None, blocksize=128, channels=1, **_):
+            made["s"] = FakeStream(callback, blocksize=blocksize, channels=channels, **kw)
             return made["s"]
 
+        @staticmethod
+        def InputStream(callback, **options):
+            return FakeSd.Stream(
+                callback=lambda data, out, frames, t, status:
+                    callback(data, frames, t, status), **options)
+
     monkeypatch.setitem(__import__("sys").modules, "sounddevice", FakeSd)
-    sa = StationAudio(input_device="fake-in", output_device="fake-out")
+    sa = StationAudio(input_device="fake-in", output_device=output_device,
+                      channels=channels)
     return sa, made
+
+
+@pytest.mark.parametrize("output_device", [None, "fake-out"])
+def test_station_opens_requested_channels(monkeypatch, output_device):
+    sa, made = station(monkeypatch, channels=2, output_device=output_device)
+    monkeypatch.setattr(FakeStream, "start", lambda self: self.run(audio._LAT_MEDIAN_N))
+    sa.open()
+    try:
+        assert sa.channels == made["s"].channels == 2
+    finally:
+        sa.close()
+
+
+@pytest.mark.parametrize("channels", [0, -1, 2.0, "2", None])
+def test_station_rejects_invalid_channels(channels):
+    with pytest.raises(ValueError, match="channels"):
+        StationAudio(input_device="fake-in", output_device="fake-out", channels=channels)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_station_mirrors_transmission_to_all_channels(monkeypatch, streaming):
+    sa, _ = station(monkeypatch, channels=2)
+    s = FakeStream(sa._callback, channels=2)
+    sa._stream = s
+    s.run(audio._LAT_MEDIAN_N)
+    s.out_channels_history.clear()
+    start = sa.samples
+    offset = 3 * s.blocksize + 37
+    at = start + sa.lat + offset
+    samples = np.arange(1, 201, dtype=np.float32) / 400
+    submitted = []
+    sa.subscribe(SimpleNamespace(push=lambda block: None,
+                                 push_tx=lambda n0, pcm: submitted.append(pcm)))
+    if streaming:
+        tx = sa.arm_stream(at, capacity=512)
+        tx.write(samples)
+        tx.close()
+    else:
+        sa.arm_burst(samples, at=at)
+    s.run(6)
+    assert sa.failure is None
+    expected = np.zeros(6 * s.blocksize, np.float32)
+    expected[offset:offset + len(samples)] = samples
+    out = np.concatenate(s.out_channels_history)
+    np.testing.assert_array_equal(out[:, 0], expected)
+    np.testing.assert_array_equal(out[:, 1], expected)
+    np.testing.assert_array_equal(np.concatenate(submitted), expected)
+
+
+def test_station_capture_uses_only_first_channel(monkeypatch):
+    sa, _ = station(monkeypatch, channels=2)
+    lanes = [sa.subscribe(CycleLane(audio.CARD_RATE_HZ)),
+             sa.subscribe(RollingLane(audio.CARD_RATE_HZ, decode=lambda buf: []))]
+    s = FakeStream(sa._callback, channels=2)
+    data = np.column_stack((np.arange(s.blocksize, dtype=np.float32) / 256,
+                            np.full(s.blocksize, -1, np.float32)))
+    s.run(data=data)
+    assert sa.failure is None
+    for lane in lanes:
+        np.testing.assert_array_equal(lane._q[0].samples, data[:, 0])
+
+
+def test_station_callback_failure_zeroes_all_channels(monkeypatch):
+    sa, _ = station(monkeypatch, channels=2)
+
+    def fail(block):
+        raise RuntimeError("failed")
+
+    sa.subscribe(SimpleNamespace(push=fail))
+    out = np.ones((128, 2), np.float32)
+    sa._callback(out.copy(), out, 128, _Times(0, .024), _Status())
+    assert isinstance(sa.failure, RuntimeError)
+    assert not out.any()
 
 
 # --- the ADC/DAC offset is a median, not one reading ---------------------------
@@ -167,12 +259,13 @@ def _fix23_station(monkeypatch, *, host="Windows WASAPI", varying=True,
         active = True
 
         def start(self):
-            for t in stamps:
+            for stamp in stamps:
+                t = stamp() if callable(stamp) else stamp
                 data = np.zeros((self.blocksize, 1), np.float32)
                 out = np.ones_like(data)
                 self.cb(data, out, self.blocksize, t, _Status())
                 self.out_history.append(out[:, 0].copy())
-            self.t = stamps[-1].inputBufferAdcTime + self.blocksize / audio.CARD_RATE_HZ
+            self.t = t.inputBufferAdcTime + self.blocksize / audio.CARD_RATE_HZ
 
     made = []
 
@@ -185,6 +278,222 @@ def _fix23_station(monkeypatch, *, host="Windows WASAPI", varying=True,
         Stream=stream, query_devices=lambda device: {"hostapi": 3},
         query_hostapis=lambda api: {"name": host}))
     return StationAudio(input_device="fake-in", output_device="fake-out", blocksize=128), made
+
+
+class _LiveTimes:
+    def __init__(self, clock):
+        self.currentTime = clock()
+        self.inputBufferAdcTime = self.currentTime - .010
+        self.outputBufferDacTime = self.currentTime + .014
+
+
+def test_realtime_callback_stamps_use_monotonic_domain(monkeypatch):
+    sa, _ = _fix23_station(monkeypatch, host="ALSA", stamps=[
+        lambda: _LiveTimes(audio.time.time) for _ in range(audio._LAT_MEDIAN_N)])
+    lane = sa.subscribe(audio.StreamLane(audio.CARD_RATE_HZ))
+    sa.open()
+    try:
+        block = lane._q[-1]
+        assert sa.lat == round(.024 * audio.CARD_RATE_HZ)
+        assert 0 < sa.sample_now() - block.n0 < .5 * audio.CARD_RATE_HZ
+        assert abs(sa.dac_time(block.n0) - audio.time.monotonic()) < .5
+        assert abs(block.adc_time - audio.time.monotonic()) < .5
+        sa.wait_until_dac(block.n0 - audio.CARD_RATE_HZ,
+                          deadline=audio.time.monotonic() + .5)
+    finally:
+        sa.close()
+
+
+def _realtime_capture(monkeypatch, *, offset=1_700_000_000.):
+    clock = SimpleNamespace(now=1000., offset=offset)
+    monkeypatch.setattr(audio.time, "monotonic", lambda: clock.now)
+    monkeypatch.setattr(audio.time, "time", lambda: clock.now + clock.offset)
+    sa = StationAudio(input_device="fake-in", output_device="fake-out", blocksize=128)
+    lane = sa.subscribe(audio.StreamLane(audio.CARD_RATE_HZ))
+
+    def stamp():
+        current = clock.now + clock.offset - .0002
+        return SimpleNamespace(currentTime=current, inputBufferAdcTime=current - .010,
+                               outputBufferDacTime=current + .014)
+
+    def deliver(t=None):
+        data = np.zeros((sa.blocksize, 1), np.float32)
+        sa._callback(data, data.copy(), sa.blocksize, stamp() if t is None else t, _Status())
+        assert sa.failure is None
+
+    return clock, sa, lane, stamp, deliver
+
+
+def test_realtime_wall_step_between_stamp_and_conversion_keeps_capture_continuous(monkeypatch):
+    clock, sa, lane, stamp, deliver = _realtime_capture(monkeypatch)
+    deliver()
+    before, anchor = sa.sample_now(), sa._last[0]
+    period = sa.blocksize / audio.CARD_RATE_HZ
+    clock.now += period
+    frozen = stamp()
+    clock.offset += 3600
+    deliver(frozen)
+    during, stale_anchor = sa.sample_now(), sa._last[0]
+    clock.now += period
+    deliver()
+    assert sa.lost == 0
+    assert not lane.faults
+    assert during - before == pytest.approx(sa.blocksize, abs=.1)
+    assert sa.sample_now() - during == pytest.approx(sa.blocksize, abs=.1)
+    assert stale_anchor - anchor == pytest.approx(period, abs=1e-6)
+    assert sa._last[0] - stale_anchor == pytest.approx(period, abs=1e-6)
+    assert [b.n0 for b in lane._q] == [0, 128, 256]
+
+
+def test_realtime_slow_clock_read_keeps_capture_continuous(monkeypatch):
+    clock, sa, lane, stamp, deliver = _realtime_capture(monkeypatch)
+    deliver()
+    period = sa.blocksize / audio.CARD_RATE_HZ
+    clock.now += period
+    frozen = stamp()
+    wall = clock.now + clock.offset
+    # A read delayed by 5 ms, followed by another 5 ms between w0 and w1.
+    reads = iter([wall + .005, wall + .010])
+    with monkeypatch.context() as slow:
+        slow.setattr(audio.time, "time", lambda: next(reads, wall))
+        deliver(frozen)
+    clock.now += period
+    deliver()
+    assert sa.lost == 0
+    assert not lane.faults
+    assert [b.n0 for b in lane._q] == [0, 128, 256]
+
+
+def test_realtime_backward_wall_step_inside_bracket_keeps_capture_continuous(monkeypatch):
+    clock, sa, lane, stamp, deliver = _realtime_capture(monkeypatch)
+    deliver()
+    anchor = sa._last[0]
+    period = sa.blocksize / audio.CARD_RATE_HZ
+    clock.now += period
+    frozen = stamp()
+    wall = clock.now + clock.offset
+    reads = iter([wall, wall - 3600])
+    with monkeypatch.context() as stepped:
+        stepped.setattr(audio.time, "time", lambda: next(reads, wall))
+        deliver(frozen)
+    during = sa._last[0]
+    clock.now += period
+    deliver()
+    assert sa.lost == 0
+    assert not lane.faults
+    assert during - anchor == pytest.approx(period, abs=1e-6)
+    assert sa._last[0] - during == pytest.approx(period, abs=1e-6)
+    assert [b.n0 for b in lane._q] == [0, 128, 256]
+
+
+def test_realtime_slow_first_bracket_starts_with_correct_anchor(monkeypatch):
+    clock, sa, lane, stamp, deliver = _realtime_capture(monkeypatch)
+    frozen = stamp()
+    wall = clock.now + clock.offset
+    reads = iter([wall, wall + .010])
+    with monkeypatch.context() as slow:
+        slow.setattr(audio.time, "time", lambda: next(reads, wall))
+        deliver(frozen)
+    first_anchor = sa._last[0]
+    expected = clock.now - .0002 - .010
+    clock.now += sa.blocksize / audio.CARD_RATE_HZ
+    deliver()
+    assert sa.lost == 0
+    assert not lane.faults
+    assert abs(first_anchor - expected) < 1e-4
+    assert [b.n0 for b in lane._q] == [0, 128]
+
+
+def test_realtime_wall_step_then_slow_brackets_keeps_capture_continuous(monkeypatch):
+    clock, sa, lane, stamp, deliver = _realtime_capture(monkeypatch)
+    deliver()
+    anchor = sa._last[0]
+    period = sa.blocksize / audio.CARD_RATE_HZ
+    clock.now += period
+    clock.offset += 3600
+    frozen = stamp()
+    wall = clock.now + clock.offset
+    reads = iter([wall, wall + .002, wall, wall + .002])
+    with monkeypatch.context() as slow:
+        slow.setattr(audio.time, "time", lambda: next(reads, wall))
+        deliver(frozen)
+    during = sa._last[0]
+    clock.now += period
+    deliver()
+    assert sa.lost == 0
+    assert not lane.faults
+    assert during - anchor == pytest.approx(period, abs=1e-6)
+    assert sa._last[0] - during == pytest.approx(period, abs=1e-6)
+    assert [b.n0 for b in lane._q] == [0, 128, 256]
+
+
+def test_monotonic_near_uptime_wall_clock_corrects_after_ntp(monkeypatch):
+    clock, sa, _, _, deliver = _realtime_capture(monkeypatch, offset=-.015)
+    for _ in range(3):
+        deliver(_Times(clock.now - .010, clock.now + .014))
+        clock.now += sa.blocksize / audio.CARD_RATE_HZ
+    clock.offset = 1_700_000_000.
+    for _ in range(3):
+        frozen = _Times(clock.now - .010, clock.now + .014)
+        deliver(frozen)
+        clock.now += sa.blocksize / audio.CARD_RATE_HZ
+    assert sa._stamp_shift == 0.0
+    assert sa._last[0] == frozen.inputBufferAdcTime
+
+
+def test_realtime_near_uptime_wall_clock_maps_adc_anchor(monkeypatch):
+    clock, sa, _, _, deliver = _realtime_capture(monkeypatch, offset=.015)
+    deliver()
+    assert abs(sa._last[0] - (clock.now - .0002 - .010)) < .001
+
+
+def test_realtime_near_uptime_wall_step_keeps_capture_continuous(monkeypatch):
+    clock, sa, lane, _, deliver = _realtime_capture(monkeypatch, offset=.015)
+    period = sa.blocksize / audio.CARD_RATE_HZ
+    for _ in range(3):
+        deliver()
+        clock.now += period
+    clock.offset += .020
+    for _ in range(3):
+        deliver()
+        clock.now += period
+    assert sa.lost == 0
+    assert not lane.faults
+    assert sa._stamp_shift == pytest.approx(-.035, abs=1e-4)
+
+
+def test_realtime_near_uptime_delayed_callback_keeps_latch_and_capture_continuous(monkeypatch):
+    clock, sa, lane, stamp, deliver = _realtime_capture(monkeypatch, offset=.015)
+    # Leave room for a 20 ms delay before the next normally timed callback.
+    sa.blocksize = 1024
+    period = sa.blocksize / audio.CARD_RATE_HZ
+    deliver()
+    shift = sa._stamp_shift
+    assert shift == pytest.approx(-.015)
+    clock.now += period
+    frozen = stamp()
+    clock.now += .020
+    deliver(frozen)
+    delayed_shift = sa._stamp_shift
+    clock.now += period - .020
+    deliver()
+    assert sa.lost == 0
+    assert not lane.faults
+    assert delayed_shift == sa._stamp_shift == shift
+
+
+def test_alsa_monotonic_callback_stamps_are_unchanged(monkeypatch):
+    now = audio.time.monotonic()
+    stamps = [_Times(now - .010 + i * 128 / audio.CARD_RATE_HZ,
+                     now + .014 + i * 128 / audio.CARD_RATE_HZ)
+              for i in range(audio._LAT_MEDIAN_N)]
+    sa, _ = _fix23_station(monkeypatch, host="ALSA", stamps=stamps)
+    sa.open()
+    try:
+        assert sa._last[0] == stamps[-1].inputBufferAdcTime
+        assert sa._dac[0] == stamps[-1].outputBufferDacTime
+    finally:
+        sa.close()
 
 
 def test_wasapi_rig_spread_opens_with_nominal_reported_latency(monkeypatch, caplog):
@@ -1037,6 +1346,20 @@ def _python_sources(root: Path):
                 yield src
 
 
+def _tracked_paths():
+    """Tracked files as absolute paths, or None for a checkout with no git (the
+    release export), where the whole tree is the project."""
+    argv = ["git", "-C", str(REPO), "ls-files", "-z"]
+    hermetic.guard.admit(argv, os.environ)
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except OSError:
+        return None
+    if r.returncode != 0:
+        return None
+    return {REPO / name for name in r.stdout.split("\0") if name}
+
+
 def test_python_source_walk_keeps_instruments_inside_py_named_directories(tmp_path):
     artifact = tmp_path / "reported-case.py"
     artifact.mkdir()
@@ -1124,6 +1447,10 @@ def test_only_core_audio_hands_a_transmission_to_a_sound_card():
     of a transmission is written down in four modems' comments and docstrings, and
     a gate that fires on the reasoning is a gate people switch off.
 
+    Only tracked files are walked (an export with no git walks everything): an
+    untracked archive of old trees under `working/` is the operator's disk, not
+    the project's source.
+
     `working/` is walked too, though it is scratch and is excluded from ruff and
     from pytest collection for being scratch. The bench instruments live there,
     and a probe there played every burst it ever
@@ -1140,8 +1467,11 @@ def test_only_core_audio_hands_a_transmission_to_a_sound_card():
     one = Path(audio.__file__).resolve()
     blessed = _transmit_path(one.read_text(encoding="utf-8"))
     hits = []
+    tracked = _tracked_paths()
     for root in (REPO / "packages", REPO / "tools", REPO / "working"):
         for src in _python_sources(root):
+            if tracked is not None and src not in tracked:
+                continue
             rel = src.relative_to(REPO).as_posix()
             if ({"tests", "__pycache__", "build", "dist"} & set(src.parts)
                     or src.resolve() == one or _sealed(rel)):

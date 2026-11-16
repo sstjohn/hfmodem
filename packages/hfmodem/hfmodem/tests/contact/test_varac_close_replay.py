@@ -89,14 +89,15 @@ def test_recording_pins_missing_ack_duplicate_farewell_and_eighteen_keyings():
         *(['session-intermediate-answer-query-a'] * 15)]
 
 
-def test_ke8plm_unacknowledged_farewell_sends_all_stop_commands_at_twenty_five_seconds():
+def test_ke8plm_unacknowledged_farewell_disconnects_at_twenty_five_seconds_and_aborts_ten_later():
     desk, commands = replay()
     assert desk.session.command('/bye')
     assert desk.host.now == 0 and desk.session.steps is not None
     desk.drive()
     assert [raw for _, raw in commands[:5]] == ['LISTEN OFF', 'CLEANTXBUFFER', 'DISCONNECT', 'VERSION', 'ABORT']
-    assert all(25 <= at <= 25.1 + 1e-9 for at, _ in commands[:5])
-    assert desk.host.now <= 26
+    assert all(25 <= at <= 25.1 + 1e-9 for at, _ in commands[:3])
+    assert all(35 <= at <= 35.1 + 1e-9 for at, _ in commands[3:5])
+    assert desk.host.now <= 36
     assert desk.texts == ['5 <AWQ>', '2 ?\n', '8 73<DISC>']
     assert not desk.host.client.connected and not desk.host.client.ptt
 
@@ -122,7 +123,7 @@ def test_terminal_reads_quit_during_recorded_farewell_and_waits_for_unkey(launch
     assert [raw for _, raw in commands if raw in ('CLEANTXBUFFER', 'DISCONNECT', 'ABORT')] == [
         'CLEANTXBUFFER', 'DISCONNECT', 'ABORT']
     abort_at = next(at for at, raw in commands if raw == 'ABORT')
-    assert abort_at <= min(quit_at, typed[0] + 25) + .1 + 1e-9
+    assert abort_at <= min(quit_at, typed[0] + 35) + .1 + 1e-9
     assert not desk.host.client.ptt and not desk.host.client.connected
 
 

@@ -171,7 +171,7 @@ def test_retained_complete_crc_refines_once_and_shares_source_registry(pcm, call
     assert 1 <= len(calls['acquire']) <= 2
     assert len(rx.observations) == 1 and not rx.observations[0].provisional
     delivered = []
-    m, arq = machine(role='irs', data='body', ladder='none')
+    m, arq = machine(role='irs', data='body')
     m.adapter.host = SimpleNamespace(deliver=delivered.append, supervisor=lambda *a: None)
     m.observe(rows[0], now=h+round(3.31*FS))
     m.observe(rows[0], now=h+round(3.31*FS))
@@ -398,7 +398,7 @@ def test_driver_initial_history_late_watch_records_trimmed_support_and_charge(pc
     tx.p4_probe.emissions = []
     tx.p4_probe.peer_breakin = True
     opts = tx.p4_link_options
-    opts.p4_ladder, opts.p4_data = 'none', 'body'
+    opts.p4_data = 'body'
     opts.p4_link_timeout = (stop-origin)/FS
     rx = tx.sessrx.p4
     rx.chirp = rx.expected = True

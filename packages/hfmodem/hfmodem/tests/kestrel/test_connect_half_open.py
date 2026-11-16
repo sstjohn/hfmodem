@@ -190,13 +190,15 @@ def test_slightly_late_ticks_keep_the_wide_ack_train_cadence(bw):
 
 @pytest.mark.parametrize('chat', [True, False])
 def test_bw500_unheard_ack_has_no_turn_request_train(chat):
+    """Under CHAT the ack itself repeats  [test_chat_ack_repeat]."""
     hs, io = answerer('500', chat=chat)
     acked_at = hs._acked_at
     for delta in (5.7, 9.34, 12.98):
         _Clock.t = acked_at[1] + delta
-        assert hs.idle_poll_due_in() is None
+        assert (hs.idle_poll_due_in() is None) != chat
         hs.idle_keepalive()
-    assert len(io.sent) == 1, io.msgs
+    assert all(np.array_equal(s, io.sent[0]) for s in io.sent), io.msgs
+    assert len(io.sent) == (4 if chat else 1), io.msgs
 
 
 @pytest.mark.parametrize('bw', ['2300', '2750'])

@@ -40,7 +40,7 @@ def recorded_word(arm, seconds, expected="V27"):
 
 def empty_hold(obs, counter=0):
     # Counterfactual drained turn: 0058 itself never settled its proposal.
-    m, a = machine(data='body', ladder='none', hold_cycles=16)
+    m, a = machine(data='body',  hold_cycles=16)
     m.counter = counter
     m._first_data = False
     m._data(obs.stream_sample - round(.930 * FS))
@@ -72,7 +72,7 @@ def test_recorded_irs_v27_flip_offers_empty_body_on_our_raster(arm, onset):
     _, meta = tape(arm)
     prior = next(e for e in reversed(meta['emissions'])
                  if e.get('word') and e['audio_start'] < obs.stream_sample)
-    m, a = machine(role='irs', data='body', ladder='none')
+    m, a = machine(role='irs', data='body')
     m._next = Proposal(Kind.WORD, prior['audio_start'], word=prior['word'],
                        state=State.IRS_ANSWER)
     m.keyed()
@@ -90,7 +90,7 @@ def test_recorded_irs_flip_starts_a_fresh_counter_only_when_offer_keys(idle_ack)
     obs = recorded_word('0929-1857', 27.843)
     _, meta = tape('0929-1857')
     prior = meta['emissions'][-1]
-    m, a = machine(role='irs', data='body', ladder='none')
+    m, a = machine(role='irs', data='body')
     m.counter = 3
     m._first_data = False
     m._next = Proposal(Kind.WORD, prior['audio_start'], word=prior['word'], state=State.IRS_ANSWER)
@@ -197,6 +197,7 @@ def test_k0003_checked_empty_reply_yields_and_peer_resumes():
 def test_0058_seed_does_not_override_ack_or_unsettled_bytes(case):
     obs = recorded_word('0930-0058', 44.096)
     m, a = empty_hold(obs, 1 if case == 'odd' else 0)
+    m.normal_ack = 'parity'
     if case in ('queued', 'inflight'):
         a.on_host_data(b'not accepted')
         if case == 'inflight':
@@ -330,8 +331,8 @@ def test_recorded_irs_seed_requires_empty_data_mode_and_our_key_phase(case):
     obs = recorded_word('0929-1857', 27.843)
     _, meta = tape('0929-1857')
     prior = meta['emissions'][-1]
-    policy = ({} if case == 'hold-policy' else dict(data='chirp', ladder='chirp')
-              if case == 'chirp-policy' else dict(data='body', ladder='none'))
+    policy = ({} if case == 'hold-policy' else dict(data='chirp')
+              if case == 'chirp-policy' else dict(data='body'))
     m, a = machine(role='irs', **policy)
     if case != 'no-key':
         m._next = Proposal(Kind.WORD, prior['audio_start'], word=prior['word'], state=State.IRS_ANSWER)
@@ -370,7 +371,7 @@ def test_real_driver_keys_handback_and_reads_reply(monkeypatch, arm, reply):
     tx.settle = .044
     tx.p4_probe.emissions.clear()
     tx.p4_link_options.p4_data = 'body'
-    tx.p4_link_options.p4_ladder = 'none'
+
     tx.p4_link_options.p4_link_timeout = 12.
     rx = tx.sessrx.p4
     rx.cfo_hz = 1.
@@ -440,7 +441,7 @@ def test_recorded_2118_full_driver_keys_seed_fallback_without_deadline_refusal()
     tx = Tx(live)
     tx.p4_probe.emissions = [dict(audio_start=e['audio_start'], audio_end=e['audio_end']) for e in pre]
     o = tx.p4_link_options
-    o.p4_ladder, o.p4_data, o.p4_hold_cycles = 'none', 'body', 16
+    o.p4_data, o.p4_hold_cycles = 'body', 16
     o.p4_normal_ack, o.p4_breakin = 'parity', 'body'
     o.p4_link_timeout = 70-live.pos/FS
     onair._run_p4_link(tx, live, onair._MasterGrid(pre[0]['audio_start'], CYCLE, 0,

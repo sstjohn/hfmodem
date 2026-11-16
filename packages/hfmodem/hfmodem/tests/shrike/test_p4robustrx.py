@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hfmodem.shrike import p4coding, p4decode, p4frame, p4oracle, p4robustrx, session
+from hfmodem.shrike import p4coding, p4decode, p4oracle, p4robustrx, session
 
 FX = Path(__file__).parent/'fixtures/p4-long-0929/symbols.npz'
 ROOT = Path(__file__).resolve().parents[5]
@@ -34,8 +34,10 @@ def test_recorded_long_field_has_unique_crc_and_measured_geometry(name,level,sta
 def test_weak_copy_requires_channel_correction_not_raw_crc_acceptance():
     symbols = recorded('ve3kpg_1')
     assert p4robustrx.decode_symbols(symbols,iterations=0) is None
-    assert p4robustrx.decode_symbols(symbols,iterations=1) is None
-    assert p4robustrx.decode_symbols(symbols,iterations=2).frame.data == BANNER
+    for iterations in (1, 2):
+        result = p4robustrx.decode_symbols(symbols, iterations=iterations)
+        assert result is not None and result.frame.data == BANNER
+        assert result.corrected_bits > 0
 
 
 def test_published_c1_and_c2_parities_match_strong_sl3_recording():
@@ -104,19 +106,37 @@ def test_invalid_decoder_dimensions(kwargs):
 
 
 
-def test_complemented_soft_candidate_preserves_erased_posterior_tie(monkeypatch):
-    reference = p4robustrx.decode_symbols(recorded('ve3kpg_0'))
-    wire = p4frame.encode_field(reference.frame.data, reference.frame.status)
-    bits = np.r_[np.unpackbits(np.frombuffer(wire,np.uint8),bitorder='little'),[0,0,0,1]]
-    zero = int(np.flatnonzero(bits[:576] == 0)[0])
-    posterior = (2*bits.astype(float)-1)*5
-    posterior[zero] = 0.
+def test_complemented_candidates_decode_with_independent_exact_boundaries(monkeypatch):
+    from hfmodem.shrike import p4longnative
+    monkeypatch.setattr(p4longnative, 'backend', None)
+    reference = p4robustrx.decode_symbols(recorded('ve3kpg_1'))
+    assert reference is not None
+    # Exhaust the domain so both C1 and C2 boundaries are exercised even if
+    # amplitude weighting identifies the frame at an earlier tier.
+    from hfmodem.shrike import p4longdecode
+    search = p4longdecode.LongSearch
+    monkeypatch.setattr(p4longdecode, 'LongSearch',
+                        lambda members, **kwargs: search(members, policy='exhaustive', **kwargs))
+    original = p4decode.component_decode
+    batch = p4longdecode._components
     calls = []
-    def decode(*args, **kwargs):
-        calls.append(1)
-        return p4decode.TurboDecode(posterior,(posterior < 0).astype(np.uint8),())
-    monkeypatch.setattr(p4decode,'turbo_decode',decode)
+    def component(*args, **kwargs):
+        calls.append((kwargs.get('initial_state'), kwargs.get('end_state')))
+        return original(*args, **kwargs)
+    def components(systematic, parity, *, end_state):
+        calls.extend([(0, end_state)]*len(systematic))
+        return batch(systematic, parity, end_state=end_state)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('legacy turbo decoder or complemented posterior cache used')
+    monkeypatch.setattr(p4decode, 'component_decode', component)
+    monkeypatch.setattr(p4longdecode, '_components', components)
+    monkeypatch.setattr(p4decode, 'turbo_decode', forbidden)
     symbols = recorded('ve3kpg_1')*(-1)**np.arange(len(recorded('ve3kpg_1')))
-    result = p4robustrx.decode_symbols(symbols)
-    assert calls == [1]
+    result = p4robustrx.decode_symbols(symbols, starts=(reference.field_start,))
     assert result is not None and result.frame == reference.frame
+    assert calls and all(initial == 0 for initial, _ in calls)
+    assert {final for _, final in calls} == {0, None}
+    # Every member reaches each admitted tier; complementary observations own
+    # distinct C1/C2 recurrences rather than negating a cached posterior.
+    assert sum(final == 0 for _, final in calls) == 2*16
+    assert sum(final is None for _, final in calls) == 2*16

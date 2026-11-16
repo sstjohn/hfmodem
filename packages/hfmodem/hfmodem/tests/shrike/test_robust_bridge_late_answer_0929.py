@@ -34,12 +34,12 @@ def _answer_in_the_final_listen(tmp_path, hushed, held=()):
 def _overrun_three_slots(monkeypatch):
     regrid, jumped = onair._regrid, []
 
-    def late(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n):
+    def late(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n, *, long_crc=None):
         if host.arq.robust_answer is not None and not jumped:
             jumped.append(slot)
             slot += 3
             seg = np.r_[seg, live.take_until(raster.boundary(slot) - settle_n)]
-        return regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n)
+        return regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n, long_crc=long_crc)
 
     monkeypatch.setattr(onair, '_regrid', late)
     return jumped

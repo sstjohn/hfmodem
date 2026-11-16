@@ -57,7 +57,7 @@ class Accessibility(unittest.TestCase):
                 self.assertIn('>Accessibility</a>', text, page)
 
     def test_each_inspector_offers_non_audio_non_pointer_routes(self):
-        for route in ('vara-send','vara-receive','pactor3-send','pactor3-receive','ardop-send','ardop-receive'):
+        for route in ('vara-send','vara-receive','pactor3-mail','pactor3-send','pactor3-receive','ardop-send','ardop-receive'):
             text = (build.ROOT / 'site/examples' / route / 'index.html').read_text()
             tags = Semantics(text).tags
             controls = {attrs.get('id'): (tag, attrs) for tag, attrs in tags if attrs.get('id')}

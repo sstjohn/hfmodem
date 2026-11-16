@@ -104,6 +104,9 @@ class _End:
     def cycle(self):
         pass
 
+    def p3_slot_keyed(self) -> None:
+        return None
+
 
 class _Air:
     def __init__(self):

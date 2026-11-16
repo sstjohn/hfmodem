@@ -47,7 +47,8 @@ def parser():
                     '(Ctrl-[ is Esc on most terminals), ^C unkeys and exits now, ^Q leaves.')
     p.add_argument('--freq', type=float, metavar='KHZ',
                    help='tune the dial here first; without it the rig stays where it is')
-    p.add_argument('--rate', default='45.45/170', metavar='BAUD/SHIFT[/STOP]')
+    p.add_argument('--rate', default='45.45/170', metavar='BAUD/SHIFT[/STOP]',
+                   help='baud rate, shift in Hz and optional stop bits (default %(default)s)')
     p.add_argument('--centre', type=float, default=2210.0, metavar='HZ',
                    help='audio centre of our tones; mark is centre + shift/2, high on RF')
     p.add_argument('--contest', metavar='ID', help='contest id: serials and the ADIF record')

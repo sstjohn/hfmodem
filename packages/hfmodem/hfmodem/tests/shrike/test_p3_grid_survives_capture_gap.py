@@ -16,8 +16,6 @@ the moved grid.
 """
 from types import SimpleNamespace
 
-import numpy as np
-
 from hfmodem.shrike import onair, spec
 
 FS, CYCLE = onair.FS, 60000

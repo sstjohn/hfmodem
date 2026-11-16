@@ -172,7 +172,7 @@ def test_failed_close_runs_terminal_finally_and_runtime_teardown_before_keyer(
     elif operation == 'quit-connect':
         assert 5 <= fake.now - tty.quit_at < 5.2
     else:
-        assert 35 <= fake.now < 37, 'terminal finally must not run a second close deadline'
+        assert 45 <= fake.now < 47, 'terminal finally must not run a second close deadline'
     assert order == ['client closed', 'server stopped', 'modem stopped', 'modem polled',
                      'audio stopped', 'slots stopped', 'keyer retired']
 

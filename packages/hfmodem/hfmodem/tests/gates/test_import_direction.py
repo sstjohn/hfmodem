@@ -20,7 +20,7 @@ LAYERS = {
         "macagua", "merlin"},
     2: {"station", "monitor"},
     3: {"contact", "winlink"},
-    4: {"bbs", "operator", "cli", "__main__"},
+    4: {"bbs", "operator", "ui", "cli", "__main__"},
 }
 
 CREANCE_MODEM_CARVE_OUT = "creance/monitor/runners"
@@ -56,10 +56,17 @@ hfmodem.sabir.sim.m4 -> hfmodem.sabir.host
 hfmodem.sabir.sim.m4 -> hfmodem.sabir.host.hostlink
 hfmodem.sabir.sim.m4 -> hfmodem.sabir.host.messages
 hfmodem.shrike.onair -> hfmodem.winlink
-hfmodem.shrike.onair -> hfmodem.winlink.session
 hfmodem.shrike.p3progress -> hfmodem.winlink.session
 hfmodem.shrike.ptc -> hfmodem.winlink
 hfmodem.shrike.traffic -> hfmodem.winlink
+hfmodem.station.chat -> hfmodem.bbs.config
+hfmodem.station.chat -> hfmodem.bbs.service
+hfmodem.station.chat -> hfmodem.bbs.store
+hfmodem.station.chat -> hfmodem.contact.chat_controller
+hfmodem.station.chat -> hfmodem.contact.chat_session
+hfmodem.station.chat -> hfmodem.contact.chat_state
+hfmodem.station.chat -> hfmodem.contact.slots
+hfmodem.station.chat -> hfmodem.contact.varac
 hfmodem.station.mail -> hfmodem.winlink""".splitlines())
 
 

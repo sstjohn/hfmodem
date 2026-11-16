@@ -89,6 +89,7 @@ class MailCollection:
                 if row['destination'] == owner and row['source'] == peer:
                     row['received'] = row.get('received', 0) + 1
                     self._save(rows)
+                    s.semantic('mail_notices_changed')
                     return
         except (OSError, ValueError) as error:
             s.say(f'VMail saved, but relay notice could not be updated: {error}')
@@ -151,8 +152,9 @@ class MailCollection:
 
     def _connect(self, peer, slot, target):
         s = self.session
+        s.semantic('attempt_started', peer=peer)
         # Normal /call without a slot uses the current dial. Collection instead
         # returns to the saved notice channel, including after passive following.
         if slot is None and s.flow.dial != target:
             yield from s.flow.tune_steps(target)
-        yield from s._connecting(peer, slot)
+        return (yield from s._connecting(peer, slot))

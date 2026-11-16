@@ -6,7 +6,7 @@ import hashlib
 from unittest.mock import patch
 import numpy as np
 import pytest
-from hfmodem.shrike import onair, p4turn, p4receiver, p4chirp, p4robusttx, p4waveforms
+from hfmodem.shrike import onair, p4turn, p4receiver, p4chirp, p4robusttx, p4waveforms, p4longnative
 from hfmodem.shrike.p4receiver import Clock, Expect
 from hfmodem.tests.shrike.test_p4_link_0927 import Tx, FS
 from hfmodem.tests.shrike.test_p4_opus_driver_1011 import ChargedStream, GRID
@@ -21,7 +21,8 @@ def counters(m, a):
 
 
 @pytest.mark.parametrize('managed', [False, True])
-def test_c3_natural_zero_key_continuation_and_distinct_final_witness(managed, monkeypatch):
+@pytest.mark.parametrize('read_cost', [.030, .080])
+def test_c3_natural_zero_key_continuation_and_distinct_final_witness(managed, read_cost, monkeypatch):
     onset, cycle = 480000, 180000
     origin, stop = onset-24000, onset+5*cycle
     audio = np.zeros(stop-origin, np.float32)
@@ -34,7 +35,7 @@ def test_c3_natural_zero_key_continuation_and_distinct_final_witness(managed, mo
     tx.settle = .025
     tx.p4_probe.emissions, tx.p4_probe.peer_breakin = [], True
     args = tx.p4_link_options
-    args.p4_ladder, args.p4_data, args.p4_link_timeout = 'none', 'body', len(audio)/FS
+    args.p4_data, args.p4_link_timeout = 'body', len(audio) / FS
     a = tx.p4_link_host.arq
     a.on_host_data(b'TEST\r')
     rx = tx.sessrx.p4
@@ -59,7 +60,7 @@ def test_c3_natural_zero_key_continuation_and_distinct_final_witness(managed, mo
             event('read_start', method=_name, at=at, owner=owner, expects=expects,
                   support=[args[1], args[1]+len(args[0])])
             result = _original(*args, **kw)
-            cost = .030 if owner is not None and abs(at-(onset+cycle)) <= 48 and _name == 'read_window' else .001
+            cost = read_cost if owner is not None and abs(at-(onset+cycle)) <= 48 and _name == 'read_window' else .001
             live.charge(_name, cost)
             event('read_end', method=_name, at=at, owner=owner, cost=cost,
                   results=[asdict(r) for r in result] if isinstance(result, list) else bool(result))
@@ -143,14 +144,18 @@ def test_c3_natural_zero_key_continuation_and_distinct_final_witness(managed, mo
             # Distinct witnesses: earlier genuinely installed final guard has
             # one actual key; naturally initial-canceled work has zero total.
             stale, retained, oldcells, oldwave = final_guards[0]
-            unkeyed = next(p for p, w, order in selected if p.word == 'Y27' and all(p is not k for k in keys))
+            unkeyed = next((p for p, w, order in selected if p.word == 'Y27'
+                            and all(p is not k for k in keys)), None)
             before = counters(m, a), m._next, m._accepted_proposal, len(tx.slots_used), len(keys)
             assert sum(p is stale for p in keys) == 1
             assert all(p is not unkeyed for p in keys)
-            for witness, boundary, captured, guard in [
-                ('natural-unkeyed', 'initial', unkeyed, lambda: m.can_key(unkeyed)),
+            witnesses = [
                 ('prior-installed', 'initial', stale, lambda: m.can_key(stale)),
-                ('prior-installed', 'final', stale, retained)]:
+                ('prior-installed', 'final', stale, retained)]
+            if unkeyed is not None:
+                witnesses.insert(0, ('natural-unkeyed', 'initial', unkeyed,
+                                     lambda: m.can_key(unkeyed)))
+            for witness, boundary, captured, guard in witnesses:
                 entered = []
                 if boundary == 'final':
                     assert retained.__code__ is fn.__code__
@@ -177,8 +182,12 @@ def test_c3_natural_zero_key_continuation_and_distinct_final_witness(managed, mo
     base = onair.time.monotonic()
     mono = lambda: base+(live.sample_now()-live.origin)/FS
     monkeypatch.setattr(onair.time, 'monotonic', mono)
+    # One in-thread work grant accounts for the declared CPU
+    # charges, so profiling and deadlines must observe that same charged clock.
+    monkeypatch.setattr(onair.time, 'perf_counter', mono)
     monkeypatch.setattr(p4receiver, 'monotonic', mono)
-    with patch.object(p4turn, 'P4Turn', factory), patch.object(onair, '_p4_link_waveforms', render), patch.object(p4waveforms, 'prepare', prepare):
+    # The declared clock also bounds the exact reference engine.
+    with patch.object(p4longnative, 'backend', None), patch.object(p4turn, 'P4Turn', factory), patch.object(onair, '_p4_link_waveforms', render), patch.object(p4waveforms, 'prepare', prepare):
         onair._run_p4_link(tx, live, GRID)
     m = machines[0]
     record('c3_charged_continuation', managed=managed, timeline=timeline, probes=probes,
@@ -187,23 +196,53 @@ def test_c3_natural_zero_key_continuation_and_distinct_final_witness(managed, mo
            keys=[dict(identity=id(p), fields=asdict(p)) for p in keys],
            events=tx.p4_probe.link_events, emissions=tx.p4_probe.emissions)
     canceled = [(p, wave, order) for p, wave, order in selected if p.word == 'Y27' and all(p is not k for k in keys)]
-    assert len(canceled) == 1, 'natural selected/rendered Y27 must cancel before its first actual key'
-    p, wave, order = canceled[0]
+    print(dict(read_cost=read_cost, canceled=len(canceled),
+               keys=[(k.word, k.stream_sample, k.accepted_target) for k in keys],
+               reads=[(r['method'], r['at'], r['support'][1]) for r in timeline
+                      if r['stage'] == 'read_start' and r['owner'] is not None]))
     missed = next(r for r in timeline if r['stage'] == 'read_end' and r['owner'] is not None and abs(r['at']-(onset+cycle)) <= 48 and r['method'] == 'read_window')
     nominal = missed['at']+163200
-    assert missed['now'] > nominal-m.lead
-    assert p.stream_sample == nominal+cycle
     cancel_read = next(r for r in timeline if r['stage'] == 'read_start' and r['owner'] is not None and abs(r['at']-(onset+2*cycle)) <= 48)
-    assert order < cancel_read['order']
-    assert cancel_read['support'][1] == cancel_read['at']+161040
-    refusals = [r for r in timeline if r['stage'] == 'admission' and r['proposal'] == id(p) and not r['ok']]
-    assert refusals and all(r['before'] == r['after'] for r in refusals)
-    assert sum(k.word == 'Y27' for k in keys) == 1
+    if read_cost == .080:
+        assert len(canceled) == 1, 'natural selected/rendered Y27 must cancel before its first actual key'
+        p, wave, order = canceled[0]
+        assert missed['now'] > nominal-m.lead
+        assert p.stream_sample == nominal+cycle
+        assert order < cancel_read['order']
+        refusals = [r for r in timeline if r['stage'] == 'admission'
+                    and r['proposal'] == id(p) and not r['ok']]
+        assert refusals and all(r['before'] == r['after'] for r in refusals)
+    else:
+        # Earlier complete support lets the original 30 ms charge retain
+        # the current request. The 80 ms case separately proves cancellation
+        # of a rendered request which has never keyed.
+        assert canceled == []
+        missed_start = next(r for r in timeline if r['stage'] == 'read_start'
+                            and r['owner'] is not None and r['method'] == 'read_window'
+                            and r['at'] == missed['at'])
+        assert (missed_start['support'][1], missed['now']) == (819841, 821281)
+        # Y27 requests do not seed an ACK chain. The first accepted CHIRP
+        # starts with X27 regardless of its counter; repeats keep X27.
+        # Its next distinct robust packet would toggle to partner V27.
+        assert [(k.word, k.stream_sample, k.accepted_target) for k in keys] == [
+            ('Y27', 643201, None), ('Y27', 823201, None),
+            ('X27', 1003200, 840000), ('X27', 1183200, 840000),
+            ('X27', 1363200, 840000)]
+    # Causal prefix ownership precedes the placed chirp's
+    # true complete support. Both must precede the canceled proposal's key.
+    assert cancel_read['method'] == 'read_partial'
+    assert cancel_read['support'][1] == cancel_read['at']+round(.810*FS)
+    complete_read = next(r for r in timeline if r['stage'] == 'read_start'
+                         and r['owner'] is not None and r['method'] == 'read_window'
+                         and abs(r['at']-(onset+2*cycle)) <= 48)
+    assert cancel_read['order'] < complete_read['order']
+    assert complete_read['support'][1] == 998760
+    assert sum(k.word == 'Y27' for k in keys) == (1 if read_cost == .080 else 2)
     answers = [k for k in keys if k.accepted_target is not None and abs(k.accepted_target-(onset+2*cycle)) <= 48]
     assert answers and all(k.state == p4turn.State.IRS_ANSWER for k in answers)
     assert answers[0].ack_identity[1].rstrip(b'\x1e') == b'new peer source\r'
     assert delivered == [b'new peer source\r']
-    assert len(probes) == 3 and [r['prior_keys'] for r in probes] == [0, 1, 1]
+    assert [r['prior_keys'] for r in probes] == ([0, 1, 1] if read_cost == .080 else [1, 1])
     assert a.tx_acked_bytes == 0 and not m.outbox.inflight and bytes(a._outbuf) == b'TEST\r'
     keyed = [e for e in tx.p4_probe.link_events if e['event'] == 'Keyed']
     assert len(keyed) == len(keys) == len(tx.p4_probe.emissions)

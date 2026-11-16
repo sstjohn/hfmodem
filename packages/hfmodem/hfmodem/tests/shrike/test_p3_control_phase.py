@@ -7,14 +7,15 @@ KB2PCN, 20 m, 2026-11-08 23:13: its CS3 and CS4 step -48.4 degrees a symbol and
 its PACTOR-1 tones read -1.0 Hz; our follow read its controls at -13.6. Our
 frames step -45 at +0 Hz and our controls 0/180, so the follow carried the
 diagonal as -12.5 Hz into everything we keyed after it. `diagonal` keys the
-controls on 315/135 and takes the convention back off a follow read off a word.
+controls on 315/135; a follow takes the changeover head's convention off under
+either phase, and a bare word's under diagonal.
 """
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from hfmodem.shrike import modem, onair, p3acquire, placement, rx, spec
+from hfmodem.shrike import arq, modem, onair, p3acquire, placement, rx, spec
 from hfmodem.tests.shrike.test_follow_p1_cross_check import p1_word, sessrx
 
 FS = spec.SAMPLE_RATE
@@ -132,7 +133,7 @@ def test_kb2pcn_follow_keys_its_carrier_under_diagonal(phase):
     phase("diagonal")
     s = sessrx()
     p1_word(s)
-    s._follow_p3_offset(-13.6)
+    s._follow_p3_offset(-13.6, word=arq.CS_SPEED_UP)
     assert s.p3_receive_offset_hz == -13.6
     assert s.p3_transmit_offset_hz == pytest.approx(-1.1, abs=1e-9)
 
@@ -140,26 +141,36 @@ def test_kb2pcn_follow_keys_its_carrier_under_diagonal(phase):
 def test_kb2pcn_follow_keys_the_raster_under_axis():
     s = sessrx()
     p1_word(s)
-    s._follow_p3_offset(-13.6)
+    s._follow_p3_offset(-13.6, word=arq.CS_SPEED_UP)
     assert s.p3_transmit_offset_hz == -13.6
+
+
+@pytest.mark.parametrize("control_phase", ["axis", "diagonal"])
+def test_cs3_follow_keys_the_carrier_under_either_phase(phase, control_phase):
+    phase(control_phase)
+    s = sessrx()
+    p1_word(s)
+    s._follow_p3_offset(-13.6, word=placement.BREAKIN_CS)
+    assert s.p3_receive_offset_hz == -13.6
+    assert s.p3_transmit_offset_hz == pytest.approx(-1.1, abs=1e-9)
 
 
 def test_a_follow_read_off_a_frame_carries_no_convention(phase):
     phase("diagonal")
     s = sessrx()
     p1_word(s)
-    s._follow_p3_offset(-1.0, word=False)
+    s._follow_p3_offset(-1.0, word=None)
     assert s.p3_transmit_offset_hz == -1.0
-    s._follow_p3_offset(-13.6)
+    s._follow_p3_offset(-13.6, word=arq.CS_SPEED_UP)
     assert s.p3_transmit_offset_hz == pytest.approx(-1.1, abs=1e-9)
-    s._follow_p3_offset(-1.4, word=False)
+    s._follow_p3_offset(-1.4, word=None)
     assert s.p3_transmit_offset_hz == -1.4
 
 
 def test_a_session_reset_forgets_the_convention(phase):
     phase("diagonal")
     s = sessrx()
-    s._follow_p3_offset(-13.6)
+    s._follow_p3_offset(-13.6, word=arq.CS_SPEED_UP)
     s.host.arq.state = onair.State.DISCONNECTED
     s.new_cycle()
     assert s.p3_receive_offset_hz == 0.0 == s.p3_transmit_offset_hz
@@ -169,11 +180,11 @@ def test_the_line_names_the_carrier_and_the_bound(phase, capsys):
     phase("diagonal")
     s = sessrx()
     p1_word(s)
-    s._follow_p3_offset(-13.6)
+    s._follow_p3_offset(-13.6, word=arq.CS_SPEED_UP)
     line = capsys.readouterr().out
     assert "-13.6" in line and "carrier -1.1 Hz" in line and "+-8 Hz" in line
     assert "within" in line and "agreed, TX follows" in line
-    s._follow_p3_offset(-25.0)
+    s._follow_p3_offset(-25.0, word=arq.CS_SPEED_UP)
     line = capsys.readouterr().out
     assert "past the diagonal's +-8 Hz" in line and "TX stays at +0 Hz" in line
     assert "CONTRADICTED" not in line
@@ -188,7 +199,7 @@ def test_diagonal_agrees_within_eight_hertz_of_the_carrier(phase, carrier, agree
     phase("diagonal")
     s = sessrx()
     p1_word(s)
-    s._follow_p3_offset(carrier + placement.DIAGONAL_HZ)
+    s._follow_p3_offset(carrier + placement.DIAGONAL_HZ, word=arq.CS_SPEED_UP)
     assert s._p3_offset_contradicts_p1 is not agreed
     assert s.p3_transmit_offset_hz == pytest.approx(carrier if agreed else 0.0, abs=1e-9)
 
@@ -196,7 +207,7 @@ def test_diagonal_agrees_within_eight_hertz_of_the_carrier(phase, carrier, agree
 def test_axis_keeps_the_pactor1_bound():
     s = sessrx()
     p1_word(s)
-    s._follow_p3_offset(-50.0)
+    s._follow_p3_offset(-50.0, word=arq.CS_SPEED_UP)
     assert not s._p3_offset_contradicts_p1
     assert s.p3_transmit_offset_hz == -50.0
 
@@ -207,7 +218,7 @@ def test_the_keyed_control_reads_where_kb2pcn_did(phase):
     phase("diagonal")
     s = sessrx()
     p1_word(s)
-    s._follow_p3_offset(-13.6)
+    s._follow_p3_offset(-13.6, word=arq.CS_SPEED_UP)
     tx = SimpleNamespace(p3_follow_offset="all", sessrx=s, _p3_shifted={},
                          _tx_offset_hz=None)
     keyed = onair.RadioTx._p3_offset(tx, _padded(3), control=True)

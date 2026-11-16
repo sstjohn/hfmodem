@@ -235,9 +235,11 @@ def campaign_arguments(many):
 
 def varied(air, link):
     """Everything past the width that an arm may vary. The defaults are what flew."""
-    link.add_argument('--direction', choices=('tx', 'rx'), default='tx')
+    link.add_argument('--direction', choices=('tx', 'rx'), default='tx',
+                      help='tx sends to the gateway; rx only receives from it (default %(default)s)')
     link.add_argument('--mail-timeout', type=int, default=240, choices=range(60, 601),
-                      metavar='60..600')
+                      metavar='60..600',
+                      help='seconds allowed for the mail exchange (default %(default)s)')
     link.add_argument('--low-speed-only', action='store_true',
                       help='key the speed limited link-setup and hold the L1-L4 ladder; the default is the high speed '
                            'capable form every user of this modem gets')

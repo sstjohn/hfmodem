@@ -146,6 +146,10 @@ METADATA = {
         'ARDOP Winlink send to WW2MI on 40 m: recorded replay',
         'One Winlink message delivered to WW2MI over ARDOP on 40 m, August 23, 2026, '
         'confirmed by destination receipt. KiwiSDR witness audio and packets.'),
+    'examples/pactor3-mail/index.html': (
+        'PACTOR-3 Winlink mail with K4MSU on 40 m: recorded replay',
+        'One Winlink message sent to K4MSU and one received over PACTOR-3 on 40 m, November 14, '
+        '2026, with a normal close. Receiver, monitor and witness audio.'),
     'examples/pactor3-receive/index.html': (
         'PACTOR-3 Winlink receive from WS8EOC on 80 m: recorded replay',
         'A complete Winlink message received from WS8EOC over PACTOR-3 on 80 m, October 3, '

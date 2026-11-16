@@ -78,7 +78,6 @@ def test_late_extent_refinement_does_not_count_unread_twice():
     assert turn.unread == 1
 
 
-
 def test_held_body_safety_exit_and_similar_body_measurement():
     from hfmodem.tests.shrike.test_p4_breakin_hold_0927 import capture
     from hfmodem.tests.shrike.p4_hold_helpers import check_hold_safety

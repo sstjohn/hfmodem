@@ -125,6 +125,7 @@ class TxRequest:
     gain: float = field(compare=False, default=1.0)
     admit: Callable[[], None] | None = field(compare=False, default=None)
     owner_poll: Callable[[], None] | None = field(compare=False, default=None)
+    control_fence: Callable[[], bool] | None = field(compare=False, default=None)
 
 
     @property
@@ -227,9 +228,18 @@ class TxArbiter:
         self._scan_hold = None
         self._contact_lock = threading.RLock()
         self._contact = None
+        self._contact_authority = None
+        self._contact_fence = None
         self._receive_boundary = (0, int(getattr(audio, "samples", 0)))
 
-    def claim_contact(self, protocol, token=None, *, receive_epoch=None):
+    def _contact_authorized(self, authority, fence):
+        if self._closed or fence is not None and not fence():
+            return False
+        return (authority is None or
+                authority[1] == self._revocations.get(authority[0], (0, 0))[0])
+
+    def claim_contact(self, protocol, token=None, *, receive_epoch=None,
+                      authority=None, fence=None):
         """Reserve acquisition through terminal RF output, without retaining a mutex.
 
         A new receiver cannot enter while a transmission or retune is underway.
@@ -237,28 +247,45 @@ class TxArbiter:
         """
         if not isinstance(protocol, str) or not protocol or protocol == 'ident':
             raise ValueError('contact requires a protocol')
-        with self._contact_lock:
-            if receive_epoch is not None and receive_epoch != self._receive_boundary[0]:
-                return None
-            if token is not None:
+        # Legacy modem callbacks can renew their unbound token while already
+        # holding admission. Authority-bound sessions always use the validated
+        # admission/contact lock order below, including token reuse.
+        if token is not None and authority is None and fence is None:
+            with self._contact_lock:
                 if self._contact != (protocol, token):
                     raise ValueError('contact token is stale or belongs to another owner')
-                return token
-            if self._contact is not None:
-                return None
+                if self._contact_authority is None and self._contact_fence is None:
+                    if (receive_epoch is not None
+                            and receive_epoch != self._receive_boundary[0]):
+                        return None
+                    return token
         if not self._admit.acquire(blocking=False):
             return None
         try:
             with self._contact_lock:
+                if not self._contact_authorized(authority, fence):
+                    return None
+                if protocol in self.disabled:
+                    return None
+                if receive_epoch is not None and receive_epoch != self._receive_boundary[0]:
+                    return None
+                if token is not None:
+                    if self._contact != (protocol, token):
+                        raise ValueError('contact token is stale or belongs to another owner')
+                    if authority != self._contact_authority or fence is not self._contact_fence:
+                        return None
+                    return token
                 if (receive_epoch is not None and receive_epoch != self._receive_boundary[0]
                         or self._closed or self._owner is not None
                         or self._contact is not None or self._scan_hold is not None
                         or protocol in self.disabled
                         or set(self.active_protocols()) - {protocol}
-                        or self.identity is not None and self.identity.due):
+                        or self.identity is not None and self.identity.due
+                        and not (authority is not None and self._attended(authority[0]))):
                     return None
                 token = object()
                 self._contact = (protocol, token)
+                self._contact_authority, self._contact_fence = authority, fence
                 return token
         finally:
             self._admit.release()
@@ -268,6 +295,7 @@ class TxArbiter:
             if token is None or self._contact != (protocol, token):
                 raise ValueError('contact token is stale or belongs to another owner')
             self._contact = None
+            self._contact_authority = self._contact_fence = None
 
     @property
     def contact_protocol(self):
@@ -345,6 +373,9 @@ class TxArbiter:
         self._check_scan_hold(request)
         if self._closed:
             raise Refused("arbiter closed")
+        fence = getattr(request, 'control_fence', None)
+        if fence is not None and not fence():
+            raise Refused('stopped: control fence revoked')
         if request.created < self._revoked_at:
             raise Refused("stopped: station authority revoked")
         if request.authority is None:
@@ -409,6 +440,38 @@ class TxArbiter:
                     and (self._scan_hold is None or self._scan_hold[1] is scan_token)):
                 self._owner = TxRequest(ERRAND, -1, protocol="hold")
                 self._flight = flight = _Flight(self._owner)
+                self._retire_receive()
+        try:
+            yield flight is not None
+        finally:
+            if flight is not None:
+                with self._admit:
+                    self._retire_receive()
+                self._release(flight)
+
+    @contextmanager
+    def try_contact_hold(self, protocol, token, *, authority, fence, paused):
+        """Hold a paused contact across retuning without surrendering its token.
+
+        ``paused`` and ``fence`` are lock-free observations supplied by the
+        runtime and lifecycle owner. They must describe this captured session.
+        """
+        self._not_from_owner_poll()
+        flight = None
+        with self._admit, self._contact_lock:
+            if (protocol == 'vara' and token is not None and authority is not None
+                    and callable(fence) and callable(paused)
+                    and self._contact == (protocol, token)
+                    and self._contact_authority == authority and self._contact_fence is fence
+                    and self._contact_authorized(authority, fence) and paused()
+                    and self._owner is None and self._flight is None
+                    and self._scan_hold is None and protocol not in self.disabled
+                    and not (set(self.active_protocols()) - {protocol})
+                    and getattr(self.rig, 'line_state', None) == 'low'):
+                self._owner = TxRequest(ERRAND, -1, protocol='hold', authority=authority,
+                                        control_fence=fence)
+                self._flight = flight = _Flight(self._owner)
+                flight.runtime_hold = True
                 self._retire_receive()
         try:
             yield flight is not None
@@ -745,6 +808,10 @@ class TxArbiter:
             worker_exited = False
             try:
                 owner = flight.request
+                if getattr(flight, 'runtime_hold', False):
+                    # No RF was submitted. Only the paused runtime can finish
+                    # this CAT operation and release its retune ownership.
+                    continue
                 if flight.done.is_set():
                     continue
                 if flight.worker is not None and not flight.worker.is_alive():

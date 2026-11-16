@@ -402,7 +402,7 @@ def held_cycle(tx, g, slot):
     whole = charged(live, onair._receive_changeover, live, g, tx, host, rx, slot,
                     whole, origin, np.empty(0, np.float32), 0, settle)
     charged(live, onair._reverse_before_key, g, host, tx, slot)
-    slot, whole, origin = charged(live, onair._regrid,
+    slot, whole, origin, _ = charged(live, onair._regrid,
                                   live, g, tx, host, rx, slot, whole, origin, settle)
     margin = (None if len(live.emissions) > before else
               (tx.key_instant(g, slot) - live.key_notice - live.now) / onair.FS)

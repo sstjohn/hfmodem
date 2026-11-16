@@ -20,7 +20,7 @@ def test_c4_real_driver_exact_sixteen_completed_packet_cycles_then_down():
     tx = Tx(live)
     tx.settle = .025
     tx.p4_probe.emissions, tx.p4_probe.peer_breakin = [], True
-    tx.p4_link_options.p4_ladder, tx.p4_link_options.p4_data = 'none', 'body'
+    tx.p4_link_options.p4_data = 'body'
     tx.p4_link_options.p4_link_timeout = len(live.audio)/FS
     rx = tx.sessrx.p4
     rx.clock = Clock(Expect.PACKET, onset, .330, 3.75, 0.)
@@ -47,10 +47,9 @@ def test_c4_real_driver_exact_sixteen_completed_packet_cycles_then_down():
            state=m.state, reason=m.reason, slots=tx.slots_used, events=tx.p4_probe.link_events)
     assert len(cycles) == 16
     assert cycles[0][0] == onset
-    # With no admitted physical frame, the ordinary default V27 response
-    # installs the next packet clock at its real IRS key+.330. Record that
-    # actual raster; do not substitute a nominal placed packet history.
-    assert [r[0] for r in cycles[1:]] == [e['audio_start']+15840 for e in tx.p4_probe.emissions[:-1]]
+    # AT Unread slots: neutral requests preserve the established packet grid.
+    assert [r[0] for r in cycles] == [onset+k*cycle for k in range(16)]
+    assert [e['audio_start'] for e in tx.p4_probe.emissions] == [r[0]+163200 for r in cycles]
     assert [r[4] for r in cycles] == list(range(1, 17))
     assert all(end >= at+157440 for at, counted, end, before, after in cycles)
     assert m.state == p4turn.State.DOWN and m.reason == 'peer silent'

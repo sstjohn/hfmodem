@@ -30,7 +30,7 @@ def row(at=AT, **changes):
 
 
 def turn():
-    m, _ = machine(role='iss', ladder='none', data='body', chirp_ack='alternate')
+    m, _ = machine(role='iss', data='body', chirp_ack='toggle')
     delivered = []
     m.adapter.host = SimpleNamespace(deliver=lambda b: delivered.append(b.hex()), supervisor=lambda *a: None)
     return m, delivered

@@ -168,11 +168,11 @@ def test_recorded_driver_never_grants_a_greeting_repeat(monkeypatch, arm, end):
     keys = [e for e in tx.p4_probe.link_events if e['event'] == 'Keyed']
     # An unread greeting copy in the opening draws the repeat request V27, never a grant.
     assert keys and all(e['kind'] == Kind.WORD and e['word'] == (
-        'V27' if e.get('purpose') == 'repeat-request' else 'X27') for e in keys)
+        'V27' if e.get('accepted_target') is None else 'X27') for e in keys)
     assert rx.capture_gaps
     for key in keys:
         if not key.get('current_slot_accepted', True):
-            assert key['word'] == ('V27' if key.get('purpose') == 'repeat-request' else 'X27')
+            assert key['word'] == ('V27' if key.get('accepted_target') is None else 'X27')
         else:
             assert any(o.kind in (Kind.BODY, Kind.SHORT)
                        and key['at'] == o.stream_sample+round(.920*FS)

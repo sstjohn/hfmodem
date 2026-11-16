@@ -34,6 +34,9 @@ def _grid(problem):
 def test_an_unplaceable_changeover_keys_on_the_held_grid(problem, reason, tmp_path, capsys):
     g = _grid(problem)
     tx = duplex(g, tmp_path)
+    # The old behaviour, kept off default: the default keys at the read
+    # (clamp) or keys the displaced answer instead (aged pair).
+    tx.p3_breakin_place, tx.p3_breakin_unplaced = "boundary", "held"
     tx._flip = lambda: False
     tx.breakin_due = True
     tx.aim(g, SLOT)

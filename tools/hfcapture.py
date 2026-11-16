@@ -41,6 +41,7 @@ from pathlib import Path
 from hfmodem.core import band, claim, hamlib
 from hfmodem.core.audio import timestamp_limitation
 from hfmodem.core.native import NativeChild, spawn_native
+from hfmodem.core.rigs import RIGS
 
 RATE = 48000
 SEGMENT_SECONDS = 600
@@ -72,12 +73,10 @@ GAP_S = 0.001
 # is 81 s, which it is meant to be impossible to sit under.
 SLIP_S = 1.0
 
-# The X6100 speaks Icom CI-V; hamlib drives it as an IC-705 (3085) at 19200 baud
-# — verified live on this station 2026-07-22. Its own native backend (3087) exists
-# but the IC-705 path is the one confirmed to key PTT over CAT. g90/ft891 use the
-# hamlib backend default baud unless --rig-baud overrides.
-RIG_MODELS = {"g90": 3088, "x6100": 3085, "ft891": 1036}
-RIG_BAUD = {"x6100": 19200}
+# The X6100 uses its native CI-V profile; g90/ft891 use the backend default
+# baud unless --rig-baud overrides.
+RIG_MODELS = {"g90": 3088, "x6100": RIGS["x6100"]["model"], "ft891": 1036}
+RIG_BAUD = {"x6100": RIGS["x6100"]["baud"]}
 RIGCTLD = ("127.0.0.1", 4532)
 MIN_PASSBAND = 2700
 
@@ -501,7 +500,6 @@ def cmd_rigs(args: argparse.Namespace) -> None:
     for name, model in RIG_MODELS.items():
         baud = f" @ {RIG_BAUD[name]}" if name in RIG_BAUD else ""
         print(f"  {name:<8} hamlib model {model}{baud}")
-    print("\n  (x6100 speaks Icom CI-V, so it's driven as an IC-705 at 19200.)")
     print("\nAnything else: `rigctl --list` and pass the number directly.")
     print("\nThe serial port is single-owner. If your Winlink client drives PTT over")
     print("CAT, start rigctld once and point both it and this script at rigctld —")

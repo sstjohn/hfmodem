@@ -11,8 +11,9 @@ import pytest
 
 from hfmodem.shrike import arq, onair, rxfront, spec
 from hfmodem.tests.shrike.recorded_pcm import recorded_pcm
-from hfmodem.tests.shrike.test_granted_entry_retry import granted, repeat
-from hfmodem.tests.shrike.test_grid import _Bench, _Rig
+from hfmodem.tests.shrike.onair_support import _Bench as _Bench, _Rig as _Rig
+from hfmodem.tests.shrike.p3_arq_support import granted as granted, repeat as repeat
+from hfmodem.tests.shrike.p3_reply_support import fallback as fallback, harness
 
 FIXTURES = Path(__file__).with_name('fixtures') / 'ws8eoc-0910'
 METADATA = FIXTURES / 'metadata.json'
@@ -28,40 +29,6 @@ def rows():
 def recorded(name):
     row = rows()[name]
     return row, recorded_pcm({'file': 'ws8eoc-0910/' + name, 'sha256': row['pcm_sha256']})
-
-
-def fallback():
-    host, _ = granted()
-    for _ in range(arq.ENTRY_GRANT_CYCLES):
-        repeat(host)
-    assert host.protocol == spec.Protocol.PACTOR1 and host.arq.role == arq.ISS
-    return host
-
-
-def harness(tmp_path, *, slot=48):
-    host = fallback()
-    tx = onair.RadioTx(rig=_Rig(), transmit=True, outdir=tmp_path, settle=.04)
-    host.peer = tx
-    tx.attach(host)
-    rx = onair._SessionRx(host)
-    tx.sessrx = rx
-    bench = _Bench(seconds=100)
-    tx.live = bench
-    # M06: slot44's stale IRS boundary2682952 minus44*60000 minus40320.
-    grid = onair._MasterGrid(2632, 60000, 8880,
-                            packet_n=46080, cs_n=5760, d_max_n=6240)
-    grid.d_n, grid.d_ref_n = .094 * onair.FS, 46080
-    grid.keyed_slot = slot - 1
-    tx.aim(grid, slot)
-    # These cases measure the staggered SCS control's own geometry, which is
-    # the experiment now that the defaults are historical/audio-start.
-    tx.p3_control_waveform, tx.p3_control_placement = "current", "pulse-center"
-    # The recorded peer carries its own -50 Hz error and the geometry below is
-    # the nominal staggered control's. Keying onto the peer's raster is
-    # `test_control_offset_follow`'s subject, not this file's.
-    tx.p3_follow_offset = "none"
-    tx.defer_p3_cs = True
-    return host, rx, tx, grid, bench
 
 
 @pytest.mark.parametrize('reader', ['upgrade', 'anchored'])
@@ -103,7 +70,7 @@ def test_recorded_fallback_changes_protocol_before_render_and_rotates_before_key
     # answer slot of the packet it is acknowledging, not on the connect train's
     # phase carried through the reversal.
     assert peer + 60000 - end == 5320
-    assert grid.boundary(48) - phase == 60000 + round(onair.P3_REPLY_S * onair.FS)
+    assert grid.boundary(48) - phase == 60000 + round(onair.P3_COMB_REPLY_S * onair.FS)
     assert onair._grid_reversal(grid, host) is None
     assert grid.anchor == 32436
 
@@ -138,7 +105,7 @@ def test_repeated_recorded_changeovers_keep_one_payload_and_one_rotation(tmp_pat
         # residual off the packet it is acknowledging, never by another 600 ms.
         assert abs(grid.anchor - 32392) <= round(onair.MAX_PULL_S * onair.FS)
         at = grid._peer_raster_position(grid._p3_peer[0], 60000) or grid._p3_peer[0]
-        assert (grid.boundary(slot) - at) % 60000 == round(onair.P3_REPLY_S * onair.FS)
+        assert (grid.boundary(slot) - at) % 60000 == round(onair.P3_COMB_REPLY_S * onair.FS)
         assert host.arq._clean_run == 0
         assert bytes(host.channel(host.ptchn).rx) == b'RMS'
         before = rx.count

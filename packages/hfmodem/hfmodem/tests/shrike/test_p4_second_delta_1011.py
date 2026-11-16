@@ -56,11 +56,10 @@ def emit(rx, p):
         current_slot_accepted=p.current_slot_accepted))
 
 @pytest.mark.parametrize('kind,status,weak,policy', [
-    (Kind.CHIRP,0x61,False,'fixed-x27'),
-    (Kind.NORMAL,0x01,True,'fixed-x27'),
-    (Kind.NORMAL,0x01,False,'fixed-x27'),
-    (Kind.LONG,0x01,False,'fixed-x27'),
-    (Kind.LONG,0x01,False,'counter-odd-t27'),
+    (Kind.CHIRP,0x61,False,'toggle'),
+    (Kind.NORMAL,0x01,True,'toggle'),
+    (Kind.NORMAL,0x01,False,'toggle'),
+    (Kind.LONG,0x01,False,'toggle'),
     (Kind.LONG,0x02,False,'counter-even-t27')])
 @pytest.mark.parametrize('advance,refuse', [(False,False),(True,False),(False,True),(True,True)])
 def test_d2_selected_repeat_binds_current_context(kind,status,weak,policy,advance,refuse):

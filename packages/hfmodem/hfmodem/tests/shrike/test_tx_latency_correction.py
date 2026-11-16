@@ -14,7 +14,7 @@ answer both ways -- 19.8 ms from where WS8EOC's PACTOR-1 answer sat against our
 960 ms packet, and about 20 ms from what the PACTOR-3 witness chain needs to
 close against an SCS pair's 894.1 ms. So it is a property of the audio path,
 spent on every emission of every protocol, and it is carried here rather than
-inside a protocol constant: `P3_REPLY_S = 0.890` is measured off SCS traffic and
+inside a protocol constant: `P3_ANSWER_S = 0.890` is measured off SCS traffic and
 is right.
 
 What this file holds is the arithmetic, on a stream with no device under it.
@@ -38,70 +38,11 @@ import pytest
 
 from hfmodem.shrike import onair
 from hfmodem.tests import hermetic
+from hfmodem.tests.shrike.tx_latency_support import BLK, LAT, SETTLE_N, _Stream
 
 FS = onair.FS
-# `arm-v23-A-40-ws8eoc`'s own clocks line: block 128, ADC->DAC 1268 samples,
-# DAC notice 1652, holdback 660 -- and the 40 ms settle the FT-891 is set for.
-BLK, LAT, SETTLE_N = 128, 1268, round(0.04 * FS)
 #: What the v24 arm flies, in samples. 20 ms, measured two ways.
 CORRECTION_N = round(0.020 * FS)
-
-
-class _Done:
-    """`threading.Event` for a burst that is over before it is armed."""
-
-    def clear(self) -> None:
-        pass
-
-    def wait(self, _timeout: float) -> bool:
-        return True
-
-
-class _Stream(onair._LiveInput):
-    """`_LiveInput`'s transmit arithmetic with no card and no clock.
-
-    Every sleep is recorded instead of taken, so the instants are the
-    measurement rather than a race: `slept[0]` is where PTT would be asserted.
-    """
-
-    def __init__(self, *, tx_latency_n: int = 0) -> None:
-        self.fs = FS
-        self._duplex = True
-        self._blk = BLK
-        self._lat = LAT
-        self.tx_latency_n = tx_latency_n
-        self.geometry_n = 0
-        self.samples = 100 * BLK
-        self.pos = self.samples
-        self.holdback = 660
-        # A fixed epoch, so two streams are comparable to the sample.
-        self._dac = (0.0, 0)
-        self._last = (0.0, self.samples)
-        self._tx = None
-        self._tx_at = 0
-        self._tx_end_time = 0.0
-        self._tx_done = _Done()
-        self.keyed_s = 0.0
-        self.keyed_at = None
-        self.slept: list[float] = []
-        self.flushes: list[int] = []
-
-    def _sleep_until(self, t: float) -> None:
-        self.slept.append(t)
-
-    def sample_now(self) -> float:
-        return float(self.samples)
-
-    def take_until(self, index: int) -> np.ndarray:
-        self.pos = max(self.pos, index)
-        return np.zeros(0, np.float32)
-
-    def wait_until(self, index: int) -> None:
-        pass
-
-    def flush_to(self, index: int) -> None:
-        self.flushes.append(index)
-        self.pos = index
 
 
 def _key(stream: _Stream, at: int) -> tuple[int, float]:

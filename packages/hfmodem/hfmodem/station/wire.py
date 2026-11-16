@@ -4,6 +4,88 @@
 import ipaddress
 import socket
 
+# Kept explicit so the portable station client remains standard-library only.
+CHAT_COMMAND_KINDS = frozenset({
+    'chat.snapshot',
+    'chat.projection',
+    'chat.check',
+    'chat.outcome',
+    'chat.help',
+    'heard.list',
+    'slots.list',
+    'files.list',
+    'vmail.list',
+    'vmail.read',
+    'vmail.pending',
+    'broadcast.status',
+    'beacon.hop.status',
+    'email.status',
+    'pskreporter.status',
+    'chat.send',
+    'chat.call',
+    'chat.answer',
+    'chat.cq',
+    'chat.qsy',
+    'chat.tag',
+    'chat.cancel_wait',
+    'chat.close',
+    'chat.exit',
+    'buffer.clear',
+    'follow.set',
+    'band.set',
+    'band.ready',
+    'broadcast.select',
+    'broadcast.send',
+    'broadcast.off',
+    'broadcast.clear',
+    'broadcast.confirm',
+    'beacon.configure',
+    'beacon.once',
+    'beacon.hop',
+    'away.set',
+    'auto.set',
+    'away.back',
+    'verbose.set',
+    'pskreporter.off',
+    'inquire.heard',
+    'vmail.compose',
+    'email.compose',
+    'draft.append',
+    'draft.drop',
+    'vmail.send',
+    'email.send',
+    'vmail.collect',
+    'vmail.dismiss',
+    'bbs.list',
+    'bbs.get',
+    'bbs.request',
+    'bbs.capture',
+    'bbs.enter',
+    'bbs.term',
+    'bbs.input',
+    'bbs.reload',
+    'chat.start',
+})
+CHAT_READ_KINDS = frozenset({
+    'chat.snapshot',
+    'chat.projection',
+    'chat.check',
+    'chat.outcome',
+    'chat.help',
+    'heard.list',
+    'slots.list',
+    'files.list',
+    'vmail.list',
+    'vmail.read',
+    'vmail.pending',
+    'broadcast.status',
+    'beacon.hop.status',
+    'email.status',
+    'pskreporter.status',
+})
+CHAT_READ_PATHS = frozenset({'/chat/snapshot', '/chat/projection', '/chat/result'})
+COMMAND_RESULT = '/commands/result'
+
 DEFAULT_PORT = 8737
 SERVICE_NAME = 'hfmodem station'
 SCHEMA = 2
@@ -14,7 +96,7 @@ COMMANDS = '/commands'
 
 EVENT_TYPES = frozenset({
     'rig', 'owner', 'tx', 'link', 'session', 'tape', 'logbook', 'gap',
-    'command', 'ptt', 'warning',
+    'command', 'ptt', 'warning', 'chat.state', 'chat.event', 'chat.outcome',
 })
 SERVICE_STATES = frozenset({
     'starting', 'observing', 'owning', 'owning-receive', 'releasing', 'failed',

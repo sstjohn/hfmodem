@@ -13,7 +13,7 @@ from hfmodem.tests.shrike.test_p3_turn_recovery import Sink, pending, packet
 @pytest.mark.parametrize("enabled", [False, True])
 def test_only_good_p3_changeovers_select_experimental_cs5(enabled):
     io=Sink()
-    io.p3_changeover_cs5=enabled
+    io.p3_changeover_answer="cs5-every" if enabled else "cs1"
     a=arq.PactorArq(io)
     a.role=arq.IRS
     a._enter_connected()
@@ -32,7 +32,7 @@ def test_only_good_p3_changeovers_select_experimental_cs5(enabled):
 @pytest.mark.parametrize("protocol", [spec.Protocol.PACTOR1,spec.Protocol.PACTOR2])
 def test_other_protocols_keep_their_changeover_answer(protocol):
     io=Sink()
-    io.p3_changeover_cs5=True
+    io.p3_changeover_answer="cs5-every"
     a=arq.PactorArq(io)
     a.role=arq.IRS
     a._enter_connected()
@@ -42,7 +42,7 @@ def test_other_protocols_keep_their_changeover_answer(protocol):
 
 def test_recovery_plain_ack_barrier_survives_experiment():
     a,io=pending()
-    io.p3_changeover_cs5=True
+    io.p3_changeover_answer="cs5-every"
     packet(a,repeated_stint=True)
     assert io.sent[-1] == ("cs",arq.CS_ACK)
     assert a._turn_ack_owed and a._buffer_raw == 6
@@ -50,7 +50,7 @@ def test_recovery_plain_ack_barrier_survives_experiment():
 
 def test_qrt_still_gets_final_ack():
     io=Sink()
-    io.p3_changeover_cs5=True
+    io.p3_changeover_answer="cs5-every"
     a=arq.PactorArq(io)
     a.role=arq.IRS
     a._enter_connected()
@@ -67,6 +67,6 @@ def test_cli_requires_explicit_opt_in(monkeypatch, enabled):
                         + (["--p3-changeover-cs5"] if enabled else []))
     monkeypatch.setattr(onair.config,"mail_password",lambda *args: None)
     observed=[]
-    monkeypatch.setattr(onair,"run",lambda args: observed.append(args.p3_changeover_cs5) or 0)
+    monkeypatch.setattr(onair,"run",lambda args: observed.append(args.p3_changeover_answer) or 0)
     assert onair.main() == 0
-    assert observed == [enabled]
+    assert observed == ["cs5-every" if enabled else "cs1"]

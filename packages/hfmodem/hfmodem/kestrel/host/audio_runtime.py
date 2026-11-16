@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Single VARA owner cadence shared by station and standalone audio launchers."""
+from contextlib import contextmanager
+from collections import deque
 import queue
 import time
 import threading
@@ -85,6 +87,11 @@ class AudioHostRuntime:
         self._idle_unkey = None
         self._diagnostic_modem = None
         self._payload_credit = (0, 0)
+        self._evidence_lock = threading.Lock()
+        self._payload_evidence = ()
+        self._payload_boundaries = deque(maxlen=4096)
+        self._evidence_consumers = 0
+        self._evidence_sequence = None
         self._retunes = queue.Queue(maxsize=1)
         self._retune = None
 
@@ -179,19 +186,60 @@ class AudioHostRuntime:
                 # A tune failure leaves frequency uncertain: stop the owner.
                 raise
 
-    def modem_factory(self):
+    def modem_factory(self, *, authority=None, fence=None):
         modem = VaraHostModem(self.transport, high_speed=self.high_speed, clock=self.clock,
-                              kiss_tx_queue=self.kiss_tx_queue, receive_context=self.receive_context)
+                              kiss_tx_queue=self.kiss_tx_queue, receive_context=self.receive_context,
+                              payload_boundary=self._record_payload_boundary,
+                              authority=authority, control_fence=fence)
         try:
             self._new.put_nowait(modem)
         except queue.Full:
             raise ConnectionAbortedError('prior VARA attachment awaits its owner') from None
         return modem
 
+    @contextmanager
+    def subscribe_payload_evidence(self):
+        with self._evidence_lock:
+            self._evidence_consumers += 1
+        try:
+            yield self.payload_evidence
+        finally:
+            with self._evidence_lock:
+                self._evidence_consumers -= 1
+                if not self._evidence_consumers:
+                    self._payload_evidence = ()
+                    self._payload_boundaries.clear()
+                    self._evidence_sequence = None
+
+    def payload_evidence(self):
+        with self._evidence_lock:
+            return self._payload_evidence
+
+    def _record_payload_boundary(self, boundary):
+        with self._evidence_lock:
+            if self._evidence_consumers:
+                self._payload_boundaries.append(boundary)
+
+    def payload_boundaries(self):
+        """Recover immutable notification tokens; a missing token is unknown.
+
+        Direct observers receive each token before its host notification.
+        This bounded history supports recovery, never an inference that the
+        newest ledger belongs to the newest Client generation.
+        """
+        with self._evidence_lock:
+            return tuple(self._payload_boundaries)
+
     def _report_payload_credit(self):
         """Observe the original-byte ledger on its owner thread, never BUFFER guesses."""
         if self.modem is None:
             return
+        with self._evidence_lock:
+            if self._evidence_consumers:
+                sequence = (self.modem, self.modem.payload_evidence_sequence)
+                if sequence != self._evidence_sequence:
+                    self._payload_evidence = self.modem.payload_evidence()
+                    self._evidence_sequence = sequence
         if self.modem is not self._diagnostic_modem:
             self._diagnostic_modem = self.modem
             self._payload_credit = (0, 0)
@@ -203,7 +251,10 @@ class AudioHostRuntime:
             for kind, total, before in zip(('acknowledged', 'discarded'), credit, previous):
                 if total > before:
                     try:
-                        notify(kind, bytes=total - before)
+                        fields = dict(bytes=total-before)
+                        if getattr(self.modem, 'authority', None) is not None:
+                            fields['authority'] = self.modem.authority
+                        notify(kind, **fields)
                     except Exception:
                         pass  # An observer must not interfere with the modem owner.
 

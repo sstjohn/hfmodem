@@ -11,7 +11,7 @@ from hfmodem.tests.shrike.test_p4turn import FS, machine, word
 
 
 def waiting(step):
-    turn, queue = machine(data='chirp' if step == 'chirp' else 'body')
+    turn, queue = machine(data={'ladder': 'long', 'chirp': 'chirp', 'data': 'body'}[step])
     queue.on_host_data(b'A' * 31)
     if step == 'ladder':
         turn._short(0, 1)
@@ -55,10 +55,10 @@ def test_missing_read_expires_once_and_rolls_back_without_accepting_a_late_ack(s
         at = sent.stream_sample + round(CYCLE[sent.kind] * FS) - turn.lead
         turn.silence(at)
     assert turn.state == State.DOWN
-    assert turn.reason == ('retry budget exhausted' if step == 'ladder' else 'close silence')
-    if step != 'ladder':
-        assert closing[0].kind == Kind.BODY and closing[0].status == 0x20
-        assert [p.value for p in closing[1:]] == [37, 37, 37]
+    # D S7.6: exhausting the long ladder closes the link on air.
+    assert turn.reason == 'close silence'
+    assert closing[0].kind == Kind.BODY and closing[0].status == 0x20
+    assert [p.value for p in closing[1:]] == [37, 37, 37]
     assert queue._buffer_raw == len(queue._outbuf) == 31 and not queue._p4_lent
     assert sum(r.outcome == Registered.EXPIRED for r in turn.events) == 1
 

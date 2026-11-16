@@ -5,6 +5,29 @@
 import time
 
 
+class LongDeadline:
+    """Frozen work, publication and enqueue limits for one physical LONG."""
+
+    def __init__(self, fs, onset, sample_now, *, lead_s, sf8=False,
+                 notice_s=0., wall_now=time.monotonic):
+        key = onset + round(3.400 * fs)
+        self.work = WorkBudget(fs, key, sample_now, wall_now,
+                               reserve_s=lead_s + (.010 if sf8 else 0.) + .005)
+        self.publication = WorkBudget(fs, key, sample_now, wall_now,
+                                      reserve_s=notice_s + .005)
+        self.enqueue = WorkBudget(fs, key, sample_now, wall_now,
+                                  reserve_s=notice_s)
+
+    def work_limit(self):
+        return self.work.wall_now() + self.work.tighten()
+
+    def publishable(self):
+        return self.publication.tighten() >= 0
+
+    def keyable(self):
+        return self.enqueue.tighten() >= 0
+
+
 class WorkBudget:
     """Admit receive work while preserving time to render and settle the key."""
 
@@ -28,6 +51,11 @@ class WorkBudget:
         return min((self.sample_deadline-self.sample_now())/self.fs,
                    self.wall_deadline-self.wall_now())
 
+    def tighten(self):
+        self.wall_deadline = min(self.wall_deadline, self.wall_now()
+            + (self.sample_deadline-self.sample_now())/self.fs)
+        return self.remaining()
+
     def admits(self, stage):
         if self.remaining() >= self.costs[stage]:
             return True
@@ -40,6 +68,19 @@ class WorkBudget:
             return True
         self.deferred.append(stage)
         return False
+
+
+def watch_read_admission(stage, support, now, decision, fs, costs=()):
+    """Reserve synchronous prefix work as well as final reads for the parent.
+
+    Stage 1 can prepare both spread forms. Measured stream charges and host
+    elapsed time may raise, but never erase, the conservative initial reserve.
+    """
+    # A partial read runs classification plus feed, not just the cheap header.
+    initial = (WorkBudget.COSTS['detect'] if stage == 0 else
+               2*WorkBudget.COSTS['long'] if stage == 1 else WorkBudget.COSTS['long'])
+    reserve = max((round(initial*fs), *costs))
+    return max(support, now)+reserve <= decision, reserve
 
 
 def decision_summary(events, heard, fs):

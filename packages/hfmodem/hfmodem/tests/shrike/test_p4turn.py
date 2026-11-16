@@ -141,7 +141,7 @@ def test_y27_decides_once(extent, accepted, grant):
     "resolution", [Registered.CONFIRMED, Registered.CONTRADICTED, Registered.EXPIRED]
 )
 def test_data_ack_admits_short_but_only_full_ack_commits(resolution):
-    m, a = machine()
+    m, a = machine(data="chirp")
     a.on_host_data(b"payload")
     m._data(0, State.ISS_DATA_ACK, Kind.BODY)
     m.keyed()
@@ -185,7 +185,7 @@ def test_late_decode_delivers_and_answers_once_over_an_unread_next_copy():
 
 
 def test_refused_short_does_not_advance_ladder():
-    m, a = machine()
+    m, a = machine(data="long")
     m.start(0)
     m.keyed()
     m.observe(word("X27", round(0.92 * FS)), now=round(1.1 * FS))
@@ -196,7 +196,7 @@ def test_refused_short_does_not_advance_ladder():
 
 
 def test_refused_speculative_short_retains_body_until_resolution():
-    m, a = machine()
+    m, a = machine(data="chirp")
     a.on_host_data(b"payload")
     m._data(0, State.ISS_DATA_ACK, Kind.BODY)
     m.keyed()
@@ -215,7 +215,7 @@ def test_refused_speculative_short_retains_body_until_resolution():
 
 
 def test_unread_y27_cancels_retransmission_and_expired_word_does_not():
-    m, a = machine()
+    m, a = machine(data="long")
     m.start(0)
     m.keyed()
     y = round(0.92 * FS)
@@ -231,21 +231,21 @@ def test_unread_y27_cancels_retransmission_and_expired_word_does_not():
     assert m.decide(y + FS).value == 13
 
 
-def test_v49_does_not_accept_unknown_word_and_long_requires_renderer():
-    m, a = machine(ladder="chirp")
-    m.index = 1
+def test_v49_does_not_accept_unknown_word_and_long_data_renders():
+    m, a = machine(data="chirp")
     m._short(0, 1)
     m.keyed()
-    m.observe(word("UNKNOWN", round(0.92 * FS)))
+    m.observe(word("UNKNOWN", round(.92 * FS)))
     assert m.decide(0).value == 49
-    n, a = machine()
-    n.index = 1
+    n, a = machine(data="long")
+    a.on_host_data(b"payload")
     n._short(0, 1)
     n.keyed()
-    n.observe(word("U27", round(0.92 * FS)))
+    n.observe(word("U27", round(.92 * FS)))
     assert n.decide(0).kind == Kind.LONG
-    n.refused("no renderer")
-    assert n.state == State.ISS_HOLD
+    assert n.decide(0).payload == b"payload"
+    n.refused("waveform not prepared")
+    assert n.decide(0).kind == Kind.LONG and n.decide(0).repeat is False
 
 
 def test_no_close_body_carries_inflight_bytes():
@@ -285,10 +285,10 @@ def answer(m, name, at):
 
 
 @pytest.mark.parametrize(
-    "ladder,data", [("long", "hold"), ("long", "body"), ("chirp", "chirp")]
+    "data", ["body", "chirp"]
 )
-def test_take_turn_ladder_data_and_close_trace(ladder, data):
-    m, a = machine(role="irs", ladder=ladder, data=data, app_done=True)
+def test_take_turn_ladder_data_and_close_trace(data):
+    m, a = machine(role="irs", data=data, app_done=True)
     a.on_host_data(b"A" * 31 + b"B" * 22)
     y = 0
     m.observe(word("Y27", y, extent=0.8))
@@ -308,44 +308,25 @@ def test_take_turn_ladder_data_and_close_trace(ladder, data):
     assert p.payload == b"A" * 31
     sent = m.keyed()
     assert m.state == State.ISS_DATA_ACK
-    short = answer(m, "X27", sent.stream_sample + round(0.92 * FS))
-    assert short.value == 13
-    short = answer(m, "X27", short.stream_sample + round(0.92 * FS))
-    assert short.value == (60 if ladder == "long" else 49)
-    if ladder == 'chirp':
-        short = answer(m, 'X27', short.stream_sample + round(.92*FS))
+    if data == "chirp":
+        short = answer(m, "X27", sent.stream_sample + round(.92*FS))
+        assert short.value == 13
+        short = answer(m, "X27", short.stream_sample + round(.92*FS))
+        assert short.value == 49
+        short = answer(m, "X27", short.stream_sample + round(.92*FS))
         assert short.value == 53
-    m.observe(
-        word(
-            "U27", short.stream_sample + round(0.92 * FS)
-        )
-    )
-    p = m.decide(short.stream_sample + FS)
-    if data == "hold":
-        assert p.kind == Kind.LONG
-        m.refused("no renderer")
-        assert m.state == State.ISS_HOLD
-        assert m.decide(p.stream_sample + round(5 * 1.25 * FS)) is None
-        # Peer retakes the turn during the hold; the remaining queue survives.
-        y = p.stream_sample + round(4 * 1.25 * FS)
-        m.observe(word("Y27", y, extent=0.8))
-        m.observe(body(y, b"", 0x40))
-        assert m.decide(y + round(0.846 * FS)).status == 0x40
-        sent = m.keyed()
-        assert m.state == State.ISS_GRANT
-        y = sent.stream_sample + round(0.92 * FS)
-        m.observe(word("Y27", y, extent=0.8))
-        m.observe(replace(body(y, b"FS YY\r"), responds_to=sent.stream_sample))
-        assert m.decide(y + round(0.846 * FS)).word == "V27"
-        m.keyed()
-        assert m.state == State.IRS_ANSWER
-        assert bytes(a._outbuf) == b"B" * 22
-        return
+        m.observe(word("U27", short.stream_sample + round(.92*FS)))
+        p = m.decide(short.stream_sample + FS)
+    else:
+        m.observe(word("X27", sent.stream_sample + round(.92*FS)))
+        p = m.decide(sent.stream_sample + FS)
     assert p.kind == (Kind.CHIRP if data == "chirp" else Kind.NORMAL)
     assert p.payload == b"B" * 22
     sent = m.keyed()
     w = sent.stream_sample + round((3.4 if data == "chirp" else 0.92) * FS)
-    close = answer(m, "X27" if data == 'chirp' else "V27", w)
+    expected = "X27" if data == "chirp" else "V27"
+    assert not m._data_ack(word("V27" if expected == "X27" else "X27", w).observation)
+    close = answer(m, expected, w)
     assert close.status == 0x20 and close.payload == b""
     assert m.counter == 2 and a._buffer_raw == 0
     m.observe(word("X27", close.stream_sample + round(0.92 * FS)))
@@ -358,9 +339,9 @@ def test_take_turn_ladder_data_and_close_trace(ladder, data):
 
 
 def test_data_rollback_ignores_the_valueless_short_answer():
-    m, a = machine()
+    m, a = machine(data="chirp")
     a.on_host_data(b"payload")
-    m._data(0, State.ISS_DATA_ACK)
+    m._data(0, State.ISS_DATA_ACK, Kind.BODY)
     m.keyed()
     w = round(0.92 * FS)
     early = word("X27", w, True)
@@ -383,7 +364,7 @@ def test_data_rollback_ignores_the_valueless_short_answer():
 
 
 def test_grant_exhaustion_requeues_before_a_fresh_ladder():
-    m, a = machine()
+    m, a = machine(data="chirp")
     a.on_host_data(b"payload")
     m.outbox.transfer()
     m._body(0, 0x40, State.ISS_GRANT)
@@ -428,7 +409,7 @@ def test_close_retries_are_a37_and_irs_silence_requests_repeat():
     assert n.state == State.IRS_ANSWER
     n.silence(FS)
     seed = n.decide(FS)
-    assert seed.word == 'V27' and seed.purpose is None
+    assert seed.word == 'V27' and seed.purpose == 'repeat-request'
     assert seed.accepted_target is None and not seed.current_slot_accepted
 
 
@@ -467,9 +448,9 @@ def test_terminal_source_failure_never_delivers_a_later_supported_packet():
     ],
 )
 def test_refused_speculation_resolves_on_the_refused_raster(name, outcome):
-    m, a = machine()
+    m, a = machine(data="chirp")
     a.on_host_data(b"data")
-    m._data(0, State.ISS_DATA_ACK)
+    m._data(0, State.ISS_DATA_ACK, Kind.BODY)
     m.keyed()
     w = round(0.92 * FS)
     early = word("X27", w, True)
@@ -485,7 +466,7 @@ def test_refused_speculation_resolves_on_the_refused_raster(name, outcome):
 
 
 def test_refused_ladder_speculation_expires_to_the_old_step():
-    m, a = machine()
+    m, a = machine(data="long")
     m.start(0)
     m.keyed()
     w = round(0.92 * FS)
@@ -502,9 +483,9 @@ def test_refused_ladder_speculation_expires_to_the_old_step():
 
 
 def test_speculative_shorts_do_not_reset_the_data_retry_budget():
-    m, a = machine()
+    m, a = machine(data="chirp")
     a.on_host_data(b"data")
-    m._data(0, State.ISS_DATA_ACK)
+    m._data(0, State.ISS_DATA_ACK, Kind.BODY)
     m.keyed()
     for _ in range(7):
         w = m.last.stream_sample + round(0.92 * FS)
@@ -568,26 +549,25 @@ def propose_ack(m, frame):
 
 @pytest.mark.parametrize('arm', ACK_GREETINGS)
 @pytest.mark.parametrize('policy,words,reasons', [
-    ('v27', ['V27']*5, ['fixed']*5),
-    ('x27', ['X27']*5, ['fixed']*5),
     ('parity', ['V27']*2 + ['X27']*3, ['counter 1']*2 + ['counter 2']*3),
-    ('alternate-packet', ['V27']*2 + ['X27']*3,
+    ('toggle', ['V27']*2 + ['X27']*3,
      ['new packet after X27', 'repeat keeps V27', 'new packet after V27',
       'repeat keeps X27', 'repeat keeps X27']),
 ])
 def test_normal_ack_recorded_repeated_packet(arm, policy, words, reasons):
     m, _ = machine(role='irs', normal_ack=policy)
     expected_words = ['X27']*5 + words
-    expected_reasons = ['opening body']*5 + reasons
+    expected_reasons = (['chain start'] + ['repeat keeps X27']*4 if policy == 'toggle'
+                        else ['opening body']*5) + reasons
     for i, frame in enumerate(ack_greeting(arm)):
-        previous = m.ack_word
+        previous = m._ack_chain
         p = propose_ack(m, frame)
         assert p.word == expected_words[i]
         assert p.ack_reason == expected_reasons[i]
-        assert m.ack_word == previous
+        assert m._ack_chain == previous
         row = [e for e in m.link_events if e['event'] == 'normal-answer'][-1]
         assert row['ack_policy'] == policy and row['reason'] == p.ack_reason
-        assert row['word'] == p.word and row['previous'] == previous
+        assert row['word'] == p.word
         assert row['status'] == row['counter'] == frame.observation.frame.status.byte
         assert row['repeat'] == (i not in (0, 5, 7))
         if row['repeat']:
@@ -596,20 +576,14 @@ def test_normal_ack_recorded_repeated_packet(arm, policy, words, reasons):
             assert repeat['ack_policy'] == policy
             assert p.word == m._last_ack[1].word
         m.keyed()
-        assert m.ack_word == p.word
+        assert m._ack_chain[1] == p.word
 
 
-@pytest.mark.parametrize('arm', ACK_GREETINGS)
-def test_normal_ack_default_keeps_recorded_words(arm):
-    m, _ = machine(role='irs')
-    for i, frame in enumerate(ack_greeting(arm)):
-        assert propose_ack(m, frame).word == ('X27' if i < 5 else 'V27')
-        m.keyed()
 
 
 @pytest.mark.parametrize('arm', ACK_GREETINGS)
 def test_normal_ack_refused_key_keeps_history(arm):
-    m, _ = machine(role='irs', normal_ack='alternate-packet')
+    m, _ = machine(role='irs', normal_ack='toggle')
     frames = ack_greeting(arm)
     for frame in frames[:7]:
         propose_ack(m, frame)
@@ -617,9 +591,9 @@ def test_normal_ack_refused_key_keeps_history(arm):
     last = m._last_ack
     p = propose_ack(m, frames[7])
     assert p.word == 'X27' and p.ack_reason == 'new packet after V27'
-    assert m.ack_word == 'V27'
+    assert m._ack_chain[1] == 'V27'
     m.refused('deadline')
-    assert m.ack_word == 'V27' and m._last_ack == last
+    assert m._ack_chain[1] == 'V27' and m._last_ack == last
     p = propose_ack(m, frames[8])
     assert p.word == 'X27' and p.ack_reason == 'new packet after V27'
     m.keyed()
@@ -629,34 +603,27 @@ def test_normal_ack_refused_key_keeps_history(arm):
 
 
 def test_normal_ack_packet_change_ignores_unrelated_words_and_turn_change():
-    m, _ = machine(role='irs', normal_ack='alternate-packet')
+    m, _ = machine(role='irs', normal_ack='toggle', chain_reset='ladder')
     for frame in ack_greeting('2200'):
         propose_ack(m, frame)
         m.keyed()
-    # Set history to V27 so an unrelated X27 would visibly corrupt it.
     p = propose_ack(m, ack_frame(1600000, b'007\rCMS via WS8EOC >\r', 3))
     assert (p.word, p.ack_reason) == ('V27', 'new packet after X27')
     m.keyed()
-    short = replace(body(1700000).observation, kind=Kind.SHORT, frame=None, value=13)
-    p = propose_ack(m, RegisteredObservation(short, Registered.NEW))
-    assert p.word == 'X27' and p.ack_reason is None
-    m.keyed()
-    assert m.ack_word == 'V27'
+    m.observe(word('T27', 1700000), now=1712000)
+    assert m._ack_chain == (3, 'V27')
     p = propose_ack(m, ack_frame(1800000, b'long', 0, Kind.LONG))
-    assert (p.word, p.ack_reason) == ('T27', 'counter-even-t27 counter 0')
-    m.keyed()
-    assert m.ack_word == 'V27'
-    p = propose_ack(m, ack_frame(2000000, b'new packet', 3))
     assert (p.word, p.ack_reason) == ('X27', 'new packet after V27')
+    m.keyed()
+    p = propose_ack(m, ack_frame(2000000, b'new packet', 3))
+    assert (p.word, p.ack_reason) == ('V27', 'new packet after X27')
     m.refused('deadline')
     p = propose_ack(m, ack_frame(2100000, b'\x01\x01\x01wrapped', 0x80))
-    assert (p.word, p.ack_reason) == ('X27', 'new packet after V27')
+    assert (p.word, p.ack_reason) == ('X27', 'repeat keeps X27')
     m.keyed()
-    # Granting the turn and returning to IRS does not reset the tracked ack.
     p = propose_ack(m, body(2200000, b'', 0x40))
     assert p.state == State.ISS_GRANT and p.ack_reason is None
     m.keyed()
-    assert m.ack_word == 'X27'
     p = propose_ack(m, ack_frame(2300000, b'next turn', 1))
     assert (p.word, p.ack_reason) == ('V27', 'new packet after X27')
     m.keyed()
@@ -673,22 +640,22 @@ def test_normal_ack_parity_covers_idle_and_extended_statuses(status):
 
 
 def test_normal_ack_without_previous_key_and_validation():
-    m, _ = machine(role='irs', normal_ack='alternate-packet')
+    m, _ = machine(role='irs', normal_ack='toggle')
     p = propose_ack(m, ack_frame(48000, b'first normal', 2))
-    assert (p.word, p.ack_reason) == ('V27', 'no previous ack')
+    assert (p.word, p.ack_reason) == ('X27', 'chain start')
     m.refused('deadline')
-    assert m.ack_word is None
+    assert m._ack_chain is None
     p = propose_ack(m, ack_frame(108000, b'first normal', 2, header='B'))
-    assert (p.word, p.ack_reason) == ('V27', 'no previous ack')
+    assert (p.word, p.ack_reason) == ('X27', 'chain start')
     m.keyed()
-    assert machine()[0].normal_ack == 'v27'
+    assert machine()[0].normal_ack == 'toggle'
     for policy in ('unknown', 'alternate-attempt'):
         with pytest.raises(ValueError):
             machine(normal_ack=policy)
 
 
 def test_normal_ack_refused_c3_then_extended_packet_reads_last_key():
-    m, _ = machine(role='irs', normal_ack='alternate-packet')
+    m, _ = machine(role='irs', normal_ack='toggle')
     for frame in ack_greeting('2200'):
         propose_ack(m, frame)
         m.keyed()
@@ -698,7 +665,7 @@ def test_normal_ack_refused_c3_then_extended_packet_reads_last_key():
     p = propose_ack(m, ack_frame(1660000, b'\x01\x01\x01wrapped', 0x80))
     assert (p.word, p.ack_reason) == ('V27', 'new packet after X27')
     m.keyed()
-    assert m.ack_word == 'V27'
+    assert m._ack_chain[1] == 'V27'
 
 
 @pytest.mark.parametrize('kind,status,expected,seed', [
@@ -710,24 +677,30 @@ def test_normal_ack_refused_c3_then_extended_packet_reads_last_key():
     (Kind.SHORT, 53, 'U27', 'V27'),
 ])
 def test_normal_ack_unrelated_control_words_do_not_advance(kind, status, expected, seed):
-    m, _ = machine(role='irs', normal_ack='alternate-packet', long_ack='fixed-x27')
+    m, _ = machine(role='irs', normal_ack='toggle', long_ack='toggle')
     for frame in ack_greeting('1151')[:8 if seed == 'X27' else 7]:
         propose_ack(m, frame)
         m.keyed()
+    before = m._ack_chain
     if kind == Kind.SHORT:
         obs = replace(body(1600000).observation, kind=kind, frame=None, value=status)
         incoming = RegisteredObservation(obs, Registered.NEW)
     else:
         incoming = ack_frame(1600000, b'unrelated', status, kind)
     p = propose_ack(m, incoming)
-    assert (p.word, p.ack_reason) == (expected, None)
+    assert p.word == expected
     m.keyed()
-    assert m.ack_word == seed
+    if kind == Kind.SHORT:
+        assert m._ack_chain == before
+    elif status == 0x21:
+        assert m._ack_chain == before
+    else:
+        assert m._ack_chain == (status & 3, expected)
 
 
 @pytest.mark.parametrize('ack_53', ['U27', 'X27'])
 def test_the_word_answering_v53_is_chosen_by_the_operator(ack_53):
-    m, _ = machine(role='irs', ack_53=ack_53)
+    m, _ = machine(role='irs', peer_ack={53: ack_53})
     for frame in ack_greeting('1151')[:7]:
         propose_ack(m, frame)
         m.keyed()
@@ -737,8 +710,8 @@ def test_the_word_answering_v53_is_chosen_by_the_operator(ack_53):
 
 
 @pytest.mark.parametrize('policy,expected', [
-    ('x27', ['X27', 'X27', 'X27', 'X27']),
-    ('alternate', ['X27', 'X27', 'V27', 'X27']),
+    ('toggle', ['X27', 'X27', 'V27', 'X27']),
+    ('parity', ['X27', 'X27', 'V27', 'X27']),
 ])
 def test_chirp_acks_follow_the_operators_policy(policy, expected):
     # K4MSU 2206: X27 moved 0x61 to 0x62, then 0x62 drew X27 on every copy and never moved.

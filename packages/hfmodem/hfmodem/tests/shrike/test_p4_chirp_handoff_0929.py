@@ -68,7 +68,7 @@ def test_checked_chirp_receive_is_independent_of_peer_control_answer(monkeypatch
     assert receiver.chirp
     assert received == [b'gateway chirp']
     assert tx.p4_probe.emissions[1]['audio_start'] == chirp_at+round(3.400*FS)
-    assert tx.p4_probe.emissions[1]['word'] == 'V27'
+    assert tx.p4_probe.emissions[1]['word'] == 'X27'
     mode = [e for e in tx.p4_probe.link_events if e['event'] == 'peer-mode']
     assert bool(mode) == (value == 53)
     assert all(e['state'] == 'IRS_ANSWER' and e['kind'] == Kind.WORD
@@ -93,14 +93,14 @@ def test_unread_chirp_has_no_answer_delivery_or_turn_credit(monkeypatch, value, 
         tx, receiver, received, _ = exchange(monkeypatch, value, refused=refused, checked=False)
     assert receiver.chirp and received == []
     expected = [] if refused else [
-        dict(at=at,word='U27',purpose=None,kind=Kind.WORD,state='IRS_ANSWER')
+        dict(at=at,word='V27',purpose='repeat-request',kind=Kind.WORD,state='IRS_ANSWER')
         for at in (271200,332160)]
     assert neutral == expected
     neutral_at = {e['at'] for e in neutral}
     ordinary = [e for e in tx.p4_probe.emissions if e['audio_start'] not in neutral_at]
     assert [e['word'] for e in ordinary] == ([] if refused else ['U27'])
     assert [e['audio_start'] for e in ordinary] == ([] if refused else [92160])
-    assert [e['word'] for e in tx.p4_probe.emissions] == ([] if refused else ['U27']*3)
+    assert [e['word'] for e in tx.p4_probe.emissions] == ([] if refused else ['U27', 'V27', 'V27'])
     assert all(not e['payload'] for e in tx.p4_probe.emissions)
     assert not [e for e in tx.p4_probe.link_events if e['event'] == 'peer-mode']
     assert all(e['state'] == 'IRS_ANSWER' and e['kind'] == Kind.WORD
@@ -138,8 +138,8 @@ def test_late_chirp_replaces_ambiguous_short_partial_before_the_deadline(monkeyp
     assert not [e for e in tx.p4_probe.link_events if e['event'] == 'BREAKIN_UNREAD']
 
 
-@pytest.mark.parametrize('status,word', [(0x00, 'V27'), (0x61, 'X27')])
-def test_first_chirp_answer_follows_its_protocol(monkeypatch, status, word):
+@pytest.mark.parametrize('status,word', [(0x00, 'X27'), (0x61, 'X27')])
+def test_first_chirp_answer_starts_x27_for_both_protocols(monkeypatch, status, word):
     tx, receiver, received, chirp_at = exchange(monkeypatch, status=status)
     assert received == [b'gateway chirp']
     assert tx.p4_probe.emissions[1]['audio_start'] == chirp_at+round(3.400*FS)

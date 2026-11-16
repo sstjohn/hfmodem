@@ -5,11 +5,11 @@ import json
 import sys
 import numpy as np
 import pytest
-from hfmodem.shrike import arq, onair, placement, spec
+from hfmodem.shrike import arq, onair
 from hfmodem.shrike.p3trial import TimingTrial, CYCLE, FS, ROTATION
-from hfmodem.tests.shrike.test_entry_answer import _Session
-from hfmodem.tests.shrike.test_grid import _Bench, _Rig
 from hfmodem.tests.shrike.archive import requires_ws8eoc_p3
+from hfmodem.tests.shrike.onair_support import _Bench, _Rig, _Session as _Session
+from hfmodem.tests.shrike.p3_reply_support import receive, setup
 
 
 @pytest.mark.parametrize('host', ['Windows WASAPI', 'Core Audio', 'ALSA'])
@@ -62,46 +62,6 @@ def test_trial_retains_sample_timing(tmp_path, host, entry):
         assert not {'timestamp_limitation', 'timing_estimated', 'timing'} & row.keys()
 
 
-def setup(tmp_path, arm, delay=0):
-    s = _Session(role=arq.ISS, entry_pending=True)
-    s.host.arq.cfg.speed_up = 'hold'
-    s.host.arq.cfg.repeat_gear = 0
-    s.host.arq.cfg.long_cycle = False
-    live = _Bench(seconds=60)
-    g = onair._MasterGrid(10*FS, CYCLE, 8880, packet_n=46080,
-                          cs_n=5760, d_max_n=6240)
-    g.protocol = spec.Protocol.PACTOR3
-    tx = onair.RadioTx(rig=_Rig(), transmit=True, outdir=tmp_path, settle=.04)
-    tx.attach(s.host)
-    s.host.peer = tx
-    tx.live, tx.raster, tx.sessrx = live, g, s.rx
-    tx.timing_trial = TimingTrial(arm)
-    tx.defer_p3_cs = True
-    tx.p3_follow_offset = 'none'
-    tx.entry_delay_n = delay
-    tx.aim(g, 0)
-    live.now = live.pos = 9*FS
-    tx.send_entry_packet(1, b'', 0x1a)
-    assert not tx.refused and tx.timing_trial.entry_phase is not None
-    return s, tx, live, g
-
-
-def receive(s, tx, live, g, head):
-    # Synthetic CRC-valid peer CS3; recorded acquisition is exercised below.
-    raw = placement.changeover_packet(b'RMS', 0, swapped=False)
-    center = int(np.argmax(placement.protocol_config().pulse()))
-    pad = 9600-center
-    x = np.pad(raw, (pad, FS//10))
-    origin = head-9600
-    live.audio[origin:origin+len(x)] = x
-    live.now = live.pos = head+round(.84*FS)
-    tx.aim(g, 2)
-    s.rx.control_signal(x, origin, head)
-    assert s.packets and s.packets[-1].packet[2] == b'RMS'
-    assert s.host.arq.role == arq.IRS
-    g.reverse(to_iss=False)
-
-
 @pytest.mark.parametrize('arm', ['A', 'B'])
 @pytest.mark.parametrize('gap', [895, 925, 945])
 @pytest.mark.parametrize('delay', [0, 336])
@@ -122,7 +82,7 @@ def test_real_emission_uses_selected_epoch(tmp_path, arm, gap, delay):
     if arm == 'B':
         assert (pulse-entry)%CYCLE == ROTATION
     else:
-        assert pulse-g._p3_peer[0] == round(onair.P3_REPLY_S*FS)+852
+        assert pulse-g._p3_peer[0] == round(onair.P3_COMB_REPLY_S*FS)+852
     assert trial.opportunities == 1
     assert trial.replies[-1]['cs'] == 1
 

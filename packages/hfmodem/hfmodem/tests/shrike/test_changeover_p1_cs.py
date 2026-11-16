@@ -67,7 +67,7 @@ def test_our_own_reader_takes_it_back_off_the_air(tmp_path, monkeypatch):
 
 
 def test_the_key_instant_stays_on_the_pactor3_raster(tmp_path, monkeypatch):
-    """The peer read the entry packet, so its window is the LINK's -- `P3_REPLY_S`
+    """The peer read the entry packet, so its window is the LINK's -- `P3_COMB_REPLY_S`
     past its own packet, not the PACTOR-1 turnaround the codeword usually keys
     on (`docs/protocols/pactor/pactor3.md`, "The slot moves when the LINK does")."""
     _, tx, grid, at, audio, _ = _keyed(tmp_path, monkeypatch, p1_changeover=True)
@@ -100,7 +100,11 @@ class _Peer:
     def attach(self, host):
         pass
 
-    def send_cs(self, index, *, p1_codeword=False):
+    def p3_slot_keyed(self) -> bool | None:
+        return None
+
+    def send_cs(self, index, *, p1_codeword=False, unread=False, maxdown=False,
+                packet_phase=None, cycle_long=None):
         self.sent.append((index, p1_codeword))
 
     def send_p1_cs(self, index):
@@ -121,7 +125,7 @@ def test_only_the_two_codewords_both_tables_share_change_renderer(cs_index):
     """PACTOR-1 has four codewords, its CS4 is a speed-DOWN to 100 Bd where
     PACTOR-3's demands a speed-up, and it has no CS5 or CS6 at all."""
     host, peer = _host()
-    host._p3_changeover_answer = True
+    host._p3_answering_changeover = True
     host.send_cs(cs_index)
     assert peer.sent == [(host._counter_cs_for(cs_index), False)]
 
@@ -129,7 +133,7 @@ def test_only_the_two_codewords_both_tables_share_change_renderer(cs_index):
 @pytest.mark.parametrize("answering", [False, True])
 def test_the_renderer_changes_only_on_the_changeover_cycle(answering):
     host, peer = _host()
-    host._p3_changeover_answer = answering
+    host._p3_answering_changeover = answering
     host.send_cs(arq.CS_ACK)
     assert peer.sent == [(host._counter_cs_for(arq.CS_ACK), answering)]
 

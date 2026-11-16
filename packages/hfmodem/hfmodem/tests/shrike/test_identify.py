@@ -137,7 +137,7 @@ def test_ident_answers_to_none_of_the_links_data_admissions(tmp_path, capsys):
     bridge, an unanswered robust entry, --observe-after-link-down) leaves
     `observing` set; all of them refuse link bursts, and none may refuse the ID."""
     tx, _, _ = transmitter(tmp_path)
-    tx.p4_probe = SimpleNamespace(requested=True, emitting=False)
+    tx.p4_probe = SimpleNamespace(requested=True, emitting=False, id=[])
     tx.p4_hold_audio = SimpleNamespace(pending=True)
     tx.host = ptc.PtcHost(peer=tx, mycall=CALL)
     assert tx.host.protocol == onair.Protocol.PACTOR1
@@ -638,7 +638,7 @@ def test_p3_breakin_projection_keeps_its_packet_width_through_settle(
     at = tx.boundary - onair.ISS_GUARD_CYCLES * r.cycle_n - r.data_n
     r.note_peer_codeword(at, onair.P3_CS_N, "BREAK-IN", "K7ABC",
                          protocol=onair.Protocol.PACTOR3)
-    assert r._peer_air()[1] == r.data_n
+    assert r._peer_air_evidence()[1] == r.data_n
     seen = []
     forget = r.forget_stale
 

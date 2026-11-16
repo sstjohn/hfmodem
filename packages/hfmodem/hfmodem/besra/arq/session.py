@@ -1097,7 +1097,7 @@ class ArqSession:
 
         Twice this station has sent one that satisfied neither, and both times the
         message opened on its 65th byte: WW2MI 2026-08-18, `0xb1`, a repeat rule
-        graded against a type held across a turnover; `WWTD6QMC61TV` 2026-08-23,
+        graded against a type held across a turnover; `WTDQ6MCT16VW` 2026-08-23,
         `0xfd`, a second concession answering a data frame the receiver had minted
         a BREAK out of. The routes were different and the defect was one.
         """
@@ -1110,7 +1110,7 @@ class ArqSession:
         As IRS every transmission the peer makes could be a data frame, and this
         receiver mints bodyless controls out of one when the half-duplex mute
         splice lands on its leader: on 2026-08-23 the 4.4 s `4PSK.200.100` carrying
-        the head of `WWTD6QMC61TV` was reported as a BREAK, and the concession that
+        the head of `WTDQ6MCT16VW` was reported as a BREAK, and the concession that
         drew was read by the CMS as the ACK of that frame. A real BREAK, IDLE or
         ConAck runs on a repeat timer of its own, so waiting for the second copy
         costs one repeat interval; a minted one arrives once, beside the frame it

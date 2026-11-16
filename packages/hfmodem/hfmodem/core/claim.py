@@ -417,7 +417,13 @@ def openers(paths, *, lsof=None, fdinfo=None, started=None, platform=None, deadl
             before = identities[row.pid]
             offset = row.offset
             if platform.startswith("linux"):
-                offset = fdinfo_offset(fdinfo(row.pid, row.fd))
+                try:
+                    offset = fdinfo_offset(fdinfo(row.pid, row.fd))
+                except (FileNotFoundError, ProcessLookupError):
+                    if not _exited(row.pid):
+                        raise
+                    dropped = True
+                    continue
             after = identity(row.pid)
             if after is None:
                 dropped = True

@@ -52,6 +52,30 @@ label.toggle input { accent-color:var(--accent); }
 .export:hover { border-color:var(--accent); }
 .chip::after { content:" \00d7"; }
 main[hidden], section[hidden] { display:none; }
+#chatViewPanel { padding:16px; overflow:auto; }
+#chatViewPanel .chat-content { height:45vh; overflow:auto; white-space:pre-wrap; }
+#chatViewPanel textarea { width:100%; background:var(--bg); color:var(--ink); }
+#chatViewPanel pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+#chatViewPanel button { margin:3px; }
+#chatViewPanel .error { color:var(--accent); }
+#chatViewPanel .bold { font-weight:bold; }
+#chatViewPanel .fg-0 { color:#000; } #chatViewPanel .bg-0 { background:#000; }
+#chatViewPanel .fg-1 { color:#800000; } #chatViewPanel .bg-1 { background:#800000; }
+#chatViewPanel .fg-2 { color:#008000; } #chatViewPanel .bg-2 { background:#008000; }
+#chatViewPanel .fg-3 { color:#808000; } #chatViewPanel .bg-3 { background:#808000; }
+#chatViewPanel .fg-4 { color:#000080; } #chatViewPanel .bg-4 { background:#000080; }
+#chatViewPanel .fg-5 { color:#800080; } #chatViewPanel .bg-5 { background:#800080; }
+#chatViewPanel .fg-6 { color:#008080; } #chatViewPanel .bg-6 { background:#008080; }
+#chatViewPanel .fg-7 { color:#c0c0c0; } #chatViewPanel .bg-7 { background:#c0c0c0; }
+#chatViewPanel .fg-8 { color:#808080; } #chatViewPanel .bg-8 { background:#808080; }
+#chatViewPanel .fg-9 { color:#f00; } #chatViewPanel .bg-9 { background:#f00; }
+#chatViewPanel .fg-10 { color:#0f0; } #chatViewPanel .bg-10 { background:#0f0; }
+#chatViewPanel .fg-11 { color:#ff0; } #chatViewPanel .bg-11 { background:#ff0; }
+#chatViewPanel .fg-12 { color:#00f; } #chatViewPanel .bg-12 { background:#00f; }
+#chatViewPanel .fg-13 { color:#f0f; } #chatViewPanel .bg-13 { background:#f0f; }
+#chatViewPanel .fg-14 { color:#0ff; } #chatViewPanel .bg-14 { background:#0ff; }
+#chatViewPanel .fg-15 { color:#fff; } #chatViewPanel .bg-15 { background:#fff; }
+
 main { flex:1; min-height:0; display:grid; grid-template-columns:minmax(320px,5fr) 7fr; }
 #map { min-height:320px; border-right:1px solid var(--line); background:var(--panel); }
 .book { overflow:auto; }
@@ -132,6 +156,7 @@ td.audio { font-size:11px; color:var(--muted); }
 </header>
 <div class="controls">
   <button class="view-button" id="bookView" aria-pressed="true">Map &amp; log</button>
+  <button class="view-button" id="chatView" aria-pressed="false" hidden>Chat</button>
   <button class="view-button" id="summaryView" aria-pressed="false">Summary</button>
   <select id="protocol" aria-label="Protocol"><option value="">All protocols</option></select>
   <select id="band" aria-label="Band"><option value="">All bands</option></select>
@@ -180,6 +205,25 @@ td.audio { font-size:11px; color:var(--muted); }
   <div id="reportHours"></div>
   <div id="reportTables" class="report-grid"></div>
 </section>
+<section id="chatViewPanel" aria-label="Station chat" hidden></section>
+<script type="module">
+import {mountDeskChat, browserStationIO} from './hfdesk_chat.mjs';
+const panel = document.getElementById('chatViewPanel');
+document.getElementById('chatView').hidden = false;
+const desk = mountDeskChat(document, panel, browserStationIO());
+document.getElementById('chatView').addEventListener('click', async () => {
+  panel.hidden = false;
+  document.getElementById('bookViewPanel').hidden = true;
+  document.getElementById('summary').hidden = true;
+  for (const name of ['bookView', 'summaryView', 'chatView'])
+    document.getElementById(name).setAttribute('aria-pressed', String(name === 'chatView'));
+  try {await desk.open();} catch (error) {desk.error = String(error); desk.changed(desk);}
+});
+for (const name of ['bookView', 'summaryView']) document.getElementById(name).addEventListener('click', () => {
+  panel.hidden = true; document.getElementById('chatView').setAttribute('aria-pressed', 'false');
+});
+window.addEventListener('beforeunload', () => desk.close());
+</script>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);

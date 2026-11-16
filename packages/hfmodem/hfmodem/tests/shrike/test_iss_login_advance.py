@@ -23,6 +23,7 @@ import pytest
 
 from hfmodem.shrike import arq, rxfront, spec
 from hfmodem.shrike.ptc import PtcHost
+from hfmodem.tests.shrike.p3_reply_support import UNBOUNDED_TRIES
 from hfmodem.winlink import B2FSession, MailClient
 
 GREETING = (b"RMS Trimode 1.3.46.0\r[RMS-1.0-B2FHM$]\r"
@@ -52,6 +53,9 @@ class ScriptedPeer:
 
     def cycle(self):
         pass
+
+    def p3_slot_keyed(self) -> None:
+        return None
 
     @property
     def last(self):
@@ -166,9 +170,19 @@ def test_a_repeat_request_re_keys_the_same_changeover_packet():
 
 def test_a_silent_peer_spends_the_retry_budget_and_signs_off():
     host, peer, login = breaks_in()
+    host.arq.cfg.p3_breakin_tries = UNBOUNDED_TRIES
     assert cycles_to_sign_off(host) == host.arq.cfg.max_retries + 1
     assert peer.last[3] and peer.last[1] == login[:CHANGEOVER_FIELD]
     assert any("max retries" in line for line in host.log_lines)
+
+
+def test_a_silent_peer_gets_the_turn_back_then_the_link_signs_off():
+    host, peer, login = breaks_in()
+    tries = host.arq.cfg.p3_breakin_tries
+    assert cycles_to_sign_off(host) == tries + host.arq.cfg.max_retries + 1
+    assert sum(burst[3] for burst in peer.bursts) == tries
+    assert any(f"changeover unanswered after {tries} keyings" in line
+               for line in host.log_lines)
 
 
 # -- the refused ISS --------------------------------------------------------

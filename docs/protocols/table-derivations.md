@@ -342,7 +342,14 @@ consult these full-frame tables.
 
 ### Summary
 
-Generated tables are built at the point of use.
+Generated tables are built at the point of use. The package also ships authored
+JavaScript source; these text assets are inventoried here because the asset gate
+includes them:
+
+| File (key) | Category | How known | Proved |
+|---|---|---|---|
+| `hfdesk_chat.mjs` | Authored source | Original JavaScript source at `hfmodem/ui/assets/hfdesk_chat.mjs`; station chat desk integration, shipped verbatim under AGPL-3.0-only | `tests/ui/test_browser_chat.py` |
+| `station_chat.mjs` | Authored source | Original JavaScript source at `hfmodem/ui/assets/station_chat.mjs`; station chat transport and protocol helpers, shipped verbatim under AGPL-3.0-only | `tests/ui/test_station_chat_protocol.py` |
 
 | Constant | How known | Held by |
 |---|---|---|

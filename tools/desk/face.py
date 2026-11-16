@@ -675,6 +675,12 @@ class Handler:
         path = unquote(url.path)
         if path == '/':
             self.send_bytes((HERE / 'index.html').read_bytes(), 'text/html; charset=utf-8')
+        elif path in ('/station_chat.mjs', '/hfdesk_chat.mjs'):
+            from importlib.resources import files
+            self.send_bytes(files('hfmodem.ui').joinpath('assets', path[1:]).read_bytes(),
+                            'text/javascript; charset=utf-8')
+        elif path == '/chat_mock.mjs':
+            self.send_bytes((HERE / 'chat_mock.mjs').read_bytes(), 'text/javascript; charset=utf-8')
         elif path == '/recording_audio.js':
             self.send_bytes((HERE / 'recording_audio.js').read_bytes(), 'text/javascript; charset=utf-8')
         elif path == '/summary.js':

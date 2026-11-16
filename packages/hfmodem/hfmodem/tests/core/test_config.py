@@ -278,7 +278,7 @@ def test_config_still_reports_an_unset_port_as_unset(tmp_path, capsys):
 
 @pytest.mark.parametrize("name,backend,identity", [
     ("ft891", "yaesu", "ft891"), ("ftdx10", "yaesu", "ftdx10"),
-    ("generic", "rigctld", ""),
+    ("generic", "rigctld", ""), ("x6100", "civ", "x6100"),
 ])
 def test_station_cat_profile_defaults(name, backend, identity):
     raw = base()
@@ -369,7 +369,7 @@ def test_tune_power_defaults_to_ten_watts_and_must_be_positive():
 def test_every_rig_profile_says_whether_a_tune_carrier_helps():
     from hfmodem.core.rigs import RIGS
     assert {name: profile["tune_carrier"] for name, profile in RIGS.items()} == dict(
-        generic=True, ft891=True, ftdx10=False, g90=True, x6100=True)
+        generic=True, ft891=True, ftdx10=False, g90=True, x6100=True, x6100_onboard=True)
     raw = base()
     raw["rig"]["profiles"] = {"ft891": {"tune_carrier": False}}
     assert config.parse(raw, environ={}).resolved_profile["tune_carrier"] is False
@@ -380,6 +380,15 @@ def test_the_full_scale_is_the_station_files_then_the_rigs():
     assert config.parse(raw, environ={}).full_scale_w == 100
     raw["rig"]["max_watts"] = 200
     assert config.parse(raw, environ={}).full_scale_w == 200
+
+
+def test_x6100_cat_backend_and_full_scale():
+    from hfmodem.core.rigs import CAT_BACKENDS
+    raw = base()
+    raw["rig"].pop("cat", None)
+    cfg = config.parse(raw, rig_name="x6100", environ={})
+    assert cfg.rig.cat == "civ" and CAT_BACKENDS[cfg.rig.cat] == "rigctld"
+    assert cfg.full_scale_w == 10
 
 
 def test_a_clamp_below_the_rigs_minimum_is_held_at_the_minimum(capsys):

@@ -314,6 +314,18 @@ and `selcall monitor` commands never transmit.
 
 ## Kestrel chat
 
+Chat senses the terminal by default: with `hfmodem[tui]` installed, an
+TTY on stdin, an available `/dev/tty`, a nonempty TERM other than dumb/unknown,
+no INSIDE_EMACS, and at least 80×24 select Textual. Other terminals use the
+permanent line console. Select it with `vara chat --ui line`, or force Textual
+on `/dev/tty` independently of stdin with `--ui textual`; if the extra or
+controlling terminal is unavailable, chat explains why and selects line mode.
+The line console retains its existing `/dev/tty` input and screen and stdout
+evidence pipe; redirected stdin is not a chat command transport. In real
+Textual sessions Ctrl-C immediately invokes the launcher's emergency panic/unkey
+handler; Ctrl-Q waits for ordered teardown.
+After a hard exit (second panic or deadman), the terminal may need `reset`.
+
 ### VARA chat quickstart
 
 Chat with VarAC peers using hfmodem's Kestrel modem, included in 0.4.0.

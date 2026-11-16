@@ -50,10 +50,10 @@ def check_settlement():
         (['weak', None, 'weak', 'weak'], [False, False, False, True]),
         (['weak', 'U27']*4, [False]*8),
     ]:
-        turn, queue = machine(data='body')
+        turn, queue = machine(data='long')
         turn.weak_pairs = True
         queue.on_host_data(b'A'*31)
-        turn._data(0, p4turn.State.ISS_DATA_ACK)
+        turn._data(0, p4turn.State.ISS_DATA_ACK, Kind.BODY)
         receiver = P4Receiver(FS, admitted=True, breakin=True)
         receiver.enable_hold()
         previous = None
@@ -83,10 +83,10 @@ def check_settlement():
             previous = sent.stream_sample
         if len(sequence) == 8:
             assert not turn.outbox.inflight and len(queue._outbuf) == 31
-    turn, queue = machine(data='body')
+    turn, queue = machine(data='long')
     turn.weak_pairs = False
     queue.on_host_data(b'A'*31)
-    turn._data(0, p4turn.State.ISS_DATA_ACK)
+    turn._data(0, p4turn.State.ISS_DATA_ACK, Kind.BODY)
     receiver = P4Receiver(FS, admitted=True, breakin=True)
     receiver.enable_hold()
     for _ in range(2):
@@ -240,7 +240,7 @@ def check_driver_settlement(monkeypatch, *, answer_offset=.9426, retry_at=120000
             live = Live(np.zeros(20*FS))
             tx = Tx(live)
             tx.p4_probe.emissions.clear()
-            tx.p4_link_options.p4_data = 'body'
+            tx.p4_link_options.p4_data = 'long'
             tx.p4_link_options.p4_link_timeout = 5.
             queue = tx.p4_link_host.arq
             receiver = tx.sessrx.p4
@@ -276,7 +276,7 @@ def check_driver_settlement(monkeypatch, *, answer_offset=.9426, retry_at=120000
                 init(turn, *a, **kw)
                 machines.append(turn)
                 turn.weak_pairs = pairs
-                turn._data(0, p4turn.State.ISS_DATA_ACK)
+                turn._data(0, p4turn.State.ISS_DATA_ACK, Kind.BODY)
                 turn.keyed()
                 receiver.note_emission(Emission(Kind.BODY, Role.ISS, 0, .8))
                 observe = turn.observe
@@ -338,10 +338,10 @@ def speculative_audio():
 def check_weak_edge_cases():
     from hfmodem.shrike.p4observation import Registered
 
-    turn, queue = machine(data='body')
+    turn, queue = machine(data='long')
     turn.weak_pairs = True
     queue.on_host_data(b'A'*31)
-    turn._data(0, p4turn.State.ISS_DATA_ACK)
+    turn._data(0, p4turn.State.ISS_DATA_ACK, Kind.BODY)
     turn.keyed()
     receiver = P4Receiver(FS, admitted=True, breakin=True)
     receiver.enable_hold()

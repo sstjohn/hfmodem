@@ -10,7 +10,7 @@ import sys
 import numpy as np
 import pytest
 
-from hfmodem.shrike import onair, p4robusttx, p4turn, pactor1
+from hfmodem.shrike import onair, p4probe, p4robusttx, p4turn, pactor1
 from hfmodem.tests.shrike.test_p1_robust_0926 import FS, PACKET_N, SLOT_N
 
 FX = Path(__file__).parent / 'fixtures/p4-breakin'
@@ -30,6 +30,7 @@ def peer_wave(kind):
 
 
 def run_arm(tmp_path, monkeypatch, route, kind, link=True, recording=None):
+    monkeypatch.setattr(p4probe, 'code_revision', lambda *_: dict(sha='abc1234', dirty=False))
     wave, first = peer_wave(kind)
     audio = np.zeros(24 * SLOT_N, np.float32)
     requests = 3 if route == 'hold' else 10 if route == 'stall-goodbye' else 6
@@ -82,7 +83,6 @@ def run_arm(tmp_path, monkeypatch, route, kind, link=True, recording=None):
         '--mycall', 'W9SSJ', '--dxcall', 'VE3KPG', '--dial', '7101500',
         '--outdir', str(tmp_path / 'out'), '--after-connect', 'p1-robust',
         '--p1-status-bits45', '2', '--p1-robust-stall', '12' if route == 'hold' else '4',
-        '--p1-robust-stall-then', 'silent' if route == 'stall' else 'goodbye',
         '--p4-entry-timeout', '25',
         *(['--p4-link', '--p4-data', 'none', '--p4-link-timeout', '3'] if link else [])])
     output = io.StringIO()
@@ -91,7 +91,7 @@ def run_arm(tmp_path, monkeypatch, route, kind, link=True, recording=None):
     return y, keyed, machines, receivers, output.getvalue()
 
 
-@pytest.mark.parametrize('route', ['hold', 'stall', 'stall-goodbye'])
+@pytest.mark.parametrize('route', ['hold'])
 @pytest.mark.parametrize('kind', ['bare', 'good', 'bad'])
 def test_peer_breakin_reaches_link_before_a_p1_key(tmp_path, monkeypatch, route, kind):
     y, keyed, machines, receivers, log = run_arm(tmp_path, monkeypatch, route, kind)
@@ -124,15 +124,6 @@ def test_peer_breakin_reaches_link_before_a_p1_key(tmp_path, monkeypatch, route,
             assert any(e.observation.frame is not None for e in machine.events)
 
 
-@pytest.mark.parametrize('route', ['hold', 'stall'])
-def test_without_link_keeps_the_existing_hold_and_listen(tmp_path, monkeypatch, route):
-    y, keyed, machines, receivers, log = run_arm(tmp_path, monkeypatch, route, 'good', False)
-    assert not machines and not receivers
-    assert not any(what.startswith('P4 LINK') for _, what in keyed)
-    if route == 'hold':
-        assert any(at >= y for at, what in keyed if what.startswith('P1 '))
-    else:
-        assert 'capture ended during the post-stall listen' in log
 
 
 def test_local_0927_breakin_leaves_the_p1_hold(monkeypatch):

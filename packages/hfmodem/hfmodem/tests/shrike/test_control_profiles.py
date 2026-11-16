@@ -65,7 +65,7 @@ def _received_reply(tmp_path, monkeypatch, waveform, reference,
         return transmit(audio, **kwargs)
 
     monkeypatch.setattr(live, "transmit", record)
-    slot, _, _ = onair._regrid(live, grid, tx, session.host, session.rx,
+    slot, _, _, _ = onair._regrid(live, grid, tx, session.host, session.rx,
                               17, seg, first, 1920)
     assert [ev.packet[2] for ev in session.packets] == [b"RMS"]
     assert session.host.arq.role == arq.IRS
@@ -145,7 +145,7 @@ def test_recorded_cs3_emits_plain_cs1_with_selected_profile(
     assert not session.host.arq.entry_pending
 
 
-NOMINAL_REPLY_N = round(onair.P3_REPLY_S * FS)
+NOMINAL_REPLY_N = round(onair.P3_COMB_REPLY_S * FS)
 
 
 @pytest.mark.parametrize("reference,lead", [(None, 0), ("pulse-center", 852)])

@@ -44,7 +44,7 @@ def observed_b3():
     g.keying(spec.Protocol.PACTOR3, entry_pending=True, entry_variant="template")
     g.reverse(to_iss=False)
     g.note_p3_packet(1908871, 38880, 60000, swapped=False, identity=IDENTITY)
-    g.note_p3_control(1908871 + round(onair.P3_REPLY_S * onair.FS))
+    g.note_p3_control(1908871 + round(onair.P3_COMB_REPLY_S * onair.FS))
     g.note_p3_packet(1968871, 38880, 60000, swapped=False, identity=IDENTITY)
     return g
 
@@ -60,7 +60,7 @@ def attempted(g, emitted_phase=1111435):
 def test_returning_stint_ten_periods_on_restores_the_irs_clock():
     g = observed_b3()
     anchor, timing = g.anchor, g._p3_timing
-    attempted(g, 1968871 + round(onair.P3_REPLY_S * onair.FS))
+    attempted(g, 1968871 + round(onair.P3_COMB_REPLY_S * onair.FS))
     g.note_p3_packet(2568924, 38880, 60000, swapped=False, identity=IDENTITY)
     assert g.recover_p3_turn(2568924, IDENTITY)
     assert not g.sending and g.anchor == anchor
@@ -189,7 +189,7 @@ def test_snapshot_is_taken_only_after_successful_cs3_emission(emitted, tmp_path,
 def test_a_stale_reply_clock_after_collision_evidence_expires_still_keys(tmp_path, monkeypatch):
     g = observed_1337()
     g.cycles += 2
-    assert g._peer_air() is None
+    assert g._peer_air_evidence() is None
     assert g.p3_control_refusal(20) is None  # A short fade keeps the valid clock.
     assert "no fresh packet clock" in g.p3_control_refusal(25)
     tx = onair.RadioTx(None, transmit=False, settle=.04, outdir=tmp_path)
@@ -214,7 +214,7 @@ def test_known_bad_phase_never_becomes_valid_by_aging(tmp_path):
     assert tx._refused(g.boundary(21) - 1920 - 677, 1920 + 11677, "CS1 ACK")
     assert g._p3_reply_phase_invalid
     g.cycles += 2
-    assert g._peer_air() is None
+    assert g._peer_air_evidence() is None
     assert "remains invalid" in g.p3_control_refusal(22)
     g.keying(spec.Protocol.PACTOR1)
     assert g.p3_control_refusal(22) is None

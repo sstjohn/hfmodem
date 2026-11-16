@@ -34,7 +34,6 @@ def replay(arm, *, ladder='chirp', end=180., queue_at=None):
 
     def drive(tx, stream, raster):
         tx.settle = .044
-        tx.p4_link_options.p4_ladder = ladder
         tx.p4_link_options.p4_data = 'chirp' if ladder == 'chirp' else 'body'
         take = stream.take_until
         queued = False

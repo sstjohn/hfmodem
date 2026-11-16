@@ -21,8 +21,10 @@ import re
 import shlex
 import subprocess
 
+from hfmodem.shrike.arq import ArqConfig
 from hfmodem.shrike.compress import supervisor_block
 from hfmodem.shrike.p3trial import reply_offsets
+from hfmodem.shrike.p4turn import chain_resets
 
 from .modes import (ANSWERED, CLEARED, NOT_ATTEMPTED, NO_REPLY, Assessment, Mode, Readout,
                     highest, spoken)
@@ -76,18 +78,34 @@ MILESTONES = (
 )
 
 
+P4_ARMS = {
+    'replica': ('can the stock caller sequence upload mail?', {}),
+    'chain-a': ('does the packet toggle advance at baseline timing?', {'--p4-data': 'body'}),
+    'chain-b': ('does keying 20 ms earlier advance more packets?', {'--p4-answer-offset': '0.900', '--p4-data': 'body'}),
+    'chain-at': ('does T27 partner X27 on robust longs?', {'--p4-long-ack': 'toggle-t27', '--p4-data': 'body'}),
+    'carry-turn': ('does the ack chain carry across peer turns?', {'--p4-chain-reset': 'form'}),
+    'sl2': ('does the SL2/v49 pair admit data?', {'--p4-long-level': '2', '--p4-ladder-values': '49'}),
+    'admit-u27': ('does the last ladder rung require U27?', {'--p4-ladder-admit': 'u27'}),
+    'spug-off': ('does SPUG prevent data acceptance?', {'--p4-spug': 'off'}),
+    'sl4': ('does the SL4/v8,59 pair admit data?', {'--p4-long-level': '4', '--p4-ladder-values': '8,59'}),
+    'u27-ack': ('does U27 acknowledge counted data?', {'--p4-iss-u27': 'ack'}),
+    'ack-x27': ('does X27 acknowledge every new normal packet at WS8EOC?', {'--p4-normal-ack': 'x27'}),
+    'y27-c1': ('does K4MSU take the first body after a bare Y27 as c1?', {'--p4-y27-first-body': 'c1'}),
+    'turn-ladder': ('does the stock robust-short ladder after our hand-back body move the turn?',
+                    {'--p4-turn-entry': 'ladder'}),
+}
+
+
 def arguments(air):
     """What a PACTOR arm may vary. The defaults are what flew."""
     mail = air.add_argument_group('mail and presets')
     mail.add_argument('--mail-password-file', help='Winlink password file; otherwise prompt or use WINLINK_PASSWORD')
     mail.add_argument('--p4-mail', action='store_true',
-                      help='the likely-working P4 mail preset: --p4-link with --p4-data body, ladder none, '
-                           'normal-ack parity, chirp-ack parity, hold 16, entry timeout 20, long cycles and '
-                           'the QRM guard off; a fetching mail client (plus --send delivery if --send is '
-                           'absent); --level p4-bench unless given. Explicit flags and later --modem-arg words '
-                           'override. Refused with --p4-chirp-counter')
+                      help='experimental P4 mail preset: SL3 robust-long data, per-packet ACK toggle, '
+                           'QRM guard off, fetching mail client; --level p4-bench by default; '
+                           'explicit flags and --modem-arg override')
     mail.add_argument('--p3-mail', action='store_true',
-                      help='experimental mail starting at SL1 with the B +3.125 ms reply timing, continued '
+                      help='experimental mail starting at SL1 with the +603.125 ms initial reply pulse, continued '
                            'through turn changes; fetch, optionally upload with --send')
     mail.add_argument('--p2-mail', action='store_true',
                       help='experimental PTC-II-style mail: P1 setup/fallback, P2 maximum, 0x6A9 entry at SL1, '
@@ -97,7 +115,7 @@ def arguments(air):
                            'nothing, open on the call phase. Forgoes P3 entirely')
     mail.add_argument('--no-mail', action='store_true',
                       help='omit every generated --mail-* flag, for an arm with no mail client (e.g. a '
-                           '--p4-probe-* --modem-arg probe). Conflicts with --send and the mail presets')
+                           '--p4-link --modem-arg arm). Conflicts with --send and the mail presets')
     mail.add_argument('--no-wait-greeting', action='store_true',
                       help='take the turn rather than wait for a greeting the peer cannot send while we hold it')
 
@@ -119,11 +137,10 @@ def arguments(air):
     connect.add_argument('--connect-fallback-after', type=int, metavar='N',
                          help='with --robust, key the remaining retries as an ordinary connect after N '
                               'unanswered robust calls')
-    connect.add_argument('--after-connect', choices=('arq', 'listen', 'chirp', 'p1-robust'),
+    connect.add_argument('--after-connect', choices=('arq', 'listen', 'p1-robust'),
                          default='arq',
-                         help="after the answered call: arq runs the link; listen keys nothing; chirp runs the "
-                              "P4 entry probe from the answer; p1-robust follows with the robust short probe "
-                              "(implied by --p4-link, the only one that can still carry mail)")
+                         help="after the answered call: arq runs the link; listen keys nothing; p1-robust follows with the robust opening "
+                              "(implied by --p4-link, the only one that can carry mail)")
     connect.add_argument('--after-connect-cycles', type=int, default=6, metavar='N',
                          help='with --after-connect listen, peer cycles to read before teardown (default %(default)s)')
     connect.add_argument('--no-observe-after-link-down', dest='observe_after_link_down',
@@ -142,8 +159,6 @@ def arguments(air):
     connect.add_argument('--setup-phase', choices=('reply', 'call'), default='reply',
                          help='which phase opens the link; call moved four messages at KB5LZK on 09-11 '
                               '(P1-only or P4-entry arms)')
-    connect.add_argument('--p1-6a9', action='store_true',
-                         help='announce P1 bits45=1 and select 0x6A9 as the entry response')
     connect.add_argument('--p1-level-digit', type=int, choices=(1, 2, 3, 4), default=1,
                          help="the announcement's leading digit, the 1990 level declaration (default %(default)s)")
     connect.add_argument('--p1-supervisor', nargs='+', default=[], metavar='BLOCK',
@@ -157,16 +172,29 @@ def arguments(air):
     entry.add_argument('--entry-sl', type=int, choices=range(1, 7), default=3, metavar='1..6',
                        help='speed level an UNINVITED P3 entry opens at (default %(default)s); a granted one '
                             'always opens at 1. All 27 uninvited entries on record opened at 3, which voids them')
+    entry.add_argument('--cs4-turn-open', choices=('next', 'sl3'), default='next',
+                       help="level our turn opens at after the gateway's CS4 answers our changeover: next, "
+                            "or min(SL3, top) with a one-rung fallback where the speed policy climbs; at SL3 "
+                            "or above, next (default %(default)s)")
+    entry.add_argument('--changeover-answer', choices=('cs1', 'cs4', 'cs5', 'cs5-every'),
+                       default='cs1', help='P3 changeover answer; cs4/cs5 apply to up to three copies '
+                       'of the same changeover, each read in its own slot (default %(default)s)')
+    entry.add_argument('--p3-breakin-cs5', choices=('accept', 'repeat'), default=ArqConfig.p3_breakin_cs5,
+                       help='a CS5 to our P3 changeover: take it as the acknowledgement and send counter 1, '
+                            'or key the changeover again (default %(default)s)')
     entry.add_argument('--changeover-p1-cs', action='store_true',
                        help="answer the peer's P3 changeover with a PACTOR-1 codeword in the P3 answer slot "
                             "(a P1 CS1 made a banner cross at KB5LZK, WS8EOC, VE1YZ)")
     entry.add_argument('--p3-fallback', action='store_true', help='allow the fall back to PACTOR-1')
 
     traffic = air.add_argument_group('PACTOR-3 traffic and speed')
-    traffic.add_argument('--traffic-sl', type=int, choices=range(1, 7), default=1, metavar='1..6')
+    traffic.add_argument('--traffic-sl', type=int, choices=range(1, 7), default=1, metavar='1..6',
+                         help='PACTOR-3 speed level after entry, 1 to 6 (default %(default)s)')
     traffic.add_argument('--speed-up', choices=('auto', 'hold'), default='auto',
-                         help='auto requests a higher P3 speed after three consecutive cycles delivering new '
+                         help='auto requests a higher P3 speed after --speed-up-after consecutive cycles delivering new '
                               'payload; hold never asks (default %(default)s)')
+    traffic.add_argument('--speed-up-after', type=int, choices=range(1, 10), default=3, metavar='N',
+                         help='clean loaded cycles before our P3 IRS asks CS4 (1..9, default %(default)s)')
     traffic.add_argument('--speed-policy', choices=('current', 'stock'), default='current',
                          help="the ISS's speed and cycle policy (--p3-speed-policy): current is the flown ladder; "
                               "stock follows the SCS manual's ISS and is unflown (default %(default)s)")
@@ -175,101 +203,106 @@ def arguments(air):
     traffic.add_argument('--p3-max-down', type=int, choices=range(2, 31), default=6, metavar='N',
                          help='SCS MAXDown: consecutive receive errors before asking for a lower speed '
                               '(2..30, default %(default)s)')
-    traffic.add_argument('--repeat-gear', type=int, default=3)
+    traffic.add_argument('--p3-maxdown-hold', choices=('held', 'once'), default=ArqConfig.p3_maxdown_hold,
+                         help='parity until MAXDown, then CS5 held for that counter; once resets '
+                              'the error run after CS5 (default %(default)s)')
+    traffic.add_argument('--repeat-gear', type=int, default=3,
+                         help='after this many identical packets in a row, ask the gateway to change speed; 0 turns it off (default %(default)s)')
     traffic.add_argument('--p3-cs4-parity', action='store_true',
                          help='unflown: a CS4 acknowledges only an odd packet counter; on an even one it asks '
                               'for the packet again (the IRS in PIII_Complete_1)')
+    traffic.add_argument('--p3-unread-after-gear', choices=('parity', 'repeat'), default=ArqConfig.p3_unread_after_gear,
+                         help="IRS unread copies after CS4 below SL6 or CS6: answer the last accepted "
+                              "counter's parity, or repeat the keyed command (default %(default)s)")
+    traffic.add_argument('--p3-repeated-cs4', choices=('repeat', 'ack'), default=ArqConfig.p3_repeated_cs4,
+                         help='P3 ISS CS4 at the speed ceiling: repeat the pending packet, or '
+                              'restore acknowledgement; below the ceiling CS4 can '
+                              'still acknowledge and climb (default %(default)s)')
     traffic.add_argument('--p3-tx-gear-hold', action='store_true',
                          help='outbound P3 trial: a repeated CS5 retains the pending packet')
+    traffic.add_argument('--control-instant', choices=('raster', 'peer'), default='raster',
+                         help='short P3 IRS data controls on our raster or relative to the peer '
+                              '(default %(default)s)')
     traffic.add_argument('--p3-irs-reply-offset-ms', type=reply_offsets, default=0.0, metavar='N',
-                         help='P3 mail: key IRS control signals N ms past their answer slots; short:N or '
-                              'long:N moves one, short:N,long:M each (default %(default)s)')
+                         help='with --p3-mail: shift IRS control pulses N ms from their selected short aim '
+                              '(raster or peer) and peer-relative long aim; short:N or long:N moves one, '
+                              'short:N,long:M each (negative is earlier; default %(default)s)')
     traffic.add_argument('--p3-qrt-confirm', action='store_true',
                          help='on by --p3-mail: send the terminal marker after the QRT ACK and await opposite '
                               'ACK parity')
     traffic.add_argument('--long-cycle', '--long-cycles', action=argparse.BooleanOptionalAction,
-                         default=None, help='enable long cycles (default with --p4-mail)')
+                         default=None, help='enable long cycles (default with --p3-mail or --p4-mail)')
     traffic.add_argument('--qrm-guard', action=argparse.BooleanOptionalAction, default=None,
                          help='keep the modem timing guard (default on; --p4-mail turns it off unless given); '
                               '--no-qrm-guard permits bursts crossing predicted peer reply slots')
+    traffic.add_argument('--p3-observed-overlap-standdown', choices=('off', 'on'), default='off',
+                         help='allow the P3 overlap guard to stand down after repeated decoded '
+                              'collisions (default %(default)s)')
+    traffic.add_argument('--p3-final-ack-overlap', choices=('observed', 'age'), default='observed',
+                         help='P3 final ACK refuses decoded overlap; age also refuses projected '
+                              'overlap from a packet at most one cycle old (default %(default)s)')
 
     p4 = air.add_argument_group('PACTOR-4 link and ACK policy', 'experimental; needs --p4-link or --p4-mail')
     p4.add_argument('--p4-link', action='store_true',
-                    help='run the experimental P4 turn machine after robust shorts. Implies --after-connect '
-                         'p1-robust, --p1-status-bits45 2, robust shorts 7,38 on headers A,A (consecutive), '
-                         '--p1-robust-stall 12 then goodbye and --no-observe-after-link-down; admits a mail '
-                         'client (--send, or the default fetch). Explicit flags and later --modem-arg override')
-    p4.add_argument('--p4-ladder', choices=('long', 'chirp', 'none'), default=None,
-                    help='the P4 waveform ladder (default long; none with --p4-mail while data is body); '
-                         'none sends a body then normal frames and needs --p4-data body')
-    p4.add_argument('--p4-data', choices=('none', 'body', 'chirp'), default=None,
+                    help='enable the P4 turn machine; use --p4-mail for the explicit mail preset')
+    p4.add_argument('--p4-data', choices=('none', 'body', 'chirp', 'long'), default=None,
                     help='the data policy each turn keys (default none)')
     p4.add_argument('--p4-train-policy', choices=('repeat', 'passive'), default='repeat',
                     help='opening and first body response train policy (default %(default)s)')
-    p4.add_argument('--p4-normal-ack', choices=('v27', 'x27', 'parity', 'x27-u27', 'alternate-packet'),
-                    default=None, metavar='POLICY',
-                    help='ack for peer normal frames: v27, x27, parity, x27-u27 or alternate-packet '
-                         '(default v27; parity with --p4-mail)')
+    p4.add_argument('--p4-normal-ack', choices=('toggle', 'parity', 'x27'),
+                    default=None,
+                    help='ack policy for peer bodies and normal short frames; x27 acks every new packet X27 '
+                         'and asks a repeat with V27 (default toggle)')
+    p4.add_argument('--p4-robust-parity', choices=('current', 'stock'), default=None,
+                    help='stock places the first robust opening v6/A in a normal-polarity slot from the answered call (default current)')
+    p4.add_argument('--p4-long-ack', choices=('toggle', 'toggle-t27', 'counter-even-t27'),
+                    default=None,
+                    help='ack policy for peer long frames (default toggle)')
+    p4.add_argument('--p4-chirp-ack', choices=('toggle', 'parity'),
+                    default=None,
+                    help='ack policy for peer chirps (default toggle)')
+    p4.add_argument('--p4-first-ack', choices=('x27', 'v27'),
+                    default=None,
+                    help='first counted ack of a toggle chain (default x27)')
+    p4.add_argument('--p4-chain-reset', type=chain_resets,
+                    default=None,
+                    help='boundaries restarting the toggle chain (default turn,form)')
     p4.add_argument('--p4-word-render', choices=('off', 'stock'), default=None,
                     help='control-word carrier placement: off (legacy zero offsets), stock (measured offsets from body); default off.')
-    p4.add_argument('--p4-long-ack', choices=('fixed-x27', 'alternate-packet', 'counter-odd-t27', 'counter-even-t27'),
-                    default=None, metavar='POLICY',
-                    help='ack policy for peer robust long frames (default counter-even-t27: T27 for counters 0 and 2, '
-                         'X27 for 1 and 3, as stock KY2D answered N9VC)')
-    p4.add_argument('--p4-text', metavar='TEXT',
-                    help='Latin-1 text keyed after our SID; runs only with --no-mail')
-    p4.add_argument('--p4-link-timeout', type=float, default=600., metavar='SECONDS',
-                    help='session ceiling in seconds (default %(default)s)')
+    p4.add_argument('--p4-link-timeout', type=float, default=None, metavar='SECONDS',
+                    help='session ceiling in seconds (600; 480 with --p4-mail)')
     p4.add_argument('--p4-hold-cycles', type=int, default=None, metavar='N',
                     help='idle cycles before the hold gives up (default 6; 16 with --p4-mail)')
-    p4.add_argument('--p4-irs-silent-cycles', type=int, default=0, metavar='N',
-                    help='key nothing for N peer cycles from the first IRS greeting body or ladder short '
-                         '(default %(default)s, off)')
-    p4.add_argument('--p4-answer-offset', type=float, default=.920, metavar='SECONDS',
-                    help='our answer after a peer short, body or normal packet onset (default %(default)s)')
+    p4.add_argument('--p4-answer-offset', type=float, default=None, metavar='SECONDS',
+                    help='answer after a peer short, body or normal onset (default 0.920 seconds)')
     p4.add_argument('--p4-breakin', choices=('body', 'y27'), default='body',
                     help='how we ask a sending peer for the turn: an idle 0x40 body, or a bare Y27 that waits '
                          'for its grant (default %(default)s)')
 
-    probe = air.add_argument_group('PACTOR-4 entry probe', 'experimental')
-    probe.add_argument('--p4-entry', action='store_true',
-                       help='PACTOR-4 chirp entry after a grant; no mail or connected ARQ')
-    probe.add_argument('--p4-chirp-counter', action='store_true',
-                       help="P4 setup/ARQ counter challenge: three chirps (same counter twice, then advance); "
-                            "not a mail transfer. Keys the modem's --p4-mail; refused with --p4-link")
-    probe.add_argument('--p4-entry-attempts', type=int, choices=range(1, 5), default=2,
-                       help='maximum chirps after a grant (default %(default)s)')
-    probe.add_argument('--p4-entry-timeout', type=float, default=None,
-                       help='post-grant probe deadline in seconds: at most 60 (default 60) for a probe-only '
-                            'arm, 120 (default 120) with --p4-link')
-    probe.add_argument('--p4-probe-packet', choices=('chirp', 'short', 'robust'),
-                       default='chirp',
-                       help="what the probe keys: chirp (SL1's 3.3 s entry), short (793 ms) or robust (the "
-                            "setup tape's caller packet, 759 ms); default %(default)s")
-    probe.add_argument('--p4-probe-statuses', metavar='BYTES',
-                       help='status bytes to key, one chirp each: one to four, comma separated (e.g. '
-                            '0x63,0x60,0x61); replaces --p4-entry-attempts')
-    probe.add_argument('--p4-probe-payload', metavar='TEXT',
-                       help='latin-1 text keyed in the chirp field; empty by default')
-    probe.add_argument('--p4-probe-values', metavar='N[,N...]',
-                       help='with --p4-probe-packet robust, datablock values 0..63, one packet each (one to '
-                            'four); replaces --p4-entry-attempts')
-    probe.add_argument('--p4-probe-headers', metavar='A|B[,...]',
-                       help="header word per value; 'alt' alternates A,B (default all A). With --p4-link or "
-                            "--p4-mail, a single A or B applies to every value")
-    probe.add_argument('--p4-probe-cadence', choices=('spaced', 'consecutive'),
-                       default=None,
-                       help='spaced keys each packet after a full receive window (default); consecutive keys '
-                            'them back to back, as the setup tape\'s caller did')
+    p4.add_argument('--p4-opening', metavar='V[,V...]', help='opening robust shorts (default 7,38; 6,9,8 with --after-robust p4-robust)')
+    p4.add_argument('--p4-entry-timeout', type=float, default=20.,
+                    help='seconds to wait for the PACTOR-4 opening to be answered, at most 120 (default %(default)s)')
+    p4.add_argument('--p4-arm', choices=P4_ARMS, help='named mail-arm variant, only with --p4-mail (default replica)')
+    from hfmodem.shrike.onair import build_parser
+    accepted = build_parser()._option_string_actions
+    for flag in sorted({f for _, overrides in P4_ARMS.values() for f in overrides}):
+        if flag in accepted and flag not in air._option_string_actions:
+            option = accepted[flag]
+            choices = None if option.choices is None else tuple(map(str, option.choices))
+            p4.add_argument(flag, default=None, choices=choices,
+                            help=option.help.replace('%(default)s', str(option.default)))
+
 
     robust = air.add_argument_group('Robust connect and the PACTOR-2 bridge')
     robust.add_argument('--after-robust', choices=('listen', 'p1', 'p2', 'p3', 'p4-robust'),
                         help="after the robust answer: listen keys nothing; p2 (default) sends our callsign in "
                              "P2 and waits for the P3 grant; p1 a P1 packet opening with our call; p3 the SL1 "
                              "entry and P3 ARQ; p4-robust the robust shorts (6,9,8 on header A unless "
-                             "--p4-probe-values)")
-    robust.add_argument('--robust-call-text', choices=('pmc', 'ascii'), default='pmc')
-    robust.add_argument('--robust-p2-max', type=int, default=10)
+                             "--p4-opening)")
+    robust.add_argument('--robust-call-text', choices=('pmc', 'ascii'), default='pmc',
+                        help='how the callsign is coded in the robust bridge: pmc (compressed) or ascii (default %(default)s)')
+    robust.add_argument('--robust-p2-max', type=int, default=10,
+                        help='the most PACTOR-2 bridge cycles to key before giving up (default %(default)s)')
     robust.add_argument('--robust-p2-marker-flag', choices=('parity', 'inverted'),
                         default='parity',
                         help="bit 0 of the bridge's P2 marker: the counter's parity, or its complement "
@@ -277,11 +310,14 @@ def arguments(air):
     robust.add_argument('--robust-p2-opening', choices=('none', 'k9'), default='none',
                         help="k9 keys K4MCK's counter-0 k=9 frame first, counted as one of --robust-p2-max's "
                              "slots (default %(default)s)")
-    robust.add_argument('--robust-p3-without-grant', type=int, metavar='K')
+    robust.add_argument('--robust-p3-without-grant', type=int, metavar='K',
+                        help='after K bridge cycles without a grant, go on to PACTOR-3 anyway; off by default')
 
     keying = air.add_argument_group('PACTOR-3 keying experiments', 'each is a control or unflown')
-    keying.add_argument('--follow-offset', choices=('none', 'control', 'all'), default='all')
-    keying.add_argument('--keep-slots', choices=('all', 'controls', 'none'), default='all')
+    keying.add_argument('--follow-offset', choices=('none', 'control', 'all'), default='all',
+                        help='key PACTOR-3 on the carrier offset the peer arrives at: all, control codewords only, or none (default %(default)s)')
+    keying.add_argument('--keep-slots', choices=('all', 'controls', 'none'), default='all',
+                        help='which cycles may run a fraction of a symbol past their slot: all, controls or none (default %(default)s)')
     keying.add_argument('--control-placement', choices=('pulse-center', 'audio-start'),
                         default='audio-start',
                         help="where the control burst sits in its slot: audio-start is the modem's default "
@@ -426,17 +462,6 @@ def _said(args):
     return [word for chunk in getattr(args, 'modem_arg', ()) for word in shlex.split(chunk)]
 
 
-def _said_value(args, flag):
-    """The value the operator's own words last give `flag`, as the modem reads it."""
-    said, value = _said(args), None
-    for i, word in enumerate(said):
-        if word == flag and i + 1 < len(said):
-            value = said[i + 1]
-        elif word.startswith(flag + '='):
-            value = word.split('=', 1)[1]
-    return value
-
-
 def flags(peer, level, args, directory, send):
     """The launcher words between the shared head and the shared witness/force tail."""
     # An explicit --tx-drive/--p1-drive wins; short of that, the chosen level's own
@@ -451,7 +476,7 @@ def flags(peer, level, args, directory, send):
         audio = getattr(args, 'selected_audio', None)
         preset = ('p4_drive' if level.get('name') == 'p4-bench' or
                   any(getattr(args, flag, False) for flag in
-                      ('p4_mail', 'p4_link', 'p4_entry', 'p4_chirp_counter')) else 'p3_drive')
+                      ('p4_mail', 'p4_link')) else 'p3_drive')
         sources = {}
         for field, chain_field in (('tx_drive', preset), ('p1_drive', 'p1_drive')):
             if getattr(args, field) is not None:
@@ -464,72 +489,68 @@ def flags(peer, level, args, directory, send):
                 setattr(args, field, value if value is not None else config.ChainAudio().drive_for())
         args.drive_sources = sources
     after_robust = _after_robust(args)
-    p4_chirp_counter = getattr(args, 'p4_chirp_counter', False)
     p4_mail_preset = getattr(args, 'p4_mail', False)
+    if getattr(args, 'p4_arm', None) and not p4_mail_preset:
+        raise ValueError('--p4-arm requires --p4-mail')
+    arm_name = getattr(args, 'p4_arm', None) or 'replica'
+    arm_overrides = dict(P4_ARMS[arm_name][1]) if p4_mail_preset else {}
+    residual = getattr(getattr(args, 'selected_audio', None), 'p4_answer_residual_ms', 0)
+    if p4_mail_preset and arm_name == 'chain-b' and residual:
+        arm_overrides.pop('--p4-answer-offset')
+        arm_overrides['--p4-answer-residual-ms'] = str(residual + 20.)
+
     if getattr(args, 'long_cycle', None) is None:
-        args.long_cycle = p4_mail_preset
-    if p4_chirp_counter and (getattr(args, 'p2_mail', False) or getattr(args, 'p3_mail', False)
-                             or getattr(args, 'p4_entry', False)
-                             or getattr(args, 'p4_link', False) or p4_mail_preset or send):
-        raise ValueError('--p4-chirp-counter runs the counter experiment; choose it '
-                         'separately from other mail/probe presets, --p4-link, '
-                         '--p4-mail and --send')
+        args.long_cycle = p4_mail_preset or bool(getattr(args, 'p3_mail', False))
     if p4_mail_preset:
         # The preset's own door into the P4 turn machine; everything else it
         # implies is resolved once `after_connect` is in scope, below.
         args.p4_link = True
     no_mail = getattr(args, 'no_mail', False)
-    if no_mail and (send or p4_chirp_counter or p4_mail_preset or getattr(args, 'p2_mail', False)
+    if no_mail and (send or p4_mail_preset or getattr(args, 'p2_mail', False)
                     or getattr(args, 'p3_mail', False) or args.p1_mail):
         raise ValueError('--no-mail drops the mail client; --send, --p1-mail, --p2-mail, '
-                         '--p3-mail, --p4-mail and --p4-chirp-counter all need it')
-    if (getattr(args, 'p4_probe_statuses', None) is not None
-            or getattr(args, 'p4_probe_payload', None) is not None
-            or getattr(args, 'p4_probe_values', None) is not None
-            or getattr(args, 'p4_probe_headers', None) is not None
-            or (getattr(args, 'p4_probe_cadence', None) or 'spaced') != 'spaced'
-            or getattr(args, 'p4_probe_packet', 'chirp') != 'chirp'):
-        if not (p4_chirp_counter or getattr(args, 'p4_entry', False)
-                or getattr(args, 'p4_link', False)
-                or getattr(args, 'after_connect', 'arq') in ('chirp', 'p1-robust')
-                or after_robust == 'p4-robust'):
-            raise ValueError('--p4-probe-statuses, --p4-probe-payload and '
-                             '--p4-probe-packet are the chirp probe\'s query; '
-                             'the probe is off')
-    p4_link = getattr(args, 'p4_link', False)
-    p4_ladder = getattr(args, 'p4_ladder', None)
+                         '--p3-mail and --p4-mail all need it')
+    p4_link = args.p4_link = getattr(args, 'p4_link', False) or after_robust == 'p4-robust'
+    robust_parity = getattr(args, 'p4_robust_parity', None)
+    if robust_parity is not None and not p4_link:
+        raise ValueError('--p4-robust-parity requires --p4-link or --p4-mail or --after-robust p4-robust')
     p4_data = getattr(args, 'p4_data', None) or 'none'
     p4_train_policy = getattr(args, 'p4_train_policy', 'repeat')
-    p4_normal_ack = (getattr(args, 'p4_normal_ack', None)
-                     or ('parity' if p4_mail_preset else 'v27'))
+    p4_ack_options = {
+        name: getattr(args, name, None) for name in (
+            'p4_normal_ack', 'p4_long_ack', 'p4_chirp_ack', 'p4_first_ack', 'p4_chain_reset')
+    }
+    if p4_mail_preset:
+        defaults = dict(p4_normal_ack='toggle', p4_chirp_ack='toggle', p4_long_ack='toggle',
+                        p4_first_ack='x27', p4_chain_reset='turn,form')
+        for name, default in defaults.items():
+            flag = '--' + name.replace('_', '-')
+            if p4_ack_options[name] is None:
+                p4_ack_options[name] = arm_overrides.get(flag, default)
+    for name, value in p4_ack_options.items():
+        if value is not None and not p4_link:
+            raise ValueError(f'--{name.replace("_", "-")} requires --p4-link or --p4-mail')
     p4_word_render = getattr(args, 'p4_word_render', None)
+    if p4_word_render is None and p4_mail_preset:
+        p4_word_render = 'off'
     if p4_word_render == 'stock' and not p4_link:
         raise ValueError('--p4-word-render stock requires --p4-link or --p4-mail')
-    p4_long_ack = getattr(args, 'p4_long_ack', None)
-    if p4_long_ack is not None and not p4_link:
-        raise ValueError('--p4-long-ack requires --p4-link or --p4-mail')
-    p4_link_timeout = getattr(args, 'p4_link_timeout', 600.)
+    p4_link_timeout = getattr(args, 'p4_link_timeout', None)
+    if p4_link_timeout is None:
+        p4_link_timeout = 480. if p4_mail_preset else 600.
     p4_hold_cycles = getattr(args, 'p4_hold_cycles', None)
     if p4_hold_cycles is None:
         p4_hold_cycles = 16 if p4_mail_preset else 6
-    p4_answer_offset = getattr(args, 'p4_answer_offset', .920)
-    p4_irs_silent_cycles = getattr(args, 'p4_irs_silent_cycles', 0)
-    if p4_irs_silent_cycles < 0:
-        raise ValueError('--p4-irs-silent-cycles must be zero or positive')
+    p4_answer_offset = getattr(args, 'p4_answer_offset', None)
+    if p4_answer_offset is None:
+        p4_answer_offset = .900 if p4_mail_preset and arm_name == 'chain-b' and not getattr(
+            getattr(args, 'selected_audio', None), 'p4_answer_residual_ms', 0) else .920
     p4_breakin = getattr(args, 'p4_breakin', 'body')
-    p4_text = getattr(args, 'p4_text', None)
-    if not p4_link and (p4_ladder not in (None, 'long') or p4_data != 'none' or p4_link_timeout != 600.
-                        or p4_hold_cycles != 6 or p4_answer_offset != .920 or p4_breakin != 'body'
-                        or p4_irs_silent_cycles or p4_train_policy != 'repeat'):
-        raise ValueError('--p4-ladder, --p4-data, --p4-link-timeout, --p4-hold-cycles, '
-                         '--p4-answer-offset, --p4-irs-silent-cycles, --p4-train-policy and --p4-breakin describe the --p4-link turn '
-                         'machine, which is off')
-    if p4_text is not None:
-        if not p4_link:
-            raise ValueError('--p4-text runs within --p4-link, which is off')
-        if not no_mail:
-            raise ValueError('--p4-text only runs with --no-mail (no fetch or send)')
-        p4_text.encode('latin-1')
+    if not p4_link and (p4_data != 'none'
+                        or p4_link_timeout != 600. or p4_hold_cycles != 6
+                        or p4_answer_offset != .920 or p4_breakin != 'body'
+                        or p4_train_policy != 'repeat'):
+        raise ValueError('P4 policy (--p4-train-policy and other P4 knobs) requires --p4-link or --p4-mail')
     supervisor = _supervisor_channel(args, send)
     if getattr(args, 'p2_mail', False):
         words, adjustments = _p2_mail_flags(level, args, directory, send)
@@ -545,16 +566,45 @@ def flags(peer, level, args, directory, send):
         words = _without(words, ('--p3-control-waveform', 1))
     speed_up = getattr(args, 'speed_up', 'auto')
     words[words.index('--p3-speed-up') + 1] = speed_up
-    for name, default, low, high in (('p3_max_try', 2, 1, 9), ('p3_max_down', 6, 2, 30)):
+    for name, flag, default, low, high, always in (
+            ('speed_up_after', '--p3-speed-up-after', 3, None, None, False),
+            ('p3_max_try', '--p3-max-try', 2, 1, 9, True),
+            ('p3_max_down', '--p3-max-down', 6, 2, 30, True)):
         value = getattr(args, name, default)
-        flag = '--' + name.replace('_', '-')
-        if not low <= value <= high:
+        if low is not None and not low <= value <= high:
             raise ValueError(f'{flag} must be {low}..{high}')
-        words += [flag, str(value)]
+        if always or value != default:
+            words += [flag, str(value)]
+    maxdown_hold = getattr(args, 'p3_maxdown_hold', ArqConfig.p3_maxdown_hold)
+    if maxdown_hold != ArqConfig.p3_maxdown_hold:
+        words += ['--p3-maxdown-hold', maxdown_hold]
     if getattr(args, 'p3_tx_gear_hold', False):
         words += ['--p3-tx-gear-hold']
+    turn_open = getattr(args, 'cs4_turn_open', 'next')
+    if turn_open != 'next':
+        words += ['--p3-cs4-turn-open', turn_open]
+    answer = getattr(args, 'changeover_answer', 'cs1')
+    if answer != 'cs1':
+        words += ['--p3-changeover-answer', answer]
+    breakin_cs5 = getattr(args, 'p3_breakin_cs5', ArqConfig.p3_breakin_cs5)
+    if breakin_cs5 != ArqConfig.p3_breakin_cs5:
+        words += ['--p3-breakin-cs5', breakin_cs5]
     if getattr(args, 'p3_cs4_parity', False):
         words += ['--p3-cs4-parity']
+    unread_after_gear = getattr(args, 'p3_unread_after_gear', ArqConfig.p3_unread_after_gear)
+    if unread_after_gear != ArqConfig.p3_unread_after_gear:
+        words += ['--p3-unread-after-gear', unread_after_gear]
+    repeated_cs4 = getattr(args, 'p3_repeated_cs4', ArqConfig.p3_repeated_cs4)
+    if repeated_cs4 != ArqConfig.p3_repeated_cs4:
+        words += ['--p3-repeated-cs4', repeated_cs4]
+    instant = getattr(args, 'control_instant', 'raster')
+    if instant != 'raster':
+        words += ['--p3-control-instant', instant]
+    for name, default in (('p3_observed_overlap_standdown', 'off'),
+                          ('p3_final_ack_overlap', 'observed')):
+        value = getattr(args, name, default)
+        if value != default:
+            words += ['--' + name.replace('_', '-'), value]
     offset = getattr(args, 'p3_irs_reply_offset_ms', 0.0)
     if offset:
         words += ['--p3-irs-reply-offset-ms', f'short:{offset[0]:g},long:{offset[1]:g}'
@@ -579,7 +629,7 @@ def flags(peer, level, args, directory, send):
         words += ['--p3-qrt-confirm']
     if p3_mail:
         if (timing_trial or entry_trial or unbounded or reply_delay is not None
-                or getattr(args, 'p4_entry', False) or args.unannounced
+                or p4_link or args.unannounced
                 or args.p1_mail or args.pactor1_only
                 or args.changeover_p1_cs or args.p3_fallback
                 or args.setup_phase != 'reply'
@@ -594,117 +644,81 @@ def flags(peer, level, args, directory, send):
         raise ValueError('--timing-reply-delay requires --timing-trial B')
     if unbounded and (not timing_trial or entry_trial):
         raise ValueError('--timing-unbounded requires --timing-trial A or B')
-    if p4_link:
-        # The working arm's own settings: a robust short probe after the
-        # ordinary connect, then the P4 turn machine. Each piece only fills a
-        # default still at its own -- an explicit flag or a later --modem-arg
-        # word always wins.
-        named_after_connect = getattr(args, 'after_connect', 'arq')
-        if named_after_connect not in ('arq', 'p1-robust'):
-            raise ValueError(f'--p4-link keys after a robust short probe; '
-                             f'--after-connect {named_after_connect} does not carry one')
+    if p4_mail_preset:
+        if getattr(args, 'after_connect', 'arq') not in ('arq', 'p1-robust'):
+            raise ValueError('--p4-mail requires --after-connect p1-robust')
         args.after_connect = 'p1-robust'
-        named_probe_packet = getattr(args, 'p4_probe_packet', 'chirp')
-        if named_probe_packet not in ('chirp', 'robust'):
-            raise ValueError('--p4-link keys the robust short packet, not '
-                             f'--p4-probe-packet {named_probe_packet}')
-        args.p4_probe_packet = 'robust'
-        if getattr(args, 'p4_probe_values', None) is None:
-            args.p4_probe_values = '7,38'
-        if getattr(args, 'p4_probe_cadence', None) is None:
-            args.p4_probe_cadence = 'consecutive'
-        if not 0 < p4_link_timeout < float('inf'):
-            raise ValueError('--p4-link-timeout must be positive')
-        if p4_hold_cycles < 0:
-            raise ValueError('--p4-hold-cycles must be zero or positive')
-        if p4_mail_preset:
-            if getattr(args, 'p4_data', None) is None:
-                p4_data = args.p4_data = 'body'
-            if getattr(args, 'qrm_guard', None) is None:
-                args.qrm_guard = False
-    if p4_ladder is None:
-        p4_ladder = ('none' if p4_mail_preset and p4_data == 'body'
-                     and _said_value(args, '--p4-data') in (None, 'body') else 'long')
+        if getattr(args, 'p4_data', None) is None:
+            p4_data = args.p4_data = arm_overrides.get('--p4-data', 'long')
+        if getattr(args, 'qrm_guard', None) is None:
+            args.qrm_guard = False
+    if p4_link:
+        if not 0 < p4_link_timeout < float('inf') or p4_hold_cycles < 0:
+            raise ValueError('P4 link timeout must be positive and hold cycles nonnegative')
     after_connect = getattr(args, 'after_connect', 'arq')
-    p4_entry = (getattr(args, 'p4_entry', False) or p4_chirp_counter
-                or after_connect in ('chirp', 'p1-robust') or after_robust == 'p4-robust')
+    if after_connect == 'p1-robust' and not p4_link:
+        raise ValueError('--after-connect p1-robust requires --p4-link')
+    p4_entry = p4_link or after_robust == 'p4-robust'
     qrm_guard = _qrm_guard(args)
+    if args.p4_opening is not None and not p4_entry:
+        raise ValueError('--p4-opening requires --p4-link or --p4-mail or --after-robust p4-robust')
     if p4_entry:
-        if (timing_trial or entry_trial or args.unannounced or args.p1_mail
-                or args.pactor1_only or (send and not p4_link)
+        if (timing_trial or entry_trial or args.unannounced or args.p1_mail or args.pactor1_only
                 or after_connect == 'listen'):
-            raise ValueError('--p4-entry requires a granted entry probe without '
-                             'mail, forced modes, P3 timing trials or a '
-                             'listening arm')
-        early = ('--after-connect chirp' if after_connect == 'chirp'
-                 else '--after-robust p4-robust' if after_robust == 'p4-robust' else None)
-        if args.setup_phase == 'call' and early:
-            raise ValueError(f'--setup-phase call holds until the first P1 payload ACK, '
-                             f'and {early} leaves PACTOR-1 before one')
-        words = _without(words, ('--p3-entry', 1), ('--p3-speed-up', 1), '--over')
+            raise ValueError('P4 opening conflicts with forced modes or P3 timing trials')
+        if args.setup_phase == 'call' and after_robust == 'p4-robust':
+            raise ValueError('--setup-phase call requires a P1 payload ACK before --after-robust p4-robust')
+        timeout = args.p4_entry_timeout
+        if not 0 < timeout <= 120:
+            raise ValueError('--p4-entry-timeout must be positive and at most 120 seconds')
+        values = _opening(args.p4_opening if args.p4_opening is not None else
+                          '6,9,8' if after_robust == 'p4-robust' else '7,38')
+        words = _without(words, ('--hold', 1), ('--p3-entry', 1), ('--p3-speed-up', 1), '--over')
         if p4_link:
+            words.append('--p4-link')
+        if p4_mail_preset:
+            if not args.robust:
+                words += ['--connect', 'normal']
             words = _without(words, ('--p1-status-bits45', 1))
-            stall_then = (_said_value(args, '--p1-robust-stall-then')
-                          or ('shorts' if p4_mail_preset else 'goodbye'))
-            words += ['--p1-status-bits45', '2', '--p1-robust-stall', '12',
-                      '--p1-robust-stall-then', stall_then]
-        attempts = 3 if p4_chirp_counter else getattr(args, 'p4_entry_attempts', 2)
-        timeout_cap = 120 if p4_link else 60
-        timeout = getattr(args, 'p4_entry_timeout', None)
-        if timeout is None:
-            timeout = 20.0 if p4_mail_preset else 120.0 if p4_link else 60.0
-        if not 0 < timeout <= timeout_cap:
-            raise ValueError(f'--p4-entry-timeout must be positive and at most '
-                             f'{timeout_cap} seconds')
-        words = _without(words, ('--hold', 1))
-        schedule = _status_schedule(getattr(args, 'p4_probe_statuses', None), p4_chirp_counter)
-        field = getattr(args, 'p4_probe_payload', None)
-        packet = getattr(args, 'p4_probe_packet', 'chirp')
-        if field is not None:
-            if p4_chirp_counter:
-                raise ValueError('--p4-probe-payload cannot change the '
-                                 '--p4-chirp-counter field')
-            field.encode('latin-1')
-        if packet != 'chirp' and p4_chirp_counter:
-            raise ValueError('--p4-probe-packet cannot change the --p4-chirp-counter waveform')
-        if packet == 'robust' and (schedule or field is not None):
-            raise ValueError('--p4-probe-packet robust keys a datablock value, '
-                             'which carries neither our status byte nor our field')
-        values, heads = _datablock(args, packet)
-        if schedule:
-            attempts = len(schedule)
-        if values:
-            attempts = len(values)
-        words += ['--p4-mail' if p4_chirp_counter else '--p4-entry', '--p3-speed-up', 'hold',
-                  '--hold', '12', '--p4-entry-attempts', str(attempts),
-                  '--p4-entry-timeout', str(timeout)]
-        if schedule:
-            words += ['--p4-probe-statuses', ','.join(f'0x{v:02X}' for v in schedule)]
-        if field is not None:
-            words += ['--p4-probe-payload', field]
-        if packet != 'chirp':
-            words += ['--p4-probe-packet', packet]
-        if values:
-            words += ['--p4-probe-values', ','.join(str(v) for v in values),
-                      '--p4-probe-headers', ','.join(heads)]
-        cadence = getattr(args, 'p4_probe_cadence', None) or 'spaced'
-        if cadence != 'spaced':
-            words += ['--p4-probe-cadence', cadence]
-        if p4_link:
-            words += ['--p4-link', '--p4-ladder', p4_ladder, '--p4-data', p4_data,
-                      '--p4-normal-ack', p4_normal_ack,
-                      '--p4-link-timeout', str(p4_link_timeout), '--p4-hold-cycles', str(p4_hold_cycles),
-                      '--p4-irs-silent-cycles', str(p4_irs_silent_cycles),
-                      '--p4-answer-offset', str(p4_answer_offset), '--p4-breakin', p4_breakin]
-            if p4_long_ack is not None:
-                words += ['--p4-long-ack', p4_long_ack]
-            if p4_train_policy != 'repeat':
-                words += ['--p4-train-policy', p4_train_policy]
-            if p4_mail_preset:
-                words += ['--p4-chirp-ack', 'parity']
-            if p4_text is not None:
-                words += ['--p4-text', p4_text]
+            words += ['--p1-status-bits45', '2', '--p1-robust-stall', '12']
+        if p4_mail_preset or args.p4_opening is not None:
+            words += ['--p4-opening', ','.join(map(str, values))]
+        if p4_mail_preset or timeout != 20:
+            words += ['--p4-entry-timeout', str(timeout)]
+        if p4_link and (p4_mail_preset or args.p4_data is not None):
+            words += ['--p4-data', p4_data]
+        for flag, value, default in (
+                ('--p4-link-timeout', p4_link_timeout, 600.),
+                ('--p4-hold-cycles', p4_hold_cycles, 6),
+                ('--p4-answer-offset', p4_answer_offset, .920),
+                ('--p4-breakin', p4_breakin, 'body'),
+                ('--p4-train-policy', p4_train_policy, 'repeat')):
+            if p4_link and (p4_mail_preset or value != default):
+                words += [flag, str(value)]
+        if p4_mail_preset:
+            words += ['--p4-arm', arm_name]
+            long_defaults = {'--p4-long-level': '3', '--p4-ladder-admit': 'u27,x27',
+                             '--p4-spug': 'queued', '--p4-iss-u27': 'repeat'}
+            for flag in ('--p4-y27-first-body', '--p4-turn-entry'):
+                if getattr(args, flag[2:].replace('-', '_'), None):
+                    long_defaults[flag] = getattr(args, flag[2:].replace('-', '_'))
+            for flag, value in (long_defaults | arm_overrides).items():
+                if (flag[2:].replace('-', '_') not in p4_ack_options
+                        and flag not in ('--p4-answer-offset', '--p4-data', '--p4-ladder-values')):
+                    words += [flag, str(getattr(args, flag[2:].replace('-', '_'), None) or value)]
+        ladder_values = getattr(args, 'p4_ladder_values', None)
+        if ladder_values is None:
+            ladder_values = arm_overrides.get('--p4-ladder-values')
+        if ladder_values is not None:
+            words += ['--p4-ladder-values', ladder_values]
+        if p4_mail_preset:
+            words += ['--p4-peer-ack', '', '--p4-v53-hold', '24', '--p4-rx-scan', 'legacy']
         args.repeat_gear = 0
+    for name, value in p4_ack_options.items():
+        if value is not None:
+            words += [f'--{name.replace("_", "-")}', value]
+    if robust_parity is not None:
+        words += ['--p4-robust-parity', robust_parity]
     if p4_word_render is not None:
         words += ['--p4-word-render', p4_word_render]
     robust = getattr(args, 'robust', False)
@@ -779,47 +793,45 @@ def flags(peer, level, args, directory, send):
         words = _without(words, '--p1-grant-only', ('--p1-status-bits45', 1))
         words.append('--pactor1-only')
     if getattr(args, 'pactor2_only', False):
-        if args.unannounced or args.pactor1_only or getattr(args, 'p1_6a9', False):
+        if args.unannounced or args.pactor1_only:
             raise ValueError('--pactor2-only sets its own announcement and ceiling; '
-                             'drop --unannounced, --pactor1-only and --p1-6a9')
+                             'drop --unannounced and --pactor1-only')
         words = _without(words, '--p1-grant-only', ('--p1-status-bits45', 1))
         words.append('--pactor2-only')
-    if getattr(args, 'p1_6a9', False):
-        if args.unannounced:
-            raise ValueError('--p1-6a9 conflicts with --unannounced')
-        words = _without(words, ('--p1-status-bits45', 1))
-        words += ['--p1-6a9', '--p1-status-bits45', '1']
     if args.setup_phase != 'reply':
         words = _without(words, ('--p1-setup-phase', 1)) + ['--p1-setup-phase', args.setup_phase]
     words += ['--tx-drive', f'{args.tx_drive:g}', '--p1-drive', f'{args.p1_drive:g}']
     for flag, watts in (('--p1-watts', level['p1_watts']), ('--p3-watts', level['p3_watts'])):
         if watts is not None:
             words += [flag, f'{watts:g}']
-    words += ['--p3-follow-offset', args.follow_offset,
-              '--p3-entry-sl', str(args.entry_sl),
-              '--p3-traffic-sl', str(args.traffic_sl),
-              '--p3-repeat-gear', str(args.repeat_gear),
-              '--p3-keep-slots', args.keep_slots,
-              '--p3-control-placement', args.control_placement,
-              '--long-cycle' if args.long_cycle else '--no-long-cycle']
-    for flag, value in (('--p3-control-tail', args.control_tail),
-                        ('--p3-control-stagger', args.control_stagger)):
-        if value != 'off':
-            words += [flag, value]
     control_phase = getattr(args, 'control_phase', 'axis')
-    if control_phase != 'axis':
-        words += ['--p3-control-phase', control_phase]
     crest_limit = getattr(args, 'crest_limit', 'off')
-    if crest_limit != 'off':
-        try:
-            db = float(crest_limit)
-        except ValueError:
-            db = 0.0
-        if db <= 0:
-            raise ValueError('--crest-limit takes off or a positive dB target')
-        words += ['--p3-crest-limit', f'{db:g}']
-    if args.changeover_p1_cs:
-        words.append('--p3-changeover-p1-cs')
+    if not p4_entry:
+        words += ['--p3-follow-offset', args.follow_offset,
+                  '--p3-entry-sl', str(args.entry_sl),
+                  '--p3-traffic-sl', str(args.traffic_sl),
+                  '--p3-repeat-gear', str(args.repeat_gear),
+                  '--p3-keep-slots', args.keep_slots,
+                  '--p3-control-placement', args.control_placement,
+                  '--long-cycle' if args.long_cycle else '--no-long-cycle']
+        for flag, value in (('--p3-control-tail', args.control_tail),
+                            ('--p3-control-stagger', args.control_stagger)):
+            if value != 'off':
+                words += [flag, value]
+        if control_phase != 'axis':
+            words += ['--p3-control-phase', control_phase]
+        if crest_limit != 'off':
+            try:
+                db = float(crest_limit)
+            except ValueError:
+                db = 0.0
+            if db <= 0:
+                raise ValueError('--crest-limit takes off or a positive dB target')
+            words += ['--p3-crest-limit', f'{db:g}']
+        if args.changeover_p1_cs:
+            words.append('--p3-changeover-p1-cs')
+    else:
+        words.append('--long-cycle' if args.long_cycle else '--no-long-cycle')
     if not args.p3_fallback and not getattr(args, 'pactor2_only', False):
         words += ['--no-p3-fallback']
     # The flag defers our break-in until the mail client has a reply, and the mail
@@ -828,7 +840,7 @@ def flags(peer, level, args, directory, send):
     # banner it was holding had nowhere to go. Forward the explicit override
     # so the P3 mail preset cannot restore its default greeting wait.
     mail_eligible = ((after_connect == 'arq' and not p4_entry)
-                     or (after_connect == 'p1-robust' and p4_link))
+                     or p4_link)
     if not timing_trial and not entry_trial and mail_eligible and not no_mail:
         words += ['--mail-fetch', '--no-mail-wait-greeting' if args.no_wait_greeting
                   else '--mail-wait-greeting']
@@ -867,6 +879,7 @@ def flags(peer, level, args, directory, send):
     words += _call_hush(args, adjustments)
     adjustments['p3_max_try'] = getattr(args, 'p3_max_try', 2)
     adjustments['p3_max_down'] = getattr(args, 'p3_max_down', 6)
+    adjustments['p3_maxdown_hold'] = getattr(args, 'p3_maxdown_hold', ArqConfig.p3_maxdown_hold)
     adjustments['speed_policy'] = speed_policy
     if qrt_confirm:
         adjustments['p3_qrt_confirm'] = True
@@ -874,6 +887,9 @@ def flags(peer, level, args, directory, send):
         adjustments['p3_tx_gear_hold'] = True
     if getattr(args, 'p3_cs4_parity', False):
         adjustments['p3_cs4_parity'] = True
+    adjustments['p3_repeated_cs4'] = getattr(args, 'p3_repeated_cs4', ArqConfig.p3_repeated_cs4)
+    adjustments['p3_unread_after_gear'] = getattr(args, 'p3_unread_after_gear', ArqConfig.p3_unread_after_gear)
+    adjustments['p3_breakin_cs5'] = getattr(args, 'p3_breakin_cs5', ArqConfig.p3_breakin_cs5)
     if getattr(args, 'p3_irs_reply_offset_ms', 0.0):
         adjustments['p3_irs_reply_offset_ms'] = args.p3_irs_reply_offset_ms
     if idle_id:
@@ -901,43 +917,18 @@ def flags(peer, level, args, directory, send):
                            entry_delay_ms=0 if entry_trial == 'A' else 4.875,
                            trial_seconds_from_first_entry=20)
     if p4_entry:
-        adjustments.update(p4_entry=True, entry_ladder=['p4chirp'],
-                           speed_up='hold', qrm_guard=qrm_guard,
-                           p4_entry_attempts=attempts, p4_entry_timeout=timeout,
-                           receive_seconds=4.0, observe_after_link_down=False)
-        if not p4_link:
-            adjustments['mail'] = 'none'
-        if schedule:
-            adjustments['status_sequence'] = list(schedule)
-        if field is not None:
-            adjustments['p4_probe_payload'] = field
-        adjustments['p4_probe_packet'] = packet
-        adjustments['p4_probe_cadence'] = cadence
-        if values:
-            adjustments.update(p4_probe_values=list(values),
-                               p4_probe_headers=list(heads))
-        if p4_chirp_counter:
-            adjustments.update(p4_chirp_counter=True, experiment='grant-chirp-counter-v2',
-                               transition_guard='selected grant releases future P1 slots',
-                               status_sequence=[0x61, 0x61, 0x62],
-                               mail='experimental-setup-only')
+        adjustments.update(p4_entry=True, p4_entry_timeout=timeout, p4_opening=list(values),
+                           qrm_guard=qrm_guard, observe_after_link_down=False)
         if p4_link:
-            adjustments.update(p4_link=True, after_connect='p1-robust',
-                               p1_status_bits45=2, p1_robust_stall=12,
-                               p1_robust_stall_then=stall_then,
-                               p4_ladder=p4_ladder, p4_data=p4_data,
-                               p4_normal_ack=p4_normal_ack,
+            adjustments.update(p4_link=True, p4_data=p4_data,
                                p4_link_timeout=p4_link_timeout, p4_hold_cycles=p4_hold_cycles,
-                               p4_irs_silent_cycles=p4_irs_silent_cycles,
                                p4_answer_offset=p4_answer_offset, p4_breakin=p4_breakin)
-            if p4_long_ack is not None:
-                adjustments['p4_long_ack'] = p4_long_ack
-            if p4_text is not None:
-                adjustments['p4_text'] = p4_text
-            if p4_mail_preset:
-                adjustments['p4_mail'] = True
+        if p4_mail_preset:
+            adjustments.update(p4_mail=True, p4_arm=arm_name, p4_arm_overrides=arm_overrides,
+                               p4_arm_purpose=P4_ARMS[arm_name][0])
     elif not qrm_guard:
         adjustments['qrm_guard'] = False
+    adjustments.update({name: value for name, value in p4_ack_options.items() if value is not None})
     if p4_word_render is not None:
         adjustments['p4_word_render'] = p4_word_render
     if robust:
@@ -958,8 +949,20 @@ def flags(peer, level, args, directory, send):
         adjustments.update(after_connect=after_connect, mail='none')
         if after_connect == 'listen':
             adjustments['after_connect_cycles'] = cycles
-    if getattr(args, 'p1_6a9', False):
-        adjustments.update(p1_6a9=True, p1_entry_response='0x6A9', p1_status_bits45=1)
+    if p4_entry:
+        from hfmodem.shrike.onair import build_parser
+        actions = build_parser()._option_string_actions
+        filtered = []
+        i = 0
+        while i < len(words):
+            word = words[i]
+            if word.startswith('--p3-'):
+                action = actions[word]
+                i += 1 if action.nargs == 0 else 2
+            else:
+                filtered.append(word)
+                i += 1
+        words = filtered
     return words, adjustments
 
 
@@ -991,10 +994,7 @@ def _supervisor_channel(args, send):
         ('--p2-mail', getattr(args, 'p2_mail', False)),
         ('--p3-mail', getattr(args, 'p3_mail', False)),
         ('--p4-mail', getattr(args, 'p4_mail', False)),
-        ('--p4-chirp-counter', getattr(args, 'p4_chirp_counter', False)),
         ('--p4-link', getattr(args, 'p4_link', False)),
-        ('--p4-entry', getattr(args, 'p4_entry', False)),
-        ('--after-connect chirp', getattr(args, 'after_connect', 'arq') == 'chirp'),
     ) if on]
     if beside:
         raise ValueError('--p1-level-digit and --p1-supervisor sound the supervisor '
@@ -1024,70 +1024,21 @@ def _after_robust(args):
         if closed:
             raise ValueError(f"--after-robust p3 keys a PACTOR-3 entry packet, which "
                              f"--{closed.replace('_', '-')} rules out")
-    if after == 'p4-robust':
-        if getattr(args, 'p4_probe_packet', 'chirp') not in ('chirp', 'robust'):
-            raise ValueError('--after-robust p4-robust keys the robust short packet, '
-                             f'not --p4-probe-packet {args.p4_probe_packet}')
-        args.p4_probe_packet = 'robust'
-        if getattr(args, 'p4_probe_values', None) is None:
-            args.p4_probe_values = '6,9,8'
     return after
 
 
-def _datablock(args, packet):
-    """(values, headers) for a robust probe, or why they are not a query."""
-    text = getattr(args, 'p4_probe_values', None)
-    named = getattr(args, 'p4_probe_headers', None)
-    if text is None and named is None:
-        return (), ()
-    if packet != 'robust':
-        raise ValueError('--p4-probe-values and --p4-probe-headers describe the '
-                         'robust datablock; --p4-probe-packet robust keys it')
-    if text is None:
-        raise ValueError('--p4-probe-headers names a header per value, and '
-                         '--p4-probe-values names none')
+def _opening(text):
+    from hfmodem.shrike.onair import _opening_values
     try:
-        values = tuple(int(v, 0) for v in text.split(',') if v.strip())
-    except ValueError:
-        raise ValueError('--p4-probe-values takes comma-separated numbers, '
-                         'e.g. 6,9,8') from None
-    if not 1 <= len(values) <= 4 or any(not 0 <= v <= 63 for v in values):
-        raise ValueError('--p4-probe-values takes one to four values in 0..63')
-    if named is None:
-        return values, ('A',) * len(values)
-    if named.strip().lower() == 'alt':
-        return values, ('A', 'B', 'A', 'B')[:len(values)]
-    words = tuple(w.strip().upper() for w in named.split(',') if w.strip())
-    if any(w not in ('A', 'B') for w in words):
-        raise ValueError("--p4-probe-headers takes 'alt' or a list of A,B")
-    if len(words) == 1 and getattr(args, 'p4_link', False):
-        words *= len(values)
-    if len(words) != len(values):
-        raise ValueError('--p4-probe-headers takes one header per '
-                         '--p4-probe-values entry')
-    return values, words
-
-
-def _status_schedule(text, p4_chirp_counter):
-    """The probe's query schedule off the command line, or why it is not one."""
-    if text is None:
-        return ()
-    if p4_chirp_counter:
-        raise ValueError('--p4-probe-statuses cannot rewrite the --p4-chirp-counter schedule')
-    try:
-        schedule = tuple(int(v, 0) for v in text.split(',') if v.strip())
-    except ValueError:
-        raise ValueError('--p4-probe-statuses takes comma-separated byte '
-                         'literals, e.g. 0x63,0x60') from None
-    if not 1 <= len(schedule) <= 4 or any(not 0 <= v <= 255 for v in schedule):
-        raise ValueError('--p4-probe-statuses takes one to four bytes in 0..255')
-    return schedule
+        return _opening_values(text)
+    except argparse.ArgumentTypeError as exc:
+        raise ValueError(str(exc)) from None
 
 
 def _p2_mail_flags(level, args, directory, send):
     """A level-2 mail arm does not inherit the assessed P3 entry experiments."""
     incompatible = ('p1_mail', 'p3_mail', 'pactor1_only', 'unannounced',
-                    'p4_entry', 'timing_trial', 'entry_timing_trial',
+                    'p4_link', 'p4_mail', 'timing_trial', 'entry_timing_trial',
                     'timing_unbounded', 'p3_qrt_confirm', 'p3_tx_gear_hold',
                     'changeover_p1_cs')
     if (any(getattr(args, name, False) for name in incompatible)
@@ -1314,6 +1265,8 @@ def readout(mode, record, text):
     reached = (record.get('verdict') or {}).get('reached') or []
     said = record.get('adjustments') or {}
     did, caveats = [], []
+    if identification := re.search(r'^P4 identification: (.+)$', text, re.M):
+        did.append(identification.group(1))
     if 'P2 call packet never taken:' in text:
         did.append('robust call answered; P2 call packet never taken')
     elif 'PACTOR-2 -> PACTOR-3' in text:

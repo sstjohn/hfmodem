@@ -14,6 +14,7 @@ verdict never skips a slot.
 import pytest
 
 from hfmodem.shrike import arq
+from hfmodem.tests.shrike.p3_reply_support import UNBOUNDED_TRIES
 from hfmodem.tests.shrike.test_p3_presence_progress_1003 import (
     IO, acknowledge_all, mail, opportunity)
 
@@ -24,9 +25,10 @@ class _Air(IO):
         return len(payload)
 
 
-def _changed_over(max_retries=200, *, entry_keyed=False):
+def _changed_over(max_retries=200, *, entry_keyed=False, tries=UNBOUNDED_TRIES):
     io = _Air()
-    a = arq.PactorArq(io, arq.ArqConfig(max_retries=max_retries))
+    a = arq.PactorArq(io, arq.ArqConfig(max_retries=max_retries,
+                                        p3_breakin_tries=tries))
     a._enter_connected()
     a._entry_keyed = entry_keyed
     a.role = arq.IRS
@@ -64,6 +66,23 @@ def test_the_changeover_keys_every_cycle_through_silence_and_the_peers_requests(
         assert a.state == arq.State.CONNECTED and a.unconfirmed_breakin
     assert not any('receive only' in line for line in io.lines)
     assert any('source=peer control' in line for line in io.lines)
+
+
+def test_handing_an_unread_turn_back_still_keys_every_silent_cycle():
+    tries = arq.ArqConfig.p3_breakin_tries
+    a, io, changeover = _changed_over(tries=tries)
+    for k in range(1, 7):
+        before = len(io.events)
+        keyed = _cycle(a, io)
+        assert len(io.events) > before, f'silent cycle {k} keyed nothing'
+        if k < tries:
+            assert keyed == changeover, f'silent cycle {k}'
+        else:
+            # The hand-back slot ACKs the packet the peer repeats; the silent
+            # cycles of the resumed stint ask for it again.
+            assert io.events[before:] == [
+                ('cs', arq.CS_ACK if k == tries else arq.CS_REQUEST)], f'silent cycle {k}'
+    assert a.role == arq.IRS and not a.unconfirmed_breakin
 
 
 def test_after_an_entry_every_request_up_to_the_unread_rung_bound_is_answered():

@@ -200,6 +200,50 @@ class Client:
                 response.close()
             connection.close()
 
+    def supports_chat(self):
+        lifecycle = (self.snapshot or {}).get('chat_lifecycle', {})
+        identity = (self.snapshot or {}).get('service', {})
+        return (identity.get('schema') == wire.SCHEMA
+                and bool(identity.get('incarnation'))
+                and lifecycle.get('incarnation') == identity.get('incarnation')
+                and type(lifecycle.get('generation')) is int
+                and lifecycle['generation'] >= 0)
+
+    def chat_command(self, request, *, wait=False, timeout=20):
+        if (not isinstance(request, dict) or request.get('_type') != 'Request'
+                or not isinstance(request.get('action'), dict)
+                or request['action'].get('kind') not in wire.CHAT_COMMAND_KINDS
+                or request['action']['kind'] == 'chat.start'
+                or not request.get('id')):
+            raise ValueError('expected typed chat Request wire mapping')
+        return self.command(request['action']['kind'], request, command_id=request['id'],
+                            control_id=request.get('control_id'), generation=request.get('control_generation'),
+                            wait=wait, timeout=timeout)
+
+    def chat_start(self, *, command_id, control_id, generation, wait=False, timeout=20):
+        if not self.supports_chat():
+            raise ClientError('station chat capability unavailable; refresh station state')
+        lifecycle = self.snapshot['chat_lifecycle']
+        return self.command('chat.start', {
+            'expected_incarnation': lifecycle['incarnation'],
+            'expected_lifecycle_generation': lifecycle['generation'],
+            'expected_controller_id': lifecycle.get('controller_id')},
+            command_id=command_id, control_id=control_id, generation=generation,
+            wait=wait, timeout=timeout)
+
+    def command_result(self, command_id, *, incarnation=None, timeout=None):
+        incarnation = incarnation or (self.snapshot or {}).get('service', {}).get('incarnation')
+        if not incarnation:
+            raise ClientError('command result lookup requires station incarnation')
+        return self._json('GET', wire.COMMAND_RESULT + '?' + urlencode({
+            'incarnation': incarnation, 'client': self.client_id, 'id': command_id}), timeout=timeout)
+
+    def chat_read(self, name, *, timeout=None, **query):
+        path = '/chat/' + name
+        if path not in wire.CHAT_READ_PATHS:
+            raise ValueError('unknown chat read')
+        return self._json('GET', path + ('?' + urlencode(query) if query else ''), timeout=timeout)
+
     def command(self, kind, args=None, *, command_id=None, control_id=None,
                 generation=None, wait=False, timeout=20):
         envelope = {'id': command_id or str(uuid.uuid4()), 'client': self.client_id,
@@ -229,13 +273,25 @@ class Client:
         stream = self.events(ack['seq'] - 1, control=control_id,
                              timeout=max(0.001, deadline - time.monotonic()),
                              duration=max(0.001, deadline - time.monotonic()))
+        missing_result = False
         try:
             for event in stream:
                 if event.get('type') == 'gap':
-                    raise ClientError(f'command {envelope["id"]}: result lost from event ring')
+                    incarnation = ack.get('incarnation') or (self.snapshot or {}).get('service', {}).get('incarnation')
+                    if not incarnation:
+                        raise ClientError(f'command {envelope["id"]}: result lost from event ring')
+                    found = self.command_result(envelope['id'], incarnation=incarnation,
+                                                timeout=max(.001, deadline - time.monotonic()))
+                    if found.get('status') != 'found':
+                        missing_result = True
+                        if time.monotonic() >= deadline:
+                            break
+                        continue
+                    event = {'type': 'command', 'data': found['result']}
                 result = event.get('data', {})
                 if (event.get('type') != 'command' or not isinstance(result, dict)
-                        or result.get('id') != envelope['id']):
+                        or result.get('id') != envelope['id']
+                        or result.get('client', self.client_id) != self.client_id):
                     if time.monotonic() >= deadline:
                         break
                     continue
@@ -250,13 +306,38 @@ class Client:
                 if time.monotonic() >= deadline:
                     break
         except (TimeoutError, OSError, http.client.HTTPException) as exc:
+            if kind == 'shutdown' and self._stopped(envelope['id'], deadline):
+                return {'id': envelope['id'], 'client': self.client_id, 'kind': kind, 'state': 'done',
+                        'detail': 'station stopped before its result was read'}
             raise ClientError(f'command {envelope["id"]} timed out or disconnected: {exc}') from exc
         finally:
             # Closing a suspended events() exits _bounded, whose timer may
             # already have fired. Cleanup must not replace a terminal result.
             with suppress(OSError, http.client.HTTPException):
                 stream.close()
+        if kind == 'shutdown' and self._stopped(envelope['id'], deadline):
+            return {'id': envelope['id'], 'client': self.client_id, 'kind': kind, 'state': 'done',
+                    'detail': 'station stopped before its result was read'}
+        if missing_result:
+            raise ClientError(f'command {envelope["id"]}: no terminal result before timeout or EOF; outcome unknown')
         raise ClientError(f'command {envelope["id"]}: no terminal result before timeout or EOF')
+
+    def _stopped(self, command_id, deadline):
+        """Whether an acknowledged shutdown has left nothing listening.
+
+        A service can close before this client's event stream reads the result,
+        and then the stream ends or is reset. The acknowledgement plus a refused
+        connection is the outcome the shutdown asked for."""
+        while True:
+            try:
+                self.state(timeout=max(.001, min(1, deadline - time.monotonic())))
+            except ConnectionRefusedError:
+                return True
+            except (ClientError, OSError, http.client.HTTPException, ValueError):
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(.1)
 
     def release(self, **kwargs):
         return self.command('release', wait=True, **kwargs)

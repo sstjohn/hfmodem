@@ -86,20 +86,13 @@ def visible(directory):
 
 
 def args(**changes):
+    import console
     flown = pactor.PROFILE.levels['current']
-    values = dict(peer='KB5LZK', band=40, level='p3-100', sense=True, pounce=0, force=False,
-                  follow_offset='all', entry_sl=3, traffic_sl=1, repeat_gear=3,
-                  keep_slots='all',
-                  control_placement='pulse-center', control_tail='off',
-                  control_stagger='off', crest_limit='off', speed_policy='current', changeover_p1_cs=False, no_wait_greeting=False,
-                  long_cycle=False, p3_fallback=False,
-                  pactor1_only=False, setup_phase='reply', p1_mail=False, unannounced=False,
-                  tx_drive=flown['tx_drive'], p1_drive=flown['p1_drive'],
-                  send=None, witness=True,
-                  witness_seconds=arm.WITNESS_SECONDS, kiwi=None, retune=False,
-                  observe_after_link_down=True, tap_tail=arm.TAP_TAIL_S,
-                  qualify=None, modem_arg=[])
-    return argparse.Namespace(**dict(values, **changes))
+    defaults = vars(console.parser_for(pactor.PROFILE).parse_args(
+        ['fly', 'KB5LZK', '--sense', '--dry-run']))
+    values = dict(band=40, level='p3-100', control_placement='pulse-center', long_cycle=False,
+                  tx_drive=flown['tx_drive'], p1_drive=flown['p1_drive'], retune=False)
+    return argparse.Namespace(**(defaults | values | changes))
 
 
 def transcript(armed=True, decoded=0, tail='session ended: test only\n'):

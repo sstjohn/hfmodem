@@ -102,5 +102,5 @@ def test_other_collection_and_required_support_are_preserved(condition):
     elif condition == "short":
         grid._p3_keyed_reply = (0, 0, 48000, 60000)
     elif condition == "head_tail":
-        session.rx._p3_head_candidate = (0, 48000, -86.0)
+        session.rx._p3_head_candidate = (0, 48000, -86.0, arq.CS_ACK)
     assert session.rx.control_collect_until(until, now, grid) == until

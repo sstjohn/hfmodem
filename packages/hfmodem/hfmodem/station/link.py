@@ -137,7 +137,7 @@ class ProtocolLink:
 
     def transmit(self, audio: np.ndarray, *, why: str = "", at: int | None = None,
                  responding: bool = False, power_w: float | None = None,
-                 on_ptt=None, gain: float = 1.0, marks=None) -> int | None:
+                 on_ptt=None, gain: float = 1.0, marks=None, authority=None, fence=None) -> int | None:
         """Ask the station to put `audio` on the air. Returns the card index it
         ended at, or None if it was refused.
 
@@ -155,7 +155,8 @@ class ProtocolLink:
                     self.station.rig.dial(),
                     power_w=power_w if power_w is not None else self.station.cfg.declared_power_w),
                 at=at, responding=responding,
-                settle_s=self.station.cfg.rig.ptt.settle_s, on_ptt=on_ptt, gain=gain, marks=marks)
+                settle_s=self.station.cfg.rig.ptt.settle_s, on_ptt=on_ptt, gain=gain, marks=marks,
+                authority=authority, control_fence=fence)
             end = arb.submit(req)
         except (Refused, RigError) as exc:
             self.refusals.append(str(exc))
@@ -430,11 +431,12 @@ class KestrelLink(ProtocolLink):
             self.runtime.transport.feed(chunk.at, chunk.samples)
         return []
 
-    def emit(self, samples, bandwidth, *, responding=False, on_ptt=None, marks=None):
+    def emit(self, samples, bandwidth, *, responding=False, on_ptt=None, marks=None,
+             authority=None, fence=None):
         self.playback_ended_at = None
         self.waveform = Waveform('vara', 48000, bandwidth)
         end = self.transmit(np.asarray(samples), why='VARA frame', responding=responding,
-                            on_ptt=on_ptt, marks=marks)
+                            on_ptt=on_ptt, marks=marks, authority=authority, fence=fence)
         if end is None:
             return False
         audio = self.station.audio

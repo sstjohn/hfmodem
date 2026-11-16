@@ -220,8 +220,9 @@ _SHIPPED_ASSETS = sorted(
 _DERIVATIONS_DOC = _REPO / "docs" / "protocols" / "table-derivations.md"
 
 
-#: The supported category for measured binary assets.
-_CATEGORIES = ("measured", "replay swaps")
+#: Categories for the shipped asset inventory.
+_CATEGORIES = ("measured", "replay swaps", "authored source")
+_AUTHORED_SOURCES = {"hfdesk_chat.mjs", "station_chat.mjs"}
 
 #: Source vocabulary for the measured-asset inventory.
 _OWN_SOURCES = ("loopback", "off-air", "audio", "recording")
@@ -282,6 +283,17 @@ def test_every_shipped_binary_is_filed_and_sourced():
             faults.append(
                 f"{shipped.name}: measured, and the How-known column names no "
                 f"source we may distribute -- say one of {list(_OWN_SOURCES)}")
+        elif category == "authored source":
+            source = f"ui/assets/{shipped.name}"
+            content = shipped.read_bytes()
+            content.decode("utf-8")
+            if (shipped.name not in _AUTHORED_SOURCES
+                    or shipped.parent != _REPO / "packages/hfmodem/hfmodem/ui/assets"
+                    or source not in how
+                    or not content.startswith(
+                        b"// SPDX-License-Identifier: AGPL-3.0-only\n")
+                    or b"\x00" in content):
+                faults.append(f"{shipped.name}: not a documented authored UI source")
     assert not faults, (
         f"{_DERIVATIONS_DOC.name} does not clear these to ship:\n  "
         + "\n  ".join(faults))

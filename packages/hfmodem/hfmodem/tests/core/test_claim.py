@@ -839,6 +839,32 @@ def test_a_holder_that_exits_during_discovery_is_not_a_holder(exited_pid, platfo
     assert [(r.pid, r.started) for r in rows] == [(live, f"start-{live}")]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX claim contract; Windows twin in test_claim_windows.py")
+def test_a_holder_that_exits_before_its_fdinfo_is_read_is_not_a_holder(exited_pid):
+    live = os.getpid()
+    listings = iter((f"p{exited_pid}\ncbrief\nf7\no0t5\np{live}\nclive\nf7\no0t5\n",
+                     f"p{live}\nclive\nf7\no0t5\n"))
+
+    def fdinfo(pid, fd):
+        if pid == exited_pid:
+            raise FileNotFoundError(f"/proc/{pid}/fdinfo/{fd}")
+        return "pos:\t5\n"
+    rows = claim.openers([claim.claim_path()], lsof=lambda paths: next(listings), platform="linux",
+                         started=lambda pid: f"start-{pid}", fdinfo=fdinfo)
+    assert [(r.pid, r.started) for r in rows] == [(live, f"start-{live}")]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX claim contract; Windows twin in test_claim_windows.py")
+def test_a_live_holder_whose_fdinfo_vanishes_fails_closed():
+    live = os.getpid()
+
+    def fdinfo(pid, fd):
+        raise FileNotFoundError(f"/proc/{pid}/fdinfo/{fd}")
+    with pytest.raises(claim.ClaimError, match="unavailable"):
+        claim.openers([claim.claim_path()], lsof=lambda paths: f"p{live}\nclive\nf7\no0t5\n",
+                      platform="linux", started=lambda pid: f"start-{pid}", fdinfo=fdinfo)
+
+
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
 @pytest.mark.parametrize("lookups", [0, 1])
 @pytest.mark.skipif(os.name == "nt", reason="POSIX claim contract; Windows twin in test_claim_windows.py")

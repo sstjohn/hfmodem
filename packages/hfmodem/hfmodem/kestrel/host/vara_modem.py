@@ -16,6 +16,7 @@ import re
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 
 from .modem_core import ModemCore
 from .kiss_tx import KissTxDisposition as TxDisposition
@@ -37,6 +38,22 @@ BUSY_HOLD_S = 1.45
 
 
 from hfmodem.core.recording import contact_ended, inherit_boundaries
+
+
+@dataclass(frozen=True, slots=True)
+class PayloadBoundary:
+    """Original-byte position captured before one exact CONNECTED notification.
+
+    This token identifies a modem ledger, not a Client link generation. A
+    consumer must explicitly associate the corresponding host notification
+    with its own generation. Nonzero offsets or queued bytes need independent
+    accounting; they cannot establish a fresh stream by themselves.
+    """
+    epoch: str
+    offset: int
+    sequence: int
+    queued_original: int
+    line: str
 
 
 class _HostIO:
@@ -118,6 +135,7 @@ class _HostIO:
         self.modem._connected = True
         self.modem._intent_active = True
         if self.modem.observer:
+            self.modem._report_payload_boundary(caller, called, bw)
             self.modem.observer.modem_connected(caller, called, bw)
             # VARA reports the received caller's capability after CONNECTED.
             # Our local high-speed enable is not evidence about that caller.
@@ -187,10 +205,13 @@ class VaraHostModem(ModemCore):
     default_compression = 'TEXT'
 
     def __init__(self, transport, *, bandwidth='2300', high_speed=True, clock=time.monotonic,
-                 kiss_tx_queue=None, receive_context=None):
+                 kiss_tx_queue=None, receive_context=None,
+                 payload_boundary=None, authority=None, control_fence=None):
         inherit_boundaries(self, transport)
         self.observer = None
         self._clock = clock
+        self._payload_boundary = payload_boundary
+        self.authority, self.control_fence = authority, control_fence
         self.last_unkey_at = None
         self.unkey_sequence = self.key_sequence = 0
         self.received_cursor = self.received_ack_cursor = 0
@@ -221,6 +242,7 @@ class VaraHostModem(ModemCore):
         self._cq_reply_lock = threading.Lock()
         self.generation = 0
         self.retired = deque(maxlen=16)
+        self._retired_payload_evidence = deque(maxlen=16)
         self._stopping = False
         self._retired_attachment = False
         self._heartbeat_reply = None
@@ -279,6 +301,28 @@ class VaraHostModem(ModemCore):
     @property
     def discarded_total(self): return self._discarded_before+self.station.payload_ledger.discarded
 
+    @property
+    def payload_evidence_sequence(self):
+        ledger = self.station.payload_ledger
+        return ledger.epoch, ledger.sequence
+
+    def payload_evidence(self):
+        return (*self._retired_payload_evidence, self.station.payload_ledger.evidence())
+
+    def _report_payload_boundary(self, caller, called, bw):
+        # Host data admission uses this same lock. Capture before publishing
+        # CONNECTED, so a consumer never samples a later replacement station.
+        with self._lock:
+            ledger = self.station.payload_ledger
+            line = f'CONNECTED {caller} {called}' + (f' {bw}' if bw else '')
+            boundary = PayloadBoundary(ledger.epoch, ledger.accepted, ledger.sequence,
+                                       self._queued_original, line)
+        if self._payload_boundary is not None:
+            self._payload_boundary(boundary)
+        report = getattr(self.observer, 'modem_payload_boundary', None)
+        if report is not None:
+            report(boundary)
+
     def _replace_station(self, *, preserve_data=False, reason='replacement'):
         old = self.station
         contact_ended(old, reason)
@@ -291,6 +335,7 @@ class VaraHostModem(ModemCore):
         else:
             original = old.retire_payload()
             ledger = old.payload_ledger
+            self._retired_payload_evidence.append(ledger.evidence())
             self._confirmed_before += ledger.confirmed
             self._discarded_before += ledger.discarded
             if ledger.accepted:

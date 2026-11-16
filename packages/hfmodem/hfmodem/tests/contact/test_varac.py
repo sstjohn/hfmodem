@@ -1021,6 +1021,21 @@ def test_a_peer_qsy_that_times_out_is_reported_and_the_contact_stays():
     assert desk.session.contact is not None and desk.tunes == [14_105_750]
 
 
+def test_a_peer_q0_is_a_stay_answered_with_qsyr_on_the_calling_frequency():
+    desk = Desk()
+    desk.hear('SN 7.7', 'CONNECTED N0BBS W9SSJ 500')
+    desk.receive('<Q:0>')
+    assert 'N0BBS asked to stay on 14105.000 kHz; no QSY' in desk.legacy_said
+    assert desk.texts[-1].endswith('<QSYR>')
+    desk.receive('<TL>')
+    desk.receive('de N0BBS <R+03>')
+    desk.drive()
+    assert desk.texts[-1].startswith('15 de W9SSJ <R')
+    assert desk.flow.state is v.State.CONNECTED and desk.session.contact is not None
+    assert desk.tunes == [] and desk.flow.dial == 14_105_000
+    assert not [line for line in desk.legacy_said if line.startswith('error:')]
+
+
 def test_a_contact_is_recorded_when_it_opens_and_when_quit_ends_it():
     desk = answered()
     opened, = desk.kinds('contact')

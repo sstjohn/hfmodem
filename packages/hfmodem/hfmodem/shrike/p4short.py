@@ -123,7 +123,7 @@ _LONG_TRAIN = np.array([p4normal.training_sequence(k + 1) for k in range(25)])
 _LONG_POS = 128 + 16 * (239 * np.arange(25)[:, None] + _TT)
 _LONG_EXP = _LONG_TRAIN[:, _TT].conj()
 _LONG_ROT = {n: np.exp(-2j * np.pi * _LONG_POS[:n].ravel()[:, None] * _RES / 28800)
-             for n in (5, 25)}
+             for n in (5, 24, 25)}
 
 
 def complete(z, first_training_start):
@@ -154,13 +154,19 @@ def _place(m, first_training_start, cfo_hz, offsets, pos, expected, rotated):
 
 
 def place_long(z, first_training_start, cfo_hz, *, offsets=None, trainings=25):
+    m = p4rx.matched_filter(z * np.exp(-2j * np.pi * cfo_hz * np.arange(len(z)) / 28800))
+    return place_long_matched(m, first_training_start, cfo_hz,
+                              offsets=offsets, trainings=trainings)
+
+
+def place_long_matched(m, first_training_start, cfo_hz, *, offsets=None, trainings=25):
+    """Score training windows already downconverted at ``cfo_hz``."""
     offsets = WIDE if offsets is None else offsets
     pos = _LONG_POS[:trainings].ravel()
     expected = _LONG_EXP[:trainings].ravel()
     rotated = _LONG_ROT.get(trainings)
     if rotated is None:
         rotated = np.exp(-2j * np.pi * pos[:, None] * _RES / 28800)
-    m = p4rx.matched_filter(z * np.exp(-2j * np.pi * cfo_hz * np.arange(len(z)) / 28800))
     return _place(m, first_training_start, cfo_hz, offsets, pos, expected, rotated)
 
 

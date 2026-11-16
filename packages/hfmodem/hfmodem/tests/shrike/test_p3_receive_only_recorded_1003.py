@@ -13,8 +13,8 @@ from hfmodem.shrike import arq, onair, p3acquire, rxfront
 from hfmodem.tests import evidence
 from hfmodem.tests.shrike.test_p3_giveup_1002 import _Session
 from hfmodem.tests.shrike.test_p3_reply_placement import irs_grid
-from hfmodem.tests.shrike.p3_receive_only_support import ChargedReturn, DeferredReplay
 from hfmodem.tests.shrike.test_p3_presence_progress_1003 import presence_session
+from hfmodem.tests.shrike.p3_receive_only_support import ChargedReturn, DeferredReplay
 
 PIN_PATH = Path(__file__).with_name('fixtures') / 'p3_receive_only_recorded_1003.json'
 if not PIN_PATH.is_file():
@@ -106,15 +106,11 @@ def test_stateful_fade_continues_current_form_and_keys_every_hold(recorded, caps
         assert all(rows[h]['source'] == 'unsupported' for h in range(49, 59))
         assert rows[59]['current_crc']
     elif p['arm'] == '1043':
-        if original_config:
-            assert rows[61]['current_crc']
-            assert rows[61]['row'] == 4253554
-        else:
-            # The bounded SL1 CRC now proves the current packet even when
-            # the historical long-policy reader did not deliver it.
-            assert rows[61]['source'] == 'tracked SL1 CRC'
-            assert rows[61]['crc_ticks'] == 0
-            assert not rows[61]['current_crc']
+        # Read the observed cycle while CS6 is
+        # pending, so this CRC must deliver rather than only qualify presence.
+        assert rows[61]['current_crc']
+        assert rows[61]['row'] == 4253554
+        assert rows[61]['crc_ticks'] == 0
         # The copy read a cycle late is the peer there again.
         assert rows[68]['source'] == 'previous CRC' and rows[68]['row'] == 4613457
         assert rows[68]['crc_ticks'] == 0

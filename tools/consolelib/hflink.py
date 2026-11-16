@@ -48,8 +48,9 @@ def parser(family='hflink'):
     p = argparse.ArgumentParser(prog=f'console {family}', description=__doc__)
     sub = p.add_subparsers(dest='action', required=True)
     run = sub.add_parser('station', help='scan, answer and exchange native text in the foreground')
-    run.add_argument('--config', default=os.environ.get(config.STATION_ENV, str(station.ROOT / 'station.toml')))
-    run.add_argument('--rig', choices=('ft891', 'ftdx10'))
+    run.add_argument('--config', default=os.environ.get(config.STATION_ENV, str(station.ROOT / 'station.toml')),
+                     help='the station file to use')
+    run.add_argument('--rig', choices=('ft891', 'ftdx10'), help="rig profile to use; default the station's")
     freq = run.add_mutually_exclusive_group(required=family != 'selcall')
     freq.add_argument('--channels', nargs='+', type=float, metavar='KHZ', help='USB dial frequencies to scan')
     freq.add_argument('--freq', type=float, metavar='KHZ', help='one USB dial frequency to hold')
@@ -59,7 +60,8 @@ def parser(family='hflink'):
     run.add_argument('--address', nargs='+', metavar='ADDRESS', help='own ALE address(es), or own numeric selcall address(es) for selcall station')
     run.add_argument('--selcall', nargs='+', metavar='ADDRESS', help='also receive selcall on a single held ALE channel')
     run.add_argument('--acknowledge', action='store_true', help='answer individual selcall acknowledgment requests; opt-in, interoperability still needs a rig test')
-    run.add_argument('--scan-rate', type=float, choices=(2.0, 5.0), default=2.0)
+    run.add_argument('--scan-rate', type=float, choices=(2.0, 5.0), default=2.0,
+                     help='channels scanned per second (default %(default)s)')
     run.add_argument('--dots', type=float, default=6.0, metavar='SECONDS', help='selcall dot preamble, default 6 seconds')
     run.add_argument('--verbose', action='store_true', help='show every retune and repeated decoder event')
     run.add_argument('--summary-seconds', type=float, default=30.0, help='quiet-station status interval (default 30; 0 disables)')

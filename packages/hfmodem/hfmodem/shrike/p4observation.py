@@ -61,6 +61,8 @@ class Observation:
     peer_raster_tail: bool = False
     sf8: bool = False
     speedlevel: str | None = None
+    word_span_supported: bool = False
+    form: str | None = None
 
 
 @dataclass(frozen=True)

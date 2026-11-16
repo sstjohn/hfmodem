@@ -50,6 +50,7 @@ def test_every_data_reply_stands_890_ms_past_the_packet_it_answers(tmp_path, ste
     """Changeover copies on our own raster, then data packets `step` samples
     off them on the peer's comb: -240 is VE3KPG's, +240 the other way."""
     s, tx, live, grid, phase = turned(tmp_path)
+    tx.p3_control_instant = 'peer'
     entry = tx.reply_clock.entry_phase
     for k in range(2, 9):
         form = (True, 1) if k < 4 else (False, 1)
@@ -70,5 +71,5 @@ def test_the_reply_never_brings_its_ptt_inside_the_packet(tmp_path):
     phase = origin + index * CYCLE
     grid.cycles = index + 1
     frame(grid, phase, index + 1)
-    centre = answered(s, tx, live, grid, index + 2)
+    answered(s, tx, live, grid, index + 2)
     assert tx.tx_key_up >= phase + CYCLE + WIDTH

@@ -24,7 +24,10 @@ def _assert_prefix(result, row):
            actual_keys=[(p.stream_sample, p.word) for p in keys],
            first_assertion='watch support then WORD full-read boundary, before key-prefix')
     assert {r[0] for r in watched} >= {'read_partial', 'read_window'}
-    assert all(r[4] == packet + 161040 for r in watched)
+    # Prefix ownership and complete unknown-SF16 support are separate causal
+    # reads. Neither borrows the associated actual WORD's completion horizon.
+    assert [(r[0], r[4]) for r in watched] == [
+        ('read_partial', 8247550), ('read_window', 8368510)]
     assert {r[4] for r in ordinary} >= {8247070, 8277310, 8284750}
     assert not forbidden, 'associated WORD origin borrowed saved-phase LONG full completion'
     assert [(p.stream_sample, p.word) for p in keys[:4]] == [

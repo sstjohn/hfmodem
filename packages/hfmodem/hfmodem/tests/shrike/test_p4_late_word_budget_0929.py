@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hfmodem.shrike import arq, onair, p4frame, p4turn, session
+from hfmodem.shrike import arq, onair, p4frame, p4oracle, p4turn, session
 from hfmodem.shrike.p4host import P4Host, P4Outbox
 from hfmodem.shrike.p4observation import Kind, Observation, Registered, RegisteredObservation
 from hfmodem.shrike.p4receiver import Clock, Expect
@@ -147,44 +147,105 @@ def replay_1024(monkeypatch, first, costly_onsets, cost_ms=60, seconds=8.):
     return tx, received, events
 
 
-def deferred_instant(tx, onset):
-    heard = next(h['onset_sample'] for h in tx.p4_probe.heard if not h['provisional']
-                 and abs(h['onset_sample']-round(onset*FS)) < FS//10)
-    return heard+round(3.4*FS)+round(3.75*FS)
+def full_long_at(tx, onset):
+    rows = [h for h in tx.p4_probe.heard if h['kind'] == Kind.LONG
+            and not h['provisional'] and 'status' in h
+            and abs(h['onset_sample']-round(onset*FS)) < FS//10]
+    assert len(rows) == 1
+    return rows[0]
 
 
+# The live link bounds LONG work by the wall clock, so a loaded host changes what it decides.
+@pytest.mark.realtime
 @pytest.mark.parametrize('costly', [(63.499,), (63.499, 67.249)])
 def test_1024_prompt_long_decoded_late_is_answered_once_on_its_repeat(monkeypatch, costly):
     tx, received, events = replay_1024(monkeypatch, 63.499, costly)
+    # Host acceptance checks the deadline after
+    # receiver publication. The injected cost precedes turn/host admission,
+    # so an expired first copy cannot create delivered or held-answer credit.
+    # A timely complete repeat has its own deadline and source receipt (:172).
+    decisions = [e for e in tx.p4_probe.link_events if e['event'] == 'Decision']
+    assert len(decisions) == 2
+    assert all(e['nominal_due'] == e['at']+round(3.4*FS) for e in decisions)
+    assert any(e['event'] == 'long-engine' and e['crc_valid'] and e['timely']
+               and abs(e['at']-round(63.499*FS)) < FS//10
+               for e in tx.p4_probe.link_events)
+    accepted = [e for e in tx.p4_probe.link_events if e['event'] == 'source-accept']
+    expected = b'[WL2K-5.0-B2FWIHJM$]\r;PQ: 25286779\rCMS via VE3KPG >\r'
     if len(costly) == 1:
+        repeat = full_long_at(tx, 67.249)
+        at = repeat['onset_sample']
         assert [(e['word'], e['audio_start']) for e in tx.p4_probe.emissions] == [
-            ('X27', deferred_instant(tx, 63.499))]
-        assert [e['purpose'] for e in tx.p4_probe.link_events if e['event'] == 'Keyed'] == [None]
-        assert [e['event'] for e in events] == ['Refused', 'answer-deferred']
+            ('X27', at+round(3.4*FS))]
+        keyed, = [e for e in tx.p4_probe.link_events if e['event'] == 'Keyed']
+        assert keyed['purpose'] is None
+        assert keyed['accepted_target'] == keyed['current_slot'] == at
+        assert keyed['current_slot_accepted']
+        assert keyed['ack_identity'] == (3, expected.ljust(69, b'\x1e').hex())
+        assert len(accepted) == 1 and accepted[0]['at'] == at
+        assert [e['event'] for e in events] == ['Refused']
+        assert events[0]['at'] == decisions[0]['nominal_due']
+        assert received == [expected]
     else:
         assert tx.p4_probe.emissions == []
-        assert len([e for e in events if e['event'] == 'Refused']) == 2
-        assert [e['at'] for e in events if e['event'] == 'Refused'] == [
-            deferred_instant(tx, 63.499)-CYCLE_LONG, deferred_instant(tx, 63.499)]
-        assert len([e for e in events if e['event'] == 'answer-deferred']) == 1
-    assert len(received) == 1 and received[0].endswith(b'CMS via VE3KPG >\r')
+        assert [e['event'] for e in events] == ['Refused', 'Refused']
+        assert [e['at'] for e in events] == [e['nominal_due'] for e in decisions]
+        assert not accepted and received == []
 
 
+# The live link bounds LONG work by the wall clock, so a loaded host changes what it decides.
+@pytest.mark.realtime
 def test_1024_idle_long_decoded_late_keys_its_policy_answer_over_the_unread_repeat(monkeypatch):
     tx, received, events = replay_1024(monkeypatch, 70.999, (70.999,), seconds=8.5)
-    assert [e['event'] for e in events] == ['Refused', 'answer-deferred']
-    assert not any(e['event'] == 'long decode' and e.get('crc_valid')
-                   and abs(e['at']-round(74.749*FS)) < FS//10 for e in tx.p4_probe.link_events)
-    answer = tx.p4_probe.emissions[0]
+    # Design :98,170,203 forbids acceptance of the first expired copy. Full
+    # coded-region agreement (:172) validates its repeat on that copy's own
+    # deadline, so this is a current-slot T27 rather than a held expired ACK.
+    assert [e['event'] for e in events] == ['Refused']
+    repeat = full_long_at(tx, 74.749)
+    at = repeat['onset_sample']
+    assert repeat['status'] == 0x40 and repeat['data'] == (b'\x1e'*69).hex()
+    assert any(e['event'] == 'long-engine' and e['state'] == 'repeat'
+               and e['crc_valid'] and e['timely']
+               and abs(e['at']-at) < FS//10 for e in tx.p4_probe.link_events)
+    accepted = [e for e in tx.p4_probe.link_events if e['event'] == 'source-accept']
+    assert len(accepted) == 1 and accepted[0]['at'] == at
+    answer, = tx.p4_probe.emissions
+    # The former held answer over an unread repeat keyed at 3751140. The
+    # validated current repeat refines its own physical onset by two samples;
+    # pin both absolute coordinates independently of the observed onset.
     assert (answer['word'], answer['status'], answer['payload'], answer['audio_start']) == (
-        'T27', 0, '', 3751140)
-    assert answer['audio_start'] == deferred_instant(tx, 70.999)
+        'X27', 0, '', 3751138)
+    assert at == 3587938
     keyed, = [e for e in tx.p4_probe.link_events if e['event'] == 'Keyed']
     assert keyed['state'] == 'IRS_ANSWER'
-    assert keyed['accepted_target'] is not None and not keyed['current_slot_accepted']
+    assert keyed['accepted_target'] == keyed['current_slot'] == at
+    assert keyed['current_slot_accepted']
+    assert keyed['ack_identity'] == (0x40, (b'\x1e'*69).hex())
+    assert received == []
     assert tx.p4_link_host.arq.tx_acked_bytes == 0
     assert not [e for e in tx.p4_probe.link_events if e['event'] == 'turn']
     assert [e['purpose'] for e in tx.p4_probe.link_events if e['event'] == 'Keyed'][:1] == [None]
+
+
+def test_1024_idle_repeat_complete_support_onset_coordinates():
+    if not CAPTURE.exists():
+        pytest.skip('local September29 1024 capture absent')
+    source = session.load_wav(str(CAPTURE), FS)
+    predicted = 3587940
+    origin = predicted-24000
+    audio = source[origin:predicted+round(3.355*FS)]
+    prefix = audio[:24000+round(3.230*FS)]
+    prepared = p4oracle.prepare_despread_long(prefix, FS, .5, 3.03)
+    assert prepared is not None
+    starts = {}
+    for count in (369, 373):
+        _, symbols, first, reason = p4oracle.finish_despread_long(
+            audio, FS, prepared, count=count)
+        assert reason == 'prepared' and len(symbols) == count
+        starts[count] = origin+first
+    # The old held answer used the predicted phase, not either body fit.
+    # Keep the broader legacy support beside the live locked-support case.
+    assert starts == {369: 3587938, 373: 3586658}
 
 
 
@@ -214,7 +275,7 @@ def late_prompt(m):
     assert (answer.word, answer.stream_sample, answer.purpose) == ('X27', FS+T_LONG, None)
     assert m._deferred is None
     m.refused('deadline')
-    assert m._deferred is not None and m.ack_word is None
+    assert m._deferred is not None and m._ack_chain is None
     m.silence(FS+T_LONG-LEAD)
     assert m._next is None
     return FS+T_LONG+CYCLE_LONG
@@ -222,14 +283,19 @@ def late_prompt(m):
 
 def test_unread_repeat_keeps_the_deferred_answer():
     m, delivered = irs()
-    instant = late_prompt(m)
+    m.observe(long(FS, readable=False))
+    request = m.decide(FS+T_LONG-LEAD)
+    assert request.word == 'V27' and request.purpose == 'repeat-request'
+    m.refused('deadline')
+    instant = FS+T_LONG+CYCLE_LONG
     repeat = FS+CYCLE_LONG
     m.observe(long(repeat, readable=False), now=repeat+round(3.3*FS))
     proposal = m.decide(repeat+T_LONG-LEAD)
-    assert (proposal.word, proposal.stream_sample) == ('X27', instant)
+    assert (proposal.word, proposal.stream_sample) == ('V27', instant)
+    assert proposal.ack_identity is None and proposal.purpose == 'repeat-request'
     m.keyed()
-    assert delivered == [b'prompt >\r']
-    assert m._last_ack[0] == (3, b'prompt >\r'.ljust(69, b'\x1e'))
+    assert delivered == []
+    assert m._last_ack is None and m._ack_chain is None
 
 
 @pytest.mark.parametrize('late', [False, True])
@@ -253,7 +319,7 @@ def test_different_packet_cancels_the_deferred_answer():
     after = FS+CYCLE_LONG
     m.observe(long(after, b'next line\r', status=0), now=after+round(3.3*FS))
     proposal = m.decide(after+T_LONG-LEAD)
-    assert (proposal.word, proposal.stream_sample) == ('T27', after+T_LONG)
+    assert (proposal.word, proposal.stream_sample) == ('X27', after+T_LONG)
     assert m._next.ack_identity[0] == 0
     events = [e for e in m.link_events if e['event'] not in ('source-accept', 'source-replay', 'source-unclassified', 'long-answer')]
     assert [e['event'] for e in events] == ['answer-deferred', 'deferred-answer-cancelled']

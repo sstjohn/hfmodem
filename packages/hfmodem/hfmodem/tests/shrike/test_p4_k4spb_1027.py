@@ -71,7 +71,7 @@ def test_recorded_sweep_protects_short_answer_and_recovers_crc(index, recent_nor
         rx.observations.append(Observation(
             Kind.NORMAL, FS, 0, prior_normal, prior_normal, .76, EVIDENCE['cfo_hz'],
             .9, frame=frame(0x03, bytes(40))))
-    m, _ = machine(role='irs', ladder='none', data='body', prekey_lead=.04)
+    m, _ = machine(role='irs', data='body', prekey_lead=.04)
     prior = at-round(1.25*FS)
     control = Observation(Kind.SHORT, FS, 0, prior, prior, .76, EVIDENCE['cfo_hz'],
                           .9, value=7, header='B', placed=True)
@@ -211,7 +211,7 @@ def test_live_driver_waits_for_recorded_damaged_header_chirp(monkeypatch, capsys
     tx = Tx(stream)
     rx = tx.sessrx.p4
     tx.settle = .04
-    tx.p4_link_options.p4_ladder = 'none'
+
     tx.p4_link_options.p4_data = 'body'
     tx.p4_link_options.p4_link_timeout = 4.2
     prior = onset-round(1.25*FS)

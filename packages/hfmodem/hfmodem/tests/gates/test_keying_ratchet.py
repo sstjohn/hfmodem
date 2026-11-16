@@ -37,6 +37,9 @@ MIGRATING = {
 #: The claim's line proof opens the line to read it low before admission and never
 #: raises it. claim.line_factory builds that opener for claim's CLI and hfcapture.
 PROOF_FACTORY = P + "core/claim.py"
+#: The subprocess side of test_windows_signals: its session raises RTS on the
+#: com0com pair it asserts, so the deadman test has a held line to drop.
+SIGNAL_PROBE = "tools/consolelib/windows_signal_probe.py"
 
 
 def violations(source):
@@ -80,13 +83,15 @@ def violations(source):
     return found
 
 
-def test_keying_paths_have_named_cutovers():
+def unexpected_keying(root):
     unexpected = []
-    for folder in (ROOT / "packages", ROOT / "tools"):
+    for folder in (root / "packages", root / "tools"):
         for path in folder.rglob("*.py"):
-            rel = path.relative_to(ROOT).parts
+            rel = path.relative_to(root).parts
             relative = "/".join(rel)
-            if ("tests" in rel or rel[:3:2] == ("packages", "build")
+            if (any(part in {".venv", "venv", "site-packages", "node_modules"}
+                    or part.startswith(".venv") for part in rel)
+                    or "tests" in rel or rel[:3:2] == ("packages", "build")
                     or path.name.startswith("test_") or path.name.endswith("_test.py")
                     or relative in OWNERS):
                 continue
@@ -103,9 +108,36 @@ def test_keying_paths_have_named_cutovers():
                                and n.name == "line_factory")
                 hits = [(line, kind) for line, kind in hits if not (
                     kind == "RtsPtt" and factory.lineno <= line <= factory.end_lineno)]
+            if relative == SIGNAL_PROBE:
+                tree = ast.parse(path.read_text())
+                session = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                               and n.name == "session")
+                hits = [(line, kind) for line, kind in hits if not (
+                    kind in {"RtsPtt", "assert high"} and session.lineno <= line <= session.end_lineno)]
             if hits and relative not in MIGRATING:
                 unexpected.append((relative, hits))
+    return unexpected
+
+
+def test_keying_paths_have_named_cutovers():
+    unexpected = unexpected_keying(ROOT)
     assert not unexpected
+
+
+@pytest.mark.parametrize("ignored", [
+    ".venv/lib/python3.13/site-packages", ".venv-test", "venv",
+    "site-packages", "node_modules",
+])
+def test_unexpected_keying_ignores_dependencies(tmp_path, ignored):
+    dependency = tmp_path / "packages/hfmodem" / ignored / "x.py"
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text("TIOCMBIS\n")
+    assert unexpected_keying(tmp_path) == []
+
+    rogue = tmp_path / P / "rogue.py"
+    rogue.parent.mkdir(parents=True)
+    rogue.write_text("ioctl(fd, termios.TIOCMBIS, bits)\n")
+    assert unexpected_keying(tmp_path) == [(P + "rogue.py", [(1, "TIOCMBIS")])]
 
 
 def shell_proofs(source):

@@ -8,7 +8,6 @@ cost the closing ID.
 """
 import pytest
 
-from hfmodem.shrike import onair
 from hfmodem.shrike.p4observation import Registered, RegisteredObservation
 from hfmodem.shrike.p4turn import State
 from hfmodem.tests.shrike.test_p4turn import FS, body, machine
@@ -50,39 +49,28 @@ def test_default_answers_u27_until_the_hold_bound():
 
 
 def test_header_b_copies_take_their_own_word():
-    m, _ = irs(ack_53_b='V27')
+    m, _ = irs(peer_ack={'53/B': 'V27'})
     assert words(m, 4) == ['U27', 'V27', 'V27', 'V27']
-
-
-def test_rotation_moves_on_after_n_unchanged_copies():
-    m, _ = irs(ack_53_rotate=3)
-    assert words(m, 10) == ['U27']*3 + ['X27']*3 + ['V27']*3 + ['U27']
-
-
-def test_rotation_starts_from_the_chosen_word():
-    m, _ = irs(ack_53='X27', ack_53_rotate=2)
-    assert words(m, 6) == ['X27', 'X27', 'V27', 'V27', 'U27', 'U27']
-
-
-def test_rotation_starts_b_copies_from_their_word():
-    m, _ = irs(ack_53_b='V27', ack_53_rotate=2)
-    assert words(m, 5) == ['U27', 'V27', 'U27', 'U27', 'X27']
 
 
 def test_unchanged_hold_ends_the_link_at_its_bound():
     m, _ = irs(v53_hold=6)
     assert words(m, 5) == ['U27']*5
-    assert copy(m, 5) is None
-    assert m.state == State.DOWN
+    p = copy(m, 5)
+    assert m.state == State.IRS_CLOSE
+    assert p.state == State.IRS_BREAKIN
     assert m.reason == 'no progress after 6 peer control 53 copies'
     exit_ = [e for e in m.link_events if e['event'] == 'v53-hold-exit']
-    assert [(e['copies'], e['action']) for e in exit_] == [(6, 'link-down')]
+    assert [(e['copies'], e['action']) for e in exit_] == [(6, 'close')]
 
 
 def test_default_bound_ends_a_41_copy_hold():
     m, _ = irs()
     words(m, 23)
-    assert copy(m, 23) is None and m.state == State.DOWN
+    p = copy(m, 23)
+    assert m.state == State.IRS_CLOSE and p.state == State.IRS_BREAKIN
+    assert m.reason == 'no progress after 24 peer control 53 copies'
+    assert [e['action'] for e in m.link_events if e['event'] == 'v53-hold-exit'] == ['close']
 
 
 def test_queued_mail_breaks_in_at_the_bound():
@@ -112,16 +100,7 @@ def test_zero_holds_to_the_link_timeout():
     assert words(m, 60) == ['U27']*60
 
 
-@pytest.mark.parametrize('bad', [dict(v53_hold=-1), dict(ack_53_rotate=-1)])
+@pytest.mark.parametrize('bad', [dict(v53_hold=-1)])
 def test_negative_bounds_are_refused(bad):
     with pytest.raises(ValueError):
         machine(**bad)
-
-
-def test_the_modem_flags_parse_and_default_off():
-    args = onair.build_parser().parse_args(
-        ['--p4-ack-53', 'x27', '--p4-ack-53-b', 'v27', '--p4-ack-53-rotate', '5', '--p4-v53-hold', '30'])
-    assert (args.p4_ack_53, args.p4_ack_53_b, args.p4_ack_53_rotate, args.p4_v53_hold) == ('X27', 'V27', 5, 30)
-    default = onair.build_parser().parse_args([])
-    assert (default.p4_ack_53, default.p4_ack_53_b, default.p4_ack_53_rotate, default.p4_v53_hold) == (
-        'U27', None, 0, 24)

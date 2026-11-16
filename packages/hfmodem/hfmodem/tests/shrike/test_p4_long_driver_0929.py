@@ -52,7 +52,7 @@ def exchange(monkeypatch, *, offset=0., established=False, short=False):
 def test_late_long_head_is_rechecked_before_committing_the_short_deadline(monkeypatch):
     tx, starts = exchange(monkeypatch, offset=.025)
     assert [e['audio_start'] for e in tx.p4_probe.emissions] == [at+round(3.4*FS) for at in starts]
-    assert all(e['word'] == 'X27' for e in tx.p4_probe.emissions)
+    assert all(e['word'] == 'V27' for e in tx.p4_probe.emissions)
 
 
 def test_established_long_clock_keeps_its_deadline_when_partial_read_is_absent(monkeypatch):
@@ -68,6 +68,10 @@ def test_positive_short_can_replace_the_long_cycle_deadline(monkeypatch):
 @pytest.mark.parametrize('cost_ms', [0, 34, 80])
 @pytest.mark.parametrize('previous_chirp', [False, True])
 def test_recorded_long_repeats_reach_their_own_driver_deadlines(monkeypatch, cost_ms, previous_chirp):
+    from hfmodem.shrike import p4longdecode
+    # Only the declared read charge advances this replay's sample clock.
+    monkeypatch.setattr(p4longdecode, '_python_step_seconds', lambda *args: 0.)
+    monkeypatch.setattr(p4longdecode, '_python_check_seconds', lambda _: 0.)
     from pathlib import Path
     path = Path.cwd()/'captures/onair-0929-0121/stream.flac'
     if not path.exists():

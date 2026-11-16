@@ -615,14 +615,41 @@ def test_contype_rejection_does_not_enter_a_native_contact_or_send_cw(running):
 
 
 def test_stop_wakes_a_worker_waiting_before_host_publication(tmp_path):
+    from hfmodem.core import gil
     card, rig = Card(), Keyer()
     station = SimpleNamespace(audio=card, rig=rig)
     station.arbiter = TxArbiter(card, rig, identity=Identity('K1ABC'))
     runtime = StationPtcRuntime(SimpleNamespace(station=station))
     runtime.start()
+    eventually(lambda: runtime._thread.ident in gil._due)
     runtime.stop()
     runtime.stop()
     assert not runtime._thread.is_alive() and runtime.host is None
+    assert not rig.edges
+    assert runtime._thread.ident not in gil._due
+
+
+def test_ptc_worker_releases_capture_yield_on_startup_failure(monkeypatch):
+    from hfmodem.core import gil
+    card, rig = Card(), Keyer()
+    station = SimpleNamespace(audio=card, rig=rig)
+    station.arbiter = TxArbiter(card, rig, identity=Identity('K1ABC'))
+    runtime = StationPtcRuntime(SimpleNamespace(station=station))
+    observed = []
+    def fail_transport(root):
+        observed.append((threading.get_ident() in gil._due, gil._tool is not None))
+        raise RuntimeError('transport test failure')
+    monkeypatch.setattr(runtime, '_new_transport', fail_transport)
+    with gil.breathing():
+        runtime._serve.set()
+        runtime.start()
+        try:
+            eventually(lambda: not runtime._thread.is_alive())
+            assert observed == [(True, True)]
+            assert str(runtime.failure) == 'transport test failure'
+        finally:
+            runtime.stop()
+        assert runtime._thread.ident not in gil._due
     assert not rig.edges
 
 

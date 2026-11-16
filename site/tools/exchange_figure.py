@@ -11,11 +11,11 @@ PAGE = ROOT / 'site/index.html'
 
 FIGURES = {
     'pactor': dict(
-        example='pactor3-send', window=(110, 151), peer='VE1YZ', levels=False,
-        title='PACTOR-3 data, acknowledgements and changeover with VE1YZ',
-        desc='Seconds 110–151. Peer controls answer local data. Three CRC-valid CS3 break-in packets '
-             'precede the local acknowledgement and peer SL1 data. CS1 is the acknowledgement codeword; '
-             'repeated CS1 replies during the changeover request do not advance its sequence.'),
+        example='pactor3-mail', window=(296, 326), peer='K4MSU', levels=False,
+        title='PACTOR-3 mail completion and close with K4MSU',
+        desc='Seconds 296–326. W9SSJ acknowledges the last packets of the received message, breaks in '
+             'and sends FF. K4MSU answers FQ in two CRC-valid SL1 packets. W9SSJ then sends QRT, its '
+             'closing packet and its identification. Peer acknowledgements are not drawn.'),
     'vara': dict(
         example='vara-send', window=(60, 135), peer='NS0A', levels=True,
         title='VARA BW2300 connection and mail delivery to NS0A',

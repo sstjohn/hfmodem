@@ -30,7 +30,7 @@ class ChargedReturn:
         assert seam.pending is not None
         cs, owner = seam.pending
         peer = grid._p3_peer
-        actual = irs_grid(anchor=peer[0]+round(onair.P3_REPLY_S*onair.FS)
+        actual = irs_grid(anchor=peer[0]+round(onair.P3_COMB_REPLY_S*onair.FS)
                           -hold*60000-28800)
         actual.note_p3_packet(*peer[:3], identity=grid._p3_peer_identity)
         radio.aim(actual, hold)
@@ -63,7 +63,8 @@ class DeferredReplay(ReplaySeam):
         super().__init__()
         self.host, self.pending = host, None
 
-    def send_cs(self, cs):
+    def send_cs(self, cs, *, p1_codeword=False, unread=False, maxdown=False,
+                packet_phase=None, cycle_long=None):
         self.pending = cs, self.host.arq.p3_tx_owner
 
     def cancel_pending_cs(self):

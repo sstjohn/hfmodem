@@ -100,7 +100,7 @@ def test_bare_control_confirms_p3_without_reusing_cached_p1_geometry(tmp_path):
     assert not s.host.arq.entry_pending
     onair._grid_reversal(g, s.host)
     assert g._p3_peer_confirmed and g._p3_peer is None
-    assert g.peer_at is None and g._peer_air() is None
+    assert g.peer_at is None and g._peer_air_evidence() is None
     assert g._bare_peer_width(2600000) is None
     # A real P3 bare control has geometry, but no CRC/control timing pair
     # from which to authorize our own changeover using the inherited P1 d.
@@ -120,7 +120,7 @@ def test_iss_retry_ignores_fsk_onset_while_crc_timing_is_fresh(tmp_path):
                          protocol=spec.Protocol.PACTOR1)
     assert g.peer_at == g._p3_peer[0]
     assert g.peer_packet_end(44) == before_end
-    assert g._peer_air()[:2] == g._p3_peer[:2]
+    assert g._peer_air_evidence()[:2] == g._p3_peer[:2]
     assert tx._breakin_key(g, 44) == g.boundary(44)
 
 
@@ -136,4 +136,4 @@ def test_new_p1_contact_releases_confirmed_p3_consumer_filter(tmp_path):
     g.sending = True
     assert not g._p3_peer_confirmed
     assert g._bare_peer_width(2700000) == 5760
-    assert g._peer_air()[:2] == (2700000, 5760)
+    assert g._peer_air_evidence()[:2] == (2700000, 5760)

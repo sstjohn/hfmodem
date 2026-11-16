@@ -43,14 +43,14 @@ def test_provisional_body_must_not_key_inside_unresolved_long(lead, queued, prio
     if queued:
         # This is a queued empty-cycle WORD proposal, not transmitted mail.
         m.silence(round(3.096*FS))
-        assert m.decide(round(3.096*FS)).purpose == None
+        assert m.decide(round(3.096*FS)).purpose == 'repeat-request'
     onset = round(2.25*FS)
     long = long_candidate(onset)
     m.observe(rx.register(long), now=round(3.10*FS))
     assert m._next is None
     at = round(3.5*FS)
     candidate = body_candidate(m, rx, at)
-    history = m.last, m._held_answer, m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack
+    history = m.last, m._held_answer, m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack
     due = at+round(m.t[Kind.BODY]*FS)
     decision = due-m.lead
     p = m.decide(decision)
@@ -66,12 +66,13 @@ def test_provisional_body_must_not_key_inside_unresolved_long(lead, queued, prio
     assert p is None
     assert m.pending[at]['body'] == candidate and not m.pending[at]['accepted']
     assert onset not in m._decided
-    assert (m.last, m._held_answer, m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack) == history
+    assert (m.last, m._held_answer, m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack) == history
     long_due = onset+round(m.t[Kind.LONG]*FS)
     p = m.decide(long_due-m.lead)
-    assert (p.stream_sample, p.word, p.purpose) == (long_due, 'X27' if prior_ack else 'V27', None)
+    assert (p.stream_sample, p.word, p.purpose) == (
+        long_due, 'V27', 'repeat-request')
     m.keyed()
-    assert (m._held_answer, m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack) == history[1:]
+    assert (m._held_answer, m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack) == history[1:]
 
 
 @pytest.mark.parametrize('order', list(permutations(('owner', 'body', 'future'))))
@@ -93,7 +94,7 @@ def test_all_pending_long_intervals_are_checked_in_any_insertion_order(order):
     # A later nominated interval does not own the earlier LONG's answer.
     own_due = onset+round(m.t[Kind.LONG]*FS)
     proposal = m.decide(own_due-m.lead)
-    assert (proposal.stream_sample, proposal.word, proposal.purpose) == (own_due, 'V27', None)
+    assert (proposal.stream_sample, proposal.word, proposal.purpose) == (own_due, 'V27', 'repeat-request')
 
 
 @pytest.mark.parametrize('resolution', ['expired', 'contradicted', 'decided'])
@@ -120,7 +121,7 @@ def test_resolved_long_does_not_hold_a_later_body_request_forever(resolution):
         m._decided.add(onset)
     due = at+round(m.t[Kind.BODY]*FS)
     p = m.decide(due-m.lead)
-    assert (p.stream_sample, p.word, p.purpose) == (due, 'V27', None)
+    assert (p.stream_sample, p.word, p.purpose) == (due, 'V27', 'repeat-request')
     assert m.pending[at]['accepted'] is False
     m.keyed()
     assert m.acked_counter is None and m._held_answer is None
@@ -144,7 +145,7 @@ def test_long_answer_boundary_is_excluded_from_receive_ownership(delta):
         assert proposal.stream_sample == own_due
     else:
         assert proposal.stream_sample == due
-    assert proposal.purpose == None and proposal.word == 'V27'
+    assert proposal.purpose == 'repeat-request' and proposal.word == 'V27'
 
 
 def test_contradiction_to_long_keeps_ownership_until_its_own_due():

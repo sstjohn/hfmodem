@@ -34,7 +34,7 @@ def control(m, *, value=59, header='A', **changes):
 
 
 def answering(policy='w27', **options):
-    m, a = machine(role='irs', v59_answer=policy, normal_ack='alternate-packet', **options)
+    m, a = machine(role='irs', peer_ack={59: 'W27'} if policy == 'w27' else {}, normal_ack='toggle', **options)
     propose_ack(m, ack_frame(FS, b'ordinary peer bytes', 1))
     m.keyed()
     return m, a
@@ -48,7 +48,7 @@ def proposal(m, reg, *, late=False):
 
 
 def ownership(m, a):
-    return (m.state, m.counter, m.ack_word, m.acked_counter, m._last_ack,
+    return (m.state, m.counter, m._ack_chain, m.acked_counter, m._last_ack,
             m._last_body_ack, m._receive_epoch,
             m.outbox.inflight, bytes(a._outbuf), a._buffer_raw)
 
@@ -87,7 +87,7 @@ def test_other_values_keep_current_answers(value):
 @pytest.mark.parametrize('allowed', [True, False])
 def test_queued_mail_keeps_its_existing_turn_permission(allowed):
     for policy in ('current', 'w27'):
-        m, a = answering(policy, data='body', ladder='none')
+        m, a = answering(policy, data='body')
         a.on_host_data(b'queued mail')
         m.allow_breakin = allowed
         before = ownership(m, a)
@@ -106,9 +106,9 @@ def test_queued_mail_keeps_its_existing_turn_permission(allowed):
 
 
 @pytest.mark.parametrize('policy', ['current', 'w27'])
-@pytest.mark.parametrize('evidence', ['idle', 'invitation', 'answered-repeat'])
+@pytest.mark.parametrize('evidence', ['idle', 'invitation'])
 def test_queued_mail_requests_on_checked_link_evidence_and_waits_for_grant(policy, evidence):
-    m, a = answering(policy, data='body', ladder='none')
+    m, a = answering(policy, data='body')
     queued = b'queued mail'
     a.on_host_data(queued)
     m.allow_breakin = True
@@ -116,8 +116,7 @@ def test_queued_mail_requests_on_checked_link_evidence_and_waits_for_grant(polic
     m.keyed()
     assert m.state == State.IRS_ANSWER and not m.outbox.inflight
     at = m.last.stream_sample+round(.330*FS)
-    status, payload = {'idle': (2, b''), 'invitation': (0x42, b''),
-                       'answered-repeat': (1, b'ordinary peer bytes')}[evidence]
+    status, payload = {'idle': (2, b''), 'invitation': (0x42, b'')}[evidence]
     p = propose_ack(m, ack_frame(at, payload, status, Kind.BODY))
     assert (p.kind, p.state, p.status) == (Kind.BODY, State.IRS_BREAKIN, 0x40)
     assert p.stream_sample == at+round(.920*FS)
@@ -144,9 +143,23 @@ def test_queued_mail_requests_on_checked_link_evidence_and_waits_for_grant(polic
 
 
 @pytest.mark.parametrize('policy', ['current', 'w27'])
+@pytest.mark.parametrize('allowed', [True, False])
+def test_answered_counter_repeat_is_acked_again_without_a_turn_request(policy, allowed):
+    m, a = answering(policy, data='body')
+    a.on_host_data(b'queued mail')
+    m.allow_breakin = allowed
+    proposal(m, control(m))
+    m.keyed()
+    p = propose_ack(m, ack_frame(m.last.stream_sample+round(.330*FS),
+                                b'ordinary peer bytes', 1, Kind.BODY))
+    assert p.kind == Kind.WORD and p.state == State.IRS_ANSWER and not p.payload
+    assert not m.outbox.inflight and bytes(a._outbuf) == b'queued mail'
+
+
+@pytest.mark.parametrize('policy', ['current', 'w27'])
 @pytest.mark.parametrize('evidence', ['idle', 'answered-repeat'])
 def test_checked_link_evidence_cannot_request_turn_without_breakin_permission(policy, evidence):
-    m, a = answering(policy, data='body', ladder='none')
+    m, a = answering(policy, data='body')
     a.on_host_data(b'queued mail')
     m.allow_breakin = False
     proposal(m, control(m))
@@ -213,7 +226,7 @@ def test_stale_capture_epoch_cannot_key_trial_proposal():
     m._receive_epoch += 1
     with pytest.raises(RuntimeError, match='stale receive answer'):
         m.keyed()
-    assert m.last.word == 'V27'
+    assert m.last.word == 'X27'
     assert ownership(m, a)[:6] == before[:6]
 
 
@@ -228,24 +241,18 @@ def test_refused_trial_is_not_keyed_or_recorded_as_data_acceptance():
     assert not [e for e in m.link_events if e['event'] in ('data-reply-ack', 'turn')]
 
 
-@pytest.mark.parametrize('bad', ['unknown', 'W27', None])
-def test_constructor_rejects_unknown_policy(bad):
-    with pytest.raises(ValueError, match='v59 answer policy'):
-        machine(v59_answer=bad)
-
-
 def replay_trial(policy=None, *, change_after_start=False):
     tx_factory = support.Tx
 
     def configured(stream):
         tx = tx_factory(stream)
         if policy is not None:
-            tx.p4_link_options.p4_v59_answer = policy
+            tx.p4_link_options.p4_peer_ack = {59: 'W27'} if policy == 'w27' else {}
         if change_after_start:
             key = tx._tx
 
             def changed(*args, **kwargs):
-                tx.p4_link_options.p4_v59_answer = 'current'
+                tx.p4_link_options.p4_peer_ack = {}
                 return key(*args, **kwargs)
 
             tx._tx = changed
@@ -273,25 +280,28 @@ def test_1123_default_serialization_and_emissions_match_prechange_flight(recorde
         assert emission.pop('nominal_due') == emission['audio_start']
         assert emission.pop('local_due') == emission['audio_start']
     nak = json.loads((fixture / 'v59-nak-default.json').read_text())
-    # The opening's unread greeting copies now draw V27 (WS8EOC 1107); the flight
-    # left those three slots silent, so they are projected out below.
+    # AT Unread slots: parity's unread opening copies request U27 on their slots.
     opening = {e['at'] for e in recorded_default['events']
                if e['event'] == 'Keyed' and e.get('purpose') == 'repeat-request'
                and e.get('accepted_target') is None}
     assert opening == {1052842, 1112840, 1172847}
-    assert all(e['word'] == 'V27' and e['state'] == State.ISS_LADDER
+    assert all(e['word'] == 'U27' and e['state'] == State.ISS_LADDER
                for e in recorded_default['events'] if e['event'] == 'Keyed' and e['at'] in opening)
     requests = {e['at']: e for e in recorded_default['events']
                 if e['event'] == 'Keyed' and e.get('current_slot_accepted') is False
                 and e['at'] not in opening}
     assert list(requests) == [1292875, 1352875, 1472871, 2192831]
-    # B1: each unread slot repeats its held target's keyed answer verbatim.
+    # AT Unread slots: a held X27 control cannot ack an unread chain start.
     held = {e['accepted_target']: e for e in recorded_default['events']
             if e['event'] == 'Keyed' and e.get('current_slot_accepted')}
     assert all(e['kind'] == Kind.WORD and e['state'] == State.IRS_ANSWER and not e.get('payload')
                and (e['word'], e['ack_reason'], e['ack_identity'])
-               == tuple(held[e['accepted_target']][k] for k in ('word', 'ack_reason', 'ack_identity'))
+               == (('V27', None, None) if e['at'] == 2192831 else
+                   (held[e['accepted_target']]['word'], None, None))
                for e in requests.values())
+    assert {at: e['purpose'] for at, e in requests.items()} == {
+        1292875: 'repeat-request', 1352875: 'repeat-request',
+        1472871: 'repeat-request', 2192831: 'repeat-request'}
     assert [e for e in support.prerender(recorded_default['emissions'])
             if e['audio_start'] in requests] == nak['neutral_emissions']
     # Preserve every original ordinary clock, renderer hash and field.
@@ -308,28 +318,30 @@ def test_1123_default_serialization_and_emissions_match_prechange_flight(recorde
         assert event.pop('local_due') == due
     events = [{k: v for k, v in e.items() if k not in ('work_ms', 'postdecision_work_ms')}
               for e in events]
-    # B1 adds held-target metadata to keys and drops the request label; the
-    # projection back to the prechange schema must still match the flight.
-    held_fields = ('accepted_target', 'current_slot', 'current_slot_accepted', 'ack_identity')
+    # D U5's diagnostics do not change the frozen protocol projection.
+    held_fields = ('accepted_target', 'current_slot', 'current_slot_accepted', 'ack_identity',
+                   'level', 'counter', 'header', 'repeat_index', 'recut_from',
+                   'ladder_index', 'final', 'waveform_sha256', 'ack_policy',
+                   'chain_epoch', 'chain_reason', 'answers_counter', 'nominal_s', 'scheduled_s')
     prechange = [e if e['event'] != 'Keyed' else {
-        **{k: v for k, v in e.items() if k not in held_fields},
+        **{k: v for k, v in e.items() if k not in held_fields
+           and not (e['kind'] == Kind.SHORT and k in ('status', 'payload'))},
         **({'purpose': 'repeat-request', 'ack_reason': None} if e['at'] in requests else {})}
         for e in events]
-    # The three opening decisions now key V27, so their capture runs past our key;
-    # every other decision and key keeps the flight digest less those three rows.
+    # D S2.3's opening requests are pinned separately from the post-opening trace.
     unread = [e for e in prechange if e['event'] == 'Decision' and e['scheduled_at'] in opening]
     assert [(e['reason'], e['proposed_at']) for e in unread] == [('body unread at decision', None)]*3
     assert digest([e for e in prechange if e not in unread]) == nak['decisions_and_keys_sha256_1107']
     assert nak['baseline_heard_sha256'] == baseline['heard_sha256']
-    assert digest(recorded_default['heard']) == nak['heard_sha256']
+    heard = support.protocol_heard(recorded_default['heard'])
+    assert digest(heard) == nak['heard_sha256']
     measured = ('cfo_hz', 'coherence', 'lattice')
     assert [{k: h[k] for k in measured if k in h}
             for h in recorded_default['heard']] == nak['measured_receive_fields']
-    # The first request refreshes Clock.cfo_hz from tracked CFO. Only these
-    # three measurements differ; all registration/association/payload fields
-    # retain the exact flight digest (not a regenerated candidate digest).
+    # Requests preserve the peer clock's CFO; the protocol evidence still
+    # retains the exact flight digest apart from these measured fields.
     assert digest([{k: v for k, v in h.items() if k not in measured}
-                   for h in recorded_default['heard']]) == nak['heard_without_measurements_sha256']
+                   for h in heard]) == nak['heard_without_measurements_sha256']
     original = json.loads((CAPTURES / 'onair-1003-1123' / 'p4-probe.json').read_text())
     # The fixture Tx records the full cached wave; flight's writer trims its
     # tail. Both paths retain the hash of that same untrimmed renderer.
@@ -360,7 +372,7 @@ def test_1123_opt_in_changes_only_associated_unambiguous_v59_answers(recorded_de
             assert requests[chosen['audio_start']]['state'] == State.IRS_ANSWER
             # The active policy already keyed W27 to the prior v59. This
             # request repeats it without accepting the unread next control.
-            assert default['word'] == 'X27' and chosen['word'] == 'W27'
+            assert default['word'] == 'V27' and chosen['word'] == 'W27'
             assert chosen['waveform_sha256'] == hashlib.sha256(
                 p4robusttx.robust_word('W27').tobytes()).hexdigest()
             assert {k: v for k, v in chosen.items() if k not in ('word', 'waveform_sha256', 'audio_end')} == {
@@ -409,7 +421,7 @@ def test_driver_renders_w27_and_does_not_record_a_refused_key(monkeypatch):
     stream = Stream(audio)
     tx = Tx(stream)
     tx.p4_probe.emissions.clear()
-    tx.p4_link_options.p4_v59_answer = 'w27'
+    tx.p4_link_options.p4_peer_ack = {59: 'W27'}
     tx.p4_link_options.p4_link_timeout = 2.5
     receiver = tx.sessrx.p4
     constructor = p4turn.P4Turn
@@ -438,13 +450,13 @@ def test_driver_renders_w27_and_does_not_record_a_refused_key(monkeypatch):
 @pytest.mark.parametrize('policy', ['current', 'w27'])
 @pytest.mark.parametrize('header', ['A', 'B'])
 def test_repeat_after_v59_is_neutral_and_cannot_accept_another_control(policy, header):
-    m, a = answering(policy, data='body', ladder='none')
+    m, a = answering(policy, data='body')
     a.on_host_data(b'queued mail')
     reg = control(m, header=header)
     accepted = proposal(m, reg)
     assert accepted.word == ('X27' if policy == 'current' else 'W27')
     m.keyed()
-    before = ownership(m, a), dict(m._packet_words), m._packet_ack, m._held_answer
+    before = ownership(m, a), m._ack_chain, m._ack_chain, m._held_answer
     experiment_count = len([e for e in m.link_events if e['event'] == 'experimental-v59-answer'])
     for shift in (0, 100):
         due = m.last.stream_sample+round(1.25*FS)
@@ -458,7 +470,7 @@ def test_repeat_after_v59_is_neutral_and_cannot_accept_another_control(policy, h
         assert not request.current_slot_accepted
         assert not request.payload and not m.outbox.inflight
         m.keyed(due+shift)
-        assert (ownership(m, a), dict(m._packet_words), m._packet_ack, m._held_answer) == before
+        assert (ownership(m, a), m._ack_chain, m._ack_chain, m._held_answer) == before
         assert bytes(a._outbuf) == b'queued mail' and a._buffer_raw == 11
     assert len([e for e in m.link_events if e['event'] == 'experimental-v59-answer']) == experiment_count
     assert not [e for e in m.link_events if e['event'] in ('turn', 'data-reply-ack')]

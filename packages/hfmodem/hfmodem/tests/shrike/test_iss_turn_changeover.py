@@ -21,6 +21,7 @@ from hfmodem.shrike import arq, onair, placement, rxfront, spec
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.tests.shrike.test_iss_login_advance import (
     CHANGEOVER_FIELD, GREETING, ScriptedPeer)
+from hfmodem.tests.shrike.p3_reply_support import UNBOUNDED_TRIES
 from hfmodem.tests.shrike.test_p3_breakin_timing import transitioned, tx_at
 from hfmodem.winlink import B2FSession, MailClient
 
@@ -429,7 +430,7 @@ def cede_window(seconds: float) -> np.ndarray:
     return win
 
 
-def stint(cycles: int):
+def stint(cycles: int, tries: int = UNBOUNDED_TRIES):
     """The 2320 stint: our changeover keyed, the peer answering every cycle.
 
     The whole cycle, through the seams that decide it -- the production listen
@@ -440,6 +441,7 @@ def stint(cycles: int):
     as long as the stint runs, which is what WS8EOC did 25 times.
     """
     host, peer, login = takes_the_channel()
+    host.arq.cfg.p3_breakin_tries = tries
     grid = iss_grid()
     peer.raster = grid
     sessrx = onair._SessionRx(host, tag="ISS")

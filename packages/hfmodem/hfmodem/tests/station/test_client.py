@@ -729,3 +729,32 @@ def test_attach_passes_resolved_data_root_to_child(station, tmp_path, monkeypatc
     expected = tmp_path / 'data'
     assert launches[0][1]['env']['HFMODEM_DATA_DIR'] == str(expected)
     assert attached.log_path.parent == expected / 'station'
+
+
+def _shutdown_ack_then_eof(monkeypatch, station, state):
+    attached = client.Client(station)
+    monkeypatch.setattr(attached, '_json', lambda method, route, body=None, **kw: {'id': body['id'], 'seq': 3})
+    monkeypatch.setattr(attached, 'events', lambda *a, **kw: (event for event in ()))
+    monkeypatch.setattr(attached, 'state', state)
+    return attached
+
+
+def test_an_acknowledged_shutdown_whose_station_is_gone_is_done(monkeypatch, station):
+    def refused(**kw):
+        raise ConnectionRefusedError(errno.ECONNREFUSED, 'refused')
+    attached = _shutdown_ack_then_eof(monkeypatch, station, refused)
+    assert attached.command('shutdown', wait=True, timeout=1)['state'] == 'done'
+
+
+def test_an_acknowledged_shutdown_whose_station_still_answers_is_not_done(monkeypatch, station):
+    attached = _shutdown_ack_then_eof(monkeypatch, station, lambda **kw: {})
+    with pytest.raises(client.ClientError, match='no terminal result'):
+        attached.command('shutdown', wait=True, timeout=.3)
+
+
+def test_only_a_shutdown_takes_a_gone_station_as_its_result(monkeypatch, station):
+    def refused(**kw):
+        raise ConnectionRefusedError(errno.ECONNREFUSED, 'refused')
+    attached = _shutdown_ack_then_eof(monkeypatch, station, refused)
+    with pytest.raises(client.ClientError, match='no terminal result'):
+        attached.command('release', wait=True, timeout=.3)

@@ -51,7 +51,7 @@ def reads(monkeypatch):
     """Every call of the three readers the pre-key path used to pay for."""
     made = []
     for owner, name in ((rxfront.SyncedRx, 'control_signal_at'),
-                        (rxfront.SyncedRx, 'sl1_header_at'),
+                        (rxfront.SyncedRx, 'narrow_header_at'),
                         (p3acquire, 'control_signal')):
         fn = getattr(owner, name)
 

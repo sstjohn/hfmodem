@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hfmodem"
-version = "0.5.1"
+version = "0.6.0"
 maintainers = [{ email = "hfmodem@ssj.lol" }]
 description = "Experimental HF modems, receive monitors and shared radio station tools."
 # Inline, not a file path: this package directory carries no README.md, and
@@ -55,6 +55,7 @@ Issues = "https://github.com/sstjohn/hfmodem/issues"
 radio = []
 # Optional logbook certificate signing.
 operator = ["cryptography>=42"]
+tui = ["textual>=8.2.8,<9"]
 dev = ["pytest>=7", "pytest-xdist", "ruff>=0.5"]
 
 [project.scripts]
@@ -69,6 +70,7 @@ namespaces = false
 exclude = ["hfmodem.tests*"]
 
 [tool.setuptools.package-data]
+"hfmodem.ui" = ["assets/*.mjs"]
 "hfmodem.shrike" = ["assets/c2-*.swaps.z"]
 "hfmodem.shrike.c2proof" = ["cml/cml_generate.c", "cml/COPYING.LESSER", "NOTICE.md"]
 # P4 uses the approved exact replay swaps above; its original constructor is an

@@ -584,7 +584,7 @@ def test_the_ww2mi_turn_is_received_as_mail():
 # spoke, in the order it spoke them. The login was accepted — `;PQ:` drew a
 # `;PR:` and the CMS answered with its prompt and an offer rather than English
 # — and the run still ended `*** [1] Unexpected response to proposal -
-# Disconnecting (100.7.81.58)` with JWKY65C2OZES left at the far end. The `FC`
+# Disconnecting (100.7.81.58)` with WKYC52O6ZESJ left at the far end. The `FC`
 # line is the one thing here the record does not hold: the transcript keeps a
 # gateway's words and not its commands, so it carries the form and the
 # compressed size the `;PM:` states, and an uncompressed size that is a guess.
@@ -594,7 +594,7 @@ KN4LQN = ("RMS Trimode 1.4.2.3\r"
           "[WL2K-5.0-B2FWIHJM$]\r"
           ";PQ: 30340143\r"
           "CMS via KN4LQN >\r").encode()
-KN4LQN_PM = (";PM: W9SSJ JWKY65C2OZES 524 opstation@example.net "
+KN4LQN_PM = (";PM: W9SSJ WKYC52O6ZESJ 524 op@example.net "
              "testing 8/26 this is a test\r").encode()
 
 
@@ -607,10 +607,10 @@ def test_the_kn4lqn_offer_draws_the_answer_the_document_defines():
         b";FW: W9SSJ\r[Pat-1.0.0-B2FHM$]\r;PR: "
         + secure_login_response("30340143", "pw").encode()
         + b"\r; KN4LQN DE W9SSJ\rFF\r")
-    out = s.feed(KN4LQN_PM + _proposal_block("FC EM JWKY65C2OZES 640 524 0"))
+    out = s.feed(KN4LQN_PM + _proposal_block("FC EM WKYC52O6ZESJ 640 524 0"))
     assert out == b"FS +\r"
     assert not s.failure and s.stage == "receiving"
-    assert s.unfetched == ["JWKY65C2OZES"]
+    assert s.unfetched == ["WKYC52O6ZESJ"]
 
 
 def test_the_answer_a_refusal_lands_on_is_in_the_record_the_operator_reads():
@@ -620,10 +620,10 @@ def test_the_answer_a_refusal_lands_on_is_in_the_record_the_operator_reads():
     s = B2FSession("W9SSJ", role="calling", target="KN4LQN",
                    password="pw", client_sid="Pat-1.0.0")
     s.feed(KN4LQN)
-    s.feed(KN4LQN_PM + _proposal_block("FC EM JWKY65C2OZES 640 524 0"))
+    s.feed(KN4LQN_PM + _proposal_block("FC EM WKYC52O6ZESJ 640 524 0"))
     said = summarize(s).splitlines()
     assert "mail: we queued: FS +" in said
-    assert "mail: peer sent: FC EM JWKY65C2OZES 640 524 0" in said
+    assert "mail: peer sent: FC EM WKYC52O6ZESJ 640 524 0" in said
     assert "mail: peer said: CMS via KN4LQN >" in said
     assert "mail: we said: ;PR: ########" in said
     assert secure_login_response("30340143", "pw") not in "\n".join(said)
@@ -686,17 +686,17 @@ WW2MI_0823 = (
     b"RMS Trimode 1.4.2.2 W8OAK Oakland County ARPSC.\r\nW9SSJ has 1437 ",
     b"daily minutes remaining with WW2MI (EN82KR)\r[WL2K-5.0-B2FWIHJM$]",
     b"\r;PQ: 74048083\rCMS via WW2MI >\r",
-    b";PM: W9SSJ WWTD6QMC61TV 464 opstation@example.net test3\r;PM: W9S",
-    b"SJ V0DAF1MQ2Y1J 504 opstation@example.net this is a test of a me",
-    b"ssage\r;PM: W9SSJ BJNKZAK5PF5K 530 opstation@example.net test ema",
+    b";PM: W9SSJ WTDQ6MCT16VW 464 op@example.net        test3\r;PM: W9S",
+    b"SJ D1AFM2QY1J0V 504 op@example.net        this is a test of a me",
+    b"ssage\r;PM: W9SSJ JNKZAKP5FK5B 530 op@example.net        test ema",
     b"il another one\rFS Y\r",
-    b"FC EM WWTD6QMC61TV 560 464 0\rFC EM V0DAF1MQ2Y1J 622 504 0\rFC EM ",
-    b"BJNKZAK5PF5K 657 530 0\rF> 88\r",
+    b"FC EM WTDQ6MCT16VW 560 464 0\rFC EM D1AFM2QY1J0V 622 504 0\rFC EM ",
+    b"JNKZAKP5FK5B 657 530 0\rF> 88\r",
     bytes.fromhex("fdfbfcd3abdf9527b917fed407f1ba97b4fb4ffd3f5ccf9cf44fac"
                   "aca7bdfbc7cf66c5b5117c5995fd6870a04b7ba4ece0dbbcbbe66d"
                   "d1821e4e6b5a1bb58ed0"),
 )
-WW2MI_0823_OFFERED = ["WWTD6QMC61TV", "V0DAF1MQ2Y1J", "BJNKZAK5PF5K"]
+WW2MI_0823_OFFERED = ["WTDQ6MCT16VW", "D1AFM2QY1J0V", "JNKZAKP5FK5B"]
 
 
 def _ww2mi_0823() -> B2FSession:
@@ -715,7 +715,7 @@ def test_a_forward_block_that_lost_its_head_says_so():
     message we had just sent it. The byte is not the fault: the bytes in front
     of it are, and nothing above the link can put them back."""
     s = _ww2mi_0823()
-    assert s.failure.startswith("WWTD6QMC61TV began 0xfd, not SOH")
+    assert s.failure.startswith("WTDQ6MCT16VW began 0xfd, not SOH")
     assert "short of its head" in s.failure
     assert not s.inbox and not s.received_blocks
 
@@ -1335,3 +1335,20 @@ def test_a_sixth_proposal_in_one_block_fails_the_session():
     assert s.done and "more than 5 proposals" in s.failure
     s = _connected()
     assert s.feed(_proposal_block(*props[:5])) == b"FS +++++\r"
+
+
+def test_a_source_gap_in_the_greeting_fails_at_once():
+    # K4SPB 2026-11-14 05:11Z: c1 ended at "[WL2K", c2 was never read and the
+    # gateway moved on to c3; nothing after the gap can complete the SID.
+    session = B2FSession("W9SSJ", target="K4SPB")
+    session.feed(b"RMS Trimode 1.4.4.0 Welcome to K4SPB\r\n{SFI = 120 UTC}\r\n[WL2K")
+    session.source_lost("counter gap")
+    assert session.done and session.failure == "lost part of the gateway greeting (counter gap)"
+
+
+def test_a_source_gap_after_the_greeting_leaves_the_session_alone():
+    s = B2FSession("W9SSJ", role="calling", target="NS0A")
+    s.feed(b"[WL2K-5.0-B2FWIHJM$]\r;PQ: 12345678\rCMS via NS0A >\r")
+    assert not s.failure
+    s.source_lost("counter gap")
+    assert not s.failure

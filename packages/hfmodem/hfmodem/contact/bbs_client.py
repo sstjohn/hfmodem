@@ -128,6 +128,7 @@ class BBSClient:
         if text == '<BGJ>':
             self.downloading = False
             self.finish('offer rejected')
+            self.session.semantic('file_outcome', state='failed', result='failed')
             self.session.say('Peer rejected the file request; no readiness sent')
         elif text.startswith('<SF:'):
             try:
@@ -140,7 +141,10 @@ class BBSClient:
             self.offer = offer
             self.offer_path = self.recorder.directory
             self.finish('offer recorded')
-            if self.downloading:
+            if not self.downloading:
+                self.session.semantic('file_outcome', state='done', result='offer-recorded',
+                                      evidence_id=str(self.offer_path))
+            else:
                 from .bbs_download import validate_offer, DownloadCapture, DOWNLOAD_SECONDS
                 try:
                     validate_offer(offer)
@@ -218,6 +222,7 @@ class BBSClient:
                 self.session.say(f'File evidence retained: {result.directory} ({result.reason}); '
                                  f'{reason if reason == "file validated and saved" else "download not validated"}')
             except OSError as error:
+                self.session.semantic('file_outcome', state='failed', result='failed')
                 self.session.say(f'File evidence write failed: {error}; partial bytes in {recorder.directory}')
 
     def end(self, reason='link ended'):
@@ -258,8 +263,10 @@ class BBSClient:
             try:
                 self.recorder.check_deadline()
             except (CaptureStopped, OSError) as error:
+                self.session.semantic('file_outcome', state='unknown' if self.waiting else 'failed', result='failed')
                 self.failure = str(error)
         if self.failure and not self.session._closing:
+            self.session.semantic('file_outcome', state='failed', result='failed')
             reason, self.failure = self.failure, None
             self.stop(reason)
         elif self.receiving and not self.session._closing:

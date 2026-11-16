@@ -125,7 +125,7 @@ def test_r2_census_recordings_available(arm):
 
 @pytest.mark.parametrize('branch', ['ACK', 'refusal', 'body', 'silence', 'P1 continuation'])
 def test_r2_reactive_peer_and_keyed_only_registration(branch):
-    turn, arq = machine()
+    turn, arq = machine(data='long')
     arq.on_host_data(b'A'*30 + b'\x1c\x1d\x1eB')
     original = b'A'*30 + b'\x1c\x1d\x1eB'
     ledger = ByteLedger(turn, original)
@@ -185,7 +185,7 @@ def test_r2_deadline_sample_wall_costs_and_clock_jumps():
     advanced = c.feasible_due(due, 60000)
     assert advanced >= c.sample+c.lag+c.lead
     assert (advanced-due) % 60000 == 0
-    turn, _ = machine()
+    turn, _ = machine(data='long')
     turn._short(FS, 0)
     stream = ReplayStream(5*FS, Clocks(wall=FS))
     rx = P4Receiver(FS, admitted=True)
@@ -200,7 +200,7 @@ def test_r2_prefix_state_is_reconstructed_and_replayable():
     first = tape.contract['emissions'][0]
     second = tape.contract['emissions'][1]
     end = second['audio_start']-1
-    turn, _ = machine(ladder='none', data='body')
+    turn, _ = machine(data='body')
     rx = P4Receiver(FS, admitted=True)
     cut, regs = tape.prefix(turn, rx, end=end)
     assert cut['turn']['last']['stream_sample'] == first['audio_start']
@@ -208,7 +208,7 @@ def test_r2_prefix_state_is_reconstructed_and_replayable():
     assert cut['queued'] == {'hex': ''} and cut['inflight'] == {'hex': ''}
     assert any(r.observation.word == 'X27' and not r.observation.provisional for r in regs)
     assert all(r.responds_to == first['audio_start'] for r in regs if r.observation.word == 'X27')
-    other_turn, _ = machine(ladder='none', data='body')
+    other_turn, _ = machine(data='body')
     other, _ = Tape('1001-0344').prefix(other_turn, P4Receiver(FS, admitted=True), end=end)
     assert other == cut
     frozen = json.loads((FIXTURES/'default-prefix-state.json').read_text())
@@ -244,6 +244,8 @@ def test_r2_default_driver_trace():
     # The default schedule is unchanged; timing now records both coordinates.
     # Check the added metadata before comparing every original golden field.
     for emission in actual['emissions'][1:]:
+        assert emission.pop('kind') == Kind.WORD
+        assert emission.pop('level') is None
         assert emission.pop('answer_residual_samples') == 0
         assert emission.pop('output_enqueue_sample') is None
         assert emission.pop('nominal_due') == emission['audio_start']
@@ -297,7 +299,7 @@ def test_r2_1042_exhaustion_proposes_close(monkeypatch):
     tape = Tape('1001-1042')
     rows = [e for e in tape.contract['emissions'] if e['audio_start'] >= 900780]
     original = bytes.fromhex(rows[0]['payload']) + bytes.fromhex(rows[-1]['payload'])
-    turn, arq = machine(ladder='chirp', data='chirp', chirp_ack='alternate',
+    turn, arq = machine(data='chirp', chirp_ack='toggle',
                         prekey_lead=2131/FS)
     turn._wall_clock = lambda: 0.
     arq.on_host_data(original)
@@ -379,7 +381,7 @@ def test_r2_1042_exhaustion_proposes_close(monkeypatch):
 ])
 def test_r2_data_exhaustion_branches(kind, state, path, monkeypatch):
     wall = [0.]
-    turn, arq = machine(ladder='none', data='body', prekey_lead=.110)
+    turn, arq = machine(data='body', prekey_lead=.110)
     turn._wall_clock = lambda: wall[0]
     original = b'A'*20 + b'\x1c\x1d\x1e' + b'B'*45
     arq.on_host_data(original)
@@ -446,7 +448,7 @@ def test_r2_data_exhaustion_branches(kind, state, path, monkeypatch):
 @pytest.mark.parametrize('branch', ['terminal-ack', 'held-v27', 'y27', 'refused', 'sample', 'wall'])
 def test_r2_data_exhaustion_continuations(branch):
     wall = [0.]
-    turn, arq = machine(ladder='chirp', data='chirp', prekey_lead=.110)
+    turn, arq = machine(data='chirp', prekey_lead=.110)
     turn._wall_clock = lambda: wall[0]
     original = b'unsent\x1c\x1d\x1e mail'*4
     arq.on_host_data(original)
@@ -526,7 +528,7 @@ def test_r2_data_exhaustion_continuations(branch):
     (State.IRS_BREAKIN, 'none'),
 ])
 def test_r2_data_exhaustion_preserves_other_budgets(state, ladder):
-    turn, arq = machine(ladder=ladder, data='body')
+    turn, arq = machine(data='body' if ladder == 'none' else ladder)
     arq.on_host_data(b'pending')
     ledger = ByteLedger(turn, b'pending')
     if state == State.ISS_DATA_ACK:
@@ -556,6 +558,8 @@ def test_r2_data_exhaustion_preserves_other_budgets(state, ladder):
         assert turn._next is selected and turn.close_context is context
         assert (context.end, context.wall_started) == (end, wall_started)
         assert turn.outbox.inflight == b'' and arq.tx_acked_bytes == 0
+    elif state == State.ISS_LADDER:
+        assert turn._next.state == State.ISS_CLOSE and turn.close_context is not None
     else:
         assert turn.state == State.DOWN and turn.reason == 'retry budget exhausted'
         assert turn.close_context is None
@@ -628,6 +632,8 @@ def test_r2_close_grant_handshake(shape):
     assert bytes(arq._outbuf)
     wall[0] = 31
     assert turn.decide(keyed.stream_sample+FS) is None
+    assert turn.state == State.IRS_ANSWER
+    assert turn.decide(keyed.stream_sample+round(1.25*FS)) is None
     assert turn.state == State.DOWN and turn.reason == 'close deadline'
     ledger.check()
 
@@ -873,8 +879,7 @@ def _breakin_prefix():
     receiver = P4Receiver(FS, admitted=True, chirp=True, breakin=True)
     receiver.enable_hold()
     # The tape keyed X27 for this long, and the replay registers that emission.
-    turn, arq = machine(ladder='none', data='body', role='irs', prekey_lead=.110,
-                        long_ack='fixed-x27')
+    turn, arq = machine(data='body', role='irs', prekey_lead=.110)
     first_ack = next(e for e in tape.contract['emissions']
                      if 68*FS < e['audio_start'] < 69*FS)
     turn._next = Proposal(Kind.WORD, first_ack['audio_start'], word='X27',
@@ -1006,7 +1011,7 @@ def test_r2_default_recorded_receiver_trace(arm):
 
 @pytest.mark.parametrize('limit', ['sample', 'wall', 'refusals'])
 def test_r2_terminal_limits_requeue_without_ack_credit(limit):
-    turn, arq = machine()
+    turn, arq = machine(data='long')
     arq.on_host_data(b'bytes\x1e')
     ledger = ByteLedger(turn, b'bytes\x1e')
     turn.outbox.transfer()
@@ -1129,7 +1134,7 @@ def test_r2_mutated_physical_fixture_is_rejected(tmp_path):
     (60*FS, 120*FS, 0, 60*FS),
 ])
 def test_r2_scheduled_emission_terminal_limits(sample_limit, wall_limit, wall, due):
-    turn, arq = machine()
+    turn, arq = machine(data='long')
     arq.on_host_data(b'pending\x1e')
     ledger = ByteLedger(turn, b'pending\x1e')
     turn.outbox.transfer()
@@ -1167,7 +1172,7 @@ def _word_request_prefix(ladder='none'):
     tape = Tape('0930-2223')
     receiver = P4Receiver(FS, admitted=True, breakin=True)
     receiver.enable_hold()
-    turn, arq = machine(ladder=ladder, data='body', role='irs',
+    turn, arq = machine(data='body' if ladder == 'none' else ladder, role='irs',
                         breakin='y27', prekey_lead=.047, normal_ack='parity')
     ack = next(e for e in tape.contract['emissions'] if 24*FS < e['audio_start'] < 25*FS)
     turn._next = Proposal(Kind.WORD, ack['audio_start'], word=ack['word'],
@@ -1239,8 +1244,7 @@ def _run_word_request(monkeypatch, stream, receiver, turn, arq, request, ladder=
     tx.sessrx.p4 = receiver
     tx.p4_probe.peer_breakin = True
     tx.p4_probe.emissions = [request]
-    tx.p4_link_options.p4_ladder = ladder
-    tx.p4_link_options.p4_data = 'body'
+    tx.p4_link_options.p4_data = 'body' if ladder == 'none' else ladder
     tx.p4_link_options.p4_breakin = 'y27'
     tx.p4_link_options.p4_link_timeout = 2.8
     tx.p4_link_host.arq = arq
@@ -1347,7 +1351,7 @@ def test_r2_request_head_resolution_driver(monkeypatch, branch):
 
 
 def test_r2_request_head_resolution_horizons():
-    turn, _ = machine(ladder='none', data='body', role='irs', breakin='y27')
+    turn, _ = machine(data='body', role='irs', breakin='y27')
     turn._break_in(0)
     turn.keyed()
     receiver = P4Receiver(FS, admitted=True, breakin=True)
@@ -1372,7 +1376,7 @@ def test_r2_request_head_resolution_horizons():
 
 
 def _r2_opening(value=38, *, policy='repeat'):
-    turn, arq = machine(ladder='long', data='hold', train_policy=policy)
+    turn, arq = machine(data='none', train_policy=policy)
     turn.seed_opening([dict(audio_start=0, value=value, header='A')], [],
                       values=(value,))
     rx = P4Receiver(FS, admitted=True, breakin=True)
@@ -1414,7 +1418,7 @@ def test_r2_v38_opening_wait():
 
 
 def test_r2_bare_y27_resolves_opening_before_mail_turn():
-    turn, arq = machine(ladder='none', data='body')
+    turn, arq = machine(data='body')
     arq.on_host_data(b'queued mail')
     turn.seed_opening([dict(audio_start=0, value=38, header='A')], [], values=(38,))
     rx = P4Receiver(FS, admitted=True)
@@ -1439,7 +1443,7 @@ def test_r2_v38_recorded_x27(arm, at_s):
     rows = tape.contract['emissions']
     row = min(rows, key=lambda e: abs(e['audio_start']/FS-at_s))
     following = next(e for e in rows if e['audio_start'] > row['audio_start'])
-    turn, _ = machine(ladder='long', data='hold')
+    turn, _ = machine(data='none')
     turn.seed_opening([e for e in rows if e.get('value') == 38
                        and e['audio_start'] <= row['audio_start']], [], values=(38,))
     rx = P4Receiver(FS, admitted=True, breakin=True)
@@ -1458,7 +1462,8 @@ def test_r2_v38_recorded_x27(arm, at_s):
 
 
 def test_r2_payload_ladder_completion_is_not_opening_wait():
-    turn, _ = machine(ladder='long', data='hold')
+    turn, arq = machine(data='long')
+    arq.on_host_data(b'long payload')
     rx = P4Receiver(FS, admitted=True)
     turn._short(0, 0)
     turn.keyed()
@@ -1500,12 +1505,12 @@ def test_r2_recorded_train_conditional_first_key(arm, start_s):
     first = rows[0]
     body_train = arm == '1001-1036'
     if body_train:
-        turn, arq = machine(ladder='none', data='body', train_policy='passive')
+        turn, arq = machine(data='body', train_policy='passive')
         arq.on_host_data(bytes.fromhex(first['payload']))
         turn._begin_data_turn(first['audio_start'])
         assert turn.keyed().payload == bytes.fromhex(first['payload'])
     else:
-        turn, _ = machine(ladder='long', data='hold', train_policy='passive')
+        turn, _ = machine(data='none', train_policy='passive')
         turn.seed_opening([first], [], values=(7, 38))
     rx = P4Receiver(FS, admitted=True, breakin=True)
     rx.enable_hold()
@@ -1593,7 +1598,7 @@ def test_r2_revoked_registrations_cannot_advance_ladder_or_commit_mail():
     turn.observe(ack, now=ack_at+round(.28*FS))
     assert not turn._opening_wait
 
-    data, arq = machine(ladder='none', data='body', train_policy='passive')
+    data, arq = machine(data='body', train_policy='passive')
     arq.on_host_data(b'pending mail')
     data._begin_data_turn(0)
     data.keyed()
@@ -1632,7 +1637,7 @@ def test_r2_passive_v38_z27_recorded():
     index = next(i for i, e in enumerate(rows) if e.get('value') == 38)
     rows = rows[index:index+9]
     first = rows[0]
-    turn, _ = machine(ladder='long', data='hold', train_policy='passive')
+    turn, _ = machine(data='none', train_policy='passive')
     turn.seed_opening([first], [], values=(38,))
     rx = P4Receiver(FS, admitted=True, breakin=True)
     rx.enable_hold()
@@ -1665,7 +1670,7 @@ def test_r2_recorded_greeting_body_keeps_replacement_authority():
     index = next(i for i, row in enumerate(rows) if row.get('value') == 38)
     rows = rows[index:index+9]
     first = rows[0]
-    turn, _ = machine(ladder='long', data='hold', train_policy='passive')
+    turn, _ = machine(data='none', train_policy='passive')
     turn.seed_opening([first], [], values=(38,))
     rx = P4Receiver(FS, admitted=True, breakin=True)
     rx.enable_hold()
@@ -1699,7 +1704,7 @@ def test_r2_recorded_greeting_body_keeps_replacement_authority():
 
 
 def test_r2_passive_data_distinct_keyed_refusals():
-    turn, arq = machine(ladder='none', data='body', train_policy='passive')
+    turn, arq = machine(data='body', train_policy='passive')
     arq.on_host_data(b'initial mail')
     turn._begin_data_turn(0)
     first = turn.keyed()
@@ -1724,7 +1729,7 @@ def test_r2_passive_data_distinct_keyed_refusals():
 
 def test_r2_passive_wall_jump_exhausts_without_credit():
     wall = [0.]
-    turn, arq = machine(ladder='none', data='body', train_policy='passive',
+    turn, arq = machine(data='body', train_policy='passive',
                         wall_clock=lambda: wall[0])
     arq.on_host_data(b'pending')
     turn._begin_data_turn(0)
@@ -1742,7 +1747,7 @@ def test_r2_passive_wall_jump_exhausts_without_credit():
 @pytest.mark.parametrize('expiry', ['k9', 'wall'])
 def test_r2_retained_x27_after_passive_expiry_cannot_commit(expiry):
     wall = [0.]
-    turn, arq = machine(ladder='none', data='body', train_policy='passive',
+    turn, arq = machine(data='body', train_policy='passive',
                         wall_clock=lambda: wall[0])
     arq.on_host_data(b'pending mail')
     turn._begin_data_turn(0)
@@ -1768,7 +1773,7 @@ def test_r2_retained_x27_after_passive_expiry_cannot_commit(expiry):
 
 
 def test_r2_complete_r8_x27_before_k9_still_commits():
-    turn, arq = machine(ladder='none', data='body', train_policy='passive')
+    turn, arq = machine(data='body', train_policy='passive')
     arq.on_host_data(b'pending mail')
     turn._begin_data_turn(0)
     turn.keyed()
@@ -1811,7 +1816,7 @@ def test_r2_passive_fallback_is_one_elapsed_opportunity(case):
 
 @pytest.mark.parametrize('word_yield,later', [(True, False), (False, True)])
 def test_r2_passive_scope_excludes_word_yield_and_later_data(word_yield, later):
-    turn, arq = machine(ladder='none', data='body', train_policy='passive')
+    turn, arq = machine(data='body', train_policy='passive')
     arq.on_host_data(b'pending data')
     if later:
         turn._first_data = False
@@ -1833,7 +1838,7 @@ def test_r2_passive_scope_excludes_word_yield_and_later_data(word_yield, later):
 @pytest.mark.parametrize('train_next', [True, False])
 @pytest.mark.parametrize('revoke_before_key', [False, True])
 def test_r2_keyed_opening_head_keeps_its_own_refinement(policy, answer, train_next, revoke_before_key):
-    turn, _ = machine(ladder='long', data='hold', train_policy=policy)
+    turn, _ = machine(data='none', train_policy=policy)
     turn.seed_opening([dict(audio_start=0, value=7, header='A')], [], values=(7, 38))
     rx = P4Receiver(FS, admitted=True)
     rx.note_emission(Emission(Kind.SHORT, Role.ISS, 0, .75, train=True))

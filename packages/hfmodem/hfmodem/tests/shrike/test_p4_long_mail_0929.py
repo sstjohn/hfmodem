@@ -27,13 +27,13 @@ def test_unread_long_in_data_mode_requests_repeat_without_turn(queued):
     m.observe(incoming, now=FS+round(3.31*FS))
     p = m.decide(FS+round(3.4*FS)-m.lead)
     assert (p.kind, p.word, p.state, p.purpose) == (
-        Kind.WORD, 'V27', State.IRS_ANSWER, None)
+        Kind.WORD, 'V27', State.IRS_ANSWER, 'repeat-request')
     assert queue._buffer_raw == (10 if queued else 0)
 
 
 @pytest.mark.parametrize('status', [0, 0x61])
 def test_checked_long_delivers_once_and_answers_each_copy_on_long_deadline(status):
-    m, queue = machine(role='irs', data='body')
+    m, queue = machine(role='irs', data='body', long_ack='counter-even-t27')
     received = []
     m.adapter.host = SimpleNamespace(deliver=received.append, supervisor=lambda *a: None)
     for at in [FS, FS+round(3.75*FS)]:
@@ -50,7 +50,7 @@ def test_checked_long_delivers_once_and_answers_each_copy_on_long_deadline(statu
     (0x20, Kind.WORD, 'V27', State.IRS_CLOSE),
 ])
 def test_checked_long_control_uses_its_status_and_long_deadline(status, kind, word, state):
-    m, queue = machine(role='irs', data='body')
+    m, queue = machine(role='irs', data='body', long_ack='counter-even-t27')
     m.observe(long(status=status), now=FS+round(3.30*FS))
     p = m.decide(FS+round(3.4*FS)-m.lead)
     assert p.kind == kind and p.word == word and p.state == state
@@ -74,18 +74,18 @@ def test_unsupported_long_source_is_terminal_without_delivering_bytes():
 
 
 def test_long_family_only_hold_experiment_retains_its_existing_answer():
-    m, _ = machine(role='irs', data='hold')
+    m, _ = machine(role='irs', data='none', long_ack='counter-even-t27')
     m.observe(long(valid=False), now=FS+round(3.30*FS))
     assert m.decide(FS+round(3.4*FS)-m.lead).word == 'X27'
 
 
 @pytest.mark.parametrize('already_decided', [False, True])
 def test_shifted_long_resolution_replaces_the_short_pending_identity(already_decided):
-    m, _ = machine(role='irs', data='body')
+    m, _ = machine(role='irs', data='body', long_ack='counter-even-t27')
     old = replace(long(valid=False).observation, kind=Kind.NORMAL, provisional=True)
     m.observe(RegisteredObservation(old, Registered.NEW), now=FS+round(.81*FS))
     if already_decided:
-        assert m.decide(FS+round(.92*FS)-m.lead).purpose is None
+        assert m.decide(FS+round(.92*FS)-m.lead).purpose == 'repeat-request'
     full = long(FS+2)
     m.observe(replace(full, outcome=Registered.CONTRADICTED, replaced=old), now=FS+round(3.30*FS))
     p = m.decide(FS+2+round(3.4*FS)-m.lead)
@@ -95,12 +95,12 @@ def test_shifted_long_resolution_replaces_the_short_pending_identity(already_dec
 
 @pytest.mark.parametrize('late_samples', [0, 3552])
 def test_late_checked_long_delivers_once_but_waits_for_a_timely_repeat(late_samples):
-    m, _ = machine(role='irs', data='body')
+    m, _ = machine(role='irs', data='body', long_ack='counter-even-t27')
     received = []
     m.adapter.host = SimpleNamespace(deliver=received.append, supervisor=lambda *a: None)
     m.observe(long(valid=False), now=FS+round(3.30*FS))
     due = FS+round(3.4*FS)
-    assert m.decide(due-m.lead).purpose is None
+    assert m.decide(due-m.lead).purpose == 'repeat-request'
     now = due-m.lead+late_samples
     m.observe(replace(long(), outcome=Registered.ENRICHED), now=now)
     answer = m.decide(now)

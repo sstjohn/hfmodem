@@ -45,52 +45,13 @@ from hfmodem.shrike import onair, placement, spec
 from hfmodem.shrike.arq import IRS, State
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.shrike.spec import Protocol
+from hfmodem.tests.shrike.onair_support import _Seam
 
 FS = onair.FS
 SNR_DB = 20.0
 MEMORY_SNR_DB = -4.0
 """`test_p3memory`'s figure for the punctured levels: past the single-shot cliff
 at speed level 5 and inside combining's reach."""
-
-
-class _Seam:
-    """A transmit seam that records instead of keying."""
-
-    def __init__(self) -> None:
-        self.sent: list = []
-
-    def attach(self, host) -> None:
-        pass
-
-    def connect_burst(self, mycall, dxcall) -> None:
-        self.sent.append(("connect", dxcall))
-
-    def send_cs(self, i) -> None:
-        self.sent.append(("cs", i))
-
-    def send_p1_cs(self, i) -> None:
-        self.sent.append(("p1cs", i))
-
-    def send_p1_packet(self, payload, baud, packet_count, **kw) -> None:
-        self.sent.append(("p1pkt", payload))
-
-    def send_packet(self, sl, payload, status, breakin=False) -> None:
-        self.sent.append(("pkt", sl, payload))
-
-    def send_long_packet(self, sl, payload, status, **kw) -> None:
-        self.sent.append(("long", sl, payload))
-
-    def deliver(self, data) -> None:
-        pass
-
-    def buffer(self, n) -> None:
-        pass
-
-    def pump(self) -> None:
-        pass
-
-    def cycle(self) -> None:
-        pass
 
 
 def _linked(protocol: Protocol = Protocol.PACTOR3) -> PtcHost:
@@ -212,7 +173,7 @@ def test_the_gear_request_climbs_from_the_peers_level() -> None:
     """
     sess = _Session()
     payload = _payload(3, False)
-    for seed in range(sess.host.arq.cfg.speed_up_after):
+    for seed in range(sess.host.arq.cfg.p3_speed_up_after):
         sess.cycle(_cycle_audio(
             placement.link_packet(3, payload, spec.status_byte(seed % 4)),
             seed=seed))

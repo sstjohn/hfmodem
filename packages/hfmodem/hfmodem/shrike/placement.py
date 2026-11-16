@@ -987,6 +987,13 @@ DIAGONAL_HZ = -12.5
 diagonal control keyed at exactly 0 Hz."""
 
 
+def read_convention_hz(cs: int) -> float:
+    """Every sender's changeover head steps the diagonal; a bare word is taken
+    to step as ours do, since one differential word cannot separate a phase
+    convention from a frequency."""
+    return DIAGONAL_HZ if cs == BREAKIN_CS or CONTROL_PHASE == "diagonal" else 0.0
+
+
 def control_burst(cs_index: int, *, tail: bool,
                   swapped: bool | None) -> np.ndarray:
     """One control codeword on channels 5 and 12, built to a named shape.

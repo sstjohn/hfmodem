@@ -213,13 +213,7 @@ def plan(mode, args, now):
     level = modes.level_for(mode, level_name)
     fly_mode = 'pounce' if args.pounce else 'force' if args.force else 'sense'
     name = arm_name(mode, peer, level, fly_mode, now)
-    if mode.name == 'pactor' and getattr(args, 'p4_chirp_counter', False):
-        name += '-p4-chirp-counter'
-    elif mode.name == 'pactor' and getattr(args, 'p4_entry', False):
-        name += '-p4-entry'
-    if mode.name == 'pactor' and getattr(args, 'p4_mail', False):
-        name += '-p4-mail'
-    elif mode.name == 'pactor' and getattr(args, 'p4_link', False):
+    if mode.name == 'pactor' and getattr(args, 'p4_link', False) and not getattr(args, 'p4_mail', False):
         name += '-p4-link'
     if mode.name == 'pactor' and getattr(args, 'robust', False):
         name += '-robust'
@@ -227,16 +221,6 @@ def plan(mode, args, now):
         name += f'-{args.after_connect}'
     if mode.name == 'pactor' and getattr(args, 'after_robust', None) not in (None, 'listen'):
         name += f'-then-{args.after_robust}'
-    if mode.name == 'pactor' and getattr(args, 'p4_probe_packet', 'chirp') != 'chirp':
-        # `-robust` already names the connect kind, so the robust packet gets
-        # its own: a clone of the tape, or our own datablock values.
-        named = '-rv' if getattr(args, 'p4_probe_values', None) else '-rclone'
-        name += {'robust': named}.get(args.p4_probe_packet,
-                                      f'-{args.p4_probe_packet}')
-    if mode.name == 'pactor' and getattr(args, 'p4_probe_cadence', None) not in (None, 'spaced'):
-        name += f'-{args.p4_probe_cadence}'
-    if mode.name == 'pactor' and getattr(args, 'p1_6a9', False):
-        name += '-p1-6a9'
     if mode.name == 'pactor' and getattr(args, 'p1_level_digit', 1) != 1:
         name += f'-lvl{args.p1_level_digit}'
     if mode.name == 'pactor' and getattr(args, 'p1_supervisor', None):
@@ -247,6 +231,8 @@ def plan(mode, args, now):
         name += f'-timing-{args.timing_trial.lower()}'
     if mode.name == 'pactor' and getattr(args, 'entry_timing_trial', None):
         name += f'-entry-timing-{args.entry_timing_trial.lower()}'
+    if mode.name == 'pactor' and getattr(args, 'p4_mail', False):
+        name += '-p4-mail-' + (getattr(args, 'p4_arm', None) or 'replica')
     directory = mode.arms / name
     named_send = args.send
     if mode.name == 'vara' and args.direction == 'tx' and not named_send:
@@ -332,8 +318,12 @@ def plan(mode, args, now):
         timing_path = env.get(config.STATION_ENV)
         if timing_path and Path(timing_path).is_file():
             timing_env[config.STATION_ENV] = timing_path
-        timing = asdict(resolve_tx_timing(override, rig=selected_rig,
-                                         command_path=command_path, environ=timing_env))
+        from hfmodem.shrike.onair import build_parser, p4_timing_plan
+        resolved = build_parser().parse_known_args(command[1:])[0]
+        timing = asdict(p4_timing_plan(resolve_tx_timing(override, rig=selected_rig,
+            command_path=command_path, environ=timing_env), resolved.p4_answer_residual_ms))
+        if getattr(args, 'p4_mail', False):
+            adjustments['p4_answer_offset'] = resolved.p4_answer_offset
     # `mode` has meant the sense/pounce/force choice in provenance since the first
     # flown arm; the radio mode is the arm name's own prefix.
     return dict(arm=name, directory=str(directory), mode=fly_mode, pounce_s=args.pounce,
@@ -362,6 +352,15 @@ def spelled(plan):
                        if k != 'HFMODEM_RECORDING_CONTROL_OUT_FDS'] + plan['command'])
     if plan.get('recording'):
         line += f'\n  Recording: {plan["recording"]["policy"]} ({plan["recording"]["source"]})'
+    if plan['adjustments'].get('p4_mail'):
+        adjustment = plan['adjustments']
+        timing = plan['tx_timing_plan']
+        line += (f"\n  P4 arm: {adjustment['p4_arm']}; {adjustment['p4_arm_purpose']}"
+                 f"\n  Overrides: {adjustment['p4_arm_overrides']}"
+                 f"\n  Timing: answer offset {adjustment['p4_answer_offset']:.3f} s; "
+                 f"tx latency {timing['tx_latency_ms']:g} ms ({timing['latency_source']}); "
+                 f"P4 residual {timing['p4_answer_residual_ms']:g} ms "
+                 f"({timing['p4_answer_residual_evidence'] or 'uncalibrated'}); {timing['chain']}")
     generation = plan.get('generation')
     if generation:
         choice = (f'P{generation["level"]} mail' if generation['level'] is not None else

@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from hfmodem.shrike import arq, onair, spec
-from hfmodem.tests.shrike.test_p3_presence_progress_1003 import modem, opportunity
+from hfmodem.shrike import onair, spec
+from hfmodem.tests.shrike.test_p3_presence_progress_1003 import modem
 
 
 def test_a_peer_repeating_a_crc_valid_packet_is_never_counted_dark():

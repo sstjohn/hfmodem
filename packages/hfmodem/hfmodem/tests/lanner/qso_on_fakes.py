@@ -48,7 +48,8 @@ class Stream:
         while self.running:
             t = t0 + k * n / 48000
             self.callback(np.zeros((n, 1), np.float32), np.zeros((n, 1), np.float32), n,
-                          SimpleNamespace(inputBufferAdcTime=t, outputBufferDacTime=t + 0.024),
+                          SimpleNamespace(currentTime=t, inputBufferAdcTime=t,
+                                          outputBufferDacTime=t + 0.024),
                           Status())
             k += 1
             time.sleep(max(0.0, t0 + k * n / 48000 - time.monotonic()))

@@ -23,7 +23,8 @@ def unread(kind, at=FS):
     return RegisteredObservation(replace(obs, frame=None), Registered.NEW)
 
 
-@pytest.mark.parametrize('options,word', [({}, 'T27'), ({'long_ack': 'fixed-x27'}, 'X27')])
+@pytest.mark.parametrize('options,word', [({}, 'X27'), ({'long_ack': 'counter-even-t27'}, 'T27'),
+                                          ({'long_ack': 'toggle-t27'}, 'X27')])
 def test_long_ack_becomes_the_request_word(options, word):
     m, _ = machine(role='irs', normal_ack='parity', **options)
     m.require_long_crc = True
@@ -31,10 +32,11 @@ def test_long_ack_becomes_the_request_word(options, word):
     due = FS + round(m.t[Kind.LONG]*FS)
     assert m.decide(due-m.lead).word == word
     m.keyed()
-    assert m._last_body_ack[1] == word and m.ack_word is None
+    assert m._last_body_ack[1] == word and m._ack_chain == (0, word)
     m.observe(unread(Kind.LONG, FS+round(3.75*FS)))
     request = m.decide(FS+round(3.75*FS)+round(m.t[Kind.LONG]*FS)-m.lead)
-    assert (request.word, request.purpose) == (word, None)
+    assert (request.word, request.purpose) == (
+        word, None if options.get('long_ack') == 'counter-even-t27' else 'repeat-request')
 
 
 def test_body_ack_after_opening_updates_request_word():
@@ -46,32 +48,33 @@ def test_body_ack_after_opening_updates_request_word():
     m.observe(body(second, b'second'))
     assert m.decide(second+round(m.t[Kind.BODY]*FS)-m.lead).word == 'V27'
     m.keyed()
-    assert m._last_body_ack[1] == 'V27' and m.ack_word == 'X27'
+    assert m._last_body_ack[1] == 'V27' and m._ack_chain[1] == 'V27'
     third = second+round(1.25*FS)
     m.observe(unread(Kind.BODY, third))
     request = m.decide(third+round(m.t[Kind.BODY]*FS)-m.lead)
-    assert (request.word, request.purpose) == ('V27', None)
+    assert (request.word, request.purpose) == ('V27', 'repeat-request')
 
 
-@pytest.mark.parametrize('normal_ack', ['v27', 'x27', 'parity', 'alternate-packet'])
-def test_protocol3_body_request_uses_last_keyed_u27_without_changing_ack_history(normal_ack):
-    m, _ = machine(role='irs', normal_ack=normal_ack, chirp_ack='x27', ack_53='U27')
+@pytest.mark.parametrize('normal_ack', ['parity', 'toggle'])
+def test_protocol3_body_request_repeats_keyed_word_without_changing_ack_history(normal_ack):
+    m, _ = machine(role='irs', normal_ack=normal_ack, chirp_ack='toggle', peer_ack={53: 'U27'})
+    expected = 'X27' if normal_ack == 'toggle' else 'U27'
     m.observe(body(FS, b'gateway', 0x61), now=FS+round(.810*FS))
-    assert m.decide(FS+round(.920*FS)-m.lead).word == 'U27'
+    assert m.decide(FS+round(.920*FS)-m.lead).word == expected
     m.keyed()
-    history = m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack
-    assert m._last_body_ack[1] == 'U27'
+    history = m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack
+    assert m._last_body_ack[1] == expected
     at = FS+round(1.25*FS)
     m.observe(unread(Kind.BODY, at))
     request = m.decide(at+round(m.t[Kind.BODY]*FS)-m.lead)
-    assert (request.word, request.purpose) == ('U27', None)
+    assert (request.word, request.purpose) == (expected, 'repeat-request')
     m.keyed()
-    assert (m.ack_word, m.acked_counter, m._last_ack[0], m._last_body_ack) == (history[0], history[1], history[2][0], history[3])
+    assert (m._ack_chain, m.acked_counter, m._last_ack[0], m._last_body_ack) == (history[0], history[1], history[2][0], history[3])
 
 
-@pytest.mark.parametrize('normal_ack', ['v27', 'x27', 'parity', 'alternate-packet'])
-def test_v53_u27_overrides_older_body_ack_for_repeat_request(normal_ack):
-    m, _ = machine(role='irs', normal_ack=normal_ack, ack_53='U27')
+@pytest.mark.parametrize('normal_ack', ['parity', 'toggle'])
+def test_unread_body_after_v53_requests_packet_repeat_without_control_credit(normal_ack):
+    m, _ = machine(role='irs', normal_ack=normal_ack, peer_ack={53: 'U27'})
     m.observe(body(FS, b'prior'))
     assert m.decide(FS+round(.920*FS)-m.lead).word == 'X27'
     m.keyed()
@@ -81,15 +84,16 @@ def test_v53_u27_overrides_older_body_ack_for_repeat_request(normal_ack):
     answer = m.decide(at+round(m.t[Kind.SHORT]*FS)-m.lead)
     assert (answer.word, answer.peer_control) == ('U27', 53)
     m.keyed()
-    history = m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack
+    history = m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack
     assert m._last_body_ack[1] == 'X27'
 
     missed = at+round(1.25*FS)
     m.observe(unread(Kind.BODY, missed))
     request = m.decide(missed+round(m.t[Kind.BODY]*FS)-m.lead)
-    assert (request.word, request.purpose) == ('U27', None)
+    assert (request.word, request.purpose) == ('X27', 'repeat-request')
+    assert request.peer_control is None
     m.keyed()
-    assert (m.ack_word, m.acked_counter, m._last_ack[0], m._last_body_ack) == (history[0], history[1], history[2][0], history[3])
+    assert (m._ack_chain, m.acked_counter, m._last_ack[0], m._last_body_ack) == (history[0], history[1], history[2][0], history[3])
 
 
 def test_unread_normal_keeps_breakin_state_until_decode():
@@ -106,14 +110,14 @@ def test_late_provisional_long_cancels_proposed_empty_request():
     m.require_long_crc = True
     m.silence(round(3.096*FS))
     request = m.decide(round(3.096*FS))
-    assert request is not None and request.purpose == None
+    assert request is not None and request.purpose == 'repeat-request'
     onset = round(2.25*FS)
     long = replace(unread(Kind.LONG, onset).observation, provisional=True)
     m.observe(RegisteredObservation(long, Registered.NEW), now=round(3.10*FS))
     assert m.decide(round(3.17*FS)) is None
     due = onset+round(m.t[Kind.LONG]*FS)
     request = m.decide(due-m.lead)
-    assert (request.stream_sample, request.purpose) == (due, None)
+    assert (request.stream_sample, request.purpose) == (due, 'repeat-request')
 
 
 def test_closed_unread_long_replaces_earlier_empty_request_with_own_answer():
@@ -125,16 +129,17 @@ def test_closed_unread_long_replaces_earlier_empty_request_with_own_answer():
     onset, now = round(2.25*FS), round(5.55*FS)
     m.silence(now)
     old = m.decide(now)
-    assert old.purpose == None and old.stream_sample == round(5.67*FS)
+    assert old.purpose == 'repeat-request' and old.stream_sample == round(5.67*FS)
     long = replace(unread(Kind.LONG, onset).observation,
                    provisional=False, duration_s=3.28)
     m.observe(RegisteredObservation(long, Registered.NEW), now=now)
     due = onset+round(m.t[Kind.LONG]*FS)
     request = m.decide(due-m.lead)
-    assert (request.stream_sample, request.purpose) == (due, None)
+    assert (request.stream_sample, request.purpose, request.ack_identity) == (
+        due, 'repeat-request', None)
     assert request.stream_sample < old.stream_sample
     sent = m.keyed()
-    assert (sent.stream_sample, sent.word) == (due, 'X27')
+    assert (sent.stream_sample, sent.word) == (due, 'V27')
     assert m.last is sent and m._next is None
 
 
@@ -149,7 +154,7 @@ def test_contradicted_word_closed_long_replaces_earlier_empty_request():
     head = replace(word('V27', onset, partial=True).observation, provisional=True)
     m.silence(now)
     old = m.decide(now)
-    assert old.purpose == None and old.stream_sample == round(5.67*FS)
+    assert old.purpose == 'repeat-request' and old.stream_sample == round(5.67*FS)
     m.observe(rx.register(head), now=now)
     closed = replace(unread(Kind.LONG, onset).observation,
                      provisional=False, duration_s=3.28)
@@ -158,7 +163,8 @@ def test_contradicted_word_closed_long_replaces_earlier_empty_request():
     m.observe(reg, now=now)
     due = onset+round(m.t[Kind.LONG]*FS)
     request = m.decide(due-m.lead)
-    assert (request.stream_sample, request.purpose) == (due, None)
+    assert (request.stream_sample, request.word, request.purpose, request.ack_identity) == (
+        due, 'V27', 'repeat-request', None)
     assert request.stream_sample < old.stream_sample
     assert m.keyed() == request
 
@@ -178,7 +184,7 @@ def test_decoded_late_long_replaces_queued_empty_request_and_defers_ack(prior_of
     due = onset+round(m.t[Kind.LONG]*FS)
     m.silence(round(5.55*FS))
     old = m.decide(round(5.55*FS))
-    assert (old.stream_sample, old.purpose) == (round(5.67*FS)+prior_offset, None)
+    assert (old.stream_sample, old.purpose) == (round(5.67*FS)+prior_offset, 'repeat-request')
 
     now = due-m.lead+144
     assert due-now == 2208 and due-now >= 1796
@@ -231,9 +237,15 @@ def test_registration_owns_queued_request_slot_and_device_notice(kind, form, old
     decision = max(now, due-m.lead)
     proposal = m.decide(decision)
     assert proposal is not None
-    expected_word = ('V27' if form == 'decoded' and kind != Kind.LONG else 'X27')
+    if kind == Kind.LONG:
+        expected_word = 'X27' if form == 'decoded' else 'V27'
+    else:
+        expected_word = 'V27' if form == 'decoded' else 'X27'
     assert (proposal.stream_sample, proposal.word) == (due, expected_word)
-    assert proposal.purpose is None
+    requests_repeat = form != 'decoded'
+    assert proposal.purpose == ('repeat-request' if requests_repeat else None)
+    if requests_repeat:
+        assert proposal.ack_identity is None
     assert proposal.current_slot_accepted == (form == 'decoded')
     live = SimpleNamespace(pos=decision,
                            clamp_late=lambda at: max(0, decision+1796-at))
@@ -246,10 +258,10 @@ def test_registration_owns_queued_request_slot_and_device_notice(kind, form, old
         sent = m.keyed()
         assert (sent.stream_sample, sent.word) == (due, expected_word)
     else:
-        history = m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack
+        history = m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack
         m.refused('deadline')
         assert m.last.stream_sample != due
-        assert (m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack) == history
+        assert (m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack) == history
         if form == 'decoded':
             assert m._deferred[1]['due'] == due+round((3.75 if kind == Kind.LONG else 1.25)*FS)
         else:
@@ -265,7 +277,7 @@ def test_closed_decoded_long_answer_preempts_queued_empty_request():
     onset, now = round(2.25*FS), round(5.55*FS)
     m.silence(now)
     old = m.decide(now)
-    assert (old.stream_sample, old.purpose) == (round(5.67*FS), None)
+    assert (old.stream_sample, old.purpose) == (round(5.67*FS), 'repeat-request')
 
     m.observe(ack_frame(onset, b'long', 1, Kind.LONG), now=now)
     due = onset+round(m.t[Kind.LONG]*FS)
@@ -304,7 +316,7 @@ def test_driver_empty_long_cycle_uses_its_due_not_a_later_raster():
     m.silence(decision, answer_due=due)
     request = m.decide(decision)
     assert (request.stream_sample, request.word, request.purpose) == (
-        due, 'X27', None)
+        due, 'X27', 'repeat-request')
 
 
 @pytest.mark.parametrize('kind', [Kind.NORMAL, Kind.BODY, Kind.LONG])
@@ -318,14 +330,20 @@ def test_unaccepted_packet_requests_last_keyed_word_without_ack(kind, prior):
     m.observe(unread(kind))
     due = FS + round(m.t[kind]*FS)
     p = m.decide(due-m.lead)
-    assert p is not None and (p.kind, p.word, p.stream_sample) == (Kind.WORD, prior or 'V27', due)
-    assert p.state == State.IRS_ANSWER and p.purpose is None
+    # AT Unread slots: counter policies need U27 before any counted ack.
+    seed = 'V27' if kind == Kind.LONG else 'U27'
+    expected = seed if kind == Kind.LONG else prior or seed
+    assert p is not None and (p.kind, p.word, p.stream_sample) == (Kind.WORD, expected, due)
+    assert p.state == State.IRS_ANSWER
+    assert p.purpose == 'repeat-request'
+    if kind == Kind.LONG:
+        assert p.ack_identity is None
     assert not p.current_slot_accepted
     assert p.accepted_target == (0 if prior else None)
     assert m.unread == 1
-    old = m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack, m.first_body
+    old = m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack, m.first_body
     m.keyed()
-    assert (m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack, m.first_body) == old
+    assert (m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack, m.first_body) == old
 
 
 @pytest.mark.parametrize('state', [State.ISS_LADDER, State.IRS_BREAKIN, State.IRS_CLOSE,
@@ -344,7 +362,7 @@ def test_empty_irs_cycle_repeats_last_word_on_peer_raster():
     assert p is None
     m.silence(0)
     p = m.decide(0)
-    assert (p.word, p.purpose) == ('V27', None)
+    assert (p.word, p.purpose) == ('V27', 'repeat-request')
     m.keyed()
     at = p.stream_sample+FS
     m.observe(body(at, b'held'))
@@ -354,7 +372,7 @@ def test_empty_irs_cycle_repeats_last_word_on_peer_raster():
     due = held.stream_sample+round(3.75*FS)
     m.silence(due-m.lead, answer_due=due)
     q = m.decide(due-m.lead)
-    assert (q.stream_sample, q.word, q.purpose) == (due, 'X27', None)
+    assert (q.stream_sample, q.word, q.purpose) == (due, 'X27', 'repeat-request')
 
 
 def test_provisional_long_owns_its_full_slot():
@@ -363,7 +381,7 @@ def test_provisional_long_owns_its_full_slot():
     m.silence(FS+round(.920*FS)-m.lead)
     assert m.decide(FS+round(.920*FS)-m.lead) is None
     p = m.decide(FS+round(3.400*FS)-m.lead)
-    assert (p.stream_sample, p.purpose) == (FS+round(3.400*FS), None)
+    assert (p.stream_sample, p.purpose) == (FS+round(3.400*FS), 'repeat-request')
 
 
 def test_unread_y27_head_does_not_block_later_empty_cycles():
@@ -380,7 +398,7 @@ def test_unread_y27_head_does_not_block_later_empty_cycles():
     following = first+round(1.25*FS)
     m.silence(following, answer_due=following+m.lead)
     p = m.decide(following)
-    assert (p.word, p.stream_sample, p.purpose) == ('X27', following+m.lead, None)
+    assert (p.word, p.stream_sample, p.purpose) == ('X27', following+m.lead, 'repeat-request')
 
 
 def test_request_does_not_advance_parity_before_next_normal():
@@ -389,24 +407,15 @@ def test_request_does_not_advance_parity_before_next_normal():
     m.observe(first)
     m.decide(FS+round(.920*FS)-m.lead)
     m.keyed()
-    assert m.ack_word == 'X27'
+    assert m._ack_chain[1] == 'X27'
     m.observe(unread(Kind.NORMAL, 2*FS))
     m.decide(2*FS+round(.920*FS)-m.lead)
     m.keyed()
-    assert m.ack_word == 'X27'
+    assert m._ack_chain[1] == 'X27'
     second = ack_frame(3*FS, b'second', 1)
     m.observe(second)
     p = m.decide(3*FS+round(.920*FS)-m.lead)
     assert (p.word, p.ack_reason) == ('V27', 'counter 1')
-
-
-def test_irs_silent_experiment_still_keys_nothing():
-    m, _ = machine(role='irs', irs_silent_cycles=8)
-    m.observe(body(FS))
-    at = FS+round(.920*FS)-m.lead
-    assert m.decide(at) is None
-    m.silence(at)
-    assert m.decide(at) is None
 
 
 def test_late_accepted_packet_answers_its_current_slot():
@@ -417,9 +426,9 @@ def test_late_accepted_packet_answers_its_current_slot():
     answer = m.decide(due-m.lead+1)
     assert (answer.word, answer.purpose, answer.ack_identity) == (
         'X27', None, (frame.observation.frame.status.byte, frame.observation.frame.data))
-    assert m._deferred is None and m.ack_word is None
+    assert m._deferred is None and m._ack_chain is None
     m.keyed()
-    assert m.ack_word == 'X27'
+    assert m._ack_chain[1] == 'X27'
     assert m.decide(due+round(1.25*FS)-m.lead) is None
 
 
@@ -450,43 +459,30 @@ def test_feasible_late_packet_answers_before_driver_refusal(
     m.observe(decoded, now=now)
     expected_delivery = [b'prior', b'late'] if prior_ack else [b'late']
     assert delivered == expected_delivery
-    history = m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack
+    history = m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack
     answer = m.decide(now)
     expected_word = 'X27' if kind == Kind.LONG or kind == Kind.BODY and not prior_ack else 'V27'
     identity = decoded.observation.frame.status.byte, decoded.observation.frame.data
     assert (answer.kind, answer.stream_sample, answer.word, answer.purpose, answer.ack_identity) == (
         Kind.WORD, due, expected_word, None, identity)
     assert m._deferred is None
-    assert (m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack) == history
+    assert (m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack) == history
     next_due = due+round((3.75 if kind == Kind.LONG else 1.25)*FS)
     if refuse:
         m.refused('deadline')
         assert m._deferred[0] == at and m._deferred[1]['due'] == next_due
-        assert (m.ack_word, m.acked_counter, m._last_ack, m._last_body_ack) == history
+        assert (m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack) == history
         answer = m.decide(next_due-m.lead)
-        assert (answer.stream_sample, answer.word, answer.ack_identity) == (next_due, expected_word, identity)
+        assert (answer.stream_sample, answer.word, answer.ack_identity) == (
+            next_due, expected_word, identity)
+        assert answer.purpose is None
+        assert not answer.current_slot_accepted
     assert m.keyed() == answer
-    assert m._last_ack[0] == identity
+    assert (m._ack_chain, m.acked_counter, m._last_ack, m._last_body_ack) == (
+        (identity[0] & 3, expected_word), identity[0] & 3,
+        (identity, answer), (identity, expected_word))
     assert m.decide(next_due+round(1.25*FS)) is None
     assert delivered == expected_delivery
-
-
-def test_k4msu_1104_keys_silent_cycles_unread_copies_then_c1_ack():
-    result = replay('onair-1002-1104', stop=54*FS)
-    keyed = [e for e in result['events'] if e['event'] == 'Keyed' and e['kind'] == Kind.WORD]
-    for onset in (29.76+1.25*i for i in range(10)):
-        word, = [e for e in keyed if abs(e['at']/FS-(onset+.920)) < .005]
-        assert (word['word'], word['purpose']) == ('X27', None)
-    for at in (43.178, 44.428):
-        word, = [e for e in keyed if abs(e['at']/FS-at) < .005]
-        assert (word['word'], word['purpose']) == ('X27', None)
-    ack, = [e for e in keyed if abs(e['at']/FS-45.678) < .005]
-    assert (ack['word'], ack['purpose']) == ('V27', None)
-    answers = [e for e in result['events'] if e['event'] == 'normal-answer'
-               and abs(e['at']/FS-44.758) < .01]
-    assert answers and answers[-1]['previous'] == 'X27'
-    assert not [e for e in result['events'] if e['event'] == 'Refused'
-                and 29.76*FS <= e['at'] <= 45.68*FS]
 
 
 def test_k4msu_0411_keys_each_unread_header_b_copy():
@@ -496,7 +492,7 @@ def test_k4msu_0411_keys_each_unread_header_b_copy():
     assert len(keys) == 36
     for i, keyed_word in enumerate(keys):
         assert abs(keyed_word['at']/FS-(29.413+1.25*i)) < .005
-        assert (keyed_word['word'], keyed_word['purpose']) == ('X27', None)
+        assert (keyed_word['word'], keyed_word['purpose']) == ('X27', 'repeat-request')
     unread = [e for e in result['events'] if e['event'] == 'BREAKIN_UNREAD'
               and 28.49*FS <= e['at'] <= 72.25*FS]
     assert len(unread) == 36 and unread[-1]['count']-unread[0]['count'] == 35

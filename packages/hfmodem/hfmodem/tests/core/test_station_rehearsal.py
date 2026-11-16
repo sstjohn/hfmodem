@@ -77,6 +77,7 @@ _TAIL_S = 0.010
 
 class _Times:
     def __init__(self, adc, dac):
+        self.currentTime = adc
         self.inputBufferAdcTime = adc
         self.outputBufferDacTime = dac
 

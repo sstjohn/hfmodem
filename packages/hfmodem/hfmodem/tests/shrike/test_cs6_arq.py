@@ -8,44 +8,7 @@ import pytest
 
 from hfmodem.shrike import arq, spec
 from hfmodem.shrike.ptc import PtcHost, SimPeer
-
-
-class IO(arq.ArqIO):
-    def __init__(self, *, deferred=True):
-        self.deferred = deferred
-        self.refuse_cs = self.refuse_packet = False
-        self.controls, self.packets, self.logs = [], [], []
-        self.delivered = bytearray()
-        self.closed = 0
-
-    def send_cs(self, cs_index):
-        self.controls.append(cs_index)
-        return arq.REFUSED if self.refuse_cs else None
-
-    def send_packet(self, sl, payload, status, breakin=False):
-        self.packets.append((sl, bytes(payload), status, breakin))
-        return arq.REFUSED if self.refuse_packet else len(payload)
-
-    def defer_rx_close(self):
-        return self.deferred
-
-    def deliver(self, payload):
-        self.delivered.extend(payload)
-
-    def disconnected(self):
-        self.closed += 1
-
-    def log(self, text):
-        self.logs.append(text)
-
-
-def linked(*, role=arq.IRS, deferred=True, long_cycle=True):
-    io = IO(deferred=deferred)
-    fsm = arq.PactorArq(io, arq.ArqConfig(long_cycle=long_cycle,
-                                        speed_up_after=1000))
-    fsm._enter_connected()
-    fsm.role = role
-    return fsm, io
+from hfmodem.tests.shrike.p3_arq_support import IO as IO, linked
 
 
 def packet(fsm, *, long=False, request=True, seq=1, data=b" Trim", crc=True,
@@ -150,6 +113,18 @@ def test_invalid_header_cannot_confirm_or_cancel_a_command():
     packet(fsm, long=True, seq=2, crc=False)
     assert not fsm.cycle_long and fsm.cycle_request is True
     assert fsm.cycle_command_emitted
+
+
+def test_cycle_observation_without_packet_cannot_confirm_later_packet():
+    fsm, io = linked()
+    packet(fsm)
+    fsm.on_cs_emitted(arq.CS_CYCLE_TOG)
+    fsm.observe_peer_cycle(True)
+    assert fsm.cycle_long and fsm.cycle_request is None
+    fsm.on_rx_packet(3, b"ode", spec.status_byte(2), True,
+                     protocol=spec.Protocol.PACTOR3)
+    assert io.controls == [arq.CS_CYCLE_TOG, arq.CS_CYCLE_TOG]
+    assert fsm.cycle_request is False
 
 
 def test_silence_retains_possible_long_packet_protection():
@@ -339,6 +314,9 @@ def test_host_tick_forwards_time_and_pumps_peer_only_once():
 
         def cycle(self):
             self.cycled += 1
+
+        def p3_slot_keyed(self) -> None:
+            return None
 
     fsm, io = linked(role=arq.ISS)
     fsm.cycle_long = True

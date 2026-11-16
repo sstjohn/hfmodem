@@ -36,22 +36,28 @@ class Tx:
     def __init__(self, peer):
         self.peer = peer
         self.settle = 0.074
+        self._host_cw_lpm = round(5 * onair.cwid.WPM)
         self.slots_used = []
         self.refused = False
         self.sessrx = SimpleNamespace(p4=P4Receiver(FS, admitted=True))
         self.p4_probe = EntryProbe(2, 60)
         self.p4_probe.request(0, b"", 0)
         self.p4_probe.emissions = [dict(audio_start=0, audio_end=round(0.758 * FS))]
-        self.p4_link_options = SimpleNamespace(
-            p4_ladder="long", p4_data="none", p4_hold_cycles=6, p4_answer_offset=.920,
-            p4_normal_ack="v27",
-            p4_link_timeout=600, p4_text=None
-        )
+        self._p4_link_options = onair.build_parser().parse_args([])
         self.p4_link_mail = None
         self.p4_link_host = SimpleNamespace(
             arq=arq.PactorArq(IO()), deliver=lambda b: None, supervisor=lambda *a: None
         )
         self.p4_link_host.arq.state = arq.State.CONNECTED
+
+    @property
+    def p4_link_options(self):
+        return self._p4_link_options
+
+    @p4_link_options.setter
+    def p4_link_options(self, options):
+        self._p4_link_options = onair.build_parser().parse_args([])
+        vars(self._p4_link_options).update(vars(options))
 
     def aim(self, raster, slot):
         self.raster = raster
@@ -149,7 +155,12 @@ def test_driver_admission_accounts_for_decode_cost_and_a_stall(
     assert tx.p4_link_host.arq._buffer_raw == 0
 
 
-def test_driver_retransmits_unacknowledged_data_without_changing_its_waveform():
+def test_driver_retransmits_unacknowledged_data_without_changing_its_waveform(monkeypatch):
+    from hfmodem.shrike import p4turn
+    original = p4turn.P4Turn
+    def completed(*args, **kwargs):
+        return original(*args, **{**kwargs, "app_done": True})
+    monkeypatch.setattr(p4turn, "P4Turn", completed)
     from hfmodem.shrike import p4robusttx
 
     audio = np.zeros(10 * FS)
@@ -163,7 +174,8 @@ def test_driver_retransmits_unacknowledged_data_without_changing_its_waveform():
     stream = Stream(audio)
     tx = Tx(stream)
     tx.p4_link_options.p4_link_timeout = 8
-    tx.p4_link_options.p4_text = "hi"
+    tx.p4_link_options.p4_data = "body"
+    tx.p4_link_host.arq.on_host_data(b"hi")
     onair._run_p4_link(
         tx,
         stream,
@@ -236,7 +248,8 @@ def test_driver_preserves_peer_sample_positions_when_transmit_flushes(first):
         onair._MasterGrid(0, 60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800),
     )
     assert b"next" in received
-    ack = "V27" if first == "body" else "X27"
+    # AT Phase: the same counter repeats its word even when the bytes differ.
+    ack = "X27"
     answers = [e for e in tx.p4_probe.link_events if e['event'] == 'Keyed'
                and e.get('current_slot_accepted', True) and e.get('word') == ack]
     assert abs(answers[-1]["at"] - (following + round(.920 * FS))) <= 1
@@ -296,15 +309,13 @@ def test_robust_packet_after_three_flushed_word_keys_keeps_its_noise_floor():
         onair._MasterGrid(0, 60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800))
     assert delivered[:3] == [b'part 0', b'part 1', b'part 2']
     words = tx.p4_probe.emissions[1:]
-    assert [e['word'] for e in words[:4]] == ['X27', 'V27', 'V27', 'X27']
+    assert [e['word'] for e in words[:4]] == ['X27', 'X27', 'X27', 'X27']
     assert abs(words[3]['audio_start']-(at+round(.920*FS))) <= 2
 
 
 @pytest.mark.parametrize('policy,expected', [
-    ('v27', ['X27', 'V27', 'V27']),
-    ('x27', ['X27', 'X27', 'X27']),
     ('parity', ['X27', 'V27', 'X27']),
-    ('alternate-packet', ['X27', 'V27', 'X27']),
+    ('toggle', ['X27', 'V27', 'X27']),
 ])
 @pytest.mark.parametrize('arm,end', [('1151', 30.8), ('2200', 32.1)])
 def test_normal_ack_driver_policy_and_keyed_reason(policy, expected, arm, end):

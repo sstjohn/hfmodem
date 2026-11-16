@@ -57,9 +57,11 @@ def test_a_taken_cs6_on_an_even_counter_leaves_parity_for_the_next():
     assert words == [1, 2, 6, 2, 1, 2]      # VE3KPG-80 0924-0010, VE1YZ-40 0921-0539
 
 
-def test_an_unread_slot_after_our_cs6_holds_on_the_counter_we_took():
+def test_cs6_emission_does_not_change_the_accepted_counter_parity_map():
     host, a, _ = irs()
     run(host, a, [(0, 1), (1, 2), (2, 6)])
+    # Unread slots use keyed history; the parity map
+    # still describes the ordinary ACK for a packet that has been read.
     assert word(host) == 1
 
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from hfmodem.tests.evidence import require_input
 from hfmodem.shrike import onair, p4chirp, p4breakintx, p4shorttx, p4host
 from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx, FS
 from hfmodem.tests.evidence import CAPTURES, WORKING, checked_record
+from hfmodem.tests.shrike.p4_declared_clock_1111 import declared_time
 
 
 def prerender(records):
@@ -21,13 +23,32 @@ def prerender(records):
     projected = []
     for record in records:
         record = dict(record)
+        if 'audio_start' in record:
+            record.pop('kind', None)
+            assert record.pop('level', None) is None
         if 'word_render' in record:
             assert (record.pop('word_render'), record.pop('word_offset_hz')) == ('off', 0.)
         projected.append(record)
     return projected
 
 
-def replay(arm, stop=None, *, measured_work=False, work_costs=None):
+def protocol_heard(records):
+    """Project protocol records while checking the separate probe diagnostics."""
+    projected = []
+    for record in records:
+        row = dict(record)
+        assert isinstance(row.pop('receive_epoch'), int)
+        row.pop('form')
+        if 'status' in row:
+            assert row.pop('counter') == row['status'] & 3
+            assert row.pop('crc_ok') is True
+        projected.append(row)
+    return projected
+
+
+def replay(arm, stop=None, *, measured_work=False, work_costs=None, elapsed_clock=None):
+    if measured_work and elapsed_clock is not None:
+        raise ValueError('measured work requires the physical elapsed clock')
     capture = CAPTURES/arm
     manifests = Path(__file__).with_name('fixtures')/'chirp-deadline'
     require_input(capture/'stream.flac')
@@ -60,6 +81,10 @@ def replay(arm, stop=None, *, measured_work=False, work_costs=None):
     tx.p4_probe.values = recorded.get('values') or (7, 38)
     args = tx.p4_link_options
     for name, value in manifest['options'].items():
+        if name == 'chirp_ack' and value == 'alternate':
+            value = 'parity'
+        elif name in ('normal_ack', 'long_ack') and value == 'alternate-packet':
+            value = 'toggle'
         setattr(args, 'p4_'+name, value)
     args.p4_link_timeout = len(audio)/FS-stream.pos/FS
     request = next((e for e in recorded['emissions'] if e.get('status') == 0x40), None)
@@ -138,10 +163,18 @@ def replay(arm, stop=None, *, measured_work=False, work_costs=None):
             return result
         setattr(rx, method, timed)
     adapter = p4host.P4Host
-    with patch.object(p4host, 'P4Host', lambda host, **kw: adapter(host, terminal=True)), \
-         patch.object(p4chirp, 'entry_packet', builder(p4chirp.entry_packet, .106/16)), \
-         patch.object(p4breakintx, 'changeover_packet', builder(p4breakintx.changeover_packet, .0085/5)), \
-         patch.object(p4shorttx, 'short_packet', builder(p4shorttx.short_packet, .002)):
+    with ExitStack() as stack:
+        if not measured_work:
+            stack.enter_context(declared_time(stream.sample_now, fs=FS,
+                                              elapsed_clock=elapsed_clock))
+        stack.enter_context(patch.object(p4host, 'P4Host',
+            lambda host, **kw: adapter(host, terminal=True)))
+        stack.enter_context(patch.object(p4chirp, 'entry_packet',
+            builder(p4chirp.entry_packet, .106/16)))
+        stack.enter_context(patch.object(p4breakintx, 'changeover_packet',
+            builder(p4breakintx.changeover_packet, .0085/5)))
+        stack.enter_context(patch.object(p4shorttx, 'short_packet',
+            builder(p4shorttx.short_packet, .002)))
         onair._run_p4_link(tx, stream, onair._MasterGrid(opening['audio_start'] % 60000,
             60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800))
     return dict(capture=arm, lead=lead, source=payload.hex(),

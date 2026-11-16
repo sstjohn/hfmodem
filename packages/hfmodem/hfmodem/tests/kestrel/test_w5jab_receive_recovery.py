@@ -78,7 +78,7 @@ def test_good_resend_delivers_once_then_queries_repeat_ack_not_nak():
     assert not is_nak(answer, h) and h._answer_owed == A._OWED_RELEASE
     progress = h.progress
     feed(h, recorded('query'))
-    np.testing.assert_array_equal(io.sent[-1], M.synth_burst(h.caller, F.for_bw(F.SESSION_TURN_REQUEST_SHORT, '500')))
+    np.testing.assert_array_equal(io.sent[-1], M.synth_burst(h.caller, F.for_bw(F.SESSION_TURN_REQUEST_RESPONDER, '500')))
     assert io.host == [payload] and h.progress == progress
     feed(h, data)
     assert io.host == [payload]

@@ -15,6 +15,7 @@ import os
 import logging
 import sys
 import threading
+from dataclasses import replace
 import time
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from hfhost.config import ConfigError
 from hfmodem.core import claim, devices, posix, regulatory, wav, windeadman
 from hfmodem.core.cat import RigctldCat, YaesuCat
 from hfmodem.core.audio import ReplayAudio, StationAudio
-from hfmodem.core.config import ChainAudio, Audio, StationConfig
+from hfmodem.core.config import ChainAudio, Audio, StationConfig, warn_config
 from hfmodem.core.ptt import RtsPtt
 from hfmodem.core.operations import LeaseTimeout
 from hfmodem.core.rates import CARD_RATE_HZ
@@ -101,6 +102,9 @@ def cat_driver(cfg: StationConfig):
                               profile=cfg.resolved_profile, max_watts=cfg.rig.max_watts)
         case "serial":
             return YaesuCat(cfg.resolved_profile.get("cat_port"), cfg.resolved_profile)
+        case "guard":
+            from hfmodem.core import x6100_base
+            return x6100_base.onboard(cfg.rig.dial_hz)
     return None
 
 
@@ -145,6 +149,8 @@ class Station:
         self.capture = None
         self.rig: Rig | None = None
         self.arbiter: TxArbiter | None = None
+        from hfmodem.station.diagnostics import Diagnostics
+        self.diagnostics = Diagnostics()
         self.lanes: dict[str, object] = {}
         self.hosts: dict = {}
         self._stop = threading.Event()
@@ -199,7 +205,8 @@ class Station:
                 gain=cfg.audio.input_gain, blocksize=cfg.audio.blocksize,
                 tx_latency_n=round((cfg.audio.tx_latency_ms if cfg.audio.tx_latency_ms is not None
                                     else cfg.resolved_profile.get("tx_latency_ms", 0))
-                                   * CARD_RATE_HZ / 1000))
+                                   * CARD_RATE_HZ / 1000),
+                channels=cfg.resolved_profile.get("audio_channels", 1))
             self.audio.close_budget_s = cfg.rig.max_key_s + cfg.rig.ptt.settle_s + 5
         from hfmodem.core.recording import resolve_recording
         self.recording_policy = self.recording_selection or resolve_recording(config=cfg)
@@ -229,7 +236,18 @@ class Station:
         if self._driver is None:
             return None
         try:
-            if not self.receive:
+            if cfg.rig.ptt.backend == "i2c":
+                self._driver.lost = self.fatal_shutdown
+                guard_s = self._driver.link.max_key_ms / 1000
+                if cfg.rig.max_key_s > guard_s:
+                    # Into the config every planner reads, not only the Rig's watchdog.
+                    warn_config(f"[rig] max_key_s {cfg.rig.max_key_s:g} s is over the guard's "
+                                f"{guard_s:g} s key limit; keying to {guard_s:g} s")
+                    cfg = self.cfg = replace(cfg, rig=replace(cfg.rig, max_key_s=guard_s))
+                if not self.receive:
+                    self._line = self._driver.keying_line()
+                    self._line.open()
+            elif not self.receive:
                 if not cfg.rig.ptt.port:
                     raise RigError("[rig.ptt] port is unset and transmit = true")
                 self._line = RtsPtt(cfg.rig.ptt.port)
@@ -262,7 +280,7 @@ class Station:
                          else cfg.station.mycall, interval_s=cfg.station.id_interval_s,
                          mode=cfg.station.id_mode,
                          tone_hz=(cwid.TONE_HZ if self.ownership_preflight else band.DIAL_OFFSET_HZ))
-        self.arbiter = TxArbiter(self.audio, self.rig, identity=ident,
+        self.arbiter = TxArbiter(self.audio, self.rig, identity=ident, attended=self.sessions.attended_chat,
                                  defer_identification=not self.ownership_preflight,
                                  drive=(cfg.audio.drive_for() if isinstance(cfg.audio, ChainAudio)
                                         else cfg.audio.tx_drive), settle_s=cfg.rig.ptt.settle_s)
@@ -499,6 +517,9 @@ class Station:
             raise RigError("ownership cancelled by STOP or shutdown")
 
     def stop_transmit(self):
+        chat = getattr(self.service, 'chat', None)
+        if chat is not None:
+            chat.revoke()
         arbiter = self.arbiter
         if self._owning or self.transitioning:
             self._own_cancel.set()
@@ -547,6 +568,9 @@ class Station:
         self._owning = False
         close("STOP", self.stop_transmit)
         self.sessions.suspend(persist=False)
+        chat = getattr(self.service, 'chat', None)
+        if chat is not None:
+            close('chat', chat.close)
         self._poll_stop.set()
         from hfmodem.station import hosts
         close("hosts", lambda: hosts.stop_all(self.hosts))
@@ -728,7 +752,7 @@ class Station:
         interlock is the right shape; it needs something to satisfy it.
         """
         arb = self.arbiter
-        if arb is None or arb.identity is None or not arb.identity.due:
+        if self._stop.is_set() or arb is None or arb.identity is None or not arb.identity.due:
             return
         try:
             self.identify()
@@ -759,8 +783,16 @@ class Station:
             pass    # an advisory line the transcript cannot take never stops the station
 
     def _tick(self) -> None:
+        if self._stop.is_set():
+            self._poll_stop.wait(0.05)
+            return
         self._identify_if_due()
         self._report_advisories()
+        events = getattr(getattr(self, 'service', None), 'events', None)
+        self.diagnostics.drain(arbiter=self.arbiter, rig=self.rig,
+                               publish=events.publish if events is not None else None)
+        if self._stop.is_set():
+            return
         if self.replay is not None:
             self.audio.pump(32)
         else:
@@ -768,6 +800,8 @@ class Station:
         if self.capture is not None:
             self.capture.drain()
         for lane in self.lanes.values():
+            if self._stop.is_set():
+                break
             poll = getattr(lane, "poll", None)
             if poll is not None:
                 poll()
@@ -879,6 +913,7 @@ class Station:
 
     def shutdown(self):
         self._stop.set()
+        self._poll_stop.set()
         self._own_cancel.set()
         # An HTTP own may still be before open_rig. Let its cancellation unwind
         # under the signal deadman, and keep the lifecycle through release so a

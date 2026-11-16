@@ -139,17 +139,16 @@ def hamlib(tmp_path, monkeypatch, request):
             '-s', '38400', '--set-conf=ptt_type=None', '-T', '127.0.0.1',
             '-t', str(port), '-vvvvv'], stdout=log, stderr=log)
         try:
+            # Wait on the daemon's own word, not a probe connection: rigctld closes a
+            # finished client's descriptor more than once, so a connect that follows
+            # a probe closely can be handed that number and lose its socket.
             deadline = time.monotonic() + 12
-            while True:
+            while 'listening on port' not in (tmp_path / 'rigctld.log').read_text(errors='replace'):
                 if daemon.poll() is not None:
                     pytest.fail((tmp_path / 'rigctld.log').read_text())
-                try:
-                    with socket.create_connection(('127.0.0.1', port), .1):
-                        break
-                except OSError:
-                    if time.monotonic() >= deadline:
-                        pytest.fail('PTY Hamlib startup timed out')
-                    time.sleep(.05)
+                if time.monotonic() >= deadline:
+                    pytest.fail('PTY Hamlib startup timed out')
+                time.sleep(.05)
             yield radio, port
         finally:
             daemon.terminate()

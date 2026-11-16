@@ -115,7 +115,7 @@ def test_a_tracked_changeover_is_delivered_on_the_raster_it_confirms(tmp_path):
 
     One repeat read through the production tracked seam: the delivery, the
     clock it leaves behind and the grid's copy of the peer's phase are all the
-    projected head, and the comb answers exactly `P3_REPLY_S` past it.
+    projected head, and the comb answers exactly `P3_COMB_REPLY_S` past it.
     """
     pcm, head, hz = crop()
     seeded = 3 * CYCLE
@@ -131,7 +131,7 @@ def test_a_tracked_changeover_is_delivered_on_the_raster_it_confirms(tmp_path):
     assert grid._p3_peer[0] == seeded + CYCLE
     assert grid.p3_reply_shift(62) is not None
     assert ((grid.boundary(62) - grid._p3_peer[0]) % grid.slot_n
-            == round(onair.P3_REPLY_S * FS))
+            == round(onair.P3_COMB_REPLY_S * FS))
 
 
 def test_a_peer_that_moved_is_measured_again_rather_than_projected(tmp_path):

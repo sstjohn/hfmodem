@@ -58,14 +58,13 @@ Run:  pytest hfmodem/tests/shrike/test_txhead.py
 """
 from __future__ import annotations
 
-import queue
-import threading
 import time
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import onair, p1rx, pactor1
+from hfmodem.tests.shrike.onair_support import _FakeCodec
 
 FS = pactor1.FS
 BIT_S = 0.010                       # 100 Bd, the speed the connect's address runs at
@@ -211,60 +210,6 @@ BLK = 128
 # The four probes using this codec measure real monotonic callback/key lead
 # with millisecond bounds. They belong to the serial nice-0 wall_clock slice;
 # competing worker scheduling would measure host contention as well as transmit timing.
-class _FakeCodec:
-    """A duplex `_LiveInput` driven by a thread instead of by a sound card.
-
-    The real `read`, `take_until`, `wait_until` and `transmit` run untouched --
-    what is stubbed is the callback, which is the only part that needs a device.
-    It publishes the same three things the real one does and at the same cadence:
-    the ADC instant of the block's first sample, the DAC instant of the buffer
-    being filled, and the block itself on the queue. Separating the two latencies
-    is the point -- one term of `holdback` is the input one, and a stand-in that
-    collapses them cannot show where the lead goes.
-    """
-
-    def __init__(self, in_lat: float = IN_LAT_S, out_lat: float = OUT_LAT_S):
-        live = object.__new__(onair._LiveInput)
-        live._q = queue.Queue()
-        live.fs, live.samples, live.pos = FS, 0, 0
-        live.xruns, live.xrun_at, live.underruns = 0, None, 0
-        live._rest = np.zeros(0, np.float32)
-        live._floor = 0
-        live._duplex, live._blk = True, BLK
-        live._lat = round((in_lat + out_lat) * FS)
-        live.tx_latency_n = 0     # the whole loop is modelled here already
-        live.geometry_n = 0
-        live.holdback = BLK + round(in_lat * FS)
-        live._tx, live._tx_at = None, 0
-        live._tx_done = threading.Event()
-        live._tx_end_time, live.keyed_s = 0.0, 0.0
-        live._last = live._dac = (time.monotonic(), 0)
-        self.live, self._in, self._out = live, in_lat, out_lat
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _run(self) -> None:
-        live, t0, k = self.live, time.monotonic(), 0
-        while not self._stop.is_set():
-            due = t0 + k * BLK / FS
-            while (d := due - time.monotonic()) > 0:
-                time.sleep(min(d, 5e-4))
-            now, n0 = time.monotonic(), live.samples
-            dac, adc = now + self._out, now - self._in
-            buf = live._tx
-            if buf is not None and n0 + BLK >= live._tx_at + buf.size:
-                live._tx = None
-                live._tx_end_time = dac + (live._tx_at + buf.size - n0) / FS
-                live._tx_done.set()
-            live._q.put((adc, n0, np.zeros(BLK, np.float32)))
-            live.samples = n0 + BLK
-            live._last, live._dac = (adc, n0), (dac, n0)
-            k += 1
-
-    def close(self) -> None:
-        self._stop.set()
-        self._thread.join()
 
 
 def _keyed_leads(hold_back: bool, cycles: int = 4) -> list[float]:

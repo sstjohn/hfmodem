@@ -39,6 +39,8 @@ from pathlib import Path
 
 import pytest
 
+from hfmodem.tests import hermetic
+
 REPO = Path(__file__).resolve().parents[5]
 GATES = REPO / "tools" / "gates.sh"
 
@@ -128,6 +130,11 @@ def _tree(root: Path, *, bulk: str = "green", oracle: str = "green",
             f'export KESTREL_CORPUS="{root}/kestrel-corpus"\n')
 
 
+def _run_bash(argv: list[str], **kwargs) -> subprocess.CompletedProcess:
+    hermetic.guard.admit(argv, kwargs.get("env", os.environ), exact=True)
+    return subprocess.run(argv, **kwargs)
+
+
 def _run(root: Path) -> subprocess.CompletedProcess:
     """The script, with this machine's own arbiters out of the environment.
 
@@ -138,12 +145,12 @@ def _run(root: Path) -> subprocess.CompletedProcess:
     env.pop("ARDOPCF", None)
     env.pop("KESTREL_CORPUS", None)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return subprocess.run(["bash", str(root / "tools/gates.sh")],
-                          capture_output=True, text=True, timeout=600, env=env)
+    return _run_bash(["bash", str(root / "tools/gates.sh")],
+                     capture_output=True, text=True, timeout=600, env=env)
 
 
 def test_the_gate_script_parses():
-    r = subprocess.run(["bash", "-n", str(GATES)], capture_output=True, text=True)
+    r = _run_bash(["bash", "-n", str(GATES)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 

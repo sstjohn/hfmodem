@@ -81,7 +81,7 @@ def test_legacy_audio_reference_reproduces_early_changeover_and_clock_reset(tmp_
     assert tx._breakin_key(grid, 69) == 4172591
     assert 4173443 - tx._breakin_key(grid, 69) == 852
     # Dropping B altogether moves the normal reply even farther backwards.
-    # Against the old 890 ms `P3_REPLY_S` this fell 20 ms past the clamp and
+    # Against the old 890 ms `P3_COMB_REPLY_S` this fell 20 ms past the clamp and
     # reproduced the refused turn in the actual recording; the 910 ms fix
     # spends that margin on the same placement and it is no longer refused.
     grid.p3_reply_shift(69)
@@ -152,10 +152,12 @@ def test_unconfirmed_cs3_retry_and_return_keep_prior_receive_clock(tmp_path):
     assert clock.target(0) == before
 
 
-@pytest.mark.parametrize('mail, under_own_carrier, keys', [
-    (True, False, True), (False, False, False), (True, True, False)])
+@pytest.mark.parametrize('mail, under_own_carrier', [
+    (True, False), (False, False), (True, True)])
 def test_new_ack_geometry_precedes_synchronous_next_packet_guard(
-        tmp_path, mail, under_own_carrier, keys):
+        tmp_path, capsys, mail, under_own_carrier):
+    from hfmodem.core.tx_events import read_line
+
     clock = ReplyClock(entry_phase=1324493) if mail else None
     grid = recorded_grid(clock, pulse_records=mail)
     grid.reverse(to_iss=True)
@@ -173,12 +175,29 @@ def test_new_ack_geometry_precedes_synchronous_next_packet_guard(
 
     # ARQ._on_ack emits synchronously with buffered mail. Keep this test focused
     # on the receiver/guard ordering; the recorded mail-turn test runs real ARQ.
-    session.host.on_rx_event = lambda ev: tx.send_packet(1, b'HELLO', 1)
+    def answer(ev):
+        if mail and not under_own_carrier:
+            assert grid.peer_cs.at == phase
+            assert grid.peer_cs.width == onair.P3_CS_N
+        else:
+            assert grid.peer_cs is None
+        tx.send_packet(1, b'HELLO', 1)
+
+    session.host.on_rx_event = answer
+    capsys.readouterr()
     session.rx._on(rxfront.Event(phase / 48000, 'cs', 'ACK',
                                  protocol=spec.Protocol.PACTOR3, cs=0),
                     anchored=True)
-    assert bool(tx.live.emissions) == keys
-    assert tx.refused != keys
+    # Stale geometry must stay diagnostic because the linked grid still owes a slot.
+    assert len(tx.live.emissions) == 1
+    assert not tx.refused and tx.guard_drops == 0
+    said = capsys.readouterr().out
+    assert ('QRM GUARD -- KEYING' in said) == (not mail or under_own_carrier)
+    events = [row for line in said.splitlines() if (row := read_line(line))
+              and row['event'] == 'completed']
+    assert len(events) == 1
+    assert events[0]['outcome'] == 'sent' and events[0]['slot'] == 70
+    assert events[0]['audio_start_sample'] == (4232777 if mail else 4232591)
 
 
 def test_inherited_rx_anchor_still_reads_first_bare_ack_after_mail_cs3(tmp_path):

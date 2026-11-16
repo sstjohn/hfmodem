@@ -108,7 +108,7 @@ and the sixteen erased parity-tail positions -- are rendered but never read back
 `p4long` and `p4longtx` are the same pair for the 3.75 s cycle -- the layout
 packet mail rides on. The field is 206 bytes (203 payload, status, CRC), the
 systematic field 1656 bits, the body 24 data blocks of 207 symbols behind 24
-trainings with a 25th to close, and the emission 3.286 s.
+trainings with a 25th to close, and the emission 3.297 s.
 
 The two Sigidwiki audio2 long regression crops, 3.7500 s apart, reproduce the
 independently established CRCs `5a2c` and `1bf8` and status bytes `63` and `60`.
@@ -260,11 +260,23 @@ an ACK to another copy. Transparent escaping and supervisor state survive
 packet boundaries; unsupported source modes terminate an attached application.
 
 The optional `--p4-link` driver starts after the robust entry shorts.
-`--p4-ladder long|chirp` selects the v13/v60 or v13/v49 experiment;
-`--p4-data none|body|chirp` selects data behavior. The robust-long renderer is
-unimplemented, so the long ladder enters a silent hold for
-`--p4-hold-cycles` (default 6). `--p4-link-timeout` bounds the link session in seconds (default 600).
-With `--no-mail`, `--p4-text` queues a SID and the requested Latin-1 text.
+`--p4-data none|body|chirp|long` selects the data form and its ladder.
+Body and none use no ladder; chirp uses v13/v49/v53. Long uses v49 at SL2,
+v13/v60 at SL3 (default), or v8/v59 at SL4, selected by `--p4-long-level`.
+`--p4-ladder-values V[,V...]` overrides those values. The last long-ladder rung
+accepts U27 or X27 by default (`--p4-ladder-admit u27` tests U27 alone).
+
+After the initial body c0, LONG counters continue at c1. `--p4-spug queued`
+sets S=11 while more bytes remain (`first` and `off` are alternatives); the
+final LONG uses S=10 and its accepted answer hands the turn to the peer.
+Later host output waits for another turn. LONG retries retain the field,
+status, counter and level and use the shared RQ header. Seven repeats or two
+Z27 refusals restart the ladder once, then close with unacknowledged bytes
+requeued. `--p4-iss-u27 repeat|ack` defaults to repeat. Body and chirp retain
+their existing status and handback policies.
+
+`--p4-hold-cycles` defaults to 6 and `--p4-link-timeout` to 600 seconds.
+The mail client supplies outbound payloads through `--mail-send`.
 The normal radio admission and late-key checks remain authoritative.
 
 These are experimental link policies. Recorded decoding and simulated-peer

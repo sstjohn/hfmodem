@@ -1,10 +1,10 @@
 {
   "kind": "argparse metadata snapshot",
-  "revision": "d2abdfa350a32331ef78e23695a3a5965f8a44a6",
+  "revision": "fb751f42492140421480f57e8fedd91f18124d8b",
   "sources": {
     "tools/console.py": "b90e3be5266e740932544484f1d82cee67dd6a0914c80181bff59c0fd973c48c",
     "tools/consolelib/modes.py": "d2db6eb4a17442911fe17903d27098743862af54e64ca364df9e1a278689b092",
-    "tools/consolelib/pactor.py": "a6b1503c4bb3c5dfb3e84364eef1c120d3875644975bd47bcd7f94f01d7f7f14",
+    "tools/consolelib/pactor.py": "cd036dba1c2b445c61c73ffab80a6197d0b38c8840eff23963be04d3c92322ba",
     "tools/consolelib/vara.py": "2a7028f96fff5001124959eef038b66a4a66ff145c3a918ae5e833c20004e1aa",
     "tools/consolelib/ardop.py": "c94e405a23b96e3f3c6fefd52d16370e1cccad4efb1cc3259d4bd6b40524e734",
     "tools/consolelib/monitor_modes.py": "bf7fb97d6ae4f22d91e0b89920c5023ea36435fd7227d55cc2e1b742a96801f0",
@@ -362,7 +362,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -544,7 +544,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "rank channels by Winlink sessions completed in this many hours (default %(default)s)",
           "group": "options"
         },
         {
@@ -561,7 +561,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "leave out gateways farther than this, in km (default %(default)s)",
           "group": "options"
         },
         {
@@ -578,7 +578,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "lowest channel frequency to consider, in Hz (default %(default)s)",
           "group": "options"
         },
         {
@@ -595,7 +595,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "highest channel frequency to consider, in Hz (default %(default)s)",
           "group": "options"
         },
         {
@@ -612,7 +612,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how many of the ranked channels to visit (default %(default)s)",
           "group": "options"
         },
         {
@@ -646,7 +646,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "seconds to listen on each channel (default %(default)s)",
           "group": "options"
         },
         {
@@ -697,7 +697,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "most seconds to stay on one busy channel (default %(default)s)",
           "group": "options"
         },
         {
@@ -748,7 +748,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the receive input; default the station input",
           "group": "options"
         },
         {
@@ -782,7 +782,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "rig model number for the CAT daemon",
           "group": "options"
         },
         {
@@ -799,7 +799,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "CAT serial speed",
           "group": "options"
         },
         {
@@ -850,7 +850,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "stop recording when free disk space falls below this many GB (default %(default)s)",
           "group": "options"
         },
         {
@@ -872,7 +872,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "rig profile to use; default the station's",
           "group": "options"
         }
       ],
@@ -1081,7 +1081,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how many recent arms to show (default %(default)s)",
           "group": "options"
         }
       ],
@@ -1137,7 +1137,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the band to call on, in metres",
           "group": "flight"
         },
         {
@@ -1159,7 +1159,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "transmit power and drive preset for this arm (default %(default)s)",
           "group": "flight"
         },
         {
@@ -1265,6 +1265,23 @@
           "group": "flight"
         },
         {
+          "key": "power",
+          "dest": "power",
+          "flags": [
+            "--power"
+          ],
+          "nargs": null,
+          "type": "watts",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": "W",
+          "help": "RF power for this arm, set at its start in place of the preset's; held to [rig] power_clamp_w",
+          "group": "flight"
+        },
+        {
           "key": "cwid_optional",
           "dest": "cwid_optional",
           "flags": [
@@ -1278,7 +1295,24 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "skip the closing CW ID when the mode's own frames carried our callsign",
+          "help": "skip the closing CW ID only when digital and CW callsigns are equal",
+          "group": "flight"
+        },
+        {
+          "key": "idcall",
+          "dest": "idcall",
+          "flags": [
+            "--idcall"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "CW station callsign, independent of the digital caller; default: IDCALL, [station] idcall, then digital mycall",
           "group": "flight"
         },
         {
@@ -1299,6 +1333,61 @@
           "group": "flight"
         },
         {
+          "key": "recording",
+          "dest": "recording",
+          "flags": [
+            "--recording"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "off",
+            "contacts",
+            "everything"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "what audio to keep: off, contacts or everything; default from the station file",
+          "group": "witness and recording"
+        },
+        {
+          "key": "record",
+          "dest": "record",
+          "flags": [
+            "--record"
+          ],
+          "nargs": null,
+          "type": "Path",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "select everything and its destination",
+          "group": "witness and recording"
+        },
+        {
+          "key": "no_record",
+          "dest": "no_record",
+          "flags": [
+            "--no-record"
+          ],
+          "nargs": 0,
+          "type": "str",
+          "action": "_StoreTrueAction",
+          "default": false,
+          "const": true,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "select off",
+          "group": "witness and recording"
+        },
+        {
           "key": "witness",
           "dest": "witness",
           "flags": [
@@ -1312,7 +1401,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "do not place a remote receiver to record the session",
           "group": "witness and recording"
         },
         {
@@ -1329,7 +1418,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how long the remote receiver records, in seconds (default %(default)s)",
           "group": "witness and recording"
         },
         {
@@ -1414,7 +1503,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "the likely-working P4 mail preset: --p4-link with --p4-data body, ladder none, normal-ack parity, chirp-ack parity, hold 16, entry timeout 20, long cycles and the QRM guard off; a fetching mail client (plus --send delivery if --send is absent); --level p4-bench unless given. Explicit flags and later --modem-arg words override. Refused with --p4-chirp-counter",
+          "help": "experimental P4 mail preset: SL3 robust-long data, per-packet ACK toggle, QRM guard off, fetching mail client; --level p4-bench by default; explicit flags and --modem-arg override",
           "group": "mail and presets"
         },
         {
@@ -1431,7 +1520,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "experimental mail starting at SL1 with the B +3.125 ms reply timing, continued through turn changes; fetch, optionally upload with --send",
+          "help": "experimental mail starting at SL1 with the +603.125 ms initial reply pulse, continued through turn changes; fetch, optionally upload with --send",
           "group": "mail and presets"
         },
         {
@@ -1482,7 +1571,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "omit every generated --mail-* flag, for an arm with no mail client (e.g. a --p4-probe-* --modem-arg probe). Conflicts with --send and the mail presets",
+          "help": "omit every generated --mail-* flag, for an arm with no mail client (e.g. a --p4-link --modem-arg arm). Conflicts with --send and the mail presets",
           "group": "mail and presets"
         },
         {
@@ -1618,12 +1707,11 @@
           "choices": [
             "arq",
             "listen",
-            "chirp",
             "p1-robust"
           ],
           "required": false,
           "metavar": null,
-          "help": "after the answered call: arq runs the link; listen keys nothing; chirp runs the P4 entry probe from the answer; p1-robust follows with the robust short probe (implied by --p4-link, the only one that can still carry mail)",
+          "help": "after the answered call: arq runs the link; listen keys nothing; p1-robust follows with the robust opening (implied by --p4-link, the only one that can carry mail)",
           "group": "connect and PACTOR-1"
         },
         {
@@ -1678,6 +1766,23 @@
           "group": "connect and PACTOR-1"
         },
         {
+          "key": "pactor2_only",
+          "dest": "pactor2_only",
+          "flags": [
+            "--pactor2-only"
+          ],
+          "nargs": 0,
+          "type": "str",
+          "action": "_StoreTrueAction",
+          "default": false,
+          "const": true,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "run as a PACTOR-2-capped station (the modem's --pactor2-only): announce bits45=1, enter P2 only on 0x6A9 or a peer leading into it, never P3 or P4. Drops the assessed profile's grant flag",
+          "group": "connect and PACTOR-1"
+        },
+        {
           "key": "unannounced",
           "dest": "unannounced",
           "flags": [
@@ -1712,23 +1817,6 @@
           "required": false,
           "metavar": null,
           "help": "which phase opens the link; call moved four messages at KB5LZK on 09-11 (P1-only or P4-entry arms)",
-          "group": "connect and PACTOR-1"
-        },
-        {
-          "key": "p1_6a9",
-          "dest": "p1_6a9",
-          "flags": [
-            "--p1-6a9"
-          ],
-          "nargs": 0,
-          "type": "str",
-          "action": "_StoreTrueAction",
-          "default": false,
-          "const": true,
-          "choices": null,
-          "required": false,
-          "metavar": null,
-          "help": "announce P1 bits45=1 and select 0x6A9 as the entry response",
           "group": "connect and PACTOR-1"
         },
         {
@@ -1883,7 +1971,7 @@
           ],
           "required": false,
           "metavar": "1..6",
-          "help": "",
+          "help": "PACTOR-3 speed level after entry, 1 to 6 (default %(default)s)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -1903,7 +1991,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "auto requests a higher P3 speed after three consecutive cycles delivering new payload; hold never asks (default %(default)s)",
+          "help": "auto requests a higher P3 speed after --speed-up-after consecutive cycles delivering new payload; hold never asks (default %(default)s)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -2014,7 +2102,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "after this many identical packets in a row, ask the gateway to change speed; 0 turns it off (default %(default)s)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -2058,14 +2146,14 @@
             "--p3-irs-reply-offset-ms"
           ],
           "nargs": null,
-          "type": "float",
+          "type": "reply_offsets",
           "action": "_StoreAction",
           "default": 0.0,
           "const": null,
           "choices": null,
           "required": false,
           "metavar": "N",
-          "help": "unflown, P3 mail: key IRS control signals N ms later than the reply clock (default %(default)s)",
+          "help": "with --p3-mail: shift IRS control pulses N ms from their selected short aim (raster or peer) and peer-relative long aim; short:N or long:N moves one, short:N,long:M each (negative is earlier; default %(default)s)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -2102,7 +2190,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "enable long cycles (default with --p4-mail)",
+          "help": "enable long cycles (default with --p3-mail or --p4-mail)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -2137,28 +2225,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "run the experimental P4 turn machine after robust shorts. Implies --after-connect p1-robust, --p1-status-bits45 2, robust shorts 7,38 on headers A,A (consecutive), --p1-robust-stall 12 then goodbye and --no-observe-after-link-down; admits a mail client (--send, or the default fetch). Explicit flags and later --modem-arg override",
-          "group": "PACTOR-4 link and ACK policy"
-        },
-        {
-          "key": "p4_ladder",
-          "dest": "p4_ladder",
-          "flags": [
-            "--p4-ladder"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": [
-            "long",
-            "chirp",
-            "none"
-          ],
-          "required": false,
-          "metavar": null,
-          "help": "the P4 waveform ladder (default long; none with --p4-mail while data is body); none sends a body then normal frames and needs --p4-data body",
+          "help": "enable the P4 turn machine; use --p4-mail for the explicit mail preset",
           "group": "PACTOR-4 link and ACK policy"
         },
         {
@@ -2175,7 +2242,8 @@
           "choices": [
             "none",
             "body",
-            "chirp"
+            "chirp",
+            "long"
           ],
           "required": false,
           "metavar": null,
@@ -2214,15 +2282,90 @@
           "default": null,
           "const": null,
           "choices": [
-            "v27",
-            "x27",
-            "parity",
-            "x27-u27",
-            "alternate-packet"
+            "toggle",
+            "parity"
           ],
           "required": false,
-          "metavar": "POLICY",
-          "help": "ack for peer normal frames: v27, x27, parity, x27-u27 or alternate-packet (default v27; parity with --p4-mail)",
+          "metavar": null,
+          "help": "ack policy for peer bodies and normal short frames; x27 acks every new packet X27 and asks a repeat with V27 (default toggle)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_long_ack",
+          "dest": "p4_long_ack",
+          "flags": [
+            "--p4-long-ack"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "toggle",
+            "toggle-t27",
+            "counter-even-t27"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "ack policy for peer long frames (default toggle)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_chirp_ack",
+          "dest": "p4_chirp_ack",
+          "flags": [
+            "--p4-chirp-ack"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "toggle",
+            "parity"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "ack policy for peer chirps (default toggle)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_first_ack",
+          "dest": "p4_first_ack",
+          "flags": [
+            "--p4-first-ack"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "x27",
+            "v27"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "first counted ack of a toggle chain (default x27)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_chain_reset",
+          "dest": "p4_chain_reset",
+          "flags": [
+            "--p4-chain-reset"
+          ],
+          "nargs": null,
+          "type": "chain_resets",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "boundaries restarting the toggle chain (default turn,form)",
           "group": "PACTOR-4 link and ACK policy"
         },
         {
@@ -2246,45 +2389,6 @@
           "group": "PACTOR-4 link and ACK policy"
         },
         {
-          "key": "p4_long_ack",
-          "dest": "p4_long_ack",
-          "flags": [
-            "--p4-long-ack"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": [
-            "fixed-x27",
-            "alternate-packet",
-            "counter-odd-t27",
-            "counter-even-t27"
-          ],
-          "required": false,
-          "metavar": "POLICY",
-          "help": "experimental ack policy for peer robust long frames (default fixed-x27)",
-          "group": "PACTOR-4 link and ACK policy"
-        },
-        {
-          "key": "p4_text",
-          "dest": "p4_text",
-          "flags": [
-            "--p4-text"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "TEXT",
-          "help": "Latin-1 text keyed after our SID; runs only with --no-mail",
-          "group": "PACTOR-4 link and ACK policy"
-        },
-        {
           "key": "p4_link_timeout",
           "dest": "p4_link_timeout",
           "flags": [
@@ -2293,12 +2397,12 @@
           "nargs": null,
           "type": "float",
           "action": "_StoreAction",
-          "default": 600.0,
+          "default": null,
           "const": null,
           "choices": null,
           "required": false,
           "metavar": "SECONDS",
-          "help": "session ceiling in seconds (default %(default)s)",
+          "help": "session ceiling in seconds (600; 480 with --p4-mail)",
           "group": "PACTOR-4 link and ACK policy"
         },
         {
@@ -2319,23 +2423,6 @@
           "group": "PACTOR-4 link and ACK policy"
         },
         {
-          "key": "p4_irs_silent_cycles",
-          "dest": "p4_irs_silent_cycles",
-          "flags": [
-            "--p4-irs-silent-cycles"
-          ],
-          "nargs": null,
-          "type": "int",
-          "action": "_StoreAction",
-          "default": 0,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "N",
-          "help": "key nothing for N peer cycles from the first IRS greeting body or ladder short (default %(default)s, off)",
-          "group": "PACTOR-4 link and ACK policy"
-        },
-        {
           "key": "p4_answer_offset",
           "dest": "p4_answer_offset",
           "flags": [
@@ -2344,12 +2431,12 @@
           "nargs": null,
           "type": "float",
           "action": "_StoreAction",
-          "default": 0.92,
+          "default": null,
           "const": null,
           "choices": null,
           "required": false,
           "metavar": "SECONDS",
-          "help": "our answer after a peer short, body or normal packet onset (default %(default)s)",
+          "help": "answer after a peer short, body or normal onset (default 0.920 seconds)",
           "group": "PACTOR-4 link and ACK policy"
         },
         {
@@ -2373,60 +2460,21 @@
           "group": "PACTOR-4 link and ACK policy"
         },
         {
-          "key": "p4_entry",
-          "dest": "p4_entry",
+          "key": "p4_opening",
+          "dest": "p4_opening",
           "flags": [
-            "--p4-entry"
-          ],
-          "nargs": 0,
-          "type": "str",
-          "action": "_StoreTrueAction",
-          "default": false,
-          "const": true,
-          "choices": null,
-          "required": false,
-          "metavar": null,
-          "help": "PACTOR-4 chirp entry after a grant; no mail or connected ARQ",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_chirp_counter",
-          "dest": "p4_chirp_counter",
-          "flags": [
-            "--p4-chirp-counter"
-          ],
-          "nargs": 0,
-          "type": "str",
-          "action": "_StoreTrueAction",
-          "default": false,
-          "const": true,
-          "choices": null,
-          "required": false,
-          "metavar": null,
-          "help": "P4 setup/ARQ counter challenge: three chirps (same counter twice, then advance); not a mail transfer. Keys the modem's --p4-mail; refused with --p4-link",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_entry_attempts",
-          "dest": "p4_entry_attempts",
-          "flags": [
-            "--p4-entry-attempts"
+            "--p4-opening"
           ],
           "nargs": null,
-          "type": "int",
+          "type": "str",
           "action": "_StoreAction",
-          "default": 2,
+          "default": null,
           "const": null,
-          "choices": [
-            1,
-            2,
-            3,
-            4
-          ],
+          "choices": null,
           "required": false,
-          "metavar": null,
-          "help": "maximum chirps after a grant (default %(default)s)",
-          "group": "PACTOR-4 entry probe"
+          "metavar": "V[,V...]",
+          "help": "opening robust shorts (default 7,38; 6,9,8 with --after-robust p4-robust)",
+          "group": "PACTOR-4 link and ACK policy"
         },
         {
           "key": "p4_entry_timeout",
@@ -2437,108 +2485,19 @@
           "nargs": null,
           "type": "float",
           "action": "_StoreAction",
-          "default": null,
+          "default": 20.0,
           "const": null,
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "post-grant probe deadline in seconds: at most 60 (default 60) for a probe-only arm, 120 (default 120) with --p4-link",
-          "group": "PACTOR-4 entry probe"
+          "help": "seconds to wait for the PACTOR-4 opening to be answered, at most 120 (default %(default)s)",
+          "group": "PACTOR-4 link and ACK policy"
         },
         {
-          "key": "p4_probe_packet",
-          "dest": "p4_probe_packet",
+          "key": "p4_arm",
+          "dest": "p4_arm",
           "flags": [
-            "--p4-probe-packet"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": "chirp",
-          "const": null,
-          "choices": [
-            "chirp",
-            "short",
-            "robust"
-          ],
-          "required": false,
-          "metavar": null,
-          "help": "what the probe keys: chirp (SL1's 3.3 s entry), short (793 ms) or robust (the setup tape's caller packet, 759 ms); default %(default)s",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_statuses",
-          "dest": "p4_probe_statuses",
-          "flags": [
-            "--p4-probe-statuses"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "BYTES",
-          "help": "status bytes to key, one chirp each: one to four, comma separated (e.g. 0x63,0x60,0x61); replaces --p4-entry-attempts",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_payload",
-          "dest": "p4_probe_payload",
-          "flags": [
-            "--p4-probe-payload"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "TEXT",
-          "help": "latin-1 text keyed in the chirp field; empty by default",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_values",
-          "dest": "p4_probe_values",
-          "flags": [
-            "--p4-probe-values"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "N[,N...]",
-          "help": "with --p4-probe-packet robust, datablock values 0..63, one packet each (one to four); replaces --p4-entry-attempts",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_headers",
-          "dest": "p4_probe_headers",
-          "flags": [
-            "--p4-probe-headers"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "A|B[,...]",
-          "help": "header word per value; 'alt' alternates A,B (default all A). With --p4-link or --p4-mail, a single A or B applies to every value",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_cadence",
-          "dest": "p4_probe_cadence",
-          "flags": [
-            "--p4-probe-cadence"
+            "--p4-arm"
           ],
           "nargs": null,
           "type": "str",
@@ -2546,13 +2505,119 @@
           "default": null,
           "const": null,
           "choices": [
-            "spaced",
-            "consecutive"
+            "replica",
+            "chain-a",
+            "chain-b",
+            "chain-at",
+            "carry-turn",
+            "sl2",
+            "admit-u27",
+            "spug-off",
+            "sl4",
+            "u27-ack"
           ],
           "required": false,
           "metavar": null,
-          "help": "spaced keys each packet after a full receive window (default); consecutive keys them back to back, as the setup tape's caller did",
-          "group": "PACTOR-4 entry probe"
+          "help": "named mail-arm variant, only with --p4-mail (default replica)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_iss_u27",
+          "dest": "p4_iss_u27",
+          "flags": [
+            "--p4-iss-u27"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "repeat",
+            "ack"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "interpret U27 to our counted long as repeat or acknowledgement",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_ladder_admit",
+          "dest": "p4_ladder_admit",
+          "flags": [
+            "--p4-ladder-admit"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "u27",
+            "u27,x27"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "words admitting data after the final ladder rung",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_ladder_values",
+          "dest": "p4_ladder_values",
+          "flags": [
+            "--p4-ladder-values"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "override the control values preceding counted data",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_long_level",
+          "dest": "p4_long_level",
+          "flags": [
+            "--p4-long-level"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "2",
+            "3",
+            "4"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "fixed robust-long transmit level (default 3)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_spug",
+          "dest": "p4_spug",
+          "flags": [
+            "--p4-spug"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "queued",
+            "off"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "set SPUG while more long data is queued, or disable it",
+          "group": "PACTOR-4 link and ACK policy"
         },
         {
           "key": "after_robust",
@@ -2574,7 +2639,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "after the robust answer: listen keys nothing; p2 (default) sends our callsign in P2 and waits for the P3 grant; p1 a P1 packet opening with our call; p3 the SL1 entry and P3 ARQ; p4-robust the robust shorts (6,9,8 on header A unless --p4-probe-values)",
+          "help": "after the robust answer: listen keys nothing; p2 (default) sends our callsign in P2 and waits for the P3 grant; p1 a P1 packet opening with our call; p3 the SL1 entry and P3 ARQ; p4-robust the robust shorts (6,9,8 on header A unless --p4-opening)",
           "group": "Robust connect and the PACTOR-2 bridge"
         },
         {
@@ -2594,7 +2659,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how the callsign is coded in the robust bridge: pmc (compressed) or ascii (default %(default)s)",
           "group": "Robust connect and the PACTOR-2 bridge"
         },
         {
@@ -2611,7 +2676,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the most PACTOR-2 bridge cycles to key before giving up (default %(default)s)",
           "group": "Robust connect and the PACTOR-2 bridge"
         },
         {
@@ -2668,7 +2733,7 @@
           "choices": null,
           "required": false,
           "metavar": "K",
-          "help": "",
+          "help": "after K bridge cycles without a grant, go on to PACTOR-3 anyway; off by default",
           "group": "Robust connect and the PACTOR-2 bridge"
         },
         {
@@ -2689,7 +2754,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "key PACTOR-3 on the carrier offset the peer arrives at: all, control codewords only, or none (default %(default)s)",
           "group": "PACTOR-3 keying experiments"
         },
         {
@@ -2710,7 +2775,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "which cycles may run a fraction of a symbol past their slot: all, controls or none (default %(default)s)",
           "group": "PACTOR-3 keying experiments"
         },
         {
@@ -2772,6 +2837,26 @@
           "required": false,
           "metavar": null,
           "help": "5 ms half-symbol carrier stagger, alternating from this foot. The wrong foot is worse than off: fly one arm on each",
+          "group": "PACTOR-3 keying experiments"
+        },
+        {
+          "key": "control_phase",
+          "dest": "control_phase",
+          "flags": [
+            "--control-phase"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": "axis",
+          "const": null,
+          "choices": [
+            "axis",
+            "diagonal"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "control codeword steps (--p3-control-phase): axis keys 0/180 degrees (flown); diagonal keys 315/135 as stock does and takes that convention off the follow. Unflown",
           "group": "PACTOR-3 keying experiments"
         },
         {
@@ -2925,6 +3010,23 @@
       "description": "",
       "fields": [
         {
+          "key": "pactor",
+          "dest": "pactor",
+          "flags": [
+            "--pactor"
+          ],
+          "nargs": null,
+          "type": "_levels",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": "LEVELS",
+          "help": "allow these advertised PACTOR generations and select their mail presets",
+          "group": "options"
+        },
+        {
           "key": "band",
           "dest": "band",
           "flags": [
@@ -3022,7 +3124,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the order channels are tried in (default %(default)s)",
           "group": "campaign selection"
         },
         {
@@ -3043,7 +3145,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "try this distance group first: near <1000 km, far 1000\u20134000 km, dx >=4000 km; other stations remain eligible",
+          "help": "try this distance group first: near <1000 km, far 1000–4000 km, dx >=4000 km; other stations remain eligible",
           "group": "campaign selection"
         },
         {
@@ -3167,7 +3269,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "transmit power and drive preset for this arm (default %(default)s)",
           "group": "flight"
         },
         {
@@ -3273,6 +3375,23 @@
           "group": "flight"
         },
         {
+          "key": "power",
+          "dest": "power",
+          "flags": [
+            "--power"
+          ],
+          "nargs": null,
+          "type": "watts",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": "W",
+          "help": "RF power for this arm, set at its start in place of the preset's; held to [rig] power_clamp_w",
+          "group": "flight"
+        },
+        {
           "key": "cwid_optional",
           "dest": "cwid_optional",
           "flags": [
@@ -3286,7 +3405,24 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "skip the closing CW ID when the mode's own frames carried our callsign",
+          "help": "skip the closing CW ID only when digital and CW callsigns are equal",
+          "group": "flight"
+        },
+        {
+          "key": "idcall",
+          "dest": "idcall",
+          "flags": [
+            "--idcall"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "CW station callsign, independent of the digital caller; default: IDCALL, [station] idcall, then digital mycall",
           "group": "flight"
         },
         {
@@ -3307,6 +3443,61 @@
           "group": "flight"
         },
         {
+          "key": "recording",
+          "dest": "recording",
+          "flags": [
+            "--recording"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "off",
+            "contacts",
+            "everything"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "what audio to keep: off, contacts or everything; default from the station file",
+          "group": "witness and recording"
+        },
+        {
+          "key": "record",
+          "dest": "record",
+          "flags": [
+            "--record"
+          ],
+          "nargs": null,
+          "type": "Path",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "select everything and its destination",
+          "group": "witness and recording"
+        },
+        {
+          "key": "no_record",
+          "dest": "no_record",
+          "flags": [
+            "--no-record"
+          ],
+          "nargs": 0,
+          "type": "str",
+          "action": "_StoreTrueAction",
+          "default": false,
+          "const": true,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "select off",
+          "group": "witness and recording"
+        },
+        {
           "key": "witness",
           "dest": "witness",
           "flags": [
@@ -3320,7 +3511,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "do not place a remote receiver to record the session",
           "group": "witness and recording"
         },
         {
@@ -3337,7 +3528,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how long the remote receiver records, in seconds (default %(default)s)",
           "group": "witness and recording"
         },
         {
@@ -3422,7 +3613,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "the likely-working P4 mail preset: --p4-link with --p4-data body, ladder none, normal-ack parity, chirp-ack parity, hold 16, entry timeout 20, long cycles and the QRM guard off; a fetching mail client (plus --send delivery if --send is absent); --level p4-bench unless given. Explicit flags and later --modem-arg words override. Refused with --p4-chirp-counter",
+          "help": "experimental P4 mail preset: SL3 robust-long data, per-packet ACK toggle, QRM guard off, fetching mail client; --level p4-bench by default; explicit flags and --modem-arg override",
           "group": "mail and presets"
         },
         {
@@ -3439,7 +3630,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "experimental mail starting at SL1 with the B +3.125 ms reply timing, continued through turn changes; fetch, optionally upload with --send",
+          "help": "experimental mail starting at SL1 with the +603.125 ms initial reply pulse, continued through turn changes; fetch, optionally upload with --send",
           "group": "mail and presets"
         },
         {
@@ -3490,7 +3681,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "omit every generated --mail-* flag, for an arm with no mail client (e.g. a --p4-probe-* --modem-arg probe). Conflicts with --send and the mail presets",
+          "help": "omit every generated --mail-* flag, for an arm with no mail client (e.g. a --p4-link --modem-arg arm). Conflicts with --send and the mail presets",
           "group": "mail and presets"
         },
         {
@@ -3626,12 +3817,11 @@
           "choices": [
             "arq",
             "listen",
-            "chirp",
             "p1-robust"
           ],
           "required": false,
           "metavar": null,
-          "help": "after the answered call: arq runs the link; listen keys nothing; chirp runs the P4 entry probe from the answer; p1-robust follows with the robust short probe (implied by --p4-link, the only one that can still carry mail)",
+          "help": "after the answered call: arq runs the link; listen keys nothing; p1-robust follows with the robust opening (implied by --p4-link, the only one that can carry mail)",
           "group": "connect and PACTOR-1"
         },
         {
@@ -3686,6 +3876,23 @@
           "group": "connect and PACTOR-1"
         },
         {
+          "key": "pactor2_only",
+          "dest": "pactor2_only",
+          "flags": [
+            "--pactor2-only"
+          ],
+          "nargs": 0,
+          "type": "str",
+          "action": "_StoreTrueAction",
+          "default": false,
+          "const": true,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "run as a PACTOR-2-capped station (the modem's --pactor2-only): announce bits45=1, enter P2 only on 0x6A9 or a peer leading into it, never P3 or P4. Drops the assessed profile's grant flag",
+          "group": "connect and PACTOR-1"
+        },
+        {
           "key": "unannounced",
           "dest": "unannounced",
           "flags": [
@@ -3720,23 +3927,6 @@
           "required": false,
           "metavar": null,
           "help": "which phase opens the link; call moved four messages at KB5LZK on 09-11 (P1-only or P4-entry arms)",
-          "group": "connect and PACTOR-1"
-        },
-        {
-          "key": "p1_6a9",
-          "dest": "p1_6a9",
-          "flags": [
-            "--p1-6a9"
-          ],
-          "nargs": 0,
-          "type": "str",
-          "action": "_StoreTrueAction",
-          "default": false,
-          "const": true,
-          "choices": null,
-          "required": false,
-          "metavar": null,
-          "help": "announce P1 bits45=1 and select 0x6A9 as the entry response",
           "group": "connect and PACTOR-1"
         },
         {
@@ -3891,7 +4081,7 @@
           ],
           "required": false,
           "metavar": "1..6",
-          "help": "",
+          "help": "PACTOR-3 speed level after entry, 1 to 6 (default %(default)s)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -3911,7 +4101,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "auto requests a higher P3 speed after three consecutive cycles delivering new payload; hold never asks (default %(default)s)",
+          "help": "auto requests a higher P3 speed after --speed-up-after consecutive cycles delivering new payload; hold never asks (default %(default)s)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -4022,7 +4212,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "after this many identical packets in a row, ask the gateway to change speed; 0 turns it off (default %(default)s)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -4066,14 +4256,14 @@
             "--p3-irs-reply-offset-ms"
           ],
           "nargs": null,
-          "type": "float",
+          "type": "reply_offsets",
           "action": "_StoreAction",
           "default": 0.0,
           "const": null,
           "choices": null,
           "required": false,
           "metavar": "N",
-          "help": "unflown, P3 mail: key IRS control signals N ms later than the reply clock (default %(default)s)",
+          "help": "with --p3-mail: shift IRS control pulses N ms from their selected short aim (raster or peer) and peer-relative long aim; short:N or long:N moves one, short:N,long:M each (negative is earlier; default %(default)s)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -4110,7 +4300,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "enable long cycles (default with --p4-mail)",
+          "help": "enable long cycles (default with --p3-mail or --p4-mail)",
           "group": "PACTOR-3 traffic and speed"
         },
         {
@@ -4145,28 +4335,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "run the experimental P4 turn machine after robust shorts. Implies --after-connect p1-robust, --p1-status-bits45 2, robust shorts 7,38 on headers A,A (consecutive), --p1-robust-stall 12 then goodbye and --no-observe-after-link-down; admits a mail client (--send, or the default fetch). Explicit flags and later --modem-arg override",
-          "group": "PACTOR-4 link and ACK policy"
-        },
-        {
-          "key": "p4_ladder",
-          "dest": "p4_ladder",
-          "flags": [
-            "--p4-ladder"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": [
-            "long",
-            "chirp",
-            "none"
-          ],
-          "required": false,
-          "metavar": null,
-          "help": "the P4 waveform ladder (default long; none with --p4-mail while data is body); none sends a body then normal frames and needs --p4-data body",
+          "help": "enable the P4 turn machine; use --p4-mail for the explicit mail preset",
           "group": "PACTOR-4 link and ACK policy"
         },
         {
@@ -4183,7 +4352,8 @@
           "choices": [
             "none",
             "body",
-            "chirp"
+            "chirp",
+            "long"
           ],
           "required": false,
           "metavar": null,
@@ -4222,15 +4392,90 @@
           "default": null,
           "const": null,
           "choices": [
-            "v27",
-            "x27",
-            "parity",
-            "x27-u27",
-            "alternate-packet"
+            "toggle",
+            "parity"
           ],
           "required": false,
-          "metavar": "POLICY",
-          "help": "ack for peer normal frames: v27, x27, parity, x27-u27 or alternate-packet (default v27; parity with --p4-mail)",
+          "metavar": null,
+          "help": "ack policy for peer bodies and normal short frames; x27 acks every new packet X27 and asks a repeat with V27 (default toggle)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_long_ack",
+          "dest": "p4_long_ack",
+          "flags": [
+            "--p4-long-ack"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "toggle",
+            "toggle-t27",
+            "counter-even-t27"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "ack policy for peer long frames (default toggle)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_chirp_ack",
+          "dest": "p4_chirp_ack",
+          "flags": [
+            "--p4-chirp-ack"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "toggle",
+            "parity"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "ack policy for peer chirps (default toggle)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_first_ack",
+          "dest": "p4_first_ack",
+          "flags": [
+            "--p4-first-ack"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "x27",
+            "v27"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "first counted ack of a toggle chain (default x27)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_chain_reset",
+          "dest": "p4_chain_reset",
+          "flags": [
+            "--p4-chain-reset"
+          ],
+          "nargs": null,
+          "type": "chain_resets",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "boundaries restarting the toggle chain (default turn,form)",
           "group": "PACTOR-4 link and ACK policy"
         },
         {
@@ -4254,45 +4499,6 @@
           "group": "PACTOR-4 link and ACK policy"
         },
         {
-          "key": "p4_long_ack",
-          "dest": "p4_long_ack",
-          "flags": [
-            "--p4-long-ack"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": [
-            "fixed-x27",
-            "alternate-packet",
-            "counter-odd-t27",
-            "counter-even-t27"
-          ],
-          "required": false,
-          "metavar": "POLICY",
-          "help": "experimental ack policy for peer robust long frames (default fixed-x27)",
-          "group": "PACTOR-4 link and ACK policy"
-        },
-        {
-          "key": "p4_text",
-          "dest": "p4_text",
-          "flags": [
-            "--p4-text"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "TEXT",
-          "help": "Latin-1 text keyed after our SID; runs only with --no-mail",
-          "group": "PACTOR-4 link and ACK policy"
-        },
-        {
           "key": "p4_link_timeout",
           "dest": "p4_link_timeout",
           "flags": [
@@ -4301,12 +4507,12 @@
           "nargs": null,
           "type": "float",
           "action": "_StoreAction",
-          "default": 600.0,
+          "default": null,
           "const": null,
           "choices": null,
           "required": false,
           "metavar": "SECONDS",
-          "help": "session ceiling in seconds (default %(default)s)",
+          "help": "session ceiling in seconds (600; 480 with --p4-mail)",
           "group": "PACTOR-4 link and ACK policy"
         },
         {
@@ -4327,23 +4533,6 @@
           "group": "PACTOR-4 link and ACK policy"
         },
         {
-          "key": "p4_irs_silent_cycles",
-          "dest": "p4_irs_silent_cycles",
-          "flags": [
-            "--p4-irs-silent-cycles"
-          ],
-          "nargs": null,
-          "type": "int",
-          "action": "_StoreAction",
-          "default": 0,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "N",
-          "help": "key nothing for N peer cycles from the first IRS greeting body or ladder short (default %(default)s, off)",
-          "group": "PACTOR-4 link and ACK policy"
-        },
-        {
           "key": "p4_answer_offset",
           "dest": "p4_answer_offset",
           "flags": [
@@ -4352,12 +4541,12 @@
           "nargs": null,
           "type": "float",
           "action": "_StoreAction",
-          "default": 0.92,
+          "default": null,
           "const": null,
           "choices": null,
           "required": false,
           "metavar": "SECONDS",
-          "help": "our answer after a peer short, body or normal packet onset (default %(default)s)",
+          "help": "answer after a peer short, body or normal onset (default 0.920 seconds)",
           "group": "PACTOR-4 link and ACK policy"
         },
         {
@@ -4381,60 +4570,21 @@
           "group": "PACTOR-4 link and ACK policy"
         },
         {
-          "key": "p4_entry",
-          "dest": "p4_entry",
+          "key": "p4_opening",
+          "dest": "p4_opening",
           "flags": [
-            "--p4-entry"
-          ],
-          "nargs": 0,
-          "type": "str",
-          "action": "_StoreTrueAction",
-          "default": false,
-          "const": true,
-          "choices": null,
-          "required": false,
-          "metavar": null,
-          "help": "PACTOR-4 chirp entry after a grant; no mail or connected ARQ",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_chirp_counter",
-          "dest": "p4_chirp_counter",
-          "flags": [
-            "--p4-chirp-counter"
-          ],
-          "nargs": 0,
-          "type": "str",
-          "action": "_StoreTrueAction",
-          "default": false,
-          "const": true,
-          "choices": null,
-          "required": false,
-          "metavar": null,
-          "help": "P4 setup/ARQ counter challenge: three chirps (same counter twice, then advance); not a mail transfer. Keys the modem's --p4-mail; refused with --p4-link",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_entry_attempts",
-          "dest": "p4_entry_attempts",
-          "flags": [
-            "--p4-entry-attempts"
+            "--p4-opening"
           ],
           "nargs": null,
-          "type": "int",
+          "type": "str",
           "action": "_StoreAction",
-          "default": 2,
+          "default": null,
           "const": null,
-          "choices": [
-            1,
-            2,
-            3,
-            4
-          ],
+          "choices": null,
           "required": false,
-          "metavar": null,
-          "help": "maximum chirps after a grant (default %(default)s)",
-          "group": "PACTOR-4 entry probe"
+          "metavar": "V[,V...]",
+          "help": "opening robust shorts (default 7,38; 6,9,8 with --after-robust p4-robust)",
+          "group": "PACTOR-4 link and ACK policy"
         },
         {
           "key": "p4_entry_timeout",
@@ -4445,108 +4595,19 @@
           "nargs": null,
           "type": "float",
           "action": "_StoreAction",
-          "default": null,
+          "default": 20.0,
           "const": null,
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "post-grant probe deadline in seconds: at most 60 (default 60) for a probe-only arm, 120 (default 120) with --p4-link",
-          "group": "PACTOR-4 entry probe"
+          "help": "seconds to wait for the PACTOR-4 opening to be answered, at most 120 (default %(default)s)",
+          "group": "PACTOR-4 link and ACK policy"
         },
         {
-          "key": "p4_probe_packet",
-          "dest": "p4_probe_packet",
+          "key": "p4_arm",
+          "dest": "p4_arm",
           "flags": [
-            "--p4-probe-packet"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": "chirp",
-          "const": null,
-          "choices": [
-            "chirp",
-            "short",
-            "robust"
-          ],
-          "required": false,
-          "metavar": null,
-          "help": "what the probe keys: chirp (SL1's 3.3 s entry), short (793 ms) or robust (the setup tape's caller packet, 759 ms); default %(default)s",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_statuses",
-          "dest": "p4_probe_statuses",
-          "flags": [
-            "--p4-probe-statuses"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "BYTES",
-          "help": "status bytes to key, one chirp each: one to four, comma separated (e.g. 0x63,0x60,0x61); replaces --p4-entry-attempts",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_payload",
-          "dest": "p4_probe_payload",
-          "flags": [
-            "--p4-probe-payload"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "TEXT",
-          "help": "latin-1 text keyed in the chirp field; empty by default",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_values",
-          "dest": "p4_probe_values",
-          "flags": [
-            "--p4-probe-values"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "N[,N...]",
-          "help": "with --p4-probe-packet robust, datablock values 0..63, one packet each (one to four); replaces --p4-entry-attempts",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_headers",
-          "dest": "p4_probe_headers",
-          "flags": [
-            "--p4-probe-headers"
-          ],
-          "nargs": null,
-          "type": "str",
-          "action": "_StoreAction",
-          "default": null,
-          "const": null,
-          "choices": null,
-          "required": false,
-          "metavar": "A|B[,...]",
-          "help": "header word per value; 'alt' alternates A,B (default all A). With --p4-link or --p4-mail, a single A or B applies to every value",
-          "group": "PACTOR-4 entry probe"
-        },
-        {
-          "key": "p4_probe_cadence",
-          "dest": "p4_probe_cadence",
-          "flags": [
-            "--p4-probe-cadence"
+            "--p4-arm"
           ],
           "nargs": null,
           "type": "str",
@@ -4554,13 +4615,119 @@
           "default": null,
           "const": null,
           "choices": [
-            "spaced",
-            "consecutive"
+            "replica",
+            "chain-a",
+            "chain-b",
+            "chain-at",
+            "carry-turn",
+            "sl2",
+            "admit-u27",
+            "spug-off",
+            "sl4",
+            "u27-ack"
           ],
           "required": false,
           "metavar": null,
-          "help": "spaced keys each packet after a full receive window (default); consecutive keys them back to back, as the setup tape's caller did",
-          "group": "PACTOR-4 entry probe"
+          "help": "named mail-arm variant, only with --p4-mail (default replica)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_iss_u27",
+          "dest": "p4_iss_u27",
+          "flags": [
+            "--p4-iss-u27"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "repeat",
+            "ack"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "interpret U27 to our counted long as repeat or acknowledgement",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_ladder_admit",
+          "dest": "p4_ladder_admit",
+          "flags": [
+            "--p4-ladder-admit"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "u27",
+            "u27,x27"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "words admitting data after the final ladder rung",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_ladder_values",
+          "dest": "p4_ladder_values",
+          "flags": [
+            "--p4-ladder-values"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": null,
+          "required": false,
+          "metavar": null,
+          "help": "override the control values preceding counted data",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_long_level",
+          "dest": "p4_long_level",
+          "flags": [
+            "--p4-long-level"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "2",
+            "3",
+            "4"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "fixed robust-long transmit level (default 3)",
+          "group": "PACTOR-4 link and ACK policy"
+        },
+        {
+          "key": "p4_spug",
+          "dest": "p4_spug",
+          "flags": [
+            "--p4-spug"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": null,
+          "const": null,
+          "choices": [
+            "queued",
+            "off"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "set SPUG while more long data is queued, or disable it",
+          "group": "PACTOR-4 link and ACK policy"
         },
         {
           "key": "after_robust",
@@ -4582,7 +4749,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "after the robust answer: listen keys nothing; p2 (default) sends our callsign in P2 and waits for the P3 grant; p1 a P1 packet opening with our call; p3 the SL1 entry and P3 ARQ; p4-robust the robust shorts (6,9,8 on header A unless --p4-probe-values)",
+          "help": "after the robust answer: listen keys nothing; p2 (default) sends our callsign in P2 and waits for the P3 grant; p1 a P1 packet opening with our call; p3 the SL1 entry and P3 ARQ; p4-robust the robust shorts (6,9,8 on header A unless --p4-opening)",
           "group": "Robust connect and the PACTOR-2 bridge"
         },
         {
@@ -4602,7 +4769,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how the callsign is coded in the robust bridge: pmc (compressed) or ascii (default %(default)s)",
           "group": "Robust connect and the PACTOR-2 bridge"
         },
         {
@@ -4619,7 +4786,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the most PACTOR-2 bridge cycles to key before giving up (default %(default)s)",
           "group": "Robust connect and the PACTOR-2 bridge"
         },
         {
@@ -4676,7 +4843,7 @@
           "choices": null,
           "required": false,
           "metavar": "K",
-          "help": "",
+          "help": "after K bridge cycles without a grant, go on to PACTOR-3 anyway; off by default",
           "group": "Robust connect and the PACTOR-2 bridge"
         },
         {
@@ -4697,7 +4864,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "key PACTOR-3 on the carrier offset the peer arrives at: all, control codewords only, or none (default %(default)s)",
           "group": "PACTOR-3 keying experiments"
         },
         {
@@ -4718,7 +4885,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "which cycles may run a fraction of a symbol past their slot: all, controls or none (default %(default)s)",
           "group": "PACTOR-3 keying experiments"
         },
         {
@@ -4780,6 +4947,26 @@
           "required": false,
           "metavar": null,
           "help": "5 ms half-symbol carrier stagger, alternating from this foot. The wrong foot is worse than off: fly one arm on each",
+          "group": "PACTOR-3 keying experiments"
+        },
+        {
+          "key": "control_phase",
+          "dest": "control_phase",
+          "flags": [
+            "--control-phase"
+          ],
+          "nargs": null,
+          "type": "str",
+          "action": "_StoreAction",
+          "default": "axis",
+          "const": null,
+          "choices": [
+            "axis",
+            "diagonal"
+          ],
+          "required": false,
+          "metavar": null,
+          "help": "control codeword steps (--p3-control-phase): axis keys 0/180 degrees (flown); diagonal keys 315/135 as stock does and takes that convention off the follow. Unflown",
           "group": "PACTOR-3 keying experiments"
         },
         {
@@ -5270,7 +5457,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -5502,7 +5689,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how many recent arms to show (default %(default)s)",
           "group": "options"
         }
       ],
@@ -5558,7 +5745,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the band to call on, in metres",
           "group": "flight"
         },
         {
@@ -5577,7 +5764,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "transmit power and drive preset for this arm (default %(default)s)",
           "group": "flight"
         },
         {
@@ -5696,7 +5883,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "skip the closing CW ID when the mode's own frames carried our callsign",
+          "help": "skip the closing CW ID only when digital and CW callsigns are equal",
           "group": "flight"
         },
         {
@@ -5730,7 +5917,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "do not place a remote receiver to record the session",
           "group": "witness and recording"
         },
         {
@@ -5747,7 +5934,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how long the remote receiver records, in seconds (default %(default)s)",
           "group": "witness and recording"
         },
         {
@@ -5839,7 +6026,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "tx sends to the gateway; rx only receives from it (default %(default)s)",
           "group": "VARA link"
         },
         {
@@ -6398,7 +6585,7 @@
           ],
           "required": false,
           "metavar": "60..600",
-          "help": "",
+          "help": "seconds allowed for the mail exchange (default %(default)s)",
           "group": "VARA link"
         },
         {
@@ -6643,7 +6830,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the order channels are tried in (default %(default)s)",
           "group": "campaign selection"
         },
         {
@@ -6664,7 +6851,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "try this distance group first: near <1000 km, far 1000\u20134000 km, dx >=4000 km; other stations remain eligible",
+          "help": "try this distance group first: near <1000 km, far 1000–4000 km, dx >=4000 km; other stations remain eligible",
           "group": "campaign selection"
         },
         {
@@ -6785,7 +6972,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "transmit power and drive preset for this arm (default %(default)s)",
           "group": "flight"
         },
         {
@@ -6904,7 +7091,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "skip the closing CW ID when the mode's own frames carried our callsign",
+          "help": "skip the closing CW ID only when digital and CW callsigns are equal",
           "group": "flight"
         },
         {
@@ -6938,7 +7125,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "do not place a remote receiver to record the session",
           "group": "witness and recording"
         },
         {
@@ -6955,7 +7142,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how long the remote receiver records, in seconds (default %(default)s)",
           "group": "witness and recording"
         },
         {
@@ -7047,7 +7234,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "tx sends to the gateway; rx only receives from it (default %(default)s)",
           "group": "VARA link"
         },
         {
@@ -7606,7 +7793,7 @@
           ],
           "required": false,
           "metavar": "60..600",
-          "help": "",
+          "help": "seconds allowed for the mail exchange (default %(default)s)",
           "group": "VARA link"
         },
         {
@@ -8091,7 +8278,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -8341,7 +8528,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how many recent arms to show (default %(default)s)",
           "group": "options"
         }
       ],
@@ -8391,7 +8578,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the band to call on, in metres",
           "group": "flight"
         },
         {
@@ -8410,7 +8597,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "transmit power and drive preset for this arm (default %(default)s)",
           "group": "flight"
         },
         {
@@ -8529,7 +8716,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "skip the closing CW ID when the mode's own frames carried our callsign",
+          "help": "skip the closing CW ID only when digital and CW callsigns are equal",
           "group": "flight"
         },
         {
@@ -8563,7 +8750,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "do not place a remote receiver to record the session",
           "group": "witness and recording"
         },
         {
@@ -8580,7 +8767,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how long the remote receiver records, in seconds (default %(default)s)",
           "group": "witness and recording"
         },
         {
@@ -8838,7 +9025,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the order channels are tried in (default %(default)s)",
           "group": "campaign selection"
         },
         {
@@ -8859,7 +9046,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "try this distance group first: near <1000 km, far 1000\u20134000 km, dx >=4000 km; other stations remain eligible",
+          "help": "try this distance group first: near <1000 km, far 1000–4000 km, dx >=4000 km; other stations remain eligible",
           "group": "campaign selection"
         },
         {
@@ -8980,7 +9167,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "transmit power and drive preset for this arm (default %(default)s)",
           "group": "flight"
         },
         {
@@ -9099,7 +9286,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "skip the closing CW ID when the mode's own frames carried our callsign",
+          "help": "skip the closing CW ID only when digital and CW callsigns are equal",
           "group": "flight"
         },
         {
@@ -9133,7 +9320,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "do not place a remote receiver to record the session",
           "group": "witness and recording"
         },
         {
@@ -9150,7 +9337,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "how long the remote receiver records, in seconds (default %(default)s)",
           "group": "witness and recording"
         },
         {
@@ -9920,7 +10107,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -10307,7 +10494,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -10694,7 +10881,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -11081,7 +11268,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -11468,7 +11655,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -11855,7 +12042,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -12242,7 +12429,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -12629,7 +12816,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -13016,7 +13203,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -13403,7 +13590,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -13790,7 +13977,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -14177,7 +14364,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -14564,7 +14751,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -14951,7 +15138,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -15338,7 +15525,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -15725,7 +15912,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -16112,7 +16299,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -16499,7 +16686,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -16886,7 +17073,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bit order of each received character (default %(default)s)",
           "group": "options"
         },
         {
@@ -16952,7 +17139,7 @@
           ],
           "required": false,
           "metavar": "NAME",
-          "help": "",
+          "help": "only arms in these modes",
           "group": "options"
         },
         {
@@ -16969,7 +17156,7 @@
           "choices": null,
           "required": false,
           "metavar": "CALL",
-          "help": "",
+          "help": "only arms with this station",
           "group": "options"
         },
         {
@@ -16986,7 +17173,7 @@
           "choices": null,
           "required": false,
           "metavar": "M",
-          "help": "",
+          "help": "only arms on this band, in metres",
           "group": "options"
         },
         {
@@ -17037,7 +17224,7 @@
           "choices": null,
           "required": false,
           "metavar": "WHEN",
-          "help": "",
+          "help": "a date or a timestamp to stop at",
           "group": "options"
         },
         {
@@ -17071,7 +17258,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "show at most this many arms; 0 shows them all",
           "group": "options"
         }
       ],
@@ -17132,7 +17319,7 @@
           ],
           "required": true,
           "metavar": null,
-          "help": "",
+          "help": "report the outlet, switch it on or off, or cycle it off and on",
           "group": "positional arguments"
         }
       ],
@@ -17162,7 +17349,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the station file to use",
           "group": "options"
         },
         {
@@ -17182,7 +17369,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "rig profile to use; default the station's",
           "group": "options"
         },
         {
@@ -17321,7 +17508,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "channels scanned per second (default %(default)s)",
           "group": "options"
         },
         {
@@ -17475,7 +17662,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the station file to use",
           "group": "options"
         },
         {
@@ -17495,7 +17682,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "rig profile to use; default the station's",
           "group": "options"
         },
         {
@@ -17634,7 +17821,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "channels scanned per second (default %(default)s)",
           "group": "options"
         },
         {
@@ -17786,7 +17973,7 @@
           "choices": null,
           "required": true,
           "metavar": null,
-          "help": "",
+          "help": "where to write the proof and its manifest",
           "group": "positional arguments"
         },
         {
@@ -17803,7 +17990,7 @@
           "choices": null,
           "required": true,
           "metavar": null,
-          "help": "",
+          "help": "the callsign the proof carries",
           "group": "options"
         },
         {
@@ -17832,7 +18019,7 @@
           ],
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "the gears to render, in order (default workhorse)",
           "group": "options"
         },
         {
@@ -17849,7 +18036,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "payload bytes per packet (default %(default)s)",
           "group": "options"
         },
         {
@@ -17894,7 +18081,7 @@
           "choices": null,
           "required": true,
           "metavar": null,
-          "help": "",
+          "help": "the manifest of the proof that was sent",
           "group": "positional arguments"
         },
         {
@@ -17909,7 +18096,7 @@
           "choices": null,
           "required": true,
           "metavar": null,
-          "help": "",
+          "help": "the remote recording to decode",
           "group": "positional arguments"
         },
         {
@@ -17926,7 +18113,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "also write the report to this file",
           "group": "options"
         }
       ],
@@ -17954,7 +18141,7 @@
           "choices": null,
           "required": true,
           "metavar": null,
-          "help": "",
+          "help": "the manifest of the proof to send",
           "group": "positional arguments"
         },
         {
@@ -18190,7 +18377,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "check occupancy once; refuse if busy",
           "group": "options"
         },
         {
@@ -18207,7 +18394,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "bypass the measured busy status; every other guard stands",
           "group": "options"
         },
         {
@@ -18224,7 +18411,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "print the plan and stop",
           "group": "options"
         },
         {
@@ -18241,7 +18428,7 @@
           "choices": null,
           "required": false,
           "metavar": null,
-          "help": "",
+          "help": "key the rig",
           "group": "options"
         }
       ],
@@ -18303,7 +18490,7 @@
           "choices": null,
           "required": false,
           "metavar": "BAUD/SHIFT[/STOP]",
-          "help": "",
+          "help": "baud rate, shift in Hz and optional stop bits (default %(default)s)",
           "group": "options"
         },
         {

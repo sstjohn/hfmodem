@@ -40,7 +40,7 @@ def silence(m):
 
 
 def ladder():
-    m, a = machine(ladder='chirp', data='chirp')
+    m, a = machine(data='chirp')
     a.on_host_data(MAIL)
     m.start(0)
     m.keyed()
@@ -134,7 +134,7 @@ def test_2213_scripted_continuation_uses_only_unacked_bytes():
     ack = p4oracle.word_at(audio, FS, 0, 32.194,
                            cfo_hz=1.-p4words.CARRIER_HZ['X27'])
     assert ack is not None and ack.word == 'X27'
-    m, a = machine(ladder='chirp', data='chirp')
+    m, a = machine(data='chirp')
     a.on_host_data(MAIL)
     m._begin_data_turn(round(31.264*FS), State.ISS_DATA_ACK)
     c0 = m.keyed()
@@ -208,8 +208,8 @@ def test_2206_marker_is_repeat_flag_not_lane_order(at, repeat, upper):
 
 def witness_words(capture):
     require_input(capture/'witness.wav')
-    require_input(ROOT/'tools/witness_align.py')
-    from witness_align import _at_48k, witness_rate
+    helpers = runpy.run_path(str(require_input(ROOT/'tools/witness_align.py')))
+    _at_48k, witness_rate = helpers['_at_48k'], helpers['witness_rate']
     path = capture/'witness.wav'
     x = _at_48k(path, witness_rate(path, 11999.0))
     placed_words = []
@@ -250,7 +250,7 @@ def replay(monkeypatch, arm, *, witness=False):
         return p
     monkeypatch.setattr(P4Turn, 'keyed', track)
     def drive(tx, stream, raster):
-        tx.p4_link_options.p4_ladder = 'chirp'
+        tx.p4_link_options.p4_data = 'chirp'
         tx.p4_link_options.p4_data = 'chirp'
         tx.p4_probe.emissions = [opening.copy()]
         take, transmit = stream.take_until, tx._tx
@@ -323,7 +323,7 @@ def test_2153_witness_u27_admits_crc_valid_data_in_driver(monkeypatch):
     # pin its witness U27 with a scripted final-v53 prefix on the same clock.
     at, full, early = witness_words(ROOT/'captures/onair-0930-2153')[-1]
     from hfmodem.shrike.p4observation import Registered, RegisteredObservation
-    m, a = machine(ladder='chirp', data='chirp')
+    m, a = machine(data='chirp')
     a.on_host_data(MAIL)
     m.start(at-round(.930*FS)-2*SHORT)
     assert key(m).value == 13

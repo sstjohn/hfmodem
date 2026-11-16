@@ -12,7 +12,7 @@ from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
 
 @pytest.mark.parametrize('now,expected', [(50000, 89120), (5*FS, 269120)])
 def test_expired_breakin_resumes_on_an_eligible_raster_slot(now, expected):
-    m, _ = machine(prekey_lead=2131/FS)
+    m, _ = machine(data='long', prekey_lead=2131/FS)
     m.start(0)
     m.keyed()
     early = word('Y27', 44000, partial=True, responds_to=0)

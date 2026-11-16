@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from hfmodem.shrike import onair, session
+from hfmodem.shrike import onair, p4probe, session
 from hfmodem.tests import evidence
 from hfmodem.tests.shrike.test_p4_link_0927 import Tx
 
@@ -154,6 +154,7 @@ def test_recorded_p1_phase_jump_recovers_at_production_final_drain(
     import shlex
     import sys
 
+    monkeypatch.setattr(p4probe, 'code_revision', lambda *_: dict(sha='abc1234', dirty=False))
     log_name = next(n for n in CASE['files'] if n.endswith('.log'))
     log = (evidence.RECORD / log_name).read_text()
     argv = shlex.split(next(s.strip()[6:] for s in log.splitlines()
@@ -161,8 +162,28 @@ def test_recorded_p1_phase_jump_recovers_at_production_final_drain(
     omit = {'--serial', '--ptt-port', '--audio-out', '--audio-in', '--outdir',
             '--mail-out', '--mail-send'}
     filtered, i = [], 0
+    folded = {'--p1-robust-stall-then': 'shorts', '--p4-entry-attempts': '2',
+              '--p4-probe-packet': 'robust', '--p4-probe-headers': 'A,A',
+              '--p4-probe-cadence': 'consecutive', '--p4-ladder': 'none',
+              '--p4-irs-silent-cycles': '0'}
     while i < len(argv):
+        # Knob rows 5–16, 31, 34 and 51: replay the same opening via its fold targets.
+        if argv[i] == '--p4-entry':
+            i += 1
+            continue
+        if argv[i] in folded:
+            assert argv[i+1] == folded[argv[i]]
+            i += 2
+            continue
+        if argv[i] == '--p4-probe-values':
+            filtered.extend(('--p4-opening', argv[i+1]))
+            i += 2
+            continue
         if argv[i] in omit:
+            i += 2
+            continue
+        if argv[i] == '--p4-chirp-ack' and argv[i+1] == 'alternate':
+            filtered.extend((argv[i], 'parity'))
             i += 2
             continue
         if argv[i] != '--transmit':

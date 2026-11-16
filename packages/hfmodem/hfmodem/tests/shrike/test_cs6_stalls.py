@@ -9,81 +9,12 @@ import numpy as np
 import pytest
 from scipy.io import wavfile
 
-from hfmodem.shrike import arq, onair
-from hfmodem.tests.shrike.test_cs6_driver import _arm, _window, requires_recorded
+from hfmodem.shrike import arq, onair, spec
+from hfmodem.tests.shrike.test_cs6_driver import _window, requires_recorded
+from hfmodem.tests.shrike.p3_cycle_support import ElapsedPCM, _arm, _buffered_listen, _duplex
 from hfmodem.tests.shrike.test_cs6_rx import FIXTURES, ROWS, recorded
 
 FS = 48000
-
-
-class ElapsedPCM:
-    """A buffered reader cannot rewind the converter clock after decoder work.
-
-    Only this in-memory object implements transmission. Capture position and
-    elapsed samples deliberately diverge during a stall, as they do in duplex.
-    """
-    holdback = 0
-
-    def __init__(self, audio, notice):
-        self.audio = audio
-        self.key_notice = notice
-        self.pos = self.samples = self.end = 0
-        self.emissions = []
-
-    def wait_until(self, until):
-        self.end = max(self.pos, min(int(until), len(self.audio)))
-        self.samples = max(self.samples, self.end)
-        return 0
-
-    def read_ready(self):
-        self.end = max(self.pos, min(self.samples, len(self.audio)))
-        audio = self.audio[self.pos:self.end]
-        self.pos = self.end
-        return audio
-
-    def take_until(self, until):
-        self.wait_until(until)
-        # Unlike read_ready, this read stops at the requested sample even if
-        # the decoder has allowed later capture to accumulate in the queue.
-        audio = self.audio[self.pos:self.end]
-        self.pos = self.end
-        return audio
-
-    def sample_now(self):
-        return self.samples
-
-    def clamp_late(self, at):
-        return max(0, self.samples + self.key_notice - at)
-
-    def transmit(self, audio, *, at, settle, key, max_key, admit=None):
-        assert not self.clamp_late(at), "production guard allowed late RF"
-        assert len(audio) / FS <= max_key
-        keyed_at = max(self.samples, at - round(settle * FS))
-        self.wait_until(keyed_at)
-        if admit is not None:
-            admit()
-        self.keyed_at = keyed_at
-        self.keyed_s = (at + len(audio) - self.keyed_at) / FS
-        self.emissions.append((at, at + len(audio), self.keyed_at))
-        self.samples = at + len(audio)
-        return at, self.samples
-
-    def flush_to(self, end):
-        self.pos = self.end = end
-        self.samples = max(self.samples, end)
-
-
-def _duplex(tx, s, audio, notice):
-    clock = ElapsedPCM(audio, notice)
-    tx.live = clock
-    tx.sessrx = s.rx
-    tx.rig = SimpleNamespace(ptt=lambda state: None, key_failure=lambda: None)
-    tx.transmit = True  # All output is intercepted by ElapsedPCM above.
-    return clock
-
-
-def _buffered_listen(live, n, host, sessrx, limit, **kwargs):
-    return live.take_until(live.pos + max(0, n))
 
 
 @requires_recorded
@@ -105,12 +36,12 @@ def test_decode_stall_recovers_on_peer_cycle_without_late_emission(
     s, tx, g, _ = _arm(tmp_path, tape, sl=3 if long_reply else 1,
                         expected_seq=0 if long_reply else 1)
     clock = _duplex(tx, s, tape, notice)
-    slot, audio, origin = _window(s, tx, g, clock)
+    slot, audio, origin, _ = _window(s, tx, g, clock)
     assert bool(s.host.arq.cycle_long) == long_reply
     clock.samples += round(stall_ms * FS / 1000)
     stalled_at = clock.samples
     monkeypatch.setattr(onair, '_listen_until_answer', _buffered_listen)
-    slot, _, _ = onair._regrid(clock, g, tx, s.host, s.rx, slot,
+    slot, _, _, _ = onair._regrid(clock, g, tx, s.host, s.rx, slot,
                                audio, origin, 1920)
     assert clock.samples >= stalled_at
     assert not clock.clamp_late(tx.key_instant(g, slot))
@@ -147,11 +78,11 @@ def test_cs6_then_retry_acks_keep_monotonic_clock_and_command_epoch(
     next_slot = 1
     for turn in range(4):
         s.rx.new_cycle()
-        slot, audio, origin = _window(s, tx, g, clock, next_slot)
+        slot, audio, origin, _ = _window(s, tx, g, clock, next_slot)
         if turn == 1:
             assert slot == 4  # no key in the two missing/possible-long bodies
         clock.samples += round((.035 if turn == 2 else .006) * FS)
-        slot, _, _ = onair._regrid(clock, g, tx, s.host, s.rx, slot,
+        slot, _, _, _ = onair._regrid(clock, g, tx, s.host, s.rx, slot,
                                    audio, origin, 1920)
         s.host.tick(elapsed_ticks=slot - next_slot + 1, cycle_ticks=g.ticks)
         tx.emit_pending_cs()
@@ -202,11 +133,12 @@ def test_stall_in_final_buffer_drain_refuses_cs6_without_recording_emission(
     s, tx, g, _ = _arm(tmp_path, tape)
     clock = _duplex(tx, s, tape, 1536)
     tx.aim(g, 3)
-    reads, attempts = _drain_fault(s, tx, clock, monkeypatch, sustained=True)
-    retained = s.host.sent_total, s.host.rcvd_total
-    tx.send_cs(arq.CS_CYCLE_TOG)
-    assert tx._pending_p3_cs == arq.CS_CYCLE_TOG and not clock.emissions
-    tx.emit_pending_cs()
+    with monkeypatch.context() as fault:
+        reads, attempts = _drain_fault(s, tx, clock, fault, sustained=True)
+        retained = s.host.sent_total, s.host.rcvd_total
+        tx.send_cs(arq.CS_CYCLE_TOG)
+        assert tx._pending_p3_cs == arq.CS_CYCLE_TOG and not clock.emissions
+        tx.emit_pending_cs()
     assert len(attempts) == onair.REGRID_TRIES
     assert [(slot, pos, elapsed, refused) for slot, pos, elapsed, refused, _ in attempts] == [
         (3, 163584, 165264, True),
@@ -222,8 +154,11 @@ def test_stall_in_final_buffer_drain_refuses_cs6_without_recording_emission(
     assert not clock.emissions and not tx.keyed and not tx.slots_used
     assert g._p3_command_slot == 0  # retain the previous actual CS6 epoch
     assert not list(tmp_path.glob('tx_*.json'))
-    assert tx._pending_p3_cs == arq.CS_CYCLE_TOG
+    # A CS6 that never keyed cannot become the held word.
+    assert tx._pending_p3_cs == arq.CS_ACK
+    assert s.host.arq.cycle_request is True
     assert (s.host.sent_total, s.host.rcvd_total) == retained
+    _fresh_packet_reasks_cs6(s, tx, g, 8)
 
 
 @pytest.mark.parametrize('sustained', [False, True], ids=['transient', 'held-until-recovery'])
@@ -242,20 +177,22 @@ def test_final_drain_recovery_keys_once_at_permitted_boundary(
             assert len(attempts) == onair.REGRID_TRIES
             assert not clock.emissions and not tx.keyed and not tx.slots_used
             assert g._p3_command_slot == 0 and not list(tmp_path.glob('tx_*.json'))
-            assert tx._pending_p3_cs == arq.CS_CYCLE_TOG
+            # A CS6 that never keyed cannot become the held word.
+            assert tx._pending_p3_cs == arq.CS_ACK
+            assert s.host.arq.cycle_request is True
         else:
             assert [a[0] for a in attempts] == [3, 4]
             assert attempts[0][3] and not attempts[1][3]
     if sustained:
-        # A held command is still owed. After fault removal, only the next
-        # permitted boundary can renew the actual emitted command epoch.
         tx.aim(g, 8)
         tx.emit_pending_cs()
     slot = 8 if sustained else 4
     assert not tx.refused and tx.slots_used == [slot]
     assert len(clock.emissions) == len(tx.keyed) == 1
+    # A successful retry outside the command's slot cannot license that command.
+    assert tx._p3_emitted_cs == arq.CS_ACK
     assert clock.emissions[0][0] == g.boundary(slot)
-    assert g._p3_command_slot == slot and s.host.arq.cycle_command_emitted
+    assert g._p3_command_slot == 0 and s.host.arq.cycle_command_emitted
     assert tx._pending_p3_cs is None
     files = list(tmp_path.glob('tx_*.json'))
     assert len(files) == 1
@@ -265,6 +202,22 @@ def test_final_drain_recovery_keys_once_at_permitted_boundary(
     assert (s.host.sent_total, s.host.rcvd_total) == retained
     tx.emit_pending_cs()
     assert len(clock.emissions) == len(tx.keyed) == 1 and tx.slots_used == [slot]
+    if sustained:
+        assert s.host.arq.cycle_request is True
+        _fresh_packet_reasks_cs6(s, tx, g, slot + 1)
+
+
+def _fresh_packet_reasks_cs6(s, tx, g, slot):
+    a = s.host.arq
+    assert a.cycle_request is True
+    tx.aim(g, slot)
+    a.on_rx_packet(1, b'x', a._expected_seq | spec.STATUS_LONG_CYCLE, True,
+                  protocol=spec.Protocol.PACTOR3, cycle_long=False)
+    assert a.cycle_request is True and not a.cycle_command_emitted
+    assert tx._pending_p3_cs == arq.CS_CYCLE_TOG
+    tx.emit_pending_cs()
+    assert not tx.refused and tx.slots_used[-1] == slot
+    assert tx._p3_emitted_cs == arq.CS_CYCLE_TOG and a.cycle_command_emitted
 
 
 @requires_recorded
@@ -276,7 +229,7 @@ def test_sustained_decode_overrun_bounds_recovery_and_preserves_grid(
         tape[start:start + len(pcm)] = pcm
     s, tx, g, _ = _arm(tmp_path, tape)
     clock = _duplex(tx, s, tape, 1536)
-    slot, audio, origin = _window(s, tx, g, clock)
+    slot, audio, origin, _ = _window(s, tx, g, clock)
     clock.samples += round(1.4 * FS)
     scan = onair._scan_frame
     calls = []
@@ -288,7 +241,7 @@ def test_sustained_decode_overrun_bounds_recovery_and_preserves_grid(
 
     monkeypatch.setattr(onair, '_scan_frame', stalled_scan)
     monkeypatch.setattr(onair, '_listen_until_answer', _buffered_listen)
-    slot, _, _ = onair._regrid(clock, g, tx, s.host, s.rx, slot,
+    slot, _, _, _ = onair._regrid(clock, g, tx, s.host, s.rx, slot,
                                audio, origin, 1920)
     assert len(calls) == onair.REGRID_TRIES
     assert clock.clamp_late(tx.key_instant(g, slot))

@@ -748,7 +748,11 @@ def _cs_profile(seg: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     band = (f > 300) & (f < 2600)
     tone = ((f > 1360) & (f < 1440)) | ((f > 1560) & (f < 1640))
     wideband = (f > 1900) & (f < 2500)
-    frames = np.lib.stride_tricks.sliding_window_view(seg, w)[:seg.size - w:h]
+    # Stepped before it is a view: NumPy sizes the whole sliding view first, and
+    # on 32-bit ARM a few seconds of it is past what an index can address.
+    frames = np.lib.stride_tricks.as_strided(
+        seg, shape=((seg.size - w - 1) // h + 1, w),
+        strides=(h * seg.strides[0], seg.strides[0]), writeable=False)
     win = _window(w)
     n = len(frames)
     p1, wide = np.empty(n), np.empty(n)
@@ -1615,14 +1619,11 @@ def decode_expected_p1_packet(audio: np.ndarray,
     own lane -- and a combined decode comes back through the same event shape,
     tagged for what it is.
     """
-    for p in p1rx.decode_p1_packets(audio):
-        if memory is not None:
-            memory.clear()
-        return _p1_packet_event(p, p.start, t=0.0, tag=", expected")
-    for p in p1rx.decode_p1_packets(audio, breakin=True):
-        if memory is not None:
-            memory.clear()
-        return _p1_packet_event(p, p.start, t=0.0, tag=", expected")
+    for packets in p1rx._packet_passes(audio):
+        for p in packets:
+            if memory is not None:
+                memory.clear()
+            return _p1_packet_event(p, p.start, t=0.0, tag=", expected")
     if memory is not None:
         for baud in (100, 200):
             softs = p1rx.packet_softs(audio, baud=baud)
@@ -1815,7 +1816,8 @@ def decode_events(audio: np.ndarray, hop_s: float = 0.5,
                   p3_packets_after: float | None = None,
                   p3_headers: bool = True, p1_controls: bool = True,
                   p2_markers: bool = True, mycall: str | None = None,
-                  strict: bool = False, linked: bool = False) -> Iterator[Event]:
+                  strict: bool = False, linked: bool = False,
+                  p1_marker_veto: bool = False) -> Iterator[Event]:
     """Decoded PACTOR events in `audio`.
 
     `acquiring` selects the connect-answer path: a sliding correlator over the
@@ -1857,6 +1859,9 @@ def decode_events(audio: np.ndarray, hop_s: float = 0.5,
     call to it across the tone-pair offsets and both connect frames, and each
     call found comes first, as a `connect` at the frame's end. `strict` is
     CONIntegrity 1.
+
+    `p1_marker_veto` retains P2 marker spans solely to veto P1 shape reads,
+    without P2 reporting. A restricted session still needs that evidence.
 
     `linked` pins the branch-B scan to the link's own tone pair, one pass: a
     station holding a link has no use for a stranger's Robust Call elsewhere,
@@ -1923,8 +1928,10 @@ def decode_events(audio: np.ndarray, hop_s: float = 0.5,
     # `_occupied_bw`, inside `P1_MAX_BW_HZ`, so every burst of it satisfied
     # `_fsk_present` and left through the `fsk` branch before this pass existed.
     # The `detect` line said so of a real PACTOR-2 station exactly never.
-    p2_frames = _p2_markers(audio) if p2_markers else []
-    for fr in p2_frames:
+    # P1 shape reads need the marker's occupied span even when no P2 events
+    # are requested; removing it turns P2 traffic into new P1 accepts.
+    p2_frames = _p2_markers(audio) if p2_markers or p1_marker_veto else []
+    for fr in p2_frames if p2_markers else ():
         yield Event(fr.t, "detect",
                     f"PACTOR-2 frame marker, {fr.path.name}, correlation "
                     f"{fr.score:.2f} -- arms at {p2rx.MARKER_ARM} of a "
@@ -2159,7 +2166,7 @@ def decode_events(audio: np.ndarray, hop_s: float = 0.5,
                         f"{pr.concurrency:.2f} -- shape only, not decoded, not "
                         f"attributed (VARA and 500 Hz ARQ look the same)")
             continue
-        p2 = _p2_present(sp) if p2mark is None else None
+        p2 = _p2_present(sp) if p2mark is None and not p1_marker_veto else None
         if p2 is not None and hi / FS - last_p2 > 1.0:
             last_p2 = hi / FS
             # The frequencies, because the omission cost a night: this line said
@@ -2285,8 +2292,10 @@ def _sampled_baseband(audio: np.ndarray, tones, idx: np.ndarray) -> dict:
     pad = np.zeros(m - 1, audio.dtype)
     rows = idx - b0
     tones = tuple(tones)
-    win = np.lib.stride_tricks.sliding_window_view(
-        np.concatenate([pad, audio[b0:b1], pad]), m)[rows]
+    # Gathered rather than viewed: a sliding view over a long window is sized
+    # whole, past what a 32-bit index can address (see `_cs_profile`).
+    win = np.concatenate([pad, audio[b0:b1], pad])[
+        rows[:, None] + np.arange(m, dtype=rows.dtype)]
     values = win @ _sampled_kernels(tones)
     values = values[:, :len(tones)] + 1j * values[:, len(tones):]
     period = FS / spec.TONE_SPACING_HZ
@@ -2465,10 +2474,10 @@ class SyncedRx:
     WIDEBAND_EARLY_N = round(.025 * FS)
     """Maximum missing short-packet tail admitted by the bounded CRC trial."""
 
-    def sl1_header_at(self, audio: np.ndarray, at: int) -> "p3frame.PacketHeader | None":
-        """Read a bounded narrow header; it authorizes listening, never ACKs."""
+    def narrow_header_at(self, audio: np.ndarray, at: int,
+                         level: int) -> "p3frame.PacketHeader | None":
         h = self._narrow_header_at(audio, at)
-        if h is not None and h.fit >= p3rx.VH_FIT and 1 in h.levels:
+        if h is not None and h.fit >= p3rx.VH_FIT and level in h.levels:
             return h
         return None
 

@@ -1515,8 +1515,9 @@ def _carries_the_record(text: str) -> bool:
 #:
 #: Empty since 2026-09-09, when the last three went. The FCC sentence left with the
 #: regulatory section that carried it. `no message body has ever been carried` had
-#: become false: `logs/mail/JWKY65C2OZES.b2f` is 643 bytes fetched over a live VARA
-#: link. The sabir clause was narrowed rather than dropped -- two public receivers
+#: become false: a 643-byte message (`WKYC52O6ZESJ` here stands in for its ID, which
+#: names its file under `logs/mail/`) was fetched over a live VARA link. The sabir
+#: clause was narrowed rather than dropped -- two public receivers
 #: decoded the beacon, so what survives is the *exchange*, and README's row now
 #: cites `docs/implementation/sabir/ONAIR.md` for why a WebSDR cannot supply one.
 KNOWN_UNCITED: set[str] = set()

@@ -72,7 +72,7 @@ def test_c4_policy_source_and_actual_association(kind, context, variant):
         assert (p.kind, p.status, p.payload, p.state) == (Kind.BODY, 0x40, b'', State.ISS_GRANT)
         assert (p.receive_epoch, p.source_root, p.accepted_target, p.current_slot) == (None, None, None, None)
     else:
-        assert (p.kind, p.word, p.state) == (Kind.WORD, 'T27' if kind == Kind.LONG else 'V27', State.IRS_ANSWER)
+        assert (p.kind, p.word, p.state) == (Kind.WORD, 'X27', State.IRS_ANSWER)
         assert p.receive_epoch == pending['receive_epoch'] and p.source_root == pending['source_root']
         assert p.accepted_target == p.current_slot == AT and p.current_slot_accepted
     assert p.ack_identity == (seed_status, seed_data)
@@ -141,7 +141,7 @@ def test_c4_policy_source_and_actual_association(kind, context, variant):
                 assert (later.kind, later.state, later.status, later.payload) == (Kind.BODY, State.ISS_GRANT, 0x40, b'')
         else:
             assert later is not None and (later.kind, later.state) == (Kind.WORD, State.IRS_ANSWER)
-            assert later.word == ('T27' if kind == Kind.LONG else 'V27')
+            assert later.word == ('X27')
             assert later.accepted_target == current and later.current_slot == current
             assert later.ack_identity[1] == o.frame.data
     elif variant != 'weak_full':
@@ -160,7 +160,10 @@ def test_c4_policy_source_and_actual_association(kind, context, variant):
         else:
             assert p.kind == Kind.WORD and p.state == State.IRS_ANSWER
             assert p.accepted_target == AT and p.current_slot == current and not p.current_slot_accepted
-            assert p.ack_identity == (seed_status, seed_data)
+            assert p.ack_identity == (
+                (seed_status, seed_data) if parent or context == 'actual-p2-seed' else None)
+            if not parent and context == 'common-p3-irs':
+                assert p.purpose == 'repeat-request'
     elif accepted_case:
         assert m.unread == 0 and current in m._decided and current not in m._dropped
         assert r.delivered[source_before:] == [b'ordinary source\r']
@@ -175,7 +178,10 @@ def test_c4_policy_source_and_actual_association(kind, context, variant):
                 # existing source; it must not manufacture current acceptance.
                 assert p.kind == Kind.WORD and p.accepted_target == AT
                 assert p.current_slot is None and not p.current_slot_accepted
-                assert p.ack_identity == (seed_status, seed_data)
+                assert p.ack_identity == (
+                    (seed_status, seed_data) if context == 'actual-p2-seed' else None)
+                if context == 'common-p3-irs':
+                    assert p.purpose == 'repeat-request'
     assert m._deferred is None
     if variant == 'displaced_duplicates':
         assert outcomes[-1][0] == outcomes[-2][0] == 'duplicate'

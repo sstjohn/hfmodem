@@ -227,7 +227,7 @@ def held(harness, source="owned = claim.acquire('legacy', 'row')", point='held')
     child = launch(harness, source + f'\ncoexist.checkpoint({point!r})\nclaim.release(owned)')
     event = harness.reached(point, quiescent=True)
     nonce = int((harness.root / 'rig.claim').read_text().split()[4])
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'],
+    assert_claim_possession(harness.observer.latest, pid=event['pid'],
                             claim_path=harness.root / 'rig.claim', nonce=nonce)
     return child
 
@@ -351,7 +351,7 @@ def test_inherited_descriptor_proven_nonce_limits(harness, nonce):
         claim.release(owned)
     ''')
     reached = harness.reached('nonce-held', quiescent=True)
-    snapshot = harness.observer.snapshots[-1]
+    snapshot = harness.observer.latest
     assert_claim_possession(snapshot, pid=reached['pid'],
                             claim_path=harness.root / 'rig.claim', nonce=nonce)
     harness.release('nonce-held')
@@ -414,7 +414,7 @@ def test_inherited_descriptor_proven(harness, case):
     child = launch(harness, 'CASE = ' + repr(case) + '\nMETADATA = ' + repr(METADATA)
                    + '\n' + textwrap.dedent(source))
     event = harness.reached('descriptor-checked', quiescent=True)
-    snapshot = harness.observer.snapshots[-1]
+    snapshot = harness.observer.latest
     path = harness.root / 'rig.claim'
     if case in ('inherited', 'dead-root'):
         assert_claim_possession(snapshot, pid=event['pid'], claim_path=path,
@@ -595,7 +595,7 @@ def test_native_audio_admission(harness, backend, output, point):
     ''')
     event = harness.reached(point, quiescent=True)
     path = harness.root / 'rig.claim'
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'], claim_path=path,
+    assert_claim_possession(harness.observer.latest, pid=event['pid'], claim_path=path,
                             nonce=int(path.read_text().split()[4]))
     contender = launch(harness, '''
         try:
@@ -713,10 +713,10 @@ def test_native_spawn_admission_surviving_child(harness, proof_line, fake_yaesu,
         harness.release('native-child-before-open')
         harness.reached('native-child-open', quiescent=True)
         path = harness.root / 'rig.claim'
-        assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'], claim_path=path,
+        assert_claim_possession(harness.observer.latest, pid=event['pid'], claim_path=path,
                                 nonce=int(path.read_text().split()[4]))
         assert any(fd['path'] == fake_yaesu.port
-                   for fd in harness.observer.snapshots[-1].descriptors[event['pid']])
+                   for fd in harness.observer.latest.descriptors[event['pid']])
         assert line_low(proof_line)
     finally:
         harness.release('native-child-before-open')
@@ -810,7 +810,7 @@ def test_child_misuses_shared_claim(harness, proof_line, fake_yaesu, misuse):
     ''')
     event = harness.reached('misused', quiescent=True)
     path = harness.root / 'rig.claim'
-    snapshot = harness.observer.snapshots[-1]
+    snapshot = harness.observer.latest
     try:
         with pytest.raises(OracleFailure, match='claim descriptor|does not hold'):
             assert_claim_possession(snapshot, pid=event['pid'], claim_path=path,
@@ -873,7 +873,7 @@ def test_audio_endpoints(harness, case):
     ''')
     event = harness.reached('endpoint-held', quiescent=True)
     assert any(fd.get('path') == str(node)
-               for fd in harness.observer.snapshots[-1].descriptors[event['pid']])
+               for fd in harness.observer.latest.descriptors[event['pid']])
     harness.release('endpoint-held')
     completed(child)
     evidence = finish(harness)
@@ -901,7 +901,7 @@ def test_mutex_holder_identified(harness, case):
     ''')
     event = harness.reached('mutex-published', quiescent=True)
     pid = event['pid']
-    descriptors = [fd for fd in harness.observer.snapshots[-1].descriptors[pid]
+    descriptors = [fd for fd in harness.observer.latest.descriptors[pid]
                    if fd.get('path') == str(harness.root / 'rig.claim.cleanup')]
     assert len(descriptors) == 1
     descriptor = descriptors[0]
@@ -960,7 +960,7 @@ os.close(mutex)
     ''')
     events = [harness.reached(f'mutex-survivor-{i}', quiescent=True) for i in range(count)]
     published = next(e for e in harness.events() if e['event'] == 'cleanup_acquired')
-    snapshot = harness.observer.snapshots[-1]
+    snapshot = harness.observer.latest
     for event in events:
         descriptors = snapshot.descriptors[event['pid']]
         assert any(fd.get('path') == str(harness.root / 'rig.claim.cleanup')
@@ -1055,7 +1055,7 @@ os.close(9)
         harness.release('publication-unwound')
     harness.release('inherited_after_inode')
     harness.reached('reopen-refused', quiescent=True)
-    snapshot = harness.observer.snapshots[-1]
+    snapshot = harness.observer.latest
     assert any(fd.get('fd') == 9 and fd.get('pos') == 0
                for fd in snapshot.descriptors[event['pid']])
     harness.release('reopen-refused')
@@ -1120,7 +1120,7 @@ claim.release(owned)
 ''')
     event = harness.reached(point, quiescent=True)
     path = harness.root / 'rig.claim'
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'], claim_path=path,
+    assert_claim_possession(harness.observer.latest, pid=event['pid'], claim_path=path,
                             nonce=int(path.read_text().split()[4]))
     contender = launch(harness, '''
         try:
@@ -1343,7 +1343,7 @@ def test_native_spawn_admission_shrike_handle(harness, request, with_line, fake_
     ''')
     event = harness.reached('interactive-open', quiescent=True)
     path = harness.root / 'rig.claim'
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'], claim_path=path,
+    assert_claim_possession(harness.observer.latest, pid=event['pid'], claim_path=path,
                             nonce=int(path.read_text().split()[4]))
     if case == 'supervisor-failure':
         harness.reached('native_before_acknowledgement', quiescent=True)
@@ -1649,7 +1649,7 @@ with sounddevice.RawInputStream():
         harness.reached('late-launch-done', quiescent=True)
         if bypass:
             newcomer = harness.reached('late-child-open', quiescent=True)['pid']
-            snapshot = harness.observer.snapshots[-1]
+            snapshot = harness.observer.latest
             mutex = harness.root / 'rig.claim.cleanup'
             with pytest.raises(OracleFailure, match='claim descriptor or nonce not observed'):
                 assert_claim_possession(snapshot, pid=newcomer, claim_path=mutex,
@@ -1710,14 +1710,14 @@ def test_native_audio_admission_silent_deadline(harness, request, with_line, out
     ''')
     event = harness.reached('ffmpeg_before_output', quiescent=True)
     path = harness.root / 'rig.claim'
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'], claim_path=path,
+    assert_claim_possession(harness.observer.latest, pid=event['pid'], claim_path=path,
                             nonce=int(path.read_text().split()[4]))
     if output == 'file':
         assert any(e['event'] == 'ffmpeg_header' for e in harness.events())
     assert not any(e['event'] == 'native_admitted' for e in harness.events())
     harness.release('ffmpeg_before_output')
     harness.reached('silent-capture-ended', timeout=20, quiescent=True)
-    assert event['pid'] not in harness.observer.snapshots[-1].participants
+    assert event['pid'] not in harness.observer.latest.participants
     harness.release('silent-capture-ended')
     completed(parent)
     evidence = finish(harness)
@@ -1777,7 +1777,7 @@ def test_native_audio_admission_node_without_output(harness):
     ''')
     event = harness.reached('ffmpeg_before_output', quiescent=True)
     harness.reached('node-admitted', quiescent=True)
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'],
+    assert_claim_possession(harness.observer.latest, pid=event['pid'],
         claim_path=harness.root / 'rig.claim',
         nonce=int((harness.root / 'rig.claim').read_text().split()[4]))
     assert any(e['event'] == 'native_admitted' for e in harness.events())

@@ -25,6 +25,7 @@ from numpy.lib.stride_tricks import as_strided
 from scipy.fft import fft, ifft, irfft, next_fast_len, rfft
 from scipy.signal import fftconvolve, hilbert, resample_poly
 
+from ..core.grid_fold import fold_grid as _fold
 from . import placement, rx, rxfront, spec
 
 FS = spec.SAMPLE_RATE
@@ -158,7 +159,8 @@ class Candidate:
     """The coarse hypothesis at which the control and extent were qualified."""
 
 
-def changeover(audio: np.ndarray, *, offsets=OFFSETS_HZ) -> Candidate | None:
+def changeover(audio: np.ndarray, *, offsets=OFFSETS_HZ,
+               can_decode=None) -> Candidate | None:
     """Search complete CS3 heads only; report body CRC when enough audio exists.
 
     The 2026-09-08 WS8EOC head precedes the old P1 anchor by ~100 ms and needs
@@ -166,7 +168,7 @@ def changeover(audio: np.ndarray, *, offsets=OFFSETS_HZ) -> Candidate | None:
     acquire it. Search the supplied receive window, with zero bit errors at
     adjacent alignments, a whole-burst extent check and coherent soft symbols.
     """
-    return _acquire(audio, offsets, (placement.BREAKIN_CS,))
+    return _acquire(audio, offsets, (placement.BREAKIN_CS,), can_decode=can_decode)
 
 
 def control_signal(audio: np.ndarray, *, offsets=CONTROL_OFFSETS_HZ,
@@ -219,7 +221,7 @@ def head_aims(audio: np.ndarray, *, offsets=ENTRY_CONTROL_OFFSETS_HZ,
                     bits*sps + sps//2 + 1)
     if found is None:
         return []
-    hits = sorted(((_ranked(found.qualities[trial, k]), int(trial), int(k))
+    hits = sorted(((ranked_quality(found.qualities[trial, k]), int(trial), int(k))
                    for trial, k in zip(*np.nonzero(found.accepted))), reverse=True)
     aims, envelopes = [], {}
     slack = rxfront.CS_EXTENT_SLACK * sps
@@ -270,7 +272,7 @@ def cut_word(audio: np.ndarray, at: int, hz: float, *,
             if abs(lo + int(found.starts[k])*DECIMATION - at) <= SPS]
     if not near:
         return None
-    return int(found.cis[0, max(near, key=lambda k: _ranked(found.qualities[0, k]))])
+    return int(found.cis[0, max(near, key=lambda k: ranked_quality(found.qualities[0, k]))])
 
 
 def _bands(analytic: np.ndarray, clock: np.ndarray, offsets,
@@ -338,8 +340,8 @@ def _grid(analytic: np.ndarray, offsets, first: int,
     -- the real part `_bands` takes is the spectrum plus its mirrored conjugate,
     and sampling one in `STEP` is the spectrum folded `STEP` times onto a
     transform `STEP` times shorter. So one forward transform serves every
-    hypothesis on the grid, each row is two shifted reads of it, a multiply and
-    a fold, and the inverse is a tenth of the length.
+    on-bin hypothesis; the whole grid folds two shifted reads per carrier and
+    offset with a weight multiply, and the inverse is a tenth of the length.
 
     Exact rather than approximate: the same circular convolution `fftconvolve`
     takes, the transform length covering the full linear output. Against
@@ -352,27 +354,26 @@ def _grid(analytic: np.ndarray, offsets, first: int,
     weight = _fold_weight(nfft, first % STEP)
     width = nfft // STEP
     spectrum = fft(analytic, nfft)
-    twice, mirror = (np.concatenate([spectrum, spectrum]),
-                     np.tile(np.conj(np.roll(spectrum[::-1], 1)), 2))
-    rows = {cn: np.empty((len(offsets), width), complex)
-            for cn in spec.VH_CHANNELS}
-    for i, hz in enumerate(offsets):
+    spectra = [spectrum]
+    picks, shifts = [], []
+    for hz in offsets:
         shift = hz * nfft / SEARCH_FS
         if abs(shift - round(shift)) < 1e-9:
-            line, image, shift = twice, mirror, round(shift)
+            picks.append(0)
+            shifts.append(round(shift))
         else:
             moved = fft(analytic * np.exp(-2j*np.pi*hz*np.arange(n)/SEARCH_FS),
                         nfft)
-            line, image, shift = (np.concatenate([moved, moved]),
-                                  np.tile(np.conj(np.roll(moved[::-1], 1)), 2),
-                                  0)
-        for cn in spec.VH_CHANNELS:
-            tone = round(spec.channel_freq_hz(cn) * nfft / SEARCH_FS)
-            a, b = (shift + tone) % nfft, (tone - shift) % nfft
-            z = line[a:a + nfft] + image[b:b + nfft]
-            rows[cn][i] = np.sum(z.reshape(STEP, width) * weight, axis=0)
+            picks.append(len(spectra))
+            spectra.append(moved)
+            shifts.append(0)
+    tones = [round(spec.channel_freq_hz(cn) * nfft / SEARCH_FS)
+             for cn in spec.VH_CHANNELS]
+    out = np.empty((len(spec.VH_CHANNELS), len(offsets), width), complex)
+    _fold(spectra, picks, shifts, tones, weight, out)
     at = first // STEP
-    return {cn: ifft(v, axis=1)[:, at:at + count] for cn, v in rows.items()}
+    return {cn: ifft(out[j], axis=1)[:, at:at + count]
+            for j, cn in enumerate(spec.VH_CHANNELS)}
 
 
 def _refined(diffs: np.ndarray, trial_signs: np.ndarray, trial: int, k: int,
@@ -413,7 +414,8 @@ each caller gave an exact one: the later alignment and higher hypothesis
 first, `cut_word`'s earliest."""
 
 
-def _ranked(quality: float) -> float:
+def ranked_quality(quality: float) -> float:
+    """Round coherent quality so numerical noise cannot break a tie."""
     return round(float(quality), RANK_DIGITS)
 
 
@@ -559,7 +561,10 @@ def _inside_burst(shifted: np.ndarray, at: int) -> bool:
 
 def _acquire(audio: np.ndarray, offsets, codes, *,
              preferred_hz: float | None = None,
-             preferred_at: int | None = None) -> Candidate | None:
+             preferred_at: int | None = None,
+             can_decode=None) -> Candidate | None:
+    if can_decode is None:
+        can_decode = lambda: True
     if len(audio) < round(.23*FS) or not np.any(audio):
         return None
     # A caller passing a long recording must slice it into receive windows.
@@ -601,8 +606,15 @@ def _acquire(audio: np.ndarray, offsets, codes, *,
             # that is where the extent above was measured; the refinement is a
             # correction with no CRC behind it, so it gets a second trial only
             # when the first does not decode, and the CRC is the acceptor.
+            if not can_decode():
+                return best
             ev = rxfront._cs_event(shifted, code, 0, at, at/FS, note)
+            got = Candidate(ev, fine, float(quality[k]), float(hz))
+            if best is None or ranked_quality(got.quality) > ranked_quality(best.quality):
+                best = got
             if ev.packet is None and fine != hz:
+                if not can_decode():
+                    return best
                 refined = rxfront._cs_event(compensate(audio, fine), code, 0,
                                             at, at/FS, note)
                 if refined.packet is not None:
@@ -610,7 +622,7 @@ def _acquire(audio: np.ndarray, offsets, codes, *,
             got = Candidate(ev, fine, float(quality[k]), float(hz))
             if ev.packet is not None:
                 return got
-            if best is None or _ranked(got.quality) > _ranked(best.quality):
+            if best is None or ranked_quality(got.quality) > ranked_quality(best.quality):
                 best = got
             break
     full_cache = {}
@@ -618,16 +630,18 @@ def _acquire(audio: np.ndarray, offsets, codes, *,
     # continuity only among hypotheses which already passed every soft/bit
     # gate, and still validate each one's physical extent below. Without a
     # retained frequency, keep the original quality ordering.
-    ordering = ((lambda row: (_ranked(row[0]), *row[1:]))
+    ordering = ((lambda row: (ranked_quality(row[0]), *row[1:]))
                 if preferred_hz is None and preferred_at is None else
                 lambda row: (preferred_hz is not None and abs(row[4]-preferred_hz) <= 25.0,
                              preferred_at is not None and abs(row[2]-preferred_at) <= round(.020*FS),
-                             _ranked(row[0]), *row[1:]))
+                             ranked_quality(row[0]), *row[1:]))
     for quality, hz, at, ci, fine in sorted(ranked, key=ordering, reverse=True):
         if hz not in full_cache:
             full_cache[hz] = compensate(audio, hz)
         shifted = full_cache[hz]
         if _inside_burst(shifted, at):
+            if not can_decode():
+                return best
             ev = rxfront._cs_event(shifted, ci, 0, at, at/FS,
                                    f", acquisition RX {fine:+g} Hz")
             return Candidate(ev, fine, quality, hz)

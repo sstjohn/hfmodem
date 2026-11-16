@@ -5,12 +5,13 @@ import contextlib
 import io
 import sys
 
-from hfmodem.shrike import onair
+from hfmodem.shrike import onair, p4probe
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.tests.shrike.test_p1_robust_0926 import _peer_wav, FS
 
 
 def test_main_hands_the_decoded_ack_to_p4_before_another_p1_cycle(tmp_path, monkeypatch):
+    monkeypatch.setattr(p4probe, 'code_revision', lambda *_: dict(sha='abc1234', dirty=False))
     wav = tmp_path / 'peer.wav'
     _peer_wav(wav)
     ready, handed, keys = [], [], []
@@ -56,8 +57,7 @@ def test_main_hands_the_decoded_ack_to_p4_before_another_p1_cycle(tmp_path, monk
         'shrike.onair', '--replay', str(wav), '--max-cycles', '3',
         '--mycall', 'W9SSJ', '--dxcall', 'N9VC', '--dial', '7100910',
         '--outdir', str(tmp_path / 'out'), '--after-connect', 'p1-robust',
-        '--p1-status-bits45', '2', '--p4-probe-values', '7,38',
-        '--p4-probe-headers', 'A,A', '--p4-probe-cadence', 'consecutive', '--p4-link'])
+        '--p1-status-bits45', '2', '--p4-opening', '7,38', '--p4-link'])
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         onair.main()

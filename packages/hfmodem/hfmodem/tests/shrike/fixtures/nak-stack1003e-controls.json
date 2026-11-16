@@ -5,79 +5,79 @@
       {
         "at": 2312834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2372834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2432834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2492834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2552834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2612834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2672834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2732834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2792834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2852834,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       }
     ],
-    "decision_digest": "c3f55bbc7b1b9ada7183c1d1541963656d600f431eaf0729586c51d781063834",
+    "decision_digest": "cc3559d75ce433371b9eaadca2710b2a0f82c023d8a804f003c1e9bdabca3225",
     "ordinary_emission_digest": "f07138df1c3b257e64e7e7eb21b9c166eb119c131ed0be09859f9216ff7b7f02",
     "ordinary_emission_count": 18,
     "ordinary_waveform_digest": "71f5d7579c6345ee417089a11497967eeeeee01e2c079be93c3a20d60489f70a",
-    "heard_digest": "14e75d948678151ee9c4241d36754ad3e8ef485b51c594ed900f1454533c3124",
+    "heard_digest": "42d75dc154a126d1896ad599a0be39c548504865603e9629bec455a4556e76b0",
     "without_requests_heard_digest": "8babb824da3c6b595b4d6a2cbdc0f447fb571155fba745ee4031d5819670cdad",
     "without_requests_decision_digest": "59e22aa1f5b5b431872e3494f95436fde6dedff1d575f5ba4efbc60a1c8ffd6d",
     "ordinary_waveform_count": 17
@@ -86,7 +86,7 @@
     "neutral": [
       {
         "at": 1831862,
-        "word": "V27",
+        "word": "U27",
         "purpose": "repeat-request",
         "kind": "word",
         "state": null
@@ -94,23 +94,23 @@
       {
         "at": 1951883,
         "word": "X27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       },
       {
         "at": 2071877,
         "word": "V27",
-        "purpose": null,
+        "purpose": "repeat-request",
         "kind": "word",
         "state": "IRS_ANSWER"
       }
     ],
-    "decision_digest": "06fd329bb43369015fe5e2282a1fcb5204aaf4904b45f69a7a5de1eb7ad7607d",
+    "decision_digest": "eb467bd5cae4f51b839b7647dd375aeda88769290e96d7a744c82a814f0dd24f",
     "ordinary_emission_digest": "c2b43ca5d3d039cd686d33ab28477f208e8df42cd13a778754f4f05d78300e71",
     "ordinary_emission_count": 38,
     "ordinary_waveform_digest": "73d5d0f2acd3c0c2bac22ca18cf90ba4f7aa0ae46b63078905a1f09878df4ba4",
-    "heard_digest": "c36088a11b65fdb043aa0e753af03a77857f21560fa289c8a7881fdb8698eaa8",
+    "heard_digest": "d5e6943dc00421e9d1a57ece4f6f5acd86890278a7c61f11bcbc44ba1e891f75",
     "without_requests_heard_digest": "fe59e4b76c040b7e3a0edad7a90c97a936598fac006ec9782312e65f32fec5ad",
     "without_requests_decision_digest": "ea7eac9ed69647c980eb2a45c300018f9ad2166bd8eb291faa370fb52afb83bc",
     "ordinary_waveform_count": 37

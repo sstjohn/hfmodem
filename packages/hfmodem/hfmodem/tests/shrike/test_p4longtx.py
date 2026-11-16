@@ -7,9 +7,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 from scipy.signal import welch
+from hfmodem.core import wav
 
 from hfmodem.shrike import (p4coding, p4frame, p4long, p4longtx, p4normal, p4rx,
-                            p4shorttx, placement, tablegen)
+                            p4short, p4shorttx, placement, tablegen)
+from hfmodem.tests.evidence import RECORD, require_input
 
 TRAINING_START = 2880
 SILENCE = 4800
@@ -32,7 +34,7 @@ def recordings():
 def read_back(audio, *, offset=0):
     padded = np.concatenate([np.zeros(SILENCE), audio, np.zeros(SILENCE)])
     baseband = p4rx.audio_to_baseband(padded, 48000)
-    start = SILENCE * p4rx.SAMPLE_RATE // 48000 + p4longtx.HEADER_CHIPS * p4rx.SAMPLES_PER_CHIP
+    start = SILENCE * p4rx.SAMPLE_RATE // 48000 + p4longtx.HEADER_SAMPLES
     return p4long.decode_body(baseband, first_training_start=start + offset)
 
 
@@ -63,9 +65,9 @@ def chips(baseband, offsets):
     return (matched[positions[:, None] + 16 * np.arange(-5, 6)] @ inverse) / gain
 
 
-def header_estimate(baseband):
+def header_estimate(baseband, count=140):
     """The recorded header's chips, through the channel its trainings support."""
-    return chips(baseband, -np.arange(p4longtx.HEADER_CHIPS, 0, -1))
+    return chips(baseband, -np.arange(count, 0, -1))
 
 
 def coherence(a, b):
@@ -151,8 +153,8 @@ def test_both_recorded_frames_close_with_a_twenty_fifth_training(recordings, ind
     assert np.array_equal(rendered[-32:], p4normal.training_sequence(25))
 
 
-def test_header_is_the_waveform_the_other_recorded_frame_sent(recordings):
-    assert coherence(p4longtx.HEADER, header_estimate(recordings[1])) >= 0.9
+def test_historical_long_headers_match(recordings):
+    assert coherence(header_estimate(recordings[0]), header_estimate(recordings[1])) >= 0.9
 
 
 def test_header_is_not_the_short_packets(recordings):
@@ -162,18 +164,38 @@ def test_header_is_not_the_short_packets(recordings):
     whole +/-900 Hz scan and still falls short of what the two long frames
     reach against each other at zero.
     """
-    turn = 2j * np.pi * np.arange(p4longtx.HEADER_CHIPS) / p4rx.CHIP_RATE
-    scanned = max(coherence(p4longtx.HEADER * np.exp(turn * hz), p4shorttx.HEADER)
+    header = header_estimate(recordings[0])[-len(p4shorttx.HEADER):]
+    turn = 2j * np.pi * np.arange(len(header)) / p4rx.CHIP_RATE
+    scanned = max(coherence(header * np.exp(turn * hz), p4shorttx.HEADER)
                   for hz in np.arange(-900, 900, 0.5))
-    assert coherence(p4longtx.HEADER, p4shorttx.HEADER) < 0.3
+    assert coherence(header, p4shorttx.HEADER) < 0.3
     assert scanned < 0.5
     assert coherence(header_estimate(recordings[0]), header_estimate(recordings[1])) > 0.9
     for index in (0, 1):
-        body = chips(recordings[index], 32 + np.arange(p4longtx.HEADER_CHIPS))
+        body = chips(recordings[index], 32 + np.arange(len(header)))
         noise = chips(recordings[index],
-                      -np.arange(2 * p4longtx.HEADER_CHIPS, p4longtx.HEADER_CHIPS, -1))
-        assert coherence(p4longtx.HEADER, body) < 0.2
-        assert coherence(p4longtx.HEADER, noise) < 0.2
+                      -np.arange(2 * len(header), len(header), -1))
+        assert coherence(header_estimate(recordings[0]), body) < 0.2
+        assert coherence(header_estimate(recordings[0]), noise) < 0.2
+
+
+def test_transmitted_header_and_body_match_stock_reference():
+    capture = RECORD / ('operator-data/captures/'
+        'onair-20261027T063407663476Z-3435ae7d-f8b1-4b34-b8ea-b1b8e916e6f1/stream.flac')
+    at, fs = 2628637, 48000
+    audio = wav.read(str(require_input(capture)), fs,
+                     start=at-4800, stop=at+round(3.35*fs))
+    z = p4rx.audio_to_baseband(audio, fs)
+    score, start, cfo = p4short.place_long(z, 2880+p4short.GEOM, .918)
+    assert score > .60 and abs(start-2880-p4short.GEOM) <= 8
+    z *= np.exp(-2j*np.pi*cfo*np.arange(len(z))/28800)
+    observed = header_estimate(z[start-2880:], p4longtx.HEADER_CHIPS)
+    assert coherence(p4longtx.HEADER, observed) > .99999
+    assert np.mean(abs(observed[:20])**2) > .5
+    rendered = p4rx.audio_to_baseband(np.r_[np.zeros(4800),
+        p4longtx.long_packet(b'hello', 0x61, fs)], fs)
+    tx_score, tx_start, _ = p4short.place_long(rendered, 2880+p4short.GEOM, 0.)
+    assert tx_score > .99 and abs(tx_start-start) <= 8
 
 
 def test_occupied_bandwidth():
@@ -187,5 +209,5 @@ def test_occupied_bandwidth():
 
 @pytest.mark.parametrize('fs', [48000, 12000])
 def test_emission_length(fs):
-    assert p4longtx.EMISSION_S == pytest.approx(3.2861, abs=1e-4)
-    assert p4longtx.long_packet(b'', 0x63, fs).size / fs == pytest.approx(3.2861, abs=1e-3)
+    assert p4longtx.EMISSION_S == pytest.approx(3.2968, abs=1e-4)
+    assert p4longtx.long_packet(b'', 0x63, fs).size / fs == pytest.approx(3.2968, abs=1e-3)

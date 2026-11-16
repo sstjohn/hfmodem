@@ -26,10 +26,11 @@ class Completion:
 
 
 class DataWriter:
-    def __init__(self, stream, *, max_bytes=262144, max_frames=64):
+    def __init__(self, stream, *, max_bytes=262144, max_frames=64, before_write=None):
         if max_bytes < 1 or max_frames < 1:
             raise ValueError('writer bounds must be positive')
         self.stream = stream
+        self.before_write = before_write
         self.max_bytes, self.max_frames = max_bytes, max_frames
         self._cv = threading.Condition()
         self._queue, self._done = deque(), deque()
@@ -84,6 +85,17 @@ class DataWriter:
                 if self._closed:
                     return
                 number, payload, token = self._queue.popleft()
+            try:
+                if self.before_write is not None:
+                    self.before_write()
+            except Exception as exc:
+                with self._cv:
+                    self._poisoned = True
+                    self._frames -= 1
+                    self._bytes -= len(payload)
+                    self._done.append(Completion(number, token, 'cancelled', str(exc)))
+                    self._cancel_queued()
+                return
             try:
                 self.stream.sendall(payload)
             except Exception as exc:

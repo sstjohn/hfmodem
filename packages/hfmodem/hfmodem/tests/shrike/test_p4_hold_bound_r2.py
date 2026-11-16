@@ -70,7 +70,7 @@ def test_r2_regrid_retains_takeover(tmp_path, monkeypatch, word, skipped):
         broad.append(len(audio))
         return read(audio, origin, **kwargs)
     monkeypatch.setattr(receiver, 'read_breakin', measured)
-    _, recovered, recovered_origin = onair._regrid(
+    _, recovered, recovered_origin, _ = onair._regrid(
         live, grid, tx, host, rx, base_slot, audio, start, round(.040*FS))
     assert not broad or max(broad) <= round(.680*FS), 'unbounded recovered word/body read'
     assert tx.p4_probe.handoff_slot == base_slot+skipped

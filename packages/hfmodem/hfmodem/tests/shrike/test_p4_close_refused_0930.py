@@ -26,8 +26,7 @@ BLOCK = b';FW: W9SSJ\r[Pat-1.0.0-B2FHM$]\r;PR: 16377127\r; K4MSU DE W9SSJ (EN63b
 
 
 def granted(ladder):
-    m, a = machine(role="irs", ladder=ladder,
-                   data="chirp" if ladder == "chirp" else "body", normal_ack="parity")
+    m, a = machine(role="irs", data="body" if ladder == "none" else ladder, normal_ack="parity")
     a.on_host_data(BLOCK)
     m._body(GRANT - round(.93 * FS), 0x40, State.IRS_BREAKIN)
     request = m.keyed()
@@ -94,7 +93,7 @@ def test_odd_counter_ack_does_not_hold_v27_through_close(body_answer):
     Precede that close with an acknowledged odd-counter packet; also cover
     a peer that answers 0x20 itself with V27.
     """
-    m, a = machine(ladder='none', data='body', app_done=True, normal_ack='parity')
+    m, a = machine(data='body', app_done=True, normal_ack='parity')
     a.on_host_data(b'A'*32)
     m._begin_data_turn(round(1536.707*FS))
     m.keyed()
@@ -171,7 +170,7 @@ def test_two_refusals_return_to_the_ladder_only_once_per_data_turn():
 @pytest.mark.parametrize("name", ["V27", "T27", "U27"])
 def test_word_yield_exhaustion_closes_after_the_peer_changes_word(name):
     """Ordinary exhaustion retains the existing changed-word close proof."""
-    m, a = machine(role="irs", ladder="none", data="body", normal_ack="parity")
+    m, a = machine(role="irs", data="body", normal_ack="parity")
     a.on_host_data(BLOCK)
     m._body(0, 0x40, State.IRS_BREAKIN)
     m.keyed()
@@ -218,7 +217,7 @@ def held_close_2028():
     heard = [h for h in probe['heard'] if h['word'] == 'V27'
              and h['outcome'] == 'confirmed' and not h['provisional']]
     assert len(heard) == 5
-    m, a = machine(role='irs', ladder='none', data='body', normal_ack='parity')
+    m, a = machine(role='irs', data='body', normal_ack='parity')
     payload = bytes.fromhex(next(e['payload'] for e in probe['emissions'] if e.get('payload')))
     a.on_host_data(payload)
     m._body(heard[0]['responds_to'], 0x40, State.IRS_BREAKIN)

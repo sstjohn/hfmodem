@@ -170,6 +170,7 @@ class VarACEntrance:
                 s.say('Returned to ordinary chat.')
                 return True
             document = self.parser.feed(raw)
+            s.semantic('bbs_document', document=document)
             mode = 'ansi16' if self.remote_ansi else 'plain'
             width, height = self.remote_dimensions
             presentation = Presentation(mode, width, height, 32768, self.remote_ansi)
@@ -265,8 +266,10 @@ class VarACEntrance:
             try:
                 config = future.result()
                 revision = self.core.reload_policy(config)
+                s.semantic('reload_finished', revision=revision)
                 s.say(f'BBS daily policy reloaded (revision {revision}); connection allowances keep their snapshots.')
             except (OSError, ValueError, RuntimeError) as error:
+                s.semantic('reload_failed', error=error)
                 s.say(f'BBS policy reload refused: {error}')
         if c._stream_poisoned and not self._poison_closed:
             self._poison_closed = True
@@ -332,6 +335,11 @@ class VarACEntrance:
         write_id = c.send_text(escape_markup(event.text))
         self.inflight = dict(event=event, write_id=write_id, after=None)
 
+    def check_term(self, mode, width, height):
+        if not self.remote_view:
+            raise ValueError('Use /bbs enter before choosing interactive terminal presentation.')
+        Presentation(mode, width, height, ansi_capable=mode == 'ansi16')
+
     def command(self, line):
         """True if the explicit local command/BBS client view consumed it."""
         s, c = self.session, self.session.client
@@ -375,7 +383,7 @@ class VarACEntrance:
                 width, height = map(int, words[3:]) if len(words) == 5 else (80, 24)
                 if len(words) not in (3, 5):
                     raise ValueError()
-                Presentation(mode, width, height, ansi_capable=mode == 'ansi16')
+                self.check_term(mode, width, height)
             except (IndexError, ValueError):
                 s.say('Use /bbs term plain or /bbs term ansi16 80 24.')
                 return True

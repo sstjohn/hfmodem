@@ -68,7 +68,7 @@ def test_decided_normal_enriches_and_answers_the_accepted_frame(status):
     assert pending == [repeat.stream_sample]
     assert m._deferred is None
     proposal = m.decide(repeat.stream_sample+44160-m.lead)
-    assert proposal.word == 'V27' and proposal.stream_sample == repeat.stream_sample+44160
+    assert proposal.word == 'X27' and proposal.stream_sample == repeat.stream_sample+44160
     m.keyed()
     assert delivered == [TAIL if status & 0x80 else PREFIX + TAIL]
     assert m.decide(proposal.stream_sample) is None

@@ -112,7 +112,7 @@ def test_strict_converter_stays_strict(audio):
 
 def test_genuine_repeat_renews_watch_without_second_delivery_and_bad_admissions_do_not():
     from hfmodem.tests.shrike.test_p4turn import machine
-    m, _ = machine(role='irs', ladder='none', data='body', chirp_ack='alternate')
+    m, _ = machine(role='irs', data='body', chirp_ack='toggle')
     delivered = []
     m.adapter.host = SimpleNamespace(deliver=delivered.append, supervisor=lambda *a: None)
     records = []

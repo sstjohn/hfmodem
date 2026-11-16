@@ -52,9 +52,12 @@ A cloned header is therefore a claim this station cannot read. What it asserts
 to a Dragon -- packet type, speed level, ARQ role -- is unknown, and rendering
 it is not evidence that a Dragon accepts it.
 
-Two more open items. The fill behind a short payload is `spec.field_fill`'s,
-PACTOR-3's measured convention carried over as it is for the chirp, and no P4
-source framing underwrites it. And `p4short.decode_body`'s window guard
+THE FILL is IDLE, 0x1E, behind a short payload and through an empty one, not
+PACTOR-3's walking template: N9VC's empty 0x40 normal in k0003 (seg-0003 at
+1488.06 s) is forty of them, as is every empty normal, body, chirp and long the
+gateways have keyed to us.
+
+One more open item. `p4short.decode_body`'s window guard
 erases the last fifteen body symbols although the seventh training now stands
 behind them, so fifteen of the 1056 coded bits are read as erasures on the
 return trip rather than as the observations they are.
@@ -68,7 +71,7 @@ from math import gcd
 import numpy as np
 from scipy.signal import resample_poly
 
-from . import p4coding, p4frame, p4normal, p4rx, p4short, placement, spec, tablegen
+from . import p4coding, p4frame, p4normal, p4rx, p4short, spec, tablegen
 
 LAYOUT = p4normal.layout("short", terminal_training=True)
 """6.4's ordinary short: six blocks of 176 data symbols, each behind its own
@@ -233,11 +236,14 @@ def body_symbols(coded: np.ndarray) -> np.ndarray:
 
 
 def short_packet(payload: bytes, status: int,
-                 fs: int = spec.SAMPLE_RATE) -> np.ndarray:
-    """One normal-short packet as audio: cloned header, then our own body."""
-    info = placement.field_info(payload, NET_BYTES - 3, status)
-    field = p4frame.encode_field(info[:-1], p4frame.Status.from_byte(info[-1]))
-    symbols = np.concatenate([HEADER, body_symbols(coded_bits(field))])
+                 fs: int = spec.SAMPLE_RATE, *, header: str = "A") -> np.ndarray:
+    """One normal-short packet as audio: cloned header, then our own body.
+
+    `header` "B" keys HEADER_B, which stock puts on every copy after the first."""
+    data = payload[:NET_BYTES - 3].ljust(NET_BYTES - 3, bytes([spec.IDLE]))
+    field = p4frame.encode_field(data, p4frame.Status.from_byte(status))
+    head = {"A": HEADER, "B": HEADER_B}[header]
+    symbols = np.concatenate([head, body_symbols(coded_bits(field))])
     impulses = np.zeros(p4rx.SAMPLES_PER_CHIP * (symbols.size - 1) + 1, complex)
     impulses[::p4rx.SAMPLES_PER_CHIP] = symbols
     up, down = int(fs), p4rx.SAMPLE_RATE

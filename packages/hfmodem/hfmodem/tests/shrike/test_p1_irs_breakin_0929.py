@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from hfmodem.tests.evidence import require_input
-from hfmodem.shrike import onair, pactor1
+from hfmodem.shrike import onair, p4probe, pactor1
 from hfmodem.shrike.p4receiver import P4Receiver
 from hfmodem.tests.shrike.test_p1_robust_0926 import FS, PACKET_N, SLOT_N
 
@@ -86,12 +86,13 @@ def run_irs(tmp_path, monkeypatch):
     monkeypatch.setattr(onair.RadioTx, '_tx', tx)
     monkeypatch.setattr(P4Receiver, 'read_breakin', charged)
     monkeypatch.setattr(onair, '_save_capture_async', lambda *a, **kw: None)
+    monkeypatch.setattr(p4probe, 'code_revision', lambda *_: None)
     monkeypatch.setattr(sys, 'argv', [
         'shrike.onair', '--replay', str(wav), '--max-cycles', '12', '--hold', '10',
         '--mycall', 'W9SSJ', '--dxcall', 'VE3KPG', '--dial', '7089500',
         '--outdir', str(tmp_path / 'out'), '--after-connect', 'p1-robust',
         '--p1-status-bits45', '2', '--p1-robust-stall', '12',
-        '--p1-robust-stall-then', 'silent', '--p4-entry-timeout', '25',
+        '--p4-entry-timeout', '25',
         '--p4-link', '--p4-data', 'none', '--p4-link-timeout', '3'])
     output = io.StringIO()
     with contextlib.redirect_stdout(output):

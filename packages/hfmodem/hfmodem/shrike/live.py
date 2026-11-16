@@ -51,8 +51,10 @@ class RollingRx:
 
     def __init__(self, on_event, *, fs: int = rxfront.FS,
                  window_s: float = WINDOW_S, keep_s: float = KEEP_S,
-                 min_decode_s: float = MIN_DECODE_S, p3_packets=None, linked=None):
+                 min_decode_s: float = MIN_DECODE_S, p3_packets=None, linked=None,
+                 decode_pactor1_only: bool = False):
         self.on_event = on_event
+        self.decode_pactor1_only = decode_pactor1_only
         # Same contract as `p3_packets`; see rxfront.decode_events.
         self.linked = linked
         # Optional live-context callback; None preserves ordinary P3 scanning.
@@ -214,12 +216,16 @@ class RollingRx:
             if was_suppressed and self.p3_packets is not None and self.p3_packets():
                 self.enable_p3_packets_after(at)
 
-        read_p3 = self.p3_packets is None or self.p3_packets()
+        read_p3 = not self.decode_pactor1_only and (
+            self.p3_packets is None or self.p3_packets())
         with gil.breathing():
             for ev in rxfront.decode_events(seg, cs_max_errors=self.cs_max_errors,
                                             acquiring=self.acquiring,
                                             mycall=self.mycall, strict=self.strict,
                                             p3_envelope=False,
+                                            p3_headers=not self.decode_pactor1_only,
+                                            p2_markers=not self.decode_pactor1_only,
+                                            p1_marker_veto=self.decode_pactor1_only,
                                             linked=self.linked is not None and self.linked(),
                                             p3_packets=read_p3,
                                             p3_packets_after=(None if self._p3_packets_after is None
@@ -228,7 +234,8 @@ class RollingRx:
             # A P1 answer can change the protocol context during this iterator.
             # Read the first upgraded field on this same retained buffer rather
             # than depending on another feed/flush. Do not repeat P1/P2 scans.
-            if not read_p3 and self.p3_packets is not None and self.p3_packets():
+            if (not self.decode_pactor1_only and not read_p3
+                    and self.p3_packets is not None and self.p3_packets()):
                 for ev in rxfront.p3_packet_events(
                         seg, envelope=False,
                         not_before=(None if self._p3_packets_after is None

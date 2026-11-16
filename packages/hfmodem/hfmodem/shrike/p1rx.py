@@ -44,6 +44,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+from ..core import p1_native
 from . import coding, pactor1, session, spec
 
 FS = pactor1.FS
@@ -124,9 +125,14 @@ class _Tones:
     __slots__ = ("mark", "space", "env", "n")
 
     def __init__(self, audio: np.ndarray, sps: int,
-                 mark: float = MARK, space: float = SPACE):
-        m = np.abs(_sliding_bin(audio, sps, mark))
-        s = np.abs(_sliding_bin(audio, sps, space))
+                 mark: float = MARK, space: float = SPACE, *, native: bool = True):
+        if (native and audio.dtype in (np.float32, np.float64) and audio.size >= sps
+                and all(f == int(f) for f in (mark, space))):
+            tables = [_lo(FS // gcd(int(f), FS), f) for f in (mark, space)]
+            m, s = p1_native.magnitudes(np.asarray(audio, dtype=float), sps, tables)
+        else:
+            m = np.abs(_sliding_bin(audio, sps, mark))
+            s = np.abs(_sliding_bin(audio, sps, space))
         self.mark, self.space, self.env, self.n = m, s, m + s, m.size
 
     def fits(self, starts: np.ndarray, sps: int, nbits: int) -> np.ndarray:
@@ -144,6 +150,28 @@ class _Tones:
         idx = starts[:, None] + np.arange(n * 8) * sps
         b = (self.mark[idx] > self.space[idx]) ^ invert
         return _bytes(b.reshape(-1, n, 8))
+
+
+TONE_PAIR_BATCH = 8
+"""Tone pairs per native call, which bounds peak memory: the 43-centre sweep
+over a 30 s capture in one call would hold gigabytes of series at once."""
+
+
+def _tone_pairs(audio, sps, pairs):
+    pairs = list(pairs)
+    if (audio.dtype not in (np.float32, np.float64) or audio.size < sps
+            or any(f != int(f) for pair in pairs for f in pair)):
+        yield from (_Tones(audio, sps, *pair, native=False) for pair in pairs)
+        return
+    x = np.asarray(audio, dtype=float)
+    for k in range(0, len(pairs), TONE_PAIR_BATCH):
+        tables = [_lo(FS // gcd(int(f), FS), f)
+                  for pair in pairs[k:k + TONE_PAIR_BATCH] for f in pair]
+        rows = p1_native.magnitudes(x, sps, tables)
+        for m, s in zip(rows[::2], rows[1::2]):
+            tones = _Tones.__new__(_Tones)
+            tones.mark, tones.space, tones.env, tones.n = m, s, m + s, m.size
+            yield tones
 
 
 _BIT_WEIGHTS = (1 << np.arange(8)).astype(np.uint8)
@@ -206,7 +234,9 @@ def _redundancy_first(audio: np.ndarray, start: int, sps_r: int,
     seg = audio[start:start + span]
     if seg.size < span:
         return None
-    raw = _Tones(seg, sps_r).read(np.zeros(1, np.int64), sps_r, RED_LEN, invert)
+    # Redundancy is candidate-local, so native dispatch would cross once per lock.
+    raw = _Tones(seg, sps_r, native=False).read(
+        np.zeros(1, np.int64), sps_r, RED_LEN, invert)
     return int(_rotate(raw)[0, 0]) >> 1
 
 
@@ -554,12 +584,10 @@ def cs_bits(audio: np.ndarray, t0: float, dur: float, fs: int = FS,
     # honest answer. It is also what leaves at least one candidate alignment
     # whenever the word itself fits.
     T = _Tones(np.concatenate([x, np.zeros(CS_TAIL_BITS * sps)]), sps)
-    starts = np.arange(T.n - (pactor1.CS_BITS + CS_TAIL_BITS - 1) * sps)
-    eye = starts[:, None] + np.arange(pactor1.CS_BITS) * sps
-    tail = starts[:, None] + (pactor1.CS_BITS + np.arange(CS_TAIL_BITS)) * sps
-    score = (np.abs(T.mark[eye] - T.space[eye]).sum(axis=1)
-             - T.env[tail].sum(axis=1))
-    origin = int(np.argmax(score)) + slip * sps
+    starts = np.arange(T.n - (pactor1.CS_BITS + CS_TAIL_BITS - 1) * sps,
+                       dtype=np.int64)
+    origin = p1_native.eye_argmax(T.mark, T.space, T.env, starts, sps,
+                                   pactor1.CS_BITS, CS_TAIL_BITS) + slip * sps
     bits = []
     for j in range(pactor1.CS_BITS + extra):
         i = origin + j * sps
@@ -567,6 +595,37 @@ def cs_bits(audio: np.ndarray, t0: float, dur: float, fs: int = FS,
             break
         bits.append(int(T.mark[i] > T.space[i]))     # MARK is a one, as in a frame
     return bits if len(bits) >= pactor1.CS_BITS else None
+
+
+CS_TRIAL_CHUNK = 8
+"""Trials a grid read submits per native call. The caller stops at the first
+acceptable trial, so a whole-grid call pays for reads it then discards; a call
+per trial pays the crossing 65 times on a window with nothing in it."""
+
+
+def _control_signal_trials(audio, positions, dur):
+    if p1_native._dsp is None or p1_native.ABS_VARIANT is None:
+        return (decode_control_signal(audio, at, dur) for at in positions)
+    return _chunked_trials(audio, positions, dur)
+
+
+def _chunked_trials(audio, positions, dur):
+    sps = FS // 100
+    audio = np.asarray(audio, dtype=float)
+    tables = [_lo(FS // gcd(int(f), FS), f) for f in (MARK, SPACE)]
+    for k in range(0, len(positions), CS_TRIAL_CHUNK):
+        chunk = positions[k:k + CS_TRIAL_CHUNK]
+        bounds = np.array([(max(0, int((at - CS_SEARCH_S) * FS)),
+                            min(audio.size, int((at + dur + CS_SEARCH_S) * FS)))
+                           for at in chunk], dtype=np.int64).reshape(-1, 2)
+        valid = bounds[:, 1] - bounds[:, 0] >= pactor1.CS_BITS * sps
+        results = [None] * len(chunk)
+        if np.any(valid):
+            bits = p1_native.slice_eyes(audio, bounds[valid], sps, tables,
+                                        pactor1.CS_BITS, CS_TAIL_BITS)
+            for i, window in zip(np.flatnonzero(valid), bits):
+                results[i] = nearest_cs(window[::-1].tolist())
+        yield from results
 
 
 def decode_control_signal(audio: np.ndarray, t0: float, dur: float,
@@ -1488,7 +1547,7 @@ def decode_connect(audio: np.ndarray, fs: int = FS,
                         continue
                     if bool(tones.mark[red_start] > tones.space[red_start]) != invert:
                         continue
-                    red = _Tones(seg, sps_r).read(
+                    red = _Tones(seg, sps_r, native=False).read(
                         np.zeros(1, np.int64), sps_r, RED_LEN, invert)[0].tobytes()
                     if (red[1:] != T[2:1 + RED_LEN] or not _valid_char(red[0])
                             or T[1] not in (red[0], red[0] ^ 0xFF)):
@@ -1641,10 +1700,10 @@ def _call_b_scan(audio: np.ndarray, fs: int, tones: "_Tones | None",
         hits = list(_call_b_frames(tones, sps))
     else:
         audio = _to_fs(audio, fs)
-        hits = [h for fc in ([centre] if centre else CALL_B_SWEEP)
-                for h in _call_b_frames(
-                    _Tones(audio, sps, fc - CALL_B_SHIFT / 2,
-                           fc + CALL_B_SHIFT / 2), sps)]
+        pairs = ((fc - CALL_B_SHIFT / 2, fc + CALL_B_SHIFT / 2)
+                 for fc in ([centre] if centre else CALL_B_SWEEP))
+        hits = [h for tones in _tone_pairs(audio, sps, pairs)
+                for h in _call_b_frames(tones, sps)]
     out: list[tuple[float, Connect, float]] = []
     for start, cn, energy in sorted(hits, key=lambda h: h[0]):
         t = start / FS
@@ -1760,8 +1819,8 @@ def search_calls(audio: np.ndarray, mycall: str, fs: int = FS,
     images = (("Robust", _bits(pactor1.call_b_bytes(call)), CALL_B_N),
               ("Normal", _bits(pactor1.address_image(call)[:len(call) + 2]), CALL_N))
     envs, hits = [], []
-    for o, off in enumerate(CALL_OFFSETS):
-        tones = _Tones(audio, sps, MARK + off, SPACE + off)
+    pairs = ((MARK + off, SPACE + off) for off in CALL_OFFSETS)
+    for o, tones in enumerate(_tone_pairs(audio, sps, pairs)):
         g = (tones.mark > tones.space)[::hop]
         envs.append(tones.env[::hop])
         for variant, image, frame_n in images:
@@ -2023,13 +2082,12 @@ def decode_p1_packets(audio: np.ndarray, fs: int = FS,
     200 Bd announcement and the JN36lf station's two fields -- with nothing anywhere
     else in the corpus and nothing at all on four minutes of white noise.
     """
-    audio = _to_fs(audio, fs)
-    out: list[Packet] = []
-    seen: set[tuple[int, int, bytes]] = set()
+    prepared = _packet_reads(_to_fs(audio, fs), tones100, (breakin,))
+    return _packets_from_reads(prepared, breakin)
+
+
+def _packet_reads(audio, tones100, passes):
     for baud, nbytes in ((100, 12), (200, 24)):
-        wants = (_prefix_words(pactor1.breakin_head(baud)) if breakin
-                 else _prefix_words(*(bytes([h]) for h in P1_DATA_HEADERS)))
-        nskip = wants[0].size // 8
         sps = FS // baud
         step = max(1, sps // 8)
         tones = tones100 if baud == 100 and tones100 is not None else _Tones(audio, sps)
@@ -2038,7 +2096,7 @@ def decode_p1_packets(audio: np.ndarray, fs: int = FS,
         # too small a batch to pay for itself. `edge` puts the surviving frames back
         # under their own onset, so the scan order is unchanged.
         spans = [np.arange(max(0, o - RISE_SYMBOLS * sps),
-                           o + RISE_SYMBOLS * sps + 1, step)
+                           o + RISE_SYMBOLS * sps + 1, step, dtype=np.int64)
                  for o in _burst_onsets(tones)]
         if not spans:
             continue
@@ -2049,10 +2107,30 @@ def decode_p1_packets(audio: np.ndarray, fs: int = FS,
         if starts.size == 0:
             continue
         edge = np.searchsorted(onset_of, np.arange(len(spans) + 1))
+        skips = [len(pactor1.breakin_head(baud)) if b else 1 for b in passes]
+        frames, masks = p1_native.gather_frames(
+            tones.mark, tones.space, starts, sps, nbytes, skips, pactor1.DATA_CRC)
+        yield baud, nbytes, tones, starts, edge, frames, dict(zip(passes, masks))
+
+
+def _packet_passes(audio):
+    prepared = list(_packet_reads(_to_fs(audio, FS), None, (False, True)))
+    for breakin in (False, True):
+        yield _packets_from_reads(prepared, breakin)
+
+
+def _packets_from_reads(prepared, breakin):
+    out: list[Packet] = []
+    seen: set[tuple[int, int, bytes]] = set()
+    for baud, nbytes, tones, starts, edge, frames, masks in prepared:
+        wants = (_prefix_words(pactor1.breakin_head(baud)) if breakin
+                 else _prefix_words(*(bytes([h]) for h in P1_DATA_HEADERS)))
+        nskip = wants[0].size // 8
+        sps = FS // baud
         reads = []
         for invert in (False, True):
-            f = tones.read(starts, sps, nbytes, invert)
-            ok = _crc_pass(f, nskip)
+            f = np.bitwise_not(frames) if invert else frames
+            ok = masks[breakin][int(invert)].copy()
             # The head and the eye are measured only on what the CRC already
             # passed -- a median over 96 or 192 symbol windows, and a second read
             # of the head's magnitudes, are far too costly to run on every
@@ -2186,7 +2264,7 @@ def packet_softs(audio: np.ndarray, fs: int = FS,
     T = _Tones(np.concatenate([np.zeros(pad), x,
                                np.zeros(pad + CS_TAIL_BITS * sps)]), sps)
     spans = [np.arange(max(pad, o - sps), max(pad, o - sps) + 2 * sps + 1,
-                       max(1, sps // 8))
+                       max(1, sps // 8), dtype=np.int64)
              for o in _burst_onsets(T)]
     if not spans:
         return None
@@ -2195,11 +2273,8 @@ def packet_softs(audio: np.ndarray, fs: int = FS,
                     & (starts + (nbits + CS_TAIL_BITS - 1) * sps < T.n - pad)]
     if starts.size == 0:
         return None
-    eye = starts[:, None] + np.arange(nbits) * sps
-    tail = starts[:, None] + (nbits + np.arange(CS_TAIL_BITS)) * sps
-    score = (np.abs(T.mark[eye] - T.space[eye]).sum(axis=1)
-             - T.env[tail].sum(axis=1))
-    best = int(starts[int(np.argmax(score))])
+    best = int(starts[p1_native.eye_argmax(T.mark, T.space, T.env, starts,
+                                           sps, nbits, CS_TAIL_BITS)])
     idx = (best + (np.arange(nbits + 2 * MEMORY_SLIP_BITS)
                    - MEMORY_SLIP_BITS) * sps)
     d = T.mark[idx] - T.space[idx]
@@ -2431,9 +2506,57 @@ The word, its polarity and the instant do most of the rejecting; this keeps a
 noise window from offering them a read at all."""
 
 
+def sweep_robust_answer(audio, t0: float, span: float, fs: int = FS) -> RobustAnswer | None:
+    """A full-word phase candidate, requiring an anchored repeat before use.
+
+    onair-20261114 K4MSU's fading answer has no usable envelope edge. Integrate
+    both tones once, then read all phases together with each tone normalised
+    to its own peak. A faded tone contributes only noise, so use the survivor
+    as on-off keying past `ROBUST_ONE_TONE_DB`.
+    """
+    sps = round(CS_BIT_S * fs)
+    lo = max(0, round(t0 * fs))
+    hi = min(round((t0 + span) * fs), len(audio) - ROBUST_CS_BITS * sps + 1)
+    if hi <= lo:
+        return None
+    starts = np.arange(lo, hi, max(1, sps // 20))
+    end = int(starts[-1]) + ROBUST_CS_BITS * sps
+    x = np.asarray(audio[lo:end], float)
+    t = np.arange(x.size) / fs
+    edges = starts[:, None] - lo + np.arange(ROBUST_CS_BITS + 1) * sps
+    mags = []
+    for f in (MARK, SPACE):
+        integral = np.concatenate(([0j], np.cumsum(x * np.exp(-2j * np.pi * f * t))))
+        mags.append(np.abs(np.diff(integral[edges], axis=1)))
+    mark, space = mags
+    mp, sp = mark.max(axis=1), space.max(axis=1)
+    mn, sn = mark / (mp[:, None] + 1e-12), space / (sp[:, None] + 1e-12)
+    db = 20 * np.log10((mp + 1e-12) / (sp + 1e-12))
+    read = np.where((db > ROBUST_ONE_TONE_DB)[:, None], mn > .5,
+                   np.where((db < -ROBUST_ONE_TONE_DB)[:, None], sn < .5, mn > sn))
+    table = [(e, w, sense) for e, w in ROBUST_CS_WORDS.items() for sense in (0, 1)]
+    refs = np.array([[(w >> j) & 1 for j in range(ROBUST_CS_BITS)]
+                     for _, w, _ in table], bool) ^ np.array([s for _, _, s in table])[:, None]
+    errors = np.count_nonzero(read[:, None, :] != refs[None, :, :], axis=2)
+    order = np.argsort(errors, axis=1)
+    best = errors[np.arange(len(starts)), order[:, 0]]
+    eligible = np.flatnonzero((best <= ROBUST_CS_MAX_ERRORS)
+                             & (best < errors[np.arange(len(starts)), order[:, 1]]))
+    if not eligible.size:
+        return None
+    quality = np.where(np.abs(db)[:, None] > ROBUST_ONE_TONE_DB,
+                       np.abs(np.where((db > 0)[:, None], mn, sn) - .5),
+                       np.abs(mn - sn)).sum(axis=1)
+    i = min(eligible, key=lambda i: (best[i], -quality[i]))
+    entry, word, sense = table[order[i, 0]]
+    tone = int(MARK if db[i] > 0 else SPACE) if abs(db[i]) > ROBUST_ONE_TONE_DB else 0
+    return RobustAnswer(entry, word, sense, ROBUST_CS_BITS, int(best[i]), starts[i] / fs, tone)
+
+
 def read_held_answer(audio, at: int, fs: int = FS, *, sense: int | None = None,
                      offset_hz: float = 0.0,
-                     words: dict[int, int] | None = None) -> RobustAnswer | None:
+                     words: dict[int, int] | None = None,
+                     bits: int = ROBUST_CS_BITS) -> RobustAnswer | None:
     """The answer a held robust link repeats, read where it is known to be.
 
     `acquire_robust_answer` finds the first answer by its envelope edge; once
@@ -2451,23 +2574,28 @@ def read_held_answer(audio, at: int, fs: int = FS, *, sense: int | None = None,
     one tone, where a pre-answer noise window once read entry 3 at 2), and a bit contrast of
     `HELD_ANSWER_CONTRAST`, which is what keeps noise out: a single known word
     in a known polarity at a known instant offers the bits no search to win.
+
+    `bits` permits an exact whole-bit prefix of at least sixteen bits when the
+    next key closes the window before the full word arrives.
     """
     words = ROBUST_CS_WORDS if words is None else words
+    if not 16 <= bits <= ROBUST_CS_BITS:
+        raise ValueError('held answer needs 16 to 20 bits')
     sps = int(CS_BIT_S * fs)
-    n = ROBUST_CS_BITS * sps
+    n = bits * sps
     t = np.arange(sps) / fs
     refs = [np.exp(-2j * np.pi * (f + offset_hz) * t) for f in (MARK, SPACE)]
     step = max(1, sps // 20)
     reach = round(HELD_ANSWER_SEARCH_S * fs)
-    tables = {e: np.array([(w >> j) & 1 for j in range(ROBUST_CS_BITS)], bool)
+    tables = {e: np.array([(w >> j) & 1 for j in range(bits)], bool)
               for e, w in words.items()}
     best = None
     for d in range(-reach, reach + 1, step):
         s0 = at + d
         if s0 < 0 or s0 + n > len(audio):
             continue
-        bits = np.asarray(audio[s0:s0 + n], float).reshape(ROBUST_CS_BITS, sps)
-        mark, space = (np.abs(bits @ r) for r in refs)
+        symbols = np.asarray(audio[s0:s0 + n], float).reshape(bits, sps)
+        mark, space = (np.abs(symbols @ r) for r in refs)
         reads = [(mark > space, float(np.median(np.maximum(mark, space)
                                                  / (np.minimum(mark, space) + 1e-12))), 0)]
         for tone, mag in ((int(MARK), mark), (int(SPACE), space)):
@@ -2480,11 +2608,13 @@ def read_held_answer(audio, at: int, fs: int = FS, *, sense: int | None = None,
             if contrast < HELD_ANSWER_CONTRAST:
                 continue
             limit = ROBUST_ONE_TONE_ERRORS if tone else ROBUST_CS_MAX_ERRORS
+            if bits < ROBUST_CS_BITS:
+                limit = 0
             for entry, ref in tables.items():
                 for sn in ((0, 1) if sense is None else (sense,)):
                     errors = int(np.count_nonzero(read != (ref ^ bool(sn))))
                     if errors <= limit and (
                             best is None or (errors, tone != 0) < (best.errors, best.tone != 0)):
-                        best = RobustAnswer(entry, words[entry], sn, ROBUST_CS_BITS,
+                        best = RobustAnswer(entry, words[entry], sn, bits,
                                             errors, s0 / fs, tone, offset_hz)
     return best

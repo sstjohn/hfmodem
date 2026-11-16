@@ -297,7 +297,7 @@ def test_unanswered_asks_do_not_extend_the_no_progress_close():
     hs, io = recovered('2300')
     hs.send(b'queued reply')
     progress = hs.progress
-    deadline = hs._progress_at + A._MAX_WITHOUT_PROGRESS * A._IDLE_POLL_S
+    deadline = hs._progress_at + A._ANSWERER_SILENCE_S
     asks = 0
     while hs.state == A.VaraState.CONNECTED:
         due = hs.idle_poll_due_in()

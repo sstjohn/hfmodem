@@ -12,7 +12,7 @@ import pytest
 from hfmodem.shrike import arq, onair, placement, rxfront, spec
 from hfmodem.shrike.p3trial import ReplyClock
 from hfmodem.tests.shrike.test_entry_answer import _Session
-from hfmodem.tests.shrike.test_cs6_stalls import _duplex
+from hfmodem.tests.shrike.p3_cycle_support import _duplex
 
 FIX = Path(__file__).parent / 'fixtures/ws8eoc-2008'
 META = json.loads((FIX / 'metadata.json').read_text())

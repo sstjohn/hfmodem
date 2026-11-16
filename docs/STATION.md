@@ -16,8 +16,10 @@ manual station operation and its interlocks.
 
 The station uses a Yaesu FTDX10 with its built-in USB audio codec. The FT-891
 remains supported with an external audio interface through the same rig-profile
-system. X6100 and G90 support is planned; their profile entries have unmeasured
-timing and incomplete readback qualification.
+system. The Xiegu X6100 is supported for receive over its one USB cable, CI-V
+CAT and its USB audio codec; set `[station] transmit = false` until its keying
+is qualified. Its timing is unmeasured, and PACTOR is not available at its
+provisional PTT settle. G90 support is planned.
 
 Select the current profile with `HFMODEM_RIG=ftdx10`
 or a per-modem tool’s `--rig ftdx10` option. Explicit options take precedence over the

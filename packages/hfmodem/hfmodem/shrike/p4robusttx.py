@@ -197,13 +197,18 @@ def carrier_hz(word, word_render, chips=None):
 def _render(spread_symbols: np.ndarray, fs: int, *, word=None, word_render='off') -> np.ndarray:
     chips = (spread_symbols[:, None] * p4sig.SPREAD16).ravel()
     carrier_hz(word, word_render, chips)
+    out = shape_chips(chips, fs)
+    return out / np.max(np.abs(out))
+
+
+def shape_chips(chips: np.ndarray, fs: int) -> np.ndarray:
+    """Chip impulses through the published pulse, resampler and real carrier."""
     impulses = np.zeros(p4rx.SAMPLES_PER_CHIP * (chips.size - 1) + 1, complex)
     impulses[::p4rx.SAMPLES_PER_CHIP] = chips
     up, down = int(fs), p4rx.SAMPLE_RATE
     g = gcd(up, down)
     bb = resample_poly(np.convolve(impulses, p4rx.RRC_TAPS), up // g, down // g)
-    out = (bb * np.exp(2j * np.pi * p4rx.CENTRE_HZ * np.arange(bb.size) / fs)).real
-    return out / np.max(np.abs(out))
+    return (bb * np.exp(2j * np.pi * p4rx.CENTRE_HZ * np.arange(bb.size) / fs)).real
 
 
 def robust_short(value: int, header: str = 'A',

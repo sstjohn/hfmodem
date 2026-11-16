@@ -153,3 +153,19 @@ def test_a_gateway_that_hands_over_and_says_nothing_does_not_strand_the_link():
     assert asked is not None, (
         f"stranded: the IRS of a silent peer with bytes queued, and the channel "
         f"asked for only by the teardown in cycle {gave_up}")
+
+
+@pytest.mark.parametrize("lost", [0, 1])
+def test_a_counter_lost_in_the_greeting_fails_the_session(lost):
+    """K4MSU 2026-11-14 15:18Z: seq 2 was lost inside the greeting."""
+    host = PtcHost(SimPeer(), mycall="W9SSJ")
+    host.arq.role = arq.IRS
+    host.arq._enter_connected()
+    mail = attach_mail(host)
+    mail.on_link_data(b"RMS Trimode 1\r\n")
+    host.arq.counters_lost = lost
+    onair._hold_mail_turns(host, mail, wait_greeting=False)
+    assert mail.session.failure == (
+        "lost part of the gateway greeting (a packet was never received)"
+        if lost else "")
+    assert host.arq._breakin_pending

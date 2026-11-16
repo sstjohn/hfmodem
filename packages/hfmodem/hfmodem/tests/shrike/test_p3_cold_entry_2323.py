@@ -97,10 +97,10 @@ def test_cold_capture_establishes_current_crc_then_emits_mail_ack(
     tx.emit_pending_cs()
     assert not tx.refused and len(live.emissions)==2
     pulse = tx.tx_audio_start+min(tx.tx_pulse_offsets)
-    # The reply rides the peer's raster rather than each decode, so the pulse
-    # sits its fixed gap past the comb the two recorded frames seated and not
-    # past the second reading's own 0.94 ms quantum.
-    assert (pulse-ENTRY)%60000 == 28965
+    # The peer's changeover is answered on our own raster, 600 ms past the
+    # pulse of our last packet, so the reply sits a whole number of slots
+    # plus that gap from the entry raster and not on either decode's reading.
+    assert (pulse-ENTRY)%60000 == 28800
     assert tx._pending_p3_cs is None
     sidecar=json.loads((tmp_path/'tx_02.json').read_text())
     assert sidecar['audio_start']+min(sidecar['pulse_offsets'])==pulse

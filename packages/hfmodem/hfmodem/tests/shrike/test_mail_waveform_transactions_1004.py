@@ -253,4 +253,4 @@ def test_p4_crc_without_keyed_grant_cannot_open_receive_epoch(monkeypatch, tmp_p
     assert len(stale) >= 2
     assert {o["receive_epoch"] for o in stale} == {1}
     assert {o["acked_counter"] for o in stale} == {1}
-    assert {o["frame_counter"] for o in stale} == {0}
+    assert {o["frame_counter"] for o in stale} == {1}

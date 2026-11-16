@@ -27,10 +27,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from hfmodem.shrike import arq, onair, pactor1, rxfront
+from hfmodem.shrike import arq, onair, pactor1
 from hfmodem.shrike.arq import State
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.shrike.spec import Protocol
+from hfmodem.tests.shrike.p3_arq_support import Keyed, calling_station, cs_event
 
 MESSAGE = b"the manual's own prose, at four times the rate " * 4
 
@@ -42,60 +43,6 @@ def check(label: str, passed: bool, detail: str = "") -> None:
     ok &= bool(passed)
     print(f"  [{'PASS' if passed else 'FAIL'}] {label}"
           + (f" -- {detail}" if detail else ""))
-
-
-class Keyed:
-    """Everything the station puts on the air, in the protocol it went out in."""
-
-    def __init__(self) -> None:
-        self.packets: list[tuple[Protocol, bytes]] = []
-        self.cs: list[tuple[Protocol, int]] = []
-        self.host: PtcHost | None = None
-
-    def attach(self, host: PtcHost) -> None:
-        self.host = host
-
-    def pump(self) -> None: ...
-    def cycle(self) -> None: ...
-    def connect_burst(self, mycall: str, dxcall: str) -> None: ...
-
-    def _packet(self, payload: bytes) -> None:
-        self.packets.append((self.host.protocol, bytes(payload)))
-
-    def send_p1_packet(self, payload, baud, seq, **kw) -> None:
-        self._packet(payload)
-
-    def send_p1_breakin(self, payload, baud, seq, **kw) -> None:
-        self._packet(payload)
-
-    def send_packet(self, sl, payload, status, breakin=False) -> None:
-        self._packet(payload)
-
-    def send_p1_cs(self, index: int) -> None:
-        self.cs.append((Protocol.PACTOR1, index))
-
-    def send_cs(self, index: int) -> None:
-        self.cs.append((Protocol.PACTOR3, index))
-
-    @property
-    def p3(self) -> list[bytes]:
-        return [pl for proto, pl in self.packets if proto is Protocol.PACTOR3]
-
-
-def cs_event(cs: int, protocol: str = "PACTOR-1"):
-    return rxfront.Event(0.1, "cs", f"CS{cs + 1}", protocol=protocol,
-                         cs=cs, sense=0)
-
-
-def calling_station() -> tuple[PtcHost, Keyed]:
-    """A linked ISS at 100 Bd with its first packet -- the callsign announcement
-    `_answer_link_setup` queues -- already on the air and unacknowledged."""
-    keyed = Keyed()
-    host = PtcHost(peer=keyed, mycall="W9SSJ")
-    host.arq.on_host_connect("W9SSJ", "WS8EOC")
-    host.on_rx_event(cs_event(pactor1.CS_SPEED))     # CS4: the link runs 100 Bd
-    host.tick()
-    return host, keyed
 
 
 def acknowledge(host: PtcHost, cs: int = pactor1.CS_ACK_A) -> None:

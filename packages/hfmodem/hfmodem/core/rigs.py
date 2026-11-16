@@ -12,9 +12,9 @@ divergence in a table like this is not a lint problem — it decides how a radio
 gets keyed.
 
 **`settle`**, the pause between key-down and the first sample, is per rig because
-its cause is per rig. The X6100's USB-audio codec re-initialises when it is keyed,
-so pushing samples immediately stalls the stream and the head of the burst never
-reaches the modulator; it needs 0.40 s. The FT-891 drives an external dongle that
+its cause is per rig. The X6100's USB-audio codec stalled a fresh output stream
+opened just after keying, and 0.40 s is what cured it on 2026-07-23: a value that
+worked, not a measured minimum. The FT-891 drives an external dongle that
 does not re-initialise, and carrying the X6100's figure over held the key open
 with dead air at both ends of every burst, which an operator watching the rig will
 rightly call out. What settle buys is nothing and what it costs is keyed time: on
@@ -30,8 +30,8 @@ The G90's 0.10 is carried rather than measured; nobody has keyed one here.
 **`ptt_type` and `ptt_iface`** say how the rig is keyed. hamlib's `RIG` is a CAT
 command; `RTS` is a modem line on a second serial interface, which is one ioctl
 rather than a blocking CAT transaction — see `core.ptt` for what that buys and
-what it costs. A rig with no `ptt_iface` has no second interface and keys over the
-port it already has.
+what it costs. Every rigctld here runs with `ptt_type=None`, so a rig with no
+`ptt_iface` has no keying line at all: the Xiegus listen until a bench shows one.
 """
 from __future__ import annotations
 
@@ -178,7 +178,8 @@ _FTDX10_READBACK = {**_FT891_READBACK,
 
 #: Each `[rig] cat` value and the way its CAT is reached. Hamlib drives Icom
 #: CI-V, so `civ` goes through the rigctld started with the profile's model.
-CAT_BACKENDS = {"yaesu": "serial", "civ": "rigctld", "rigctld": "rigctld", "none": "none"}
+CAT_BACKENDS = {"yaesu": "serial", "civ": "rigctld", "rigctld": "rigctld", "none": "none",
+                "x6100_base": "guard"}
 
 RIGS = {
     "generic": {"cat": "rigctld", "model": 0, "mode": "USB", "settle": 0.1,
@@ -211,15 +212,25 @@ RIGS = {
     "g90":   {"model": 3088, "baud": 19200, "mode": "PKTUSB", "settle": 0.10, "tr_switch_s": 0.055, "tr_recovery_slack_s": 0.015,
               "tx_latency_ms": 0.0, "tx_latency_status": "UNMEASURED", "audio_chain": "g90_external",
               "note": "Xiegu G90; CAT on its serial, audio via external interface"},
-    "x6100": {"model": 3087, "baud": 19200, "mode": "PKTUSB", "settle": 0.40, "tr_switch_s": 0.055, "tr_recovery_slack_s": 0.015,
+    "x6100": {"cat": "civ", "max_watts": 10, "min_watts": 1, "model": 3087, "baud": 19200, "mode": "PKTUSB", "settle": 0.40, "tr_switch_s": 0.055, "tr_recovery_slack_s": 0.015,
               "tx_latency_ms": 0.0, "tx_latency_status": "UNMEASURED", "audio_chain": "x6100_usb",
-              "note": "Xiegu X6100; single USB gives both CAT serial and a soundcard"},
+              "note": "Xiegu X6100; one USB carries CI-V CAT and a codec; receive-only until RTS keying is benched; settle provisional"},
+    # The same radio from its own board with the GUI stopped: register 12 keys the
+    # base over I2C, the guard reads its flow port, and the codec runs only in
+    # stereo. Settle is the stage-b key lead; TR is the patched base's (receive
+    # back 22.5 ms after unkey, transient to about 60 ms).
+    "x6100_onboard": {"cat": "x6100_base", "ptt_backend": "i2c", "identity": "x6100",
+                      "max_watts": 10, "min_watts": 1, "model": 0, "mode": "PKTUSB", "settle": 0.031, "tr_switch_s": 0.0225,
+                      "tr_recovery_slack_s": 0.040, "tx_latency_ms": 0.0,
+                      "tx_latency_status": "UNMEASURED", "audio_chain": "x6100_onboard",
+                      "audio_device": "hw:0,0", "audio_channels": 2,
+                      "note": "Xiegu X6100 onboard; register 12 keying under the guard, dial, mode and power set in the GUI before it stops; settle and TR provisional"},
 }
 # Whether a TUNE carrier gets the rig's tuner a match. The FT-891's tuner searches
 # on one; the FTDX10's does not: with no stored match it folds back on the SWR,
 # even through the tuner, until a tuning cycle is started at the rig.
 for _name, _carrier in (("generic", True), ("ft891", True), ("ftdx10", False),
-                        ("g90", True), ("x6100", True)):
+                        ("g90", True), ("x6100", True), ("x6100_onboard", True)):
     RIGS[_name]["tune_carrier"] = _carrier
 assert all("tune_carrier" in profile for profile in RIGS.values())
 
@@ -260,10 +271,16 @@ RIGS['ftdx10']['roofing_codes'] = {
     for code, value in meanings.items()}
 RIGS['ftdx10']['width_modes'] = ('8', 'C', 'E')
 # Empty rows are intentional: no Yaesu decoders or widths for unqualified rigs.
-for _name in ('g90', 'x6100', 'generic'):
+# The X6100 reads hamlib's own levels; VOX among its funcs, since a VOX left on
+# keys the radio from any audio we send it.
+for _name in ('g90', 'x6100', 'x6100_onboard', 'generic'):
     RIGS[_name].update(readback={key: (() if key in ('rig_levels', 'rig_funcs',
         'unreported_levels', 'meters', 'menu_items', 'raw_reads') else {})
         for key in _FT891_READBACK if key != 'menu_group'}, data_widths=())
+RIGS['x6100']['readback'].update(
+    rig_levels=('PREAMP', 'ATT', 'AF', 'RF', 'SQL', 'AGC', 'NR', 'RFPOWER', 'RAWSTR', 'ALC', 'SWR'),
+    rig_funcs=('NB', 'NR', 'ANF', 'MN', 'COMP', 'MON', 'VOX'),
+    meters=('RAWSTR', 'ALC', 'SWR'))
 
 
 def mode_passband(profile, passband):

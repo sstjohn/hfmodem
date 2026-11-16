@@ -5,10 +5,12 @@
 from dataclasses import InitVar, dataclass, replace
 from contextlib import contextmanager
 from enum import StrEnum
+from functools import lru_cache
+from hashlib import blake2b
 from time import monotonic
 import numpy as np
 from . import p4oracle, p4words, p4robusttx, p4rx, p4shorttx, p4chirprx, p4short, p4chirp, p4robustrx, p4sf8rx, p4long, p4longtx, p4frame
-from . import p4shortlevels
+from . import p4shortlevels, p4longdecode, p4longrates, p4coding
 from .p4observation import Kind, Observation, Registered, RegisteredObservation, RESPONSE_S, WORD_HORIZON_S
 
 WORD_SLACK_S = .035
@@ -16,6 +18,22 @@ SCAN_WINDOW_S = 1.25
 SCAN_STEP_S = .400
 SCAN_ALLOWANCE_S = .080
 EMISSION_LOOKBACK_S = 10*1.25 + WORD_SLACK_S
+
+
+def _normal_form(width):
+    level = '9/10' if width == 4 else str(6 if width == 1 else width+5)
+    return f'normal-short/SL{level}'
+
+
+@lru_cache(maxsize=1)
+def _warm_long():
+    for sl in range(2, 11):
+        p4longdecode.geometry(sl).order
+    for sl in p4longrates.LEVELS:
+        p4longrates.constellation(sl)
+    g = p4longdecode.geometry(2)
+    p4longdecode.LongSearch([p4longdecode.LongMember(g, np.ones(g.serialized_size))],
+                            iterations=0).advance()
 
 
 class Role(StrEnum):
@@ -26,6 +44,16 @@ class Role(StrEnum):
 class Expect(StrEnum):
     WORD = "word"
     PACKET = "packet"
+
+
+@dataclass(frozen=True)
+class PreparationFailure:
+    reason: str
+    generation: int
+    support_begin: int
+    support_end: int
+    input_hash: bytes
+    coherence: float = 0.
 
 
 @dataclass(frozen=True)
@@ -101,11 +129,6 @@ class TrainLease:
     max_slot: int = 0
 
 
-@dataclass(frozen=True)
-class PreparationFailure:
-    reason: str
-
-
 class P4Receiver:
     def __init__(self, fs=48000, *, admitted=False, cfo_hz=None, chirp=False, breakin=False,
                  scan='legacy'):
@@ -117,6 +140,7 @@ class P4Receiver:
         self.cfo_hz = cfo_hz
         self.chirp = chirp
         self.breakin = breakin
+        _warm_long()
         self.new_call()
 
     def new_call(self):
@@ -158,6 +182,13 @@ class P4Receiver:
         self.acked_counter = None
         self.normal_deadline = None
         self.sf8_deadline = None
+        self.long_deadline = None
+        self._long_jobs = {}
+        self._remembered_longs = {}
+        self._normal_long_copies = []
+        self._long_inputs = {}
+        self._long_relaxed_deadline = None
+        self._long_admission_deferred = 0
         self._normal_cache = {}
         self._normal_level = None
         self._normal_costs = {width: [] for width in (1, 2, 3, 4)}
@@ -170,17 +201,12 @@ class P4Receiver:
         self._robust_long_cache = {}
         self._sf8_cache = {}
         self._sf8_prepared = {}
-        self._sf8_noise = {}
+        self._sf8_rf_references = {}
         self._long_prepared = {}
         self._long_hint = None
         self._long_phase = None
         self._long_generation = getattr(self, '_long_generation', 0)+1
-        self._sf8_suppressed = set()
         self._sf8_recoveries = {}
-        self._long_frame = None
-        self._long_scores = None
-        # An eight-iteration pass measured about 52 ms on the receive host.
-        self._long_refine_cost_s = .052
         self._normal_baseband = None
         self.normal_coherence = 0.
         self.normal_waiting = False
@@ -307,6 +333,7 @@ class P4Receiver:
 
     def _resolve_scan(self, support_end):
         result, pending = [], []
+        spans = None
         for obs in self._scan_pending:
             at = obs.stream_sample
             # Retained context resolves a Y27/body extent at the crop edge.
@@ -318,12 +345,19 @@ class P4Receiver:
             if horizon > support_end:
                 pending.append(obs)
                 continue
+            gaps = self._scan_gaps(self._scan_audio, self._scan_origin)
+            if spans is None:
+                spans = p4oracle.bursts(self._scan_audio, self.fs, gaps=gaps)
             extent = p4oracle._extent(self._scan_audio, self.fs,
-                (at-self._scan_origin)/self.fs, word=obs.word,
-                gaps=self._scan_gaps(self._scan_audio, self._scan_origin))
-            obs = replace(obs, extent_s=extent)
+                (at-self._scan_origin)/self.fs, word=obs.word, gaps=gaps, spans=spans)
+            supported = (extent is None and obs.word == 'V27' and not obs.weak and not obs.provisional
+                and p4oracle._word_span_supported(self._scan_audio, self.fs,
+                    at-self._scan_origin, obs.cfo_hz, gaps, spans=spans))
+            obs = replace(obs, extent_s=extent, word_span_supported=supported)
             qualification = (obs.word, obs.weak, obs.unexpected,
-                             extent is not None and extent > .50)
+                             extent is not None and extent > .50,
+                             obs.word == 'V27' and extent is not None and extent < .240,
+                             supported)
             if any(abs(at-s) <= round(.010*self.fs) and q == qualification
                    for s, q in self._scan_seen):
                 continue
@@ -697,9 +731,10 @@ class P4Receiver:
         self.capture_gaps = [(a, b) for a, b in self.capture_gaps if b > end-6*self.fs]
         self.capture_gaps.append((begin, end))
         overlaps = False
-        for cache, support_s in ((self._sf8_prepared, 3.230), (self._sf8_noise, 3.230),
+        for cache, support_s in ((self._sf8_prepared, 3.230), (self._sf8_rf_references, 3.230),
                                 (self._sf8_cache, 3.280), (self._long_prepared, 3.230),
-                                (self._robust_long_cache, 3.355), (self._sf8_recoveries, 3.280)):
+                                (self._robust_long_cache, 3.355), (self._sf8_recoveries, 3.280),
+                                (self._long_cache, 3.400)):
             for key in list(cache):
                 support_end = key[0]+round(support_s*self.fs)
                 if cache is self._robust_long_cache:
@@ -707,9 +742,20 @@ class P4Receiver:
                 if begin < support_end and end > key[0]-round(.100*self.fs):
                     del cache[key]
                     overlaps = True
-        self._sf8_suppressed = {key for key in self._sf8_suppressed
-            if not (begin < key[0]+round(3.306*self.fs)
-                    and end > key[0]-round(.100*self.fs))}
+        for key in list(self._long_jobs):
+            if begin < key[0]+round(3.4*self.fs) and end > key[0]-round(.1*self.fs):
+                del self._long_jobs[key]
+        # Reply-carrier gaps after the complete body do not erase repeat
+        # evidence. Only a gap through the observation/filter support does.
+        def affected(onset):
+            return begin < onset+round(3.300*self.fs) and end > onset-round(.100*self.fs)
+
+        self._remembered_longs = {key: row for key, row in self._remembered_longs.items()
+                                  if not affected(row[3])}
+        self._normal_long_copies = [row for row in self._normal_long_copies
+                                   if not any(affected(at) for at, _ in row['chain'])]
+        self._long_inputs = {key: row for key, row in self._long_inputs.items()
+                             if not (begin < row['end'] and end > row['origin'])}
         if (overlaps or self.clock is not None and self.clock.expects == Expect.PACKET
                 and begin < self.clock.next_due+round(3.306*self.fs)
                 and end > self.clock.next_due-round(.100*self.fs)):
@@ -719,11 +765,15 @@ class P4Receiver:
         self._long_generation += 1
         self._long_hint = None
         self._sf8_prepared.clear()
-        self._sf8_noise.clear()
+        self._sf8_rf_references.clear()
         self._sf8_cache.clear()
         self._long_prepared.clear()
         self._robust_long_cache.clear()
-        self._sf8_suppressed.clear()
+        self._long_cache.clear()
+        self._long_jobs.clear()
+        self._remembered_longs.clear()
+        self._normal_long_copies.clear()
+        self._long_inputs.clear()
         self._sf8_recoveries.clear()
 
     def set_receive_phase(self, phase):
@@ -732,38 +782,43 @@ class P4Receiver:
         self._long_phase = phase
 
     def _prune_long_preparation(self, predicted):
-        for cache in (self._sf8_prepared, self._sf8_noise, self._sf8_cache,
+        for cache in (self._sf8_prepared, self._sf8_rf_references, self._sf8_cache,
                       self._long_prepared, self._sf8_recoveries):
             for key in list(cache):
                 if key[0] < predicted-6*self.fs:
                     del cache[key]
-        self._sf8_suppressed = {key for key in self._sf8_suppressed
-                                if key[0] >= predicted-6*self.fs}
 
     def sf8_prepared(self):
         if self.clock is None or not self._sf8_allowed():
             return False
         entry = self._sf8_prepared.get((self.clock.next_due, self.clock.cfo_hz))
-        return entry is not None and not isinstance(entry, PreparationFailure)
+        return (entry is not None and not isinstance(entry, PreparationFailure)
+                and entry.coherence >= .40)
 
     def has_normal_long(self, onset):
         return any(v.get('kind') == 'normal' and v.get('obs') is not None
                    and abs(k[0]-onset) < self.fs//20
                    for k, v in self._long_cache.items())
 
+    def pending_long_support(self, onset):
+        """Extra input needed by an unread, unresolved SF16 field domain."""
+        return onset+round(3.330*self.fs) if any(
+            row['obs'] is None and row.get('count', 369) == 369
+            and abs(key[0]-onset) < self.fs//20
+            for key, row in self._robust_long_cache.items()) else None
+
     def _sf8_allowed(self):
-        if self.clock is None:
-            return False
-        key = (self.clock.next_due, self.clock.cfo_hz)
-        if self._long_hint == 'sf16':
-            self._sf8_suppressed.add(key)
-        return key not in self._sf8_suppressed
+        return self.clock is not None
 
     def _recover_sf8(self, *a, **kw):
         key = (self.clock.next_due, self.clock.cfo_hz)
         self._prune_long_preparation(key[0])
         self._sf8_recoveries[key] = self._sf8_recoveries.get(key, 0)+1
         return p4rx.recover_robust(*a, **kw)
+
+    def _place_sf8(self, z, cfo, count):
+        return self._recover_sf8(z, reference_start=8000, spread_factor=8,
+            data_symbols=count, timing_offsets=range(-96, 97), cfo_hz=(cfo,))
 
     def _preparation_status(self, format, result, reason, at, **fields):
         self.live_events.append(dict(event=f'{format} prepare', at=at,
@@ -831,6 +886,9 @@ class P4Receiver:
             elif obs.kind == Kind.LONG and any(
                     entry['obs'] is obs for entry in self._robust_long_cache.values()):
                 self._long_hint = 'sf16'
+            elif obs.kind == Kind.LONG and obs.speedlevel in (
+                    'SL5-long', 'SL6-long', 'SL7-long', 'SL8-long', 'SL9-long', 'SL10-long'):
+                self._long_hint = 'normal'
             elif obs.kind != Kind.WORD:
                 self.invalidate_long_phase()
         if (self.close_lease is not None and reg.replaced is not None
@@ -840,7 +898,12 @@ class P4Receiver:
         previous = reg.replaced.stream_sample if reg.replaced else obs.after if obs.kind == Kind.BODY else obs.stream_sample
         target = self._responds_to.get(previous)
         evidence = self._response_evidence.get(previous)
-        if (previous not in self._responds_to or target is None
+        # Ordinary confirmations can outlive the train they already answered.
+        refined_span = (reg.replaced is not None and reg.observation.kind == Kind.WORD
+                        and (reg.replaced.word_span_supported or reg.observation.word_span_supported)
+                        and (reg.replaced.stream_sample != reg.observation.stream_sample
+                             or reg.replaced.word_span_supported != reg.observation.word_span_supported))
+        if (refined_span or previous not in self._responds_to or target is None
                 and (obs.kind in (Kind.LONG, Kind.CHIRP)
                      or self._train_target(reg.observation) is not None)):
             target = self._response_target(reg.observation)
@@ -895,6 +958,15 @@ class P4Receiver:
             raise ValueError("observation sample rate differs from the session")
         old = self._classification(obs.stream_sample)
         answer = self._answered.get(old.stream_sample) if old else None
+        same_v27 = (old is not None and old.kind == obs.kind == Kind.WORD
+                    and old.word == obs.word == 'V27')
+        if same_v27 and old.extent_s is not None and old.extent_s < .240:
+            # A later noise floor cannot retract a measured short transmission.
+            obs = replace(obs, extent_s=min(old.extent_s, obs.extent_s)
+                          if obs.extent_s is not None else old.extent_s)
+        if (same_v27 and obs.provisional and not old.provisional
+                and obs.extent_s is not None and obs.extent_s < .240):
+            obs = replace(old, extent_s=obs.extent_s)
         if obs.kind == Kind.BODY:
             if old is None or old.provisional or old.word != "Y27":
                 return RegisteredObservation(obs, Registered.DUPLICATE)
@@ -961,12 +1033,17 @@ class P4Receiver:
               and not obs.provisional
               and abs(old.cfo_hz-obs.cfo_hz) > p4words.SYMBOL_RATE/2):
             outcome = Registered.ENRICHED
+        elif (old.kind == obs.kind == Kind.WORD and old.word == obs.word
+              and not obs.provisional and not old.word_span_supported
+              and obs.word_span_supported):
+            outcome = Registered.ENRICHED
         elif (
             old.kind == obs.kind == Kind.WORD
             and not obs.provisional
             and old.word == obs.word
-            and old.extent_s is None
             and obs.extent_s is not None
+            and (old.extent_s is None or obs.word == 'V27' and obs.extent_s < .240
+                 and obs.extent_s < old.extent_s)
         ):
             outcome = Registered.EXTENDED
         if outcome != Registered.DUPLICATE:
@@ -1314,7 +1391,7 @@ class P4Receiver:
                     and abs(burst_end-end) <= round(.030*self.fs)):
                 obs = Observation(Kind.NORMAL, self.fs, origin, at-origin, at,
                                   .805, self.cfo_hz, 0., placed=True,
-                                  peer_raster_tail=True)
+                                  peer_raster_tail=True, form='normal-short')
                 self._emit(obs, result)
                 self.clock = replace(self.clock, expects=Expect.PACKET,
                                      next_due=at+cycle, after_s=.330,
@@ -1394,7 +1471,7 @@ class P4Receiver:
                 if frame is not None:
                     entry['decoder'] = None
                     self._normal_level = 1
-                    obs = entry['obs'] = replace(obs, frame=frame)
+                    obs = entry['obs'] = replace(obs, frame=frame, form='normal-short/SL5')
             if entry.get('decoder') is not None and not obs.frame:
                 deadline = self.normal_deadline(obs.stream_sample) if self.normal_deadline else None
                 frame = entry['decoder'].decode(deadline)
@@ -1402,7 +1479,8 @@ class P4Receiver:
                     self._normal_level = entry['decoder'].width
                     self.hold.reset('single-copy normal')
                     obs = entry['obs'] = replace(obs, frame=frame,
-                        speedlevel='SL9/10-short' if self._normal_level == 4 else None)
+                        speedlevel='SL9/10-short' if self._normal_level == 4 else None,
+                        form=_normal_form(self._normal_level))
             return obs
         lo = max(0, predicted-origin-round(.050*self.fs))
         if lo >= len(audio):
@@ -1460,7 +1538,7 @@ class P4Receiver:
             self.live_events.append(dict(event='normal-header', at=at, header=heard[0],
                                          a=round(heard[1], 3), b=round(heard[2], 3)))
         obs = Observation(Kind.NORMAL, self.fs, origin, at-origin, at, .805, cfo,
-                          coherence, lattice=coherence, placed=True)
+                          coherence, lattice=coherence, placed=True, form='normal-short')
         deadline = self.normal_deadline(at) if self.normal_deadline else None
         ranked = p4shortlevels.candidates(*equalized, scored[2], self._normal_level, qam=True)
         qam = any(width == 4 and p4shortlevels.agreement(fields)
@@ -1468,6 +1546,7 @@ class P4Receiver:
         if not qam:
             ranked = [pair for pair in ranked if pair[0] != 4]
         frame = None
+        form = 'normal-short'
         if not qam and (ranked[0][0] == 1 or p4shortlevels.agreement(ranked[0][1])
                        < p4shortlevels.LEVEL_CHANGE_AGREEMENT):
             entry['legacy'] = True
@@ -1475,6 +1554,7 @@ class P4Receiver:
                                      (z, nominal, self.clock.cfo_hz, at), deadline=deadline)
             if frame is not None:
                 self._normal_level = 1
+                form = 'normal-short/SL5'
             ranked = [pair for pair in ranked if pair[0] != 1]
         if frame is None:
             decoder_type = p4shortlevels.QamShortDecode if qam else p4shortlevels.ShortDecode
@@ -1490,9 +1570,11 @@ class P4Receiver:
             frame = entry['decoder'].decode(deadline)
             if frame is not None:
                 self._normal_level = entry['decoder'].width
+                form = _normal_form(self._normal_level)
                 self.hold.reset('single-copy normal')
         entry['obs'] = replace(obs, frame=frame,
-            speedlevel='SL9/10-short' if frame is not None and self._normal_level == 4 else None)
+            speedlevel='SL9/10-short' if frame is not None and self._normal_level == 4 else None,
+            form=form)
         return entry['obs']
 
     def _normal_status_current(self, frame, **kwargs):
@@ -1500,9 +1582,11 @@ class P4Receiver:
         return self.hold.status_ok(frame, **kwargs)
 
     def refine(self, *, deadline=None):
-        body_work = self.hold.kind == 'body' and self.hold.work is not None and self.hold.frame is None
+        body_work = (self.hold is not None and self.hold.kind == 'body'
+                     and self.hold.work is not None and self.hold.frame is None)
         started = monotonic()
-        frame = self.hold.refine(deadline=deadline)
+        limit = started+.250 if deadline is None else deadline
+        frame = self.hold.refine(deadline=limit) if self.hold is not None else None
         if body_work:
             self.live_events.append(dict(event='body decode', stage='refine', at=self.hold.last,
                 elapsed_ms=1000*(monotonic()-started), accepted=frame is not None,
@@ -1526,47 +1610,53 @@ class P4Receiver:
             if obs is not None and decoder is not None and not decoder.done and obs.frame is None:
                 if not self._qam_work_eligible(entry):
                     continue
-                limit = monotonic()+.250 if deadline is None else deadline
+                normal_limit = limit
                 if isinstance(decoder, p4shortlevels.QamShortDecode) and self.normal_deadline:
-                    limit = min(limit, self.normal_deadline(obs.stream_sample))
-                frame = decoder.decode(limit)
+                    normal_limit = min(normal_limit, self.normal_deadline(obs.stream_sample))
+                frame = decoder.decode(normal_limit)
                 if frame is not None:
                     self._normal_level = decoder.width
                     self.hold.reset('single-copy normal')
                     entry['obs'] = replace(obs, frame=frame,
-                        speedlevel='SL9/10-short' if decoder.width == 4 else None)
+                        speedlevel='SL9/10-short' if decoder.width == 4 else None,
+                        form=_normal_form(decoder.width))
                     self._emit(entry['obs'], result)
-        for entry in self._long_cache.values():
-            if (entry.get('kind') != 'normal' or entry.get('scores') is None
-                    or entry.get('refined') or entry.get('obs') is None):
-                continue
-            if deadline is not None and monotonic() >= deadline:
+        for entry in sorted(self._long_jobs.values(),
+                            key=lambda row: row['obs'].coherence, reverse=True):
+            if monotonic() >= limit:
                 break
-            scores = entry.get('score_sets', (entry['scores'],))
-            attempts = [(field, copies, polarity)
-                        for copies, field in enumerate(scores, start=1)
-                        for polarity in (1, -1)]
-            while entry.get('refine_index', 0) < len(attempts):
-                if (deadline is not None and
-                        deadline-monotonic() < self._long_refine_cost_s):
-                    break
-                index = entry.get('refine_index', 0)
-                field, copies, polarity = attempts[index]
-                started = monotonic()
-                frame = p4long.decode_scores(field, iterations=8, polarity=polarity)
-                elapsed = monotonic()-started
-                self._long_refine_cost_s = max(.001, elapsed)
-                entry['refine_index'] = index+1
-                self.live_events.append(dict(event='long-decode', at=entry['obs'].stream_sample,
-                    iterations=8, polarity=polarity, elapsed_ms=1000*elapsed,
-                    crc_valid=frame is not None, copies=copies))
-                if frame is not None:
-                    entry['obs'] = replace(entry['obs'], frame=frame, provisional=False, extent_s=3.282)
-                    self._remember_long(frame)
-                    self._long_scores = None
-                    self._emit(entry['obs'], result)
-                    break
-            entry['refined'] = entry.get('refine_index', 0) == len(attempts) or entry['obs'].frame is not None
+            if not entry['search'].done:
+                self._advance_long(entry, deadline=limit, relaxed=True)
+        # A failed splice or an expired frontend may not have constructed an
+        # engine job yet. Retained complete input belongs to this same bounded
+        # relaxed scheduler, never a late current-slot publication path.
+        for saved in tuple(self._long_inputs.values()):
+            if monotonic() >= limit:
+                break
+            if saved['tried'] or saved['generation'] != self._long_generation:
+                continue
+            if any(entry['result'] is not None and entry['result'].frame is not None
+                   and abs(entry['obs'].stream_sample-saved['clock'].next_due) < self.fs//20
+                   for entry in self._long_jobs.values()):
+                saved['tried'] = True
+                continue
+            deferred = self._long_admission_deferred
+            self._long_relaxed_deadline = limit
+            try:
+                with self.scoped_clock(saved['clock']):
+                    # Classification/fall-through needs time before the
+                    # family-specific frontend can enforce its own reserve.
+                    if self._long_work_expired(self.clock.next_due,
+                            reserve_s=.015+max(self._long_frontend_seconds(sf8=True),
+                                              self._long_frontend_seconds(fallback=True))):
+                        continue
+                    self._packet(saved['audio'], saved['origin'], long_fallback=True)
+                # Spending the remaining slice before constructing a job is
+                # a deferral, not a negative result for this retained input.
+                saved['tried'] = (monotonic() < limit
+                                  and self._long_admission_deferred == deferred)
+            finally:
+                self._long_relaxed_deadline = None
         return result
 
     def _body(self, head, frame, origin, result):
@@ -1575,36 +1665,312 @@ class P4Receiver:
         self._emit(Observation(
             Kind.BODY, self.fs, origin, head.stream_sample-origin,
             head.stream_sample, .796, head.cfo_hz-p4words.CARRIER_HZ["Y27"], head.coherence,
-            after=head.stream_sample, frame=frame), result)
+            after=head.stream_sample, frame=frame, form='body'), result)
 
-    def _remember_long(self, frame):
-        if self._long_frame is None or self._long_frame[0] != frame:
-            field = p4frame.encode_field(frame.data, frame.status)
-            self._long_frame = frame, p4longtx.body_symbols(p4longtx.coded_bits(field))
+    @staticmethod
+    def _long_codeword(frame, g):
+        wire = p4frame.encode_field(frame.data, frame.status)
+        prefix = np.r_[np.unpackbits(np.frombuffer(wire, np.uint8), bitorder='little'),
+                       np.zeros(g.padding, np.uint8)]
+        state = p4coding.rsc_encode(prefix, initial_state=(0, 0, 0)).final_state
+        bits = np.r_[prefix, p4coding.rsc_terminate(state).systematic].astype(np.uint8)
+        c1 = p4coding.rsc_encode(bits, initial_state=(0, 0, 0)).parity
+        c2 = p4coding.rsc_encode(bits[g.order], initial_state=(0, 0, 0)).parity
+        return np.r_[bits, np.asarray(c1)[g.c1_slice], np.asarray(c2)[g.c2_slice]]
 
-    def _long_agreement(self, z, start, cfo):
-        if self._long_frame is None:
-            return 0.
-        matched = p4rx.matched_filter(z * np.exp(
-            -2j*np.pi*cfo*np.arange(len(z))/28800))
-        expected = self._long_frame[1]
-        numerator = denominator = 0.
-        for block in range(5):
-            training = p4short._LONG_TRAIN[block]
-            idx = start + 128 + 16*(239*block+np.arange(4, 28))
-            if idx[-1] >= len(matched):
-                return 0.
-            gain = np.vdot(training[4:28], matched[idx]) / np.vdot(training[4:28], training[4:28])
-            data = start + 128 + 16*(p4long.LAYOUT.data_offsets[block]
-                                     + np.arange(p4long.LAYOUT.block_symbols))
-            if data[-1] >= len(matched) or abs(gain) == 0:
-                return 0.
-            symbols = (matched[data]/gain).real
-            want = expected[p4long.LAYOUT.data_offsets[block]:
-                            p4long.LAYOUT.data_offsets[block]+p4long.LAYOUT.block_symbols].real
-            numerator += float(symbols @ want)
-            denominator += float(np.sum(abs(symbols)))
-        return numerator/denominator if denominator else 0.
+    def _remember_long(self, frame, member, onset):
+        coded = self._long_codeword(frame, member.geometry)
+        if any(row[3] > onset for row in self._remembered_longs.values()):
+            return coded
+        g = member.geometry
+        identity = (g.speedlevel, frame.status.byte, frame.data)
+        current = {key: row for key, row in self._remembered_longs.items() if row[3] == onset}
+        current[identity] = (frame, g, coded, onset, self._long_generation)
+        self._remembered_longs = current
+        return coded
+
+    def _long_agreement(self, members, onset):
+        matches = {}
+        for identity, (frame, g, coded, previous, generation) in self._remembered_longs.items():
+            if (generation != self._long_generation or
+                    abs(onset-previous-round(3.75*self.fs)) > self.fs//20):
+                continue
+            for member in members:
+                # Sums remain decoder models, never evidence that the current
+                # physical copy agrees with a remembered frame.
+                if member.geometry != g or member.label.startswith('copies:'):
+                    continue
+                support = []
+                for _, lo, hi in g.regions:
+                    scores = member.fields[lo:hi]
+                    total = np.sum(abs(scores))
+                    support.append(float(scores @ (1-2.0*coded[lo:hi])/total) if total else 0.)
+                status = slice(8*g.data_bytes, 8*(g.data_bytes+1))
+                scores = member.fields[status]
+                reliable = abs(scores) >= 2
+                compatible = not np.any(((scores < 0) != coded[status]) & reliable)
+                if min(support) >= .70 and compatible:
+                    matches[identity] = (frame, member)
+        return next(iter(matches.values())) if len(matches) == 1 else None
+
+    def _start_long(self, key, members, obs, *, replace_members=False):
+        entry = self._long_jobs.get(key)
+        if entry is None:
+            # Placement refines the evidence, not the physical slot's grant.
+            # Looking up a newly placed onset here would start a fresh wall
+            # allowance after the frontend has already spent receive time.
+            limits = self.long_deadline(key[0], sf8=obs.sf8) if self.long_deadline else None
+            entry = dict(search=p4longdecode.LongSearch(members, policy='live'),
+                         obs=obs, limits=limits, result=None)
+            self._long_jobs = {k: v for k, v in self._long_jobs.items()
+                               if k[0] >= key[0]-6*self.fs}
+            self._long_jobs[key] = entry
+        elif replace_members:
+            entry.update(search=p4longdecode.LongSearch(members, policy='live'),
+                         obs=obs, result=None)
+        return entry
+
+    def _long_work_expired(self, onset, *, sf8=False, reserve_s=0.):
+        if self._long_relaxed_deadline is not None:
+            limit = self._long_relaxed_deadline
+        elif self.long_deadline is not None:
+            limit = self.long_deadline(onset, sf8=sf8).work_limit()
+        else:
+            return False
+        expired = limit <= monotonic()+reserve_s
+        if expired and reserve_s:
+            self._long_admission_deferred += 1
+        return expired
+
+    def _long_frontend_seconds(self, *, sf8=False, fallback=False):
+        # Full SF8/SF16 frontends measured 33/27 ms; prepared finishes are
+        # bounded separately. Include conversion and member construction.
+        key = self.clock.next_due, self.clock.cfo_hz
+        if sf8:
+            prepared = self._sf8_prepared.get(key)
+            return .010 if prepared is not None else .045
+        prepared = key in self._long_prepared
+        failed = self._robust_long_cache.get(key, {}).get('splice_failed')
+        return .015 if prepared and not (fallback and failed) else .040
+
+    def _advance_long(self, entry, *, deadline=None, relaxed=False):
+        if self._long_relaxed_deadline is not None:
+            relaxed = True
+            deadline = self._long_relaxed_deadline
+        obs, search, limits = entry['obs'], entry['search'], entry['limits']
+        if obs.frame is not None:
+            return None if relaxed else obs
+        if not relaxed:
+            if limits is not None:
+                deadline = limits.work_limit()
+                if self._watch_read_generation is not None:
+                    # The side read owes packet fall-through and feed before
+                    # its independent parent's decision. Keep that work in
+                    # this grant as well as the numerical search.
+                    deadline -= .015
+            elif obs.sf8 and self.sf8_deadline:
+                deadline = self.sf8_deadline(obs.stream_sample)-.005
+            matched = self._long_agreement(search.members, obs.stream_sample)
+        else:
+            matched = None
+        started = monotonic()
+        if matched is None:
+            budget = search.component_budget
+            # SF8's final callback may leave only a few milliseconds after
+            # its tail check. Admit the free systematic tier, but reserve at
+            # least 10 ms before starting constituent work. This is a live
+            # deadline decision, not a permanent component cap on the job.
+            if obs.sf8 and deadline is not None and deadline-monotonic() < .010:
+                search.component_budget = min(search.calls, budget) if budget is not None else search.calls
+            try:
+                result = search.advance(deadline=deadline)
+            finally:
+                search.component_budget = budget
+            entry['result'] = result
+            frame = result.frame
+            member = (search.members[result.selected_provenance.member_index]
+                      if frame is not None else None)
+        else:
+            frame, member = matched
+            result = None
+        if frame is not None:
+            entry['selected_member'] = next(i for i, candidate in enumerate(search.members)
+                                            if candidate is member)
+            if member.geometry.speedlevel <= 3 and member.label:
+                shift = round((int(member.label)-20)*self.fs/112.5)
+                obs = replace(obs, first_chip=obs.first_chip+shift,
+                              stream_sample=obs.stream_sample+shift)
+            coded = self._remember_long(frame, member, obs.stream_sample)
+        agreement = corrected_bits = None
+        if frame is not None:
+            g = member.geometry
+            corrected_bits = int(np.count_nonzero((member.fields[:g.systematic] < 0)
+                                                 != coded[:g.systematic]))
+            agreement = min(float(member.fields[lo:hi] @ (1-2.0*coded[lo:hi])
+                                  / np.sum(abs(member.fields[lo:hi])))
+                            if np.any(member.fields[lo:hi]) else 0.
+                            for _, lo, hi in g.regions)
+        # Re-encoding and diagnostics are part of finalization too. Check the
+        # publication limit after that work, immediately before exposing CRC.
+        timely = (not relaxed and (limits is None or limits.publishable())
+                  and (not obs.sf8 or self.sf8_deadline is None or
+                       monotonic()+.005 <= self.sf8_deadline(obs.stream_sample)))
+        if frame is not None and timely:
+            sl = member.geometry.speedlevel
+            entry['obs'] = replace(obs, frame=frame, provisional=False, placed=True,
+                speedlevel=str(sl) if sl < 4 else f'SL{sl}-long',
+                form=f"{'robust' if sl <= 4 else 'normal'}-long/SL{sl}")
+        self.live_events.append(dict(event='long-engine', at=obs.stream_sample,
+            state='repeat' if matched else result.state,
+            tier=None if result is None else result.completed_tier,
+            iteration=None if result is None or result.selected_provenance is None
+                else result.selected_provenance.iteration,
+            copies=None if member is None else len(member.label.removeprefix('copies:').split(','))
+                if member.label.startswith('copies:') else 1,
+            polarity=None if member is None else member.polarity,
+            crc_valid=frame is not None, timely=timely, relaxed=relaxed,
+            agreement=agreement, corrected_bits=corrected_bits,
+            members=len(search.members), elapsed_ms=1000*(monotonic()-started),
+            budget_overrun_keyable=bool(frame is not None and timely and limits is not None
+                                       and limits.work.remaining() < 0)))
+        return entry['obs'] if entry['obs'].frame is not None else None
+
+    def _normal_long_members(self, members, placements, onset):
+        """Keep raw observations alongside guarded, independent repeat sums.
+
+        Each chain contains one channel model per physical copy, never a
+        posterior or two weighting/placement hypotheses of the same copy.
+        All raw and summed models share the engine's completed-tier decision.
+        """
+        previous = self._normal_long_copies
+        if previous and previous[0]['onset'] > onset:
+            return tuple(members), tuple(placements)
+        rows, combined, combined_places = [], [], []
+        for member, placement in zip(members, placements):
+            g = member.geometry
+            compatible = []
+            for row in previous:
+                delta = onset-row['onset']
+                old = row['member']
+                if (abs(delta-round(3.75*self.fs)) > self.fs//20
+                        or old.geometry != g or old.polarity != member.polarity
+                        or old.weighting != member.weighting
+                        or abs(row['placement'][2]-placement[2]) > 1.):
+                    continue
+                chain = row['chain'][-3:]
+                agrees = True
+                for copy_at, copy_member in chain:
+                    if any(a < copy_at+round(3.282*self.fs) and b > copy_at
+                           or a < onset+round(3.282*self.fs) and b > onset
+                           for a, b in self.capture_gaps):
+                        agrees = False
+                        break
+                    old_fields = copy_member.fields
+                    for _, lo, hi in g.regions:
+                        a, b = member.fields[lo:hi], old_fields[lo:hi]
+                        # Both directions must support the same channel bits.
+                        if (not np.any(a) or not np.any(b)
+                                or a @ np.where(b < 0, -1., 1.) < .70*np.sum(abs(a))
+                                or b @ np.where(a < 0, -1., 1.) < .70*np.sum(abs(b))):
+                            agrees = False
+                            break
+                    status = slice(8*g.data_bytes, 8*(g.data_bytes+1))
+                    reliable = (abs(member.fields[status]) >= 2) & (abs(old_fields[status]) >= 2)
+                    if np.any(((member.fields[status] < 0) != (old_fields[status] < 0)) & reliable):
+                        agrees = False
+                    if not agrees:
+                        break
+                if agrees:
+                    compatible.append(row)
+            chain = []
+            if compatible:
+                best = min(compatible, key=lambda row: abs(row['placement'][2]-placement[2]))
+                chain = best['chain'][-3:]
+            chain = [*chain, (onset, member)]
+            rows.append(dict(onset=onset, member=member, placement=placement, chain=chain))
+            if len(chain) > 1:
+                combined.append(p4longdecode.LongMember(g,
+                    np.sum([copy.fields for _, copy in chain], axis=0),
+                    quarter_turn=member.quarter_turn, weighting=member.weighting,
+                    polarity=member.polarity,
+                    label='copies:'+','.join(str(at) for at, _ in chain)))
+                combined_places.append(placement)
+        self._normal_long_copies = rows
+        return (*members, *combined), (*placements, *combined_places)
+
+    def _prepare_normal_long(self, z, base_origin):
+        """Retain pilot/filter work, never early fitted fields or decisions."""
+        predicted, fs = self.clock.next_due, self.fs
+        entry = next((row for key, row in self._long_cache.items()
+                      if row.get('kind') == 'normal' and not row.get('complete')
+                      and abs(key[0]-predicted) < fs//20), None)
+        if entry is None or 'prepared' in entry:
+            return
+        started = monotonic()
+        start = entry['start']+round((entry['base_origin']-base_origin)*28800/fs)
+        rows = []
+        for cfo in (entry['cfo'], *([entry['cfo']-1800/239, entry['cfo']+1800/239]
+                                   if entry.get('alias') else [])):
+            matched = p4rx.matched_filter(z*np.exp(-2j*np.pi*cfo*np.arange(len(z))/28800))
+            placement = p4short.place_long_matched(matched, start, cfo,
+                                                  offsets=p4short.NARROW, trainings=24)
+            refined = placement[2]
+            fitted = (matched if refined == cfo else p4rx.matched_filter(
+                z*np.exp(-2j*np.pi*refined*np.arange(len(z))/28800)))
+            rows.append((cfo, placement, matched, fitted))
+        entry['prepared'] = dict(z=z, base_origin=base_origin, rows=rows, start=start)
+        self._preparation_status('normal', 'prepared', 'filter-windows', predicted,
+                                  elapsed_ms=1000*(monotonic()-started))
+
+    def _finish_normal_long(self, prepared, audio, origin):
+        """Splice causal filter windows before the final all-25-pilot fit."""
+        fs, predicted = self.fs, self.clock.next_due
+        base = prepared['base_origin']
+        tail_origin = predicted+round(3.*fs)
+        begin = tail_origin-origin
+        if begin < 0 or len(audio) <= begin:
+            return None
+        tail = p4rx.audio_to_baseband(np.asarray(audio)[begin:], fs)
+        offset = round((tail_origin-base)*28800/fs)
+        # Keep the resampler's input phase exact; unsupported rates use the
+        # ordinary full-window frontend rather than a fractional splice.
+        if abs(offset-(tail_origin-base)*28800/fs) > 1e-9:
+            return None
+        old = prepared['z']
+        lo, hi = 1440, 2880
+        a, b = old[offset+lo:offset+hi], tail[lo:hi]
+        if len(a) != hi-lo or len(b) != len(a):
+            return None
+        phase = np.vdot(b, a)
+        norm = np.linalg.norm(a)*np.linalg.norm(b)
+        if abs(phase) < .999*max(norm, 1e-30):
+            return None
+        tail *= phase/abs(phase)
+        join = offset+hi
+        z = np.concatenate((old[:join], tail[hi:]))
+        placements, matched_rows = [], []
+        for cfo, early, head, fitted in prepared['rows']:
+            def finish(frequency, prefix):
+                # The first tail outputs depend on the retained prefix, not
+                # the merely correlated overlap from the new conversion.
+                begin = join-(len(p4rx.RRC_TAPS)-1)
+                rotated = z[begin:]*np.exp(-2j*np.pi*frequency*np.arange(begin, len(z))/28800)
+                last = p4rx.matched_filter(rotated)
+                return np.concatenate((prefix[:join], last[join-begin:]))
+            matched = finish(cfo, head)
+            placed = p4short.place_long_matched(matched, prepared['start'], cfo,
+                                               offsets=p4short.NARROW, trainings=25)
+            placements.append(placed)
+            if placed[2] == early[2]:
+                matched_rows.append(finish(early[2], fitted))
+            elif placed[2] == cfo:
+                matched_rows.append(matched)
+            else:
+                matched_rows.append(None)
+        ranked = sorted(zip(placements, matched_rows), key=lambda row: row[0][0], reverse=True)
+        self._preparation_status('normal', 'finished', 'filter-windows', predicted,
+            carriers=len(ranked), retained_carriers=sum(row[1] is not None for row in ranked))
+        return z, base, [row[0] for row in ranked], [row[1] for row in ranked]
 
     def _normal_long(self, audio, origin, *, partial=False, alias=False):
         predicted, fs = self.clock.next_due, self.fs
@@ -1618,7 +1984,14 @@ class P4Receiver:
         if entry is not None and (entry.get('obs') is None
                                   or entry.get('complete') or end <= entry['end']):
             return entry.get('obs'), entry['coherence']
-        if self._normal_baseband is not None:
+        expand_alias = entry is not None and alias and not entry.get('alias')
+        finished = (self._finish_normal_long(entry['prepared'], audio, origin)
+                    if entry is not None and 'prepared' in entry
+                    and not partial and not expand_alias else None)
+        if finished is not None:
+            z, base_origin, ready_placements, matched_rows = finished
+            nominal = round((predicted-base_origin)*28800/fs)+p4short.GEOM
+        elif self._normal_baseband is not None:
             z, base_origin, nominal = self._normal_baseband
         else:
             lo = max(0, predicted-origin-round(.050*fs))
@@ -1628,13 +2001,14 @@ class P4Receiver:
             z = p4rx.audio_to_baseband(available, fs)
             base_origin = origin+lo
             nominal = round((predicted-base_origin)*28800/fs)+p4short.GEOM
-        if entry is not None and alias:
+        if expand_alias:
             entry['alias'] = True
+            entry.pop('prepared', None)
         if entry is None:
             offsets = p4short.WIDE
-            bases = (self.clock.cfo_hz,)
-            placed = p4short.place_long(z, nominal, bases[0], offsets=offsets, trainings=5)
-            if placed[0] < .45 and alias:
+            placed = p4short.place_long(z, nominal, self.clock.cfo_hz, offsets=offsets, trainings=5)
+            unresolved_carrier = placed[0] < .45 and alias
+            if unresolved_carrier:
                 alternatives = [p4short.place_long(z, nominal, self.clock.cfo_hz+step,
                                     offsets=offsets, trainings=5) for step in (-1800/239, 1800/239)]
                 placed = max((placed, *alternatives), key=lambda x: x[0])
@@ -1646,29 +2020,29 @@ class P4Receiver:
             at = predicted+round((start-nominal)*fs/28800)
             obs = Observation(Kind.LONG, fs, origin, at-origin, at,
                               (end-at)/fs, cfo, coherence, provisional=True,
-                              lattice=coherence, placed=True)
-            agreement = self._long_agreement(z, start, cfo)
-            if agreement >= .70:
-                obs = replace(obs, frame=self._long_frame[0], provisional=False, extent_s=3.282)
-                self.live_events.append(dict(event='long-repeat', at=at, agreement=agreement))
+                              lattice=coherence, placed=False, form='normal-long')
             entry = dict(kind='normal', obs=obs, coherence=coherence, end=end,
-                         start=start, base_origin=base_origin, cfo=cfo, scores=None,
-                         iterations=0, complete=False, alias=alias)
+                         start=start, base_origin=base_origin, cfo=cfo,
+                         complete=False, alias=alias)
             self._long_cache[key] = entry
             self.clock.cycle_s = 3.75
             self.clock.misses = 0
             self.live_events.append(dict(event='long-candidate', at=at,
                                          coherence=coherence, trainings=5))
-        if partial or end < entry['obs'].stream_sample+round(3.300*fs):
+        start = entry['start'] + round((entry['base_origin']-base_origin)*28800/fs)
+        if partial or len(z) < start+p4long.LAYOUT.total_symbols*16+128:
             entry['end'] = end
             return entry['obs'], entry['coherence']
-        start = entry['start'] + round((entry['base_origin']-base_origin)*28800/fs)
-        placed = p4short.place_long(z, start, entry['cfo'], offsets=p4short.NARROW, trainings=25)
+        placed = (ready_placements[0] if finished is not None else
+                  p4short.place_long(z, start, entry['cfo'], offsets=p4short.NARROW, trainings=25))
+        placements = ready_placements if finished is not None else [placed]
+        if entry.get('alias') and finished is None:
+            placements += [p4short.place_long(z, start, entry['cfo']+step,
+                offsets=p4short.NARROW, trainings=25) for step in (-1800/239, 1800/239)]
+            placements.sort(key=lambda row: row[0], reverse=True)
+            placed = placements[0]
         entry['end'] = end
         entry['complete'] = True
-        if placed[0] < .45:
-            entry['obs'] = None
-            return None, placed[0]
         coherence, start, cfo = placed
         header = start+128+16*(np.arange(p4longtx.HEADER_CHIPS)-p4longtx.HEADER_CHIPS)
         if header[0] >= 0:
@@ -1679,61 +2053,45 @@ class P4Receiver:
             if energy:
                 self.live_events.append(dict(event='long-header', at=entry['obs'].stream_sample,
                     a=float(abs(np.vdot(p4longtx.HEADER, chips))/energy)))
-        fields = p4long.body_scores(z, first_training_start=start, frequency_offset=cfo)
-        if fields is None:
-            entry['complete'] = False
-            return entry['obs'], coherence
-        entry.update(start=start, base_origin=base_origin, cfo=cfo,
-                     coherence=coherence, scores=fields, iterations=1)
-        started = monotonic()
-        frame = p4long.decode_scores(fields, iterations=1, polarity=1)
-        self.live_events.append(dict(event='long-decode', at=entry['obs'].stream_sample,
-            iterations=1, polarity=1, elapsed_ms=1000*(monotonic()-started),
-            crc_valid=frame is not None, copies=1))
-        score_sets = [fields]
-        if frame is None and entry.get('alias'):
-            # The five-training lattice can prefer a 7.53 Hz alias even at
-            # coherence .679. A full-packet CRC decides the carrier.
-            for step in (-1800/239, 1800/239):
-                alternative = p4short.place_long(z, start, self.clock.cfo_hz+step,
-                                                  offsets=p4short.NARROW, trainings=25)
-                if alternative[0] < .45 or abs(alternative[2]-cfo) < 1.:
-                    continue
-                alt_fields = p4long.body_scores(z, first_training_start=alternative[1],
-                                                frequency_offset=alternative[2])
-                if alt_fields is None:
-                    continue
-                started = monotonic()
-                alt_frame = p4long.decode_scores(alt_fields, iterations=1, polarity=1)
-                self.live_events.append(dict(event='long-decode', at=entry['obs'].stream_sample,
-                    iterations=1, polarity=1, elapsed_ms=1000*(monotonic()-started),
-                    crc_valid=alt_frame is not None, copies=1))
-                if alt_frame is not None:
-                    frame, fields = alt_frame, alt_fields
-                    coherence, start, cfo = alternative
-                    entry.update(start=start, cfo=cfo, coherence=coherence)
-                    break
-        if frame is None and self._long_scores is not None:
-            previous_at, previous_scores = self._long_scores
-            if abs(entry['obs'].stream_sample-previous_at-round(3.75*fs)) < fs//20:
-                combined = fields+previous_scores
-                started = monotonic()
-                frame = p4long.decode_scores(combined, iterations=1, polarity=1)
-                self.live_events.append(dict(event='long-decode', at=entry['obs'].stream_sample,
-                    iterations=1, polarity=1, elapsed_ms=1000*(monotonic()-started),
-                    crc_valid=frame is not None, copies=2))
-                if frame is None:
-                    score_sets.append(combined)
-        if frame is None:
-            entry['score_sets'] = score_sets
-            self._long_scores = entry['obs'].stream_sample, fields
-            return entry['obs'], coherence
-        self._long_scores = None
-        self._remember_long(frame)
-        entry['refined'] = True
-        entry['obs'] = replace(entry['obs'], frame=frame, provisional=False,
-                               extent_s=3.282, cfo_hz=cfo, coherence=coherence,
-                               lattice=coherence)
+        members, member_placements = [], []
+        for index, placement in enumerate(placements):
+            retained = matched_rows[index] if finished is not None else None
+            observed = (p4longrates.observe_matched_body(retained/np.max(abs(z)),
+                            first_training_start=int(placement[1]),
+                            frequency_offset=placement[2], input_samples=len(z))
+                        if retained is not None else
+                        p4longrates.observe_body(z, first_training_start=int(placement[1]),
+                                               frequency_offset=placement[2]))
+            if observed is not None:
+                group = p4longrates.build_members(observed)
+                members.extend(group)
+                member_placements.extend([placement]*len(group))
+        if not members:
+            support = p4long.LAYOUT.total_symbols*16+128
+            if all(len(z) >= placement[1]+support for placement in placements):
+                # A full but unusable body cannot validate the prefix's
+                # provisional placement. Weak usable observations still go
+                # through the exact engine, irrespective of coherence.
+                entry.update(obs=None, coherence=coherence)
+            else:
+                entry['complete'] = False
+            return entry.get('obs'), coherence
+        entry.update(start=start, base_origin=base_origin, cfo=cfo, coherence=coherence)
+        obs = replace(entry['obs'], duration_s=3.282, extent_s=3.282,
+                      cfo_hz=cfo, coherence=coherence, lattice=coherence,
+                      placed=coherence >= .45)
+        entry['obs'] = obs
+        members, member_placements = self._normal_long_members(
+            members, member_placements, obs.stream_sample)
+        job = self._start_long((predicted, self.clock.cfo_hz, 'normal'),
+                               members, obs)
+        decoded = self._advance_long(job)
+        if decoded is not None:
+            if 'selected_member' in job:
+                selected = member_placements[job['selected_member']]
+                decoded = replace(decoded, cfo_hz=selected[2], coherence=selected[0])
+                job['obs'] = decoded
+            entry['obs'] = decoded
         return entry['obs'], coherence
 
     def prepare_long(self, audio, origin):
@@ -1777,7 +2135,14 @@ class P4Receiver:
                 and k[1] == cfo and abs(k[0]-predicted) < round(.035*fs)), key)
         entry = self._robust_long_cache.get(key)
         end = origin+len(audio)
-        if entry is not None and (entry['obs'] is not None
+        # The early locked horizon is sufficient for start20. Later support
+        # must restore starts21..24 rather than freeze a truncated domain.
+        count = 373 if end >= predicted+round(3.330*fs) else 369
+        job = self._long_jobs.get((predicted, cfo, 'sf16'))
+        retained = job is not None and job['result'] is not None and job['result'].frame is not None
+        # A validated late result is already retained, even though publication
+        # left obs empty. Padding that same copy cannot buy another grant.
+        if entry is not None and (retained or entry['obs'] is not None
                 or not (fallback and entry.get('splice_failed'))
                 and (entry['end'] >= key[0]+round(3.355*fs) or end <= entry['end'])):
             return entry['obs'], entry['coherence']
@@ -1790,36 +2155,33 @@ class P4Receiver:
         if split:
             coherence, symbols, first, reason = p4oracle.finish_despread_long(
                 audio, fs, dict(prepared, lo=prepared['lo']-origin, onset=predicted-origin),
-                diagnostics=diagnostics)
+                diagnostics=diagnostics, count=count)
         else:
             coherence, symbols, first = p4oracle.placed_despread(
-                audio, fs, (predicted-origin)/fs, cfo, count=373)
+                audio, fs, (predicted-origin)/fs, cfo, count=count)
         placed_at = monotonic()
         obs = None
-        reception = None
-        if coherence >= p4oracle.ROBUST_FRACTION_KNEE:
-            reception = p4robustrx.decode_symbols(symbols)
-            if reception is not None:
-                first += round(reception.packet_symbol*fs/112.5)
-                obs = Observation(Kind.LONG, fs, origin, first, origin+first,
-                                  369/112.5, cfo, coherence, frame=reception.frame, placed=True,
-                                  speedlevel=str(reception.speedlevel))
+        members = (() if symbols is None or first is None else
+                   p4robustrx.build_members(symbols))
+        if members and first is not None:
+            candidate = Observation(Kind.LONG, fs, origin, first, origin+first,
+                count/112.5, cfo, coherence, placed=True, provisional=True,
+                extent_s=count/112.5, form='robust-long')
+            job = self._start_long((predicted, cfo, 'sf16'), members, candidate,
+                                   replace_members=(not split or entry is not None
+                                       and count > entry.get('count', 369)))
+            obs = self._advance_long(job)
         self.live_events.append(dict(event='long decode', at=predicted, coherence=coherence,
-            symbols=len(symbols), crc_valid=reception is not None,
-            elapsed_ms=1000*(monotonic()-started),
-            speedlevel=None if reception is None else reception.speedlevel,
-            corrected_bits=None if reception is None else reception.corrected_bits,
-            preparation=reason, format_hint=self._long_hint,
-            sf8_recoveries=self._sf8_recoveries.get(key, 0),
-            tail_ms=1000*(placed_at-started) if split else None,
+            symbols=0 if symbols is None else len(symbols), crc_valid=obs is not None,
+            elapsed_ms=1000*(monotonic()-started), preparation=reason,
             overlap_correlation=diagnostics.get('overlap_correlation'),
+            tail_ms=1000*(placed_at-started) if split else None,
             decode_ms=1000*(monotonic()-placed_at)))
-        self._robust_long_cache[key] = dict(obs=obs, coherence=coherence, end=end,
-            splice_failed=split and (reason in ('overlap', 'incomplete') or reception is None))
+        cached = dict(obs=obs, coherence=coherence, end=end, count=count,
+            splice_failed=split and (reason in ('overlap', 'incomplete') or obs is None))
+        self._robust_long_cache[key] = cached
         if obs is not None:
-            self._robust_long_cache[(obs.stream_sample, cfo)] = self._robust_long_cache[key]
-        if obs is None and end >= predicted+round(3.306*fs) and key in self._sf8_suppressed:
-            self._long_hint = None
+            self._robust_long_cache[(obs.stream_sample, cfo)] = cached
         return obs, coherence
 
     def prepare_sf8(self, audio, origin):
@@ -1831,9 +2193,9 @@ class P4Receiver:
         if not self._sf8_allowed():
             self._preparation_status('sf8', 'skipped', 'sf16-hint', predicted)
             return None
-        if key in self._sf8_prepared:
-            entry = self._sf8_prepared[key]
-            return None if isinstance(entry, PreparationFailure) else entry
+        entry = self._sf8_prepared.get(key)
+        if entry is not None and not isinstance(entry, PreparationFailure):
+            return entry if entry.coherence >= .40 else None
         if origin + len(audio) < predicted + round(3.230*fs):
             self._preparation_status('sf8', 'retryable', 'incomplete', predicted)
             return None
@@ -1846,51 +2208,79 @@ class P4Receiver:
             self._preparation_status('sf8', 'retryable', 'capture-gap', predicted)
             return None
         chunk = np.asarray(audio)[begin:predicted-origin+round(3.230*fs)]
+        fingerprint = blake2b(np.ascontiguousarray(chunk).view(np.uint8), digest_size=16).digest()
+        if isinstance(entry, PreparationFailure):
+            if (entry.generation == self._long_generation and
+                    entry.support_begin == origin+begin and
+                    entry.support_end == predicted+round(3.230*fs) and
+                    entry.input_hash == fingerprint):
+                return None
+            del self._sf8_prepared[key]
         started = monotonic()
         z = p4rx.audio_to_baseband(chunk, fs)
-        reason = None
+        self._prepare_normal_long(z, origin+begin)
         try:
-            observed = self._recover_sf8(
-                z, reference_start=8000, spread_factor=8, data_symbols=680,
-                timing_offsets=range(-48, 49), cfo_hz=(cfo,))
+            observed = self._place_sf8(z, cfo, 680)
         except ValueError:
-            reason = 'recovery-error'
-        else:
-            if observed.coherence < .40:
-                reason = 'below-coherence'
-            else:
-                noise = self._sf8_noise_floor(z)
-                if not self._sf8_energy_present(z, observed, noise):
-                    reason = 'energy'
-        self._preparation_status('sf8', 'negative' if reason else 'prepared',
-            reason or 'prefix', predicted, sf8_recoveries=self._sf8_recoveries[key],
-            coherence=None if reason == 'recovery-error' else observed.coherence,
-            elapsed_ms=1000*(monotonic()-started))
-        if reason:
-            self._sf8_prepared[key] = PreparationFailure(reason)
+            self._sf8_prepared[key] = PreparationFailure('recovery-error',
+                self._long_generation, origin+begin, predicted+round(3.230*fs), fingerprint)
+            self._preparation_status('sf8', 'negative', 'recovery-error', predicted)
             return None
+        power = self._sf8_rf_power(z, observed)
+        energy = self._sf8_energy_present(power)
+        if not energy:
+            self._sf8_prepared[key] = PreparationFailure('energy',
+                self._long_generation, origin+begin, predicted+round(3.230*fs),
+                fingerprint,
+                coherence=observed.coherence)
+            self._preparation_status('sf8', 'negative', 'energy', predicted,
+                coherence=observed.coherence, elapsed_ms=1000*(monotonic()-started))
+            return None
+        self._preparation_status('sf8', 'prepared', 'prefix', predicted,
+            coherence=observed.coherence, energy=energy,
+            elapsed_ms=1000*(monotonic()-started))
         self._sf8_prepared[key] = observed
-        self._sf8_noise[key] = noise
-        return observed
+        self._sf8_rf_references[key] = power[1]
+        if (self._long_hint == 'sf16' or observed.coherence < .40) and not self.has_normal_long(predicted):
+            self.prepare_long(audio, origin)
+        return observed if observed.coherence >= .40 else None
 
     @staticmethod
-    def _sf8_noise_floor(z):
-        blocks = np.abs(z[:1440])**2
-        return float(np.percentile(blocks[:blocks.size//144*144].reshape(-1, 144).mean(axis=1), 10))
-
-    @staticmethod
-    def _sf8_energy_present(z, observed, noise):
+    def _sf8_rf_power(z, observed):
         start = observed.reference_start + 8*16
         end = observed.reference_start + (len(observed.symbols)*8-1)*16 + len(p4rx.RRC_TAPS)
         if end > len(z):
-            return False
+            return np.empty(0), 0.
         samples = np.abs(z[start:end])**2
-        width = 29
-        blocks = samples[:samples.size//width*width].reshape(-1, width).mean(axis=1)
+        blocks = samples[:samples.size//128*128].reshape(-1, 128).mean(axis=1)
+        if not blocks.size:
+            return blocks, 0.
+        # A short surviving head must not let the majority post-cut noise set
+        # the reference. A small upper-envelope contribution still permits
+        # the deep fades present in complete recorded bodies.
+        return blocks, max(float(np.median(blocks)), .1*float(np.percentile(blocks, 99)))
+
+    @staticmethod
+    def _sf8_presence_baseband(audio, fs, length):
+        # The decoder retains its original observations. Only the physical
+        # presence check gets a quiet extension, preventing the strong start
+        # of a short Hilbert window wrapping into its final support samples.
+        padded = np.pad(np.asarray(audio), (0, round(4096*fs/48000)))
+        return p4rx.audio_to_baseband(padded, fs)[:length]
+
+    @staticmethod
+    def _sf8_energy_present(power, rf_reference: float | None = None):
+        # Integrate a full spread symbol. Instantaneous RF zero crossings and
+        # a preamble noise estimate cannot reject an AGC/faded complete body.
+        blocks, reference = power
         if not blocks.size:
             return False
-        floor = max(.01*float(np.median(blocks)), .1*noise)
-        return bool(np.all(blocks >= floor) and np.min(samples[-2:]) >= floor)
+        if rf_reference is not None:
+            # The tail may mostly contain post-cut noise. Its own median must
+            # not erase the physical energy reference established by the body.
+            reference = max(reference, rf_reference)
+        floor = .0005*reference
+        return bool(floor > 0 and np.all(blocks >= floor))
 
     @staticmethod
     def _sf8_present(body, tail):
@@ -1907,6 +2297,27 @@ class P4Receiver:
                 and np.mean(coherence[-2:]) >= .15
                 and power[-1] >= .10*reference_power
                 and coherence[-1] >= .10)
+
+    @staticmethod
+    def _sf8_tail_present(z, observed, rf_reference: float | None = None, *, reference_start=None):
+        start = observed.reference_start
+        if reference_start is not None:
+            # A prefix projection can lead the physical chip clock under ISI.
+            # That phase fit cannot shorten the support owed by the original
+            # packet onset and turn a truncated last chip into a complete body.
+            start = max(start, reference_start)
+        end = start+(len(observed.symbols)*8-1)*16+len(p4rx.RRC_TAPS)
+        if end > len(z):
+            return False
+        power = abs(z[max(0, end-25*128):end])**2
+        # A faded tail can be below the preamble noise estimate. Detect loss
+        # of its final support against the local envelope instead.
+        reference = float(np.median(power))
+        floor = max(.004*reference, min(.01*reference, .08*float(np.mean(power[-8:]))))
+        whole = (P4Receiver._sf8_rf_power(z, observed)[1]
+                 if rf_reference is None else rf_reference)
+        floor = max(floor, .00001*whole)
+        return bool(len(power) >= 8 and np.mean(power[-2:]) >= floor)
 
     def _sf8_long(self, audio, origin, *, work=None):
         predicted, fs, cfo = self.clock.next_due, self.fs, self.clock.cfo_hz
@@ -1925,7 +2336,9 @@ class P4Receiver:
             return None
         if prepared is not None:
             begin = predicted-origin+round(3.000*fs)
-            tail = p4rx.audio_to_baseband(np.asarray(audio)[begin:], fs)
+            raw = np.asarray(audio)[begin:]
+            tail = p4rx.audio_to_baseband(raw, fs)
+            presence = self._sf8_presence_baseband(raw, fs, len(tail))
             try:
                 last = self._recover_sf8(
                     tail, reference_start=4736+prepared.reference_start-8000,
@@ -1934,47 +2347,60 @@ class P4Receiver:
             except ValueError:
                 return None
             phase = np.vdot(last.symbols[:9], prepared.symbols[672:681])
-            if abs(phase) < 1e-30:
+            energy = np.linalg.norm(last.symbols[:9])*np.linalg.norm(prepared.symbols[672:681])
+            if abs(phase) < .90*max(energy, 1e-30):
                 return None
             symbols = np.concatenate((prepared.symbols[:672],
                                       last.symbols*phase/abs(phase)))
             coherence = prepared.coherence
-            present = (self._sf8_present(prepared, last) and
-                       self._sf8_energy_present(tail, last, self._sf8_noise[key]))
+            rf_reference = self._sf8_rf_references[key]
+            energy_complete = self._sf8_energy_present(
+                self._sf8_rf_power(presence, last), rf_reference)
+            present = self._sf8_present(prepared, last) and energy_complete
+            complete_tail = self._sf8_tail_present(presence, last, rf_reference,
+                                                   reference_start=4736)
         else:
             begin = predicted-origin-round(.100*fs)
             if begin < 0:
                 return None
-            z = p4rx.audio_to_baseband(np.asarray(audio)[begin:], fs)
+            raw = np.asarray(audio)[begin:]
+            z = p4rx.audio_to_baseband(raw, fs)
+            presence = self._sf8_presence_baseband(raw, fs, len(z))
             try:
-                observed = self._recover_sf8(
-                    z, reference_start=8000, spread_factor=8, data_symbols=696,
-                    timing_offsets=range(-48, 49), cfo_hz=(cfo,))
+                observed = self._place_sf8(z, cfo, 696)
             except ValueError:
                 return None
             coherence, symbols = observed.coherence, observed.symbols
-            present = (self._sf8_present(observed, observed) and
-                       self._sf8_energy_present(z, observed, self._sf8_noise_floor(z)))
-        if coherence < .40 or not present:
+            energy_complete = self._sf8_energy_present(self._sf8_rf_power(presence, observed))
+            present = self._sf8_present(observed, observed) and energy_complete
+            complete_tail = self._sf8_tail_present(presence, observed,
+                                                   reference_start=8000)
+        if not complete_tail or not energy_complete:
             return None
         placed_at = monotonic()
-        deadline = self.sf8_deadline(predicted) if self.sf8_deadline else None
-        reception = p4sf8rx.decode_symbols(symbols, c1=False)
-        if reception is None and (deadline is None or deadline-monotonic() >= .035):
-            reception = p4sf8rx.decode_symbols(symbols)
-        timely = deadline is None or monotonic()+.005 <= deadline
-        frame = reception.frame if reception is not None and timely else None
         obs = Observation(Kind.LONG, fs, origin, predicted-origin, predicted,
-                          3.280, cfo, coherence, frame=frame,
-                          provisional=frame is None, placed=True, extent_s=3.280, sf8=True)
+                          3.280, cfo, coherence, provisional=True, placed=True,
+                          extent_s=3.280, sf8=True, speedlevel='SL4-long',
+                          form='robust-long/SL4')
+        members = p4sf8rx.build_members(symbols)
+        job = self._start_long((predicted, cfo, 'sf8'), members, obs)
+        decoded = self._advance_long(job)
+        result = job['result']
+        timely = (self._long_relaxed_deadline is None
+                  and (job['limits'] is None or job['limits'].publishable()))
+        if self.sf8_deadline is not None:
+            timely = timely and monotonic()+.005 <= self.sf8_deadline(predicted)
+        # Complete physical presence is independently useful to liveness. A CRC
+        # found after publication remains retained in the engine, never on obs.
+        placed = decoded if decoded is not None else obs if present and coherence >= .40 else None
         self.live_events.append(dict(event='sf8-long', at=predicted,
-            coherence=coherence, crc_valid=reception is not None,
-            timely=timely, placement_ms=1000*(placed_at-started),
-            decode_ms=1000*(monotonic()-placed_at)))
-        self._sf8_cache = {k: v for k, v in self._sf8_cache.items()
-                           if k[0] >= predicted-6*fs}
-        self._sf8_cache[key] = obs
-        return obs
+            coherence=coherence, presence_rank=bool(present),
+            crc_valid=bool(decoded is not None or result is not None and result.frame is not None),
+            timely=bool(timely),
+            placement_ms=1000*(placed_at-started), decode_ms=1000*(monotonic()-placed_at)))
+        self._sf8_cache = {k: v for k, v in self._sf8_cache.items() if k[0] >= predicted-6*fs}
+        self._sf8_cache[key] = placed
+        return placed
 
     def has_chirp_header(self, onset):
         """Whether a retained marker places this onset at the current carrier."""
@@ -2033,7 +2459,7 @@ class P4Receiver:
         reception = self._chirp_cache[key]
         if reception is not None:
             return Observation(Kind.CHIRP, fs, origin, first, onset,
-                               p4chirp.PACKET_S, key[1], 0., frame=reception.frame)
+                               p4chirp.PACKET_S, key[1], 0., frame=reception.frame, form='chirp')
         return None
 
     def read_chirp(self, audio, origin, *, onset):
@@ -2069,9 +2495,45 @@ class P4Receiver:
             origin += begin
         onset = (self.clock.next_due - origin) / fs if self.clock else None
         if self.clock and self.clock.expects == Expect.PACKET:
-            sf8_allowed = self._sf8_allowed()
+            cached = next((entry['obs'] for entry in self._long_jobs.values()
+                if entry['obs'].frame is not None
+                and entry['obs'].cfo_hz == self.clock.cfo_hz
+                and abs(entry['obs'].stream_sample-self.clock.next_due) < fs//20), None)
+            if cached is not None:
+                return cached
+            complete_long = not partial and origin+len(audio) >= self.clock.next_due+round(3.280*fs)
+            if complete_long and self._long_relaxed_deadline is None:
+                key = (self._long_generation, self.clock.next_due, self.clock.cfo_hz)
+                saved = self._long_inputs.get(key)
+                end = origin+len(audio)
+                if saved is None or end > saved['end']:
+                    self._long_inputs = {k: v for k, v in self._long_inputs.items()
+                                         if k[0] == self._long_generation and k[1] >= key[1]-6*fs}
+                    frozen = np.frombuffer(np.ascontiguousarray(audio).tobytes(), dtype=audio.dtype)
+                    self._long_inputs[key] = dict(audio=frozen, origin=origin,
+                        end=end, clock=replace(self.clock), generation=self._long_generation, tried=False)
+            if complete_long and self._long_work_expired(self.clock.next_due):
+                decoded = next((entry['obs'] for entry in self._long_jobs.values()
+                    if entry['obs'].frame is not None
+                    and abs(entry['obs'].stream_sample-self.clock.next_due) < fs//20), None)
+                if decoded is not None:
+                    return decoded
+            # A LONG work cutoff only stops new work for that family. Short,
+            # chirp and ordinary normal readers keep their own admission and
+            # publication rules; SF8's extra key-wait reserve does not own them.
+            if (self.clock.cycle_s == 3.75
+                    and (partial or self.has_normal_long(self.clock.next_due))
+                    and not self._long_work_expired(self.clock.next_due)):
+                normal, _ = self._normal_long(audio, origin, partial=partial, alias=True)
+                if normal is not None and (partial or normal.frame is not None):
+                    return normal
+            sf8_allowed = (self._sf8_allowed()
+                           and not self._long_work_expired(self.clock.next_due, sf8=True))
             if (not partial and
-                    sf8_allowed and self.sf8_prepared() and
+                    sf8_allowed and self._long_hint != 'sf16' and self.sf8_prepared() and
+                    self._sf8_prepared[(self.clock.next_due, self.clock.cfo_hz)].coherence >= .40 and
+                    not self._long_work_expired(self.clock.next_due, sf8=True,
+                        reserve_s=self._long_frontend_seconds(sf8=True)) and
                     origin+len(audio) >= self.clock.next_due+round(3.280*fs)):
                 sf8_candidate = self._sf8_long(audio, origin, work=work)
                 sf8_tried = True
@@ -2094,21 +2556,50 @@ class P4Receiver:
                     Kind.SHORT, fs, origin, first, origin+first,
                     p4robusttx.SHORT_SYMBOLS/112.5, self.clock.cfo_hz,
                     field['coherence'], provisional=partial, header=field['p4_hdr'],
-                    value=field['p4_value'], walsh_peak=field['p4_walsh_peak'], placed=True)
+                    value=field['p4_value'], walsh_peak=field['p4_walsh_peak'], placed=True, form='robust-short')
             if (not partial
                     and origin+len(audio)-self.clock.next_due >= round(3.28*fs)
-                    and p4oracle.placed_despread(audio, fs, onset, self.clock.cfo_hz)[0]
-                    >= p4oracle.ROBUST_FRACTION_KNEE):
-                if not sf8_tried and sf8_allowed and (self.clock.cycle_s == 3.75 or
-                        self.sf8_prepared()):
+                    ):
+                if (not sf8_tried and sf8_allowed
+                        and not self._long_work_expired(self.clock.next_due, sf8=True,
+                            reserve_s=self._long_frontend_seconds(sf8=True))
+                        and (self.clock.cycle_s == 3.75 or
+                        self.sf8_prepared()) and not self._long_prepared.get(
+                            (self.clock.next_due, self.clock.cfo_hz))):
                     sf8_candidate = self._sf8_long(audio, origin, work=work)
                     if sf8_candidate is not None and sf8_candidate.frame is not None:
                         return sf8_candidate
-                long, long_coherence = self._long(audio, origin, fallback=long_fallback)
-                if long is not None:
-                    return long
-            if (not partial and not sf8_allowed
-                    and origin+len(audio) >= self.clock.next_due+round(3.306*fs)):
+                if not self._long_work_expired(self.clock.next_due,
+                        reserve_s=self._long_frontend_seconds(fallback=long_fallback)):
+                    long, long_coherence = self._long(audio, origin, fallback=long_fallback)
+                    if long is not None:
+                        return long
+                if (not sf8_tried and sf8_allowed
+                        and not self._long_work_expired(self.clock.next_due, sf8=True,
+                            reserve_s=self._long_frontend_seconds(sf8=True))):
+                    sf8_candidate = self._sf8_long(audio, origin, work=work)
+                    sf8_tried = True
+                    if sf8_candidate is not None and sf8_candidate.frame is not None:
+                        return sf8_candidate
+                if (self.clock.cycle_s == 3.75
+                        and not self._long_work_expired(self.clock.next_due, reserve_s=.030)):
+                    # This is a new alias placement frontend after the spread
+                    # search, not a free poll. Its measured negative search
+                    # takes 20 ms; retain the 30 ms frontend admission reserve.
+                    normal, _ = self._normal_long(audio, origin, alias=True)
+                    if normal is not None:
+                        return normal
+            if (not partial
+                    and origin+len(audio) >= self.clock.next_due+round(3.306*fs)
+                    and not any(
+                        abs(key[0]-self.clock.next_due) < fs//20
+                        and (entry['obs'].frame is not None
+                             or entry.get('result') is not None
+                             and entry['result'].frame is not None)
+                        for key, entry in self._long_jobs.items())):
+                # A completed unread slot retires the old ranking hint. SF8
+                # remains eligible independently; a hint is never a negative
+                # cache entry. Late validated work still carries provenance.
                 self._long_hint = None
         if (self.chirp and self.expected and self.clock
                 and self.clock.expects == Expect.PACKET):
@@ -2151,7 +2642,7 @@ class P4Receiver:
                 self.clock.cycle_s = 3.75
             if partial and first is not None and len(audio)-first > round(.80*fs):
                 return Observation(Kind.CHIRP, fs, origin, first, origin+first,
-                                   (len(audio)-first)/fs, self.clock.cfo_hz, 0., provisional=True)
+                                   (len(audio)-first)/fs, self.clock.cfo_hz, 0., provisional=True, form='chirp')
             if not partial and first is not None:
                 chirp = self._chirp(audio, origin, origin+first)
                 if chirp is not None:
@@ -2165,7 +2656,8 @@ class P4Receiver:
                 if normal is not None:
                     return normal
                 if self.normal_coherence < p4short.NORMAL_ACQUIRE_KNEE or self.clock.cycle_s == 3.75:
-                    if work is None or work.admits('long'):
+                    if ((work is None or work.admits('long'))
+                            and not self._long_work_expired(self.clock.next_due)):
                         long, _ = self._long(audio, origin, placed=True, partial=partial,
                                              alias=self.normal_coherence < p4short.NORMAL_ACQUIRE_KNEE)
                         if long is not None:
@@ -2292,6 +2784,8 @@ class P4Receiver:
                     walsh_peak=peak,
                     lattice=lattice,
                     frame=frame,
+                    form={Kind.SHORT: 'robust-short', Kind.LONG: 'robust-long',
+                          Kind.CHIRP: 'chirp', Kind.NORMAL: 'normal-short'}[kind],
                 )
         return None
 
@@ -2331,7 +2825,7 @@ class P4Receiver:
                     self.clock = grant_clock
 
     def read_window(self, audio, origin, *, carrier_end=None, whole=False, work=None,
-                    long_fallback=False):
+                    long_fallback=False, reacquire=True):
         if work is not None:
             return self._read_hold_body(audio, origin, work=work) if whole else []
         self.consumed = None
@@ -2372,7 +2866,7 @@ class P4Receiver:
                     + round(.85*self.fs) and self._scan_missed_due != self.clock.next_due):
                 self._scan_misses += 1
                 self._scan_missed_due = self.clock.next_due
-        if (self.scan == 'legacy' and not hits and packet is None and not pending_packet
+        if (reacquire and self.scan == 'legacy' and not hits and packet is None and not pending_packet
                 and (not self.clock or self.clock.misses >= 3)):
             end = carrier_end or origin
             if self.last_emission:

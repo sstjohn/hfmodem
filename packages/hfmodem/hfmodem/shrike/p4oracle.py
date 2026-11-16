@@ -882,10 +882,11 @@ def lines(row: dict) -> list[str]:
 from .p4observation import Kind, Observation
 
 
-def _extent(audio, fs, onset_s, *, word=None, gaps=()):
+def _extent(audio, fs, onset_s, *, word=None, gaps=(), spans=None):
     """Closed emission extent; fragmented or censored Y27 tails stay unknown."""
     x = np.asarray(audio)
-    spans = bursts(x, fs, gaps=gaps)
+    if spans is None:
+        spans = bursts(x, fs, gaps=gaps)
     for start, duration in spans:
         stop = start + duration
         if abs(start - onset_s) > 0.05 or stop >= len(x) / fs - 0.005:
@@ -908,6 +909,8 @@ def _extent(audio, fs, onset_s, *, word=None, gaps=()):
 
 def _word_record(hit, fs, origin, audio, whole=False, gaps=()):
     first = round(hit["onset"] * fs)
+    spans = bursts(audio, fs, gaps=gaps) if whole else None
+    extent = _extent(audio, fs, first / fs, word=hit['word'], gaps=gaps, spans=spans) if whole else None
     return Observation(
         Kind.WORD,
         fs,
@@ -920,8 +923,78 @@ def _word_record(hit, fs, origin, audio, whole=False, gaps=()):
         word=hit["word"],
         score=hit["score"],
         symbols_read=27,
-        extent_s=_extent(audio, fs, first / fs, word=hit["word"], gaps=gaps) if whole else None,
+        extent_s=extent,
+        word_span_supported=(whole and extent is None and hit['word'] == 'V27'
+            and hit['score'] >= p4words.MATCH_KNEE
+            and _word_span_supported(audio, fs, first, hit['cfo_hz'], gaps, spans=spans)),
     )
+
+
+def _word_span_supported(audio, fs, first, cfo_hz, gaps, *, spans=None):
+    """Independent SF16 support at both ends and throughout a complete V27."""
+    stop = first + round(27 / p4words.SYMBOL_RATE * fs)
+    pad = round(.035 * fs)
+    lo, hi = first - pad, stop + pad
+    if (lo < 0 or hi > len(audio)
+            or any(a < hi and b > lo for a, b in gaps)):
+        return False
+    # An energy burst with a misplaced or censored boundary is not missing
+    # contrast. Keep that evidence under the existing extent gate.
+    if spans is None:
+        spans = bursts(audio, fs, gaps=gaps)
+    if any(a * fs < stop and (a + duration) * fs > first
+           for a, duration in spans):
+        return False
+    z = p4rx.audio_to_baseband(np.asarray(audio[lo:hi]), fs)
+    z *= np.exp(-2j * np.pi * cfo_hz * np.arange(len(z)) / p4rx.SAMPLE_RATE)
+    chips = p4rx.matched_filter(z)[p4rx.MATCHED_DELAY:len(z) + p4rx.MATCHED_DELAY]
+    # Word matching may place a multipath copy between chip peaks. Resolve
+    # that sub-symbol timing without sliding away an absent word symbol.
+    start = round((first - lo) * p4rx.SAMPLE_RATE / fs)
+    slack = round(.003 * p4rx.SAMPLE_RATE)
+    indices = start + np.arange(-slack, slack + 1)[:, None] + _SYMBOL_N * np.arange(27)
+    symbols = (chips[indices[:, :, None] + p4rx.SAMPLES_PER_CHIP * np.arange(16)]
+               @ p4sig.SPREAD16.conj()) / _SPREAD_ENERGY
+    reference = p4words.BANK['V27']
+    dot = symbols @ reference.conj()
+    gain = dot / np.vdot(reference, reference)
+    match = abs(dot) / np.maximum(
+        np.linalg.norm(reference) * np.linalg.norm(symbols, axis=1), 1e-30)
+    ends = symbols[:, [0, -1]] / np.where(abs(gain) > 1e-30, gain, 1e-30)[:, None] / reference[[0, -1]]
+    viable = ((abs(gain) > 1e-30) & (match >= p4words.MATCH_KNEE)
+              & (abs(np.angle(ends)).max(axis=1) <= np.pi / 4))
+    if not viable.any():
+        return False
+    # Match the repeatable channel distortion, without letting either endpoint
+    # train its own proof. Raw waveform quarters avoid matched-filter leakage
+    # across a cut; symbol boundaries are half a chip before pulse centres.
+    boundary = (p4rx.MATCHED_DELAY - p4rx.SAMPLES_PER_CHIP) // 2
+    waves = z[indices[viable, :, None] + boundary + np.arange(_SYMBOL_N)]
+    channel = (waves[:, 1:-1] * reference[None, 1:-1, None].conj()).mean(axis=1)
+    predicted = reference[None, :, None] * channel[:, None, :]
+    amplitude, support = _span_projection(waves, predicted)
+    quarters = waves[:, [0, -1]].reshape(-1, 2, 4, _SYMBOL_N // 4)
+    templates = predicted[:, [0, -1]].reshape(quarters.shape)
+    end_amplitude, end_support = _span_projection(quarters, templates)
+    end_gain = amplitude[:, [0, -1], None]
+    phase = np.angle(end_amplitude / np.where(abs(end_gain) > 1e-30, end_gain, 1e-30))
+    # Floors sit just under KO4HJO 10-27's four real V27s; a refusal only falls
+    # back to the energy-extent gate.
+    return bool(np.any(
+        (support.min(axis=1) >= .12)
+        & (support[:, [0, -1]].min(axis=1) >= .20)
+        & (amplitude[:, [0, -1]].real.min(axis=1) >= .80)
+        & (amplitude.real.min(axis=1) >= .50)
+        & (end_amplitude.real.min(axis=(1, 2)) >= .55)
+        & (end_support.min(axis=(1, 2)) >= .15)
+        & (abs(phase).max(axis=2) <= np.deg2rad([40, 28])).all(axis=1)))
+
+
+def _span_projection(received, reference):
+    dot = (received * reference.conj()).sum(axis=-1)
+    energy = np.maximum((abs(reference) ** 2).sum(axis=-1), 1e-30)
+    return (dot / energy, abs(dot) ** 2 / energy
+            / np.maximum((abs(received) ** 2).sum(axis=-1), 1e-30))
 
 
 def word_scan(audio, fs=48000, cfo_hz=None, *, origin=0, whole=False, gaps=(), work=None):
@@ -1014,16 +1087,18 @@ def prepare_despread_long(audio, fs, onset_s, cfo_hz):
                 cfo=cfo_hz, onset=round(onset_s*fs))
 
 
-def finish_despread_long(audio, fs, prepared, *, diagnostics=None):
+def finish_despread_long(audio, fs, prepared, *, diagnostics=None, count=373):
+    if count not in (369, 373):
+        raise ValueError('LONG support must contain 369 or 373 symbols')
     onset, lo, cfo = prepared['onset'], prepared['lo'], prepared['cfo']
     begin = onset+round(2.950*fs)
-    end = min(len(audio), onset+round((373/112.5+.035)*fs))
+    end = min(len(audio), onset+round((count/112.5+.035)*fs))
     if end <= begin:
         return 0., np.empty(0, complex), None, 'incomplete'
     spread, power, size = _despread_window(audio[begin:end], fs, cfo)
     offset = round((begin-lo)*p4rx.SAMPLE_RATE/fs)
     starts = prepared['starts']
-    indices = starts[:, None]+_SYMBOL_N*np.arange(344, 373)-offset
+    indices = starts[:, None]+_SYMBOL_N*np.arange(344, count)-offset
     valid = (indices[:, 0] >= 0) & (indices[:, -1]+_SYMBOL_N <= size)
     if not np.any(valid):
         return 0., np.empty(0, complex), None, 'incomplete'
@@ -1209,6 +1284,8 @@ def word_at(
         )
     if fraction < (PLACED_FRACTION_KNEE if expected_words is not None else ROBUST_FRACTION_KNEE):
         return None
+    spans = bursts(x, fs, gaps=gaps) if whole and not provisional else None
+    extent = _extent(x, fs, first / fs, word=name, gaps=gaps, spans=spans) if whole and not provisional else None
     return Observation(
         Kind.WORD,
         fs,
@@ -1226,7 +1303,10 @@ def word_at(
         word=name,
         score=score,
         shift=shift,
-        extent_s=_extent(x, fs, first / fs, word=name, gaps=gaps) if whole and not provisional else None,
+        extent_s=extent,
+        word_span_supported=(whole and not provisional and extent is None and name == 'V27'
+            and score >= p4words.MATCH_KNEE
+            and _word_span_supported(x, fs, first, carrier, gaps, spans=spans)),
     )
 
 

@@ -326,7 +326,7 @@ def test_legacy_context_free_repeat_reports_zero_new_credit():
 
 
 def turn_open(prefix=PREFIX, *, negotiate=True):
-    turn, _ = machine(role='irs', chirp_ack='alternate', data='body')
+    turn, _ = machine(role='irs', chirp_ack='toggle', data='body')
     sink = Sink()
     turn.adapter.host = sink
     body = packet(Kind.BODY, FS, prefix)
@@ -347,7 +347,7 @@ def controls(turn, *, start=3*FS, key=True, values=(49, 53)):
 @pytest.mark.parametrize('name', ROWS)
 def test_turn_recorded_stream_and_unchanged_alternate_words(name):
     row = ROWS[name]
-    turn, _ = machine(role='irs', chirp_ack='alternate', prekey_lead=2132/FS)
+    turn, _ = machine(role='irs', chirp_ack='toggle', prekey_lead=2132/FS)
     sink = Sink()
     turn.adapter.host = sink
     receive(turn, packet(Kind.BODY, row['body']['onset'], bytes.fromhex(row['body']['data'])))
@@ -466,7 +466,7 @@ def test_turn_no_positive_sequence_delivers_chirps_without_credit(mode):
 
 @pytest.mark.parametrize('reply', ['data', 'idle', 'unassociated'])
 def test_turn_ordinary_protocol_two_reply_does_not_arm_chirp_credit(reply):
-    turn, arq = machine(role='irs', data='body', ladder='none')
+    turn, arq = machine(role='irs', data='body')
     sink = Sink()
     turn.adapter.host = sink
     responds_to = None
@@ -501,7 +501,7 @@ def test_turn_accepted_root_and_older_unseen_source_cannot_deliver_again():
 
 def test_turn_new_epoch_accepts_same_identity_and_rejects_closed_emission():
     turn, sink, body = turn_open()
-    ack_word = turn.ack_word
+    ack_word = turn._ack_chain
     assert ack_word is not None
     old_answer = next(p.stream_sample for p in turn._emissions.values() if p.ack_identity)
     turn._next = Proposal(Kind.BODY, 6*FS, status=0x40, state=State.ISS_HANDBACK)
@@ -509,7 +509,7 @@ def test_turn_new_epoch_accepts_same_identity_and_rejects_closed_emission():
     assert turn.adapter.last is None
     for name in ('_last_ack', '_last_body_ack', 'acked_counter'):
         assert getattr(turn, name) is None
-    assert turn.ack_word == ack_word
+    assert turn._ack_chain == ack_word
     new = packet(Kind.BODY, 8*FS, PREFIX)
     receive(turn, replace(new, responds_to=grant.stream_sample))
     assert sink.payload == PREFIX*2
@@ -624,7 +624,7 @@ def test_unknown_receipt_cannot_arm_and_new_candidate_requires_retirement():
 
 @pytest.mark.parametrize('mode', ['unkeyed-body', 'refused-body'])
 def test_turn_positive_control_sequence_without_keyed_body_cannot_arm(mode):
-    turn, _ = machine(role='irs', chirp_ack='alternate', data='body')
+    turn, _ = machine(role='irs', chirp_ack='toggle', data='body')
     sink = Sink()
     turn.adapter.host = sink
     receive(turn, packet(Kind.BODY, FS, PREFIX), key=False)
@@ -655,7 +655,7 @@ def test_frozen_recorded_oracles():
 
 @pytest.mark.parametrize('rejection', ['provisional', 'weak', 'unexpected', 'crc'])
 def test_turn_rejected_body_cannot_deliver_or_create_candidate(rejection):
-    turn, _ = machine(role='irs', chirp_ack='alternate', data='body')
+    turn, _ = machine(role='irs', chirp_ack='toggle', data='body')
     sink = Sink()
     turn.adapter.host = sink
     first = packet(Kind.BODY, FS, PREFIX)

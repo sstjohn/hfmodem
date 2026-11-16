@@ -18,24 +18,52 @@ from .p4host import P4LateFrame, P4StreamFailure, observed_extension, source_pay
 from .p4credit import ReceiptContext, SourceReceipt
 from . import p4words, spec
 
+DATA_KINDS = (Kind.BODY, Kind.NORMAL, Kind.CHIRP, Kind.LONG)
+
 CYCLE = {Kind.WORD: 1.25, Kind.NORMAL: 1.25, Kind.SHORT: 1.25, Kind.BODY: 1.25,
          Kind.LONG: 3.75, Kind.CHIRP: 3.75}
 T = {Kind.SHORT: 0.920, Kind.BODY: 0.920,
      Kind.NORMAL: 0.920, Kind.LONG: 3.400, Kind.CHIRP: 3.400}
-ACK = {7: "X27", 38: "X27", 13: "X27", 11: "X27", 12: "T27", 60: "U27", 61: "U27"}
+ACK = {7: "X27", 8: "X27", 11: "X27", 12: "T27", 13: "X27",
+       38: "X27", 49: "X27", 59: "X27", 60: "U27", 61: "U27"}
 # Trimode's opening v61 progresses on X27 (0451), not N9VC's U27.
-PEER_ACK = {**{value: word for value, word in ACK.items() if value != 38},
+PEER_ACK = {**{value: word for value, word in ACK.items() if value not in (8, 38, 59)},
             49: "X27", 53: "U27", 61: "X27"}
+# What follows a robust-short value on tape.
+# Transitions are SEEN; the value as a level is INFERRED, and v13 also opens
+# walks that end elsewhere.
+LADDER_MEANING = {
+    **dict.fromkeys((7, 38, 6, 9, 8), 'opening'),
+    **dict.fromkeys((53, 55, 5), 'SL1 chirp next'),
+    49: 'SL2 next',
+    **dict.fromkeys((13, 60, 61), 'SL3 next'),
+    **dict.fromkeys((58, 59), 'SL4 next'),
+    10: 'SL5 short next',
+    37: 'close',
+}
 LADDER_LONG = (13, 60)
+LONG_LADDERS = {2: (49,), 3: LADDER_LONG, 4: (8, 59)}
+LONG_BYTES = {2: 40, 3: 69, 4: 141}
 LADDER_CHIRP = (13, 49, 53)
-# Words a v53 answer may rotate through; U27 is the one stock exchange (o0802).
-V53_ROTATION = ('U27', 'X27', 'V27')
+# k0003 1482.730-1488.060: N9VC's idle body drew V27, then 13 -> 12 -> 11 -> 10
+# and an SL5 normal short offering the turn back.
+LADDER_SL5 = (13, 12, 11, 10)
 HANDBACK_REOFFER_SECONDS = 20.
+CLOSE_TIMEOUT_S = 30.
+# A late decode can owe a word or changeover reply one full peer cycle later.
+REPLY_DRAIN_S = max(T[kind] + CYCLE[kind] for kind in T) + CYCLE[Kind.BODY]
 _peer_watch_generations = count(1)
 
 
 def counter_ack(counter):
     return 'V27' if counter & 1 else 'X27'
+
+
+def chain_resets(value):
+    members = value.split(',')
+    if any(member not in ('turn', 'form', 'ladder') for member in members):
+        raise ValueError('P4 chain reset must be a comma list of turn, form, ladder')
+    return value
 
 
 class State(StrEnum):
@@ -82,6 +110,8 @@ class Proposal:
     current_slot: int | None = None
     current_slot_accepted: bool = True
     peer_watch_generation: int | None = None
+    level: int | None = None
+    final: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +121,7 @@ class HeldAnswer:
     answer: Proposal
     context: dict
     generation: int
+    acknowledged: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,6 +193,7 @@ class CloseContext:
     receive_at: int | None = None
     progress_at: int | None = None
     held_word_yield: HeldWordYield | None = None
+    expired_at: int | None = None
 
 
 class P4Turn:
@@ -171,8 +203,12 @@ class P4Turn:
         adapter,
         *,
         fs=48000,
-        ladder="long",
-        data="hold",
+        data="none",
+        long_level=3,
+        ladder_values=None,
+        ladder_admit="u27,x27",
+        spug="queued",
+        iss_u27="repeat",
         hold_cycles=6,
         prekey_lead=0.074,
         role="iss",
@@ -180,60 +216,68 @@ class P4Turn:
         managed_application=False,
         answer_offset=T[Kind.SHORT],
         breakin="body",
-        normal_ack="v27",
-        long_ack="counter-even-t27",
-        ack_53="U27",
-        ack_53_b=None,
-        ack_53_rotate=0,
+        normal_ack="toggle",
+        long_ack="toggle",
+        chirp_ack="toggle",
+        first_ack="x27",
+        chain_reset="turn,form",
         v53_hold=24,
+        y27_first_body="c0",
+        turn_entry="current",
         peer_ack=None,
-        v59_answer="current",
-        chirp_ack="parity",
-        irs_silent_cycles=0,
         train_policy="repeat",
         wall_clock=monotonic,
         session_end=None,
         session_wall_end=None,
     ):
-        if (ladder not in ("long", "chirp", "none") or data not in ("hold", "body", "chirp")
-                or breakin not in ("body", "y27")):
-            raise ValueError("unknown P4 ladder, data or break-in policy")
-        if ladder == "none" and data != "body":
-            raise ValueError("a P4 link without a ladder needs the body data policy")
-        if normal_ack not in ("v27", "x27", "parity", "x27-u27", "alternate-packet"):
-            raise ValueError("unknown P4 normal ack policy")
-        if v59_answer not in ("current", "w27"):
-            raise ValueError("unknown P4 v59 answer policy")
-        if long_ack not in ("fixed-x27", "alternate-packet", "counter-odd-t27", "counter-even-t27"):
-            raise ValueError("unknown P4 long ack policy")
-        if ack_53_rotate < 0 or v53_hold < 0:
-            raise ValueError("P4 v53 rotation and hold bounds must be nonnegative")
-        if irs_silent_cycles < 0:
-            raise ValueError("P4 IRS silent cycles must be nonnegative")
+        if data not in ('none', 'body', 'chirp', 'long') or breakin not in ('body', 'y27'):
+            raise ValueError("unknown P4 data or break-in policy")
+        if ladder_admit not in ('u27', 'u27,x27') or iss_u27 not in ('repeat', 'ack'):
+            raise ValueError('unknown P4 ladder admission or ISS U27 policy')
+        if long_level not in LONG_BYTES or spug not in ('queued', 'off'):
+            raise ValueError('unknown P4 long level or SPUG policy')
+        self.long_level = long_level
+        self.spug_policy = spug
+        self.iss_u27 = iss_u27
+        self.ladder_admit = tuple(word.upper() for word in ladder_admit.split(','))
+        if ladder_values is not None and (not ladder_values or any(
+                not isinstance(value, int) or not 0 <= value <= 63 for value in ladder_values)):
+            raise ValueError('P4 ladder values must be a nonempty list of values 0..63')
+        for name, policy, choices in (
+            ('normal ack', normal_ack, ('toggle', 'parity', 'x27')),
+            ('long ack', long_ack, ('toggle', 'toggle-t27', 'counter-even-t27')),
+            ('chirp ack', chirp_ack, ('toggle', 'parity')),
+            ('first ack', first_ack, ('x27', 'v27')),
+        ):
+            if policy not in choices:
+                raise ValueError(f"unknown P4 {name} policy")
+        if y27_first_body not in ('c0', 'c1'):
+            raise ValueError('unknown first body counter after a bare Y27')
+        if turn_entry not in ('current', 'ladder'):
+            raise ValueError('unknown P4 turn entry')
+        self.turn_entry = turn_entry
+        self._turn_body = self._turn_values = None
+        if v53_hold < 0:
+            raise ValueError('P4 v53 hold bound must be nonnegative')
         if train_policy not in ("repeat", "passive"):
             raise ValueError("unknown P4 train policy")
         self.train_policy = train_policy
-        self.irs_silent_cycles = irs_silent_cycles
-        self._irs_silent_start = None
-        self._irs_silent_onset = None
-        self._irs_silent_until = None
-        self._irs_silent_cycle = round(1.25 * fs)
-        self._irs_silent_done = False
         self.normal_ack = normal_ack
         self.long_ack = long_ack
-        self._packet_ack = None
-        self._answer_kinds = {}
-        self._packet_words = {}
-        self._long_policies = {}
-        self._packet_previous = {}
-        self.ack_53 = ack_53
-        self.ack_53_b = ack_53_b
-        self.ack_53_rotate = ack_53_rotate
-        self.v53_hold = v53_hold
-        self.peer_ack = {**PEER_ACK, **(peer_ack or {})}
-        self._v59_answer = v59_answer
         self.chirp_ack = chirp_ack
-        self.ack_word = None
+        self.first_ack = first_ack.upper()
+        self.chain_reset = chain_resets(chain_reset)
+        self._ack_chain = None
+        self._ack_form = None
+        self._ack_epoch = None
+        self._ack_boundary = True
+        self._chain_epoch = 0
+        self._chain_reason = 'opening'
+        self.keyed_ack = {}
+        self._answer_kinds = {}
+        self.v53_hold = v53_hold
+        self.y27_first_body = y27_first_body
+        self.peer_ack = {**PEER_ACK, **(peer_ack or {})}
         self.fs = fs
         self.t = {**T, Kind.SHORT: answer_offset, Kind.BODY: answer_offset,
                   Kind.NORMAL: answer_offset}
@@ -241,12 +285,14 @@ class P4Turn:
         self.adapter = adapter
         self.sf8_eligible = None
         self._sf8_acks = {}
-        self.ladder = {"long": LADDER_LONG, "chirp": LADDER_CHIRP, "none": ()}[ladder]
-        self.sends_data = data != "hold"
-        self.data_kind = (
-            Kind.CHIRP if ladder == "chirp" or data == "chirp" else Kind.BODY
-        )
-        self.hold_after_ladder = ladder == "long" and data == "hold"
+        self.ladder = ()
+        if data in ('long', 'chirp'):
+            self.ladder = (tuple(ladder_values) if ladder_values is not None else
+                           LONG_LADDERS[long_level] if data == 'long' else LADDER_CHIRP)
+        self.sends_data = data != 'none'
+        self.data_kind = {'long': Kind.LONG, 'chirp': Kind.CHIRP}.get(data, Kind.BODY)
+        self._restart_packet = None
+        self._awaiting_peer_turn = False
         self.require_long_crc = self.sends_data
         self.hold_cycles = hold_cycles
         self.breakin = breakin
@@ -260,6 +306,8 @@ class P4Turn:
         self._data_refusals = {}
         self._ladder_returned = False
         self._chirp_origin = None
+        self._last_data_ack = None
+        self._last_data_form = None
         self._chirp_ack_word = 'X27'
         self._last_chirp = None
         self.repeats = 0
@@ -305,6 +353,8 @@ class P4Turn:
         self._blocked_redue = False
         self._rollback_until = None
         self._closing_failure = False
+        self._close_resumed_in_peer_turn = False
+        self.identification_closing = False
         self._refused_due = None
         self._close_refusals = 0
         self._peer_word = None
@@ -327,9 +377,9 @@ class P4Turn:
         self._accepted_proposal = None
         self._last_ack = None
         self.acked_counter = None
-        self._peer_continuing_counter = None
         self.link_events = []
         self._opening = False
+        self._opening_unread_head = None
         self._opening_wait = False
         self._opening_end = None
         self._opening_wall_end = None
@@ -392,6 +442,7 @@ class P4Turn:
         self.pending.clear()
         self._deferred = None
         self._held_answer = self._accepted_proposal = None
+        self._unread_data_due = None
         if self._next is not None and self._next.receive_epoch is not None:
             self._next = None
         self._last_source_onset = None
@@ -399,10 +450,13 @@ class P4Turn:
         self._receive_boundary = (self.last.stream_sample if self.last else self._receive_boundary)
         self._last_ack = self._last_body_ack = None
         self.acked_counter = None
-        self._peer_continuing_counter = None
 
     def _open_receive_epoch(self, onset):
+        if self._receive_epoch == 0 or 'turn' in self.chain_reset.split(','):
+            self._ack_boundary = True
+            self._chain_reason = 'opening' if self._chain_epoch == 0 else 'turn'
         self._held_answer = self._accepted_proposal = None
+        self._unread_data_due = None
         self._receive_epoch += 1
         self._receive_active = True
         self._receive_boundary = onset
@@ -449,6 +503,7 @@ class P4Turn:
                 or reg.responds_to in self._emission_epoch
                 and self._emission_epoch[reg.responds_to] != self._receive_epoch
                 and reg.responds_to != self._handoff_ticket
+                and not (self._awaiting_peer_turn and target is not None and target.final)
                 and not (self._receive_epoch == 0 and obs.kind == Kind.BODY
                          and self._emission_epoch[reg.responds_to] == 1)):
             return False, root
@@ -458,23 +513,19 @@ class P4Turn:
         words = {'Y27'}
         if self.state == State.ISS_LADDER and self.index < len(self.ladder):
             words.update(('Z27', ACK.get(self.ladder[self.index], 'Y27')))
+            if not self._opening and self.data_kind == Kind.LONG:
+                words.update(self.ladder_admit)
             if self._opening:
                 words.update(('T27', 'W27', 'X27'))
-            if self.ladder[self.index] in (49, 53):
+            if self.ladder[self.index] in (49, 53) or self._sl5_turn():
                 words.update(('X27', 'V27', 'T27', 'U27'))
         elif (self.state in (State.ISS_DATA, State.ISS_DATA_ACK)
               and self._data_packet is not None):
             words.update(('X27', 'V27', 'T27', 'Z27', 'W27'))
-            if self._word_yield:
+            if self._word_yield or self._data_packet.kind == Kind.LONG:
                 words.add('U27')
         else:
             words.update(('V27', 'X27', 'Z27'))
-        if (self.normal_ack == 'x27-u27'
-                and self.state in (State.ISS_DATA, State.ISS_DATA_ACK)
-                and self._data_packet is not None
-                and self._data_packet.kind == Kind.NORMAL
-                and self._expected_data_ack() == 'U27'):
-            words.add('U27')
         return words
 
     def seed_opening(self, emissions, observations, *, values=None):
@@ -514,18 +565,55 @@ class P4Turn:
             delta -= round(delta/cycle)*cycle
         return abs(delta) <= tolerance
 
-    def _close_expired(self, now):
+    def reply_pending_before(self, boundary, now, incoming=None):
+        if now >= boundary + round(REPLY_DRAIN_S*self.fs):
+            return False
+        packets = [(p.get('body') or p.get('word'), p.get('accepted'))
+                   for s, p in self.pending.items() if s not in self._decided]
+        if incoming is not None:
+            packets.append((incoming, incoming.frame is not None))
+        for packet, accepted in packets:
+            if (packet is None or packet.stream_sample >= boundary
+                    or packet.kind == Kind.WORD and packet.word not in ('Y27', 'BREAKIN')):
+                continue
+            kind = Kind.BODY if packet.kind == Kind.WORD else packet.kind
+            span = self.t[kind] + WORD_HORIZON_S + (CYCLE[kind] if accepted else 0)
+            if now < packet.stream_sample + round(span*self.fs):
+                return True
+        if self._deferred is not None:
+            sample, pending = self._deferred
+            if sample < boundary and now < pending['due'] + round(WORD_HORIZON_S*self.fs):
+                return True
+        for reply in (self._next, self.last):
+            if reply is None:
+                continue
+            source = reply.accepted_target if reply.accepted_target is not None else reply.current_slot
+            if source is None and self._accepted_proposal is not None and reply is self._next:
+                source = self._accepted_proposal[1]
+            span = WORD_HORIZON_S if reply.kind == Kind.WORD else CYCLE[reply.kind]
+            if (source is not None and source < boundary
+                    and now < reply.stream_sample + round(span*self.fs)):
+                return True
+        return False
+
+    def _close_expired(self, now, incoming=None):
         ctx = self.close_context
         if ctx is None:
             return False
-        if (now >= ctx.end or self._wall_clock() - ctx.wall_started >= 30):
-            self.link_down('close deadline')
-            return True
-        return False
+        if ctx.expired_at is None:
+            if now < ctx.end and self._wall_clock() - ctx.wall_started < CLOSE_TIMEOUT_S:
+                return False
+            ctx.expired_at = min(now, ctx.end)
+        if self.reply_pending_before(ctx.expired_at, now, incoming):
+            return False
+        self.link_down('close deadline')
+        return True
 
-    def _resume_close(self, now, *, exact=False):
+    def _resume_close(self, now, *, exact=False, reply_to=None):
         ctx = self.close_context
-        if ctx is None or ctx.resumed or self.state == State.DOWN:
+        if (ctx is None or ctx.resumed or self.state == State.DOWN
+                or ctx.expired_at is not None
+                and (reply_to is None or reply_to >= ctx.expired_at)):
             return
         ctx.resumed = True
         self._next = self._deferred = None
@@ -533,7 +621,15 @@ class P4Turn:
         self._blocked_redue = False
         due = now if exact else (max(now + self.lead, self.next_raster(now))
                                  if self.last else now + self.lead)
+        if not exact and self._peer_holds_turn(now):
+            # K4MSU 05:05Z 88.781: a 0x20 keyed into the peer's own ISS slots.
+            # The close asks for the turn first, and keys 0x20 once granted.
+            self._closing_failure = self._close_resumed_in_peer_turn = True
+            self.state = State.IRS_CLOSE
+            self._break_in(due)
+            return
         self._body(due, 0x20, State.ISS_CLOSE)
+        self._next = replace(self._next, current_slot=reply_to)
 
     def _close_request(self, reg):
         ctx = self.close_context
@@ -793,8 +889,32 @@ class P4Turn:
             if self._next is not None and self._next.state == State.ISS_HOLD:
                 self._body(self._next.stream_sample, 0x20, State.ISS_CLOSE)
 
+    def close_for_identification(self, now):
+        """Retire data at a packet boundary, retaining every selected reply."""
+        if self.state in (State.DOWN, State.ISS_CLOSE, State.IRS_CLOSE):
+            return
+        self.revoke_peer_watch()
+        if self._next is not None and self._next.peer_watch_generation is not None:
+            self._next = replace(self._next, peer_watch_generation=None)
+        self.app_done = self._closing_failure = True
+        self.identification_closing = True
+        self.reason = 'identification deadline'
+        if (self.state not in ISS_TURN or self._accepted_proposal is not None
+                or self._deferred is not None
+                or any(s not in self._decided for s in self.pending)
+                or self._next is not None and (self._next.kind == Kind.WORD
+                                              or self._next.accepted_target is not None)):
+            return
+        due = self._next.stream_sample if self._next is not None else self.next_raster(now)
+        self._cancel_credit('identification deadline')
+        self._clear_opening_credit()
+        self._clear_ack_wait()
+        self._requeue()
+        self._body(due, 0x20, State.ISS_CLOSE)
+        self.state = State.ISS_CLOSE
+
     def start(self, at):
-        self._short(at, 0)
+        self._advance(at)
 
     def _short(self, at, index, header="A", repeat=False):
         self._next = Proposal(
@@ -816,7 +936,8 @@ class P4Turn:
             self.close_context = CloseContext(
                 self.reason, self.app_done, bytes(self.outbox.arq._outbuf),
                 self.outbox.inflight, at, self._wall_clock(),
-                min(at + round(30 * self.fs), self.session_end or at + round(30 * self.fs)),
+                min(at + round(CLOSE_TIMEOUT_S * self.fs),
+                    self.session_end or at + round(CLOSE_TIMEOUT_S * self.fs)),
                 held_word_yield=self._held_word_yield)
             # Keep the admitted evidence in this one close context even if its
             # first proposal is refused. Its data episode may now release bytes.
@@ -826,7 +947,14 @@ class P4Turn:
         )
 
     def _idle(self, at):
-        self._next = Proposal(Kind.NORMAL, at, status=self.counter, state=State.ISS_HOLD)
+        self._next = Proposal(Kind.NORMAL, at, status=self.counter, state=State.ISS_HOLD,
+                              header=self._normal_header(self.counter))
+
+    def _normal_header(self, status):
+        """B for another copy of the normal we last keyed, as stock keys every
+        copy after a packet's first; A opens a packet."""
+        last = self.last
+        return "B" if last is not None and last.kind == Kind.NORMAL and last.status == status else "A"
 
     def _begin_data_turn(self, at, state=State.ISS_DATA, *, word_yield=False,
                          counted_continuation=False):
@@ -858,12 +986,16 @@ class P4Turn:
         self._retire_data_episode()
         self._requeue()
         self._data_packet = None
-        self.counter = 0
+        # H1 of K4MSU 05:05Z: the peer may count our bare Y27 as c0.
+        self.counter = int(word_yield and self.y27_first_body == 'c1' and self.last is not None
+                           and self.last.kind == Kind.WORD and self.last.word == 'Y27')
         self._first_data = True
         self._train_initial_data = not word_yield
         self._word_yield = word_yield
         self._ladder_returned = False
         self._chirp_origin = None
+        self._last_data_ack = None
+        self._last_data_form = None
         self._chirp_ack_word = 'X27'
         self._last_chirp = None
         self._handback_attempted = False
@@ -872,30 +1004,34 @@ class P4Turn:
         self._clear_offer()
         self._data_refusals.clear()
         self._clear_ack_wait()
-        if word_yield and self.ladder:
+        self._restart_packet = None
+        self._awaiting_peer_turn = False
+        if word_yield and self.ladder and self.data_kind != Kind.LONG:
             self._short(at, 0)
         else:
             self._data(at, state, Kind.BODY)
 
     def _data_ack(self, obs):
         return (self._data_packet is not None
-                and obs.word == self._expected_data_ack())
+                and (obs.word == self._expected_data_ack()
+                     or self._data_packet.kind == Kind.LONG
+                     and obs.word == "U27" and self.iss_u27 == "ack"))
 
-    def _expected_data_ack(self):
-        if (self._data_packet.kind == Kind.NORMAL
-                and self._data_packet.status & 0x60 == 0x60):
-            return self._counter_word(self._data_packet.status)
-        return (self._chirp_ack_word if self._data_packet.kind == Kind.CHIRP
-                else self._counter_word(self._data_packet.status, expectation=True))
-
-    def _counter_word(self, counter, *, expectation=False):
-        if self.normal_ack == 'x27':
-            return 'X27'
-        if self.normal_ack == 'v27' and not expectation:
-            return 'V27'
-        if self.normal_ack == 'x27-u27':
-            return 'U27' if counter & 1 else 'X27'
-        return counter_ack(counter)
+    def _expected_data_ack(self, *, idle=False):
+        packet = self.last if idle else self._data_packet
+        policy = self._ack_policy(packet.kind)
+        # x27 shapes only our answers; the peer's acks still follow the toggle.
+        if policy.startswith("toggle") or policy == 'x27':
+            if self._last_data_ack is None or self._packet_form(packet) != self._last_data_form:
+                return 'X27'
+            return (self._ack_partner(packet.kind, self._packet_form(packet))
+                    if self._last_data_ack == "X27" else "X27")
+        if packet.kind == Kind.LONG:
+            t27 = (packet.status & 1) == 0
+            return "T27" if t27 else "X27"
+        if packet.kind == Kind.CHIRP:
+            return self._chirp_ack_word
+        return counter_ack(packet.status)
 
     def _handback_seed(self, reg, now):
         obs = reg.observation
@@ -924,14 +1060,14 @@ class P4Turn:
                 if obs.word == 'V27':
                     # Reserve the imminent raster before the word's tail resolves.
                     self._handback_pending = (obs.stream_sample, self.last, self.repeats)
-                    self._idle(self.next_raster(now))
+                    self._seeded(self.next_raster(now), self.last)
                 return True
             self._clear_ack_wait()
             if obs.word == 'X27':
                 self._accept_handback(self.next_raster(now))
                 event = 'handback-accepted'
             else:
-                self._idle(self.next_raster(now))
+                self._seeded(self.next_raster(now), self.last)
                 event = 'handback-seed'
             self.link_events.append(dict(event=event, at=obs.stream_sample))
             return True
@@ -946,7 +1082,7 @@ class P4Turn:
                 return False
         elif self.state == State.ISS_HOLD and self.last.kind == Kind.NORMAL:
             if (reg.responds_to != self.last.stream_sample
-                    or obs.word == counter_ack(self.last.status)):
+                    or obs.word == self._expected_data_ack(idle=True)):
                 return False
         else:
             return False
@@ -956,19 +1092,72 @@ class P4Turn:
         self._hold_until = at + round(4*1.25*self.fs)
         return True
 
+    def _seeded(self, at, body):
+        """The slot after V27 answers our hand-back body.
+
+        Every stock new ISS in k0003 (1460.934, 1473.708, 1481.812, 1488.988,
+        1524.906) keyed a robust-short ladder after its first body, never a
+        normal: 13 -> 60/61 before the SL3 long, 13 -> 12 -> 11 -> 10 before an
+        SL5 short."""
+        if self.turn_entry != 'ladder':
+            self._idle(at)
+            return
+        self._turn_body = body
+        self._turn_values = (self._payload_ladder if self._payload_ladder and self._bytes_waiting()
+                             else LADDER_SL5)
+        self.index = 0
+        self.state = State.ISS_LADDER
+        self._short(at, 0)
+
+    @property
+    def ladder(self):
+        if self._turn_body is not None and self.state == State.ISS_LADDER:
+            return self._turn_values
+        return self._ladder
+
+    @ladder.setter
+    def ladder(self, values):
+        self._ladder = values
+
+    def _sl5_turn(self):
+        return self._turn_body is not None and self.ladder == LADDER_SL5
+
+    def _after_turn_ladder(self, at):
+        body, values = self._turn_body, self.ladder
+        self._turn_body, self.index = None, 0
+        # INFERRED, k0003: each acked ladder short takes a counter. Bodies c0
+        # led long c2 after 13, 60 (1477.461, 1529.906), long c1 after 61
+        # (1491.503) and normal c0 after 13, 12, 11, 10 (1488.060).
+        self.counter = (body.status + len(values)) % 4
+        if not self._bytes_waiting():
+            self.state = State.ISS_HOLD
+            self._hold_until = None
+            self._next = Proposal(Kind.NORMAL, at, status=0x40 | self.counter, state=State.ISS_HOLD)
+            return
+        self._handback_attempted = False
+        if self.managed_application:
+            self._hold_until = None
+        self._clear_offer()
+        self._first_data = self._word_yield = False
+        self._after_ladder(at)
+
     def _accept_handback(self, at):
         """Continue a confirmed X27 through the common hand-back mail gate."""
         self.counter = 1
+        self._last_data_ack = 'X27'
+        self._last_data_form = 'normal short'
         self._first_data = self._word_yield = False
         self._begin_data_turn(at, counted_continuation=True)
 
-    def _commit_data(self):
+    def _commit_data(self, word=None):
         self._clear_held_word_yield()
         self._retire_data_episode()
         self._train_active = False
         self._train_initial_data = False
         self._train_heads.clear()
         self.weak_ack = None
+        self._last_data_ack = word or self._expected_data_ack()
+        self._last_data_form = self._packet_form(self._data_packet)
         if self._data_packet is not None and self._data_packet.kind == Kind.CHIRP:
             self._chirp_ack_word = 'V27' if self._chirp_ack_word == 'X27' else 'X27'
         self.outbox.commit()
@@ -990,7 +1179,9 @@ class P4Turn:
             self._requeue()
             self._body(at, 0x20, State.ISS_CLOSE)
             return
-        payload = self.outbox.transfer(22 if kind == Kind.CHIRP else 40 if kind == Kind.NORMAL else 31)
+        level = self.long_level if kind == Kind.LONG else None
+        size = LONG_BYTES[level] if level is not None else {Kind.CHIRP: 22, Kind.NORMAL: 40, Kind.BODY: 31}[kind]
+        payload = self.outbox.transfer(size)
         if not payload:
             if self.app_done:
                 self._body(at, 0x20, State.ISS_CLOSE)
@@ -1003,9 +1194,18 @@ class P4Turn:
             return
         status = self.counter | (0x60 if kind == Kind.CHIRP else
                                 0x40 if self._first_data and self._word_yield else 0)
+        final = kind == Kind.LONG and not self.outbox.queued
+        if kind == Kind.LONG:
+            queued = len(self.outbox.arq._outbuf)
+            spug = bool(queued) and self.spug_policy == 'queued'
+            status = self.counter | (0x40 if final else 0x60 if spug else 0)
+        elif kind == Kind.BODY and self.data_kind == Kind.LONG:
+            status = self.counter
         if kind == Kind.CHIRP and self._chirp_origin is None:
             self._chirp_origin = at
         self._next = Proposal(kind, at, payload=payload, status=status, state=state,
+                              level=level, final=final,
+                              header=self._normal_header(status) if kind == Kind.NORMAL else "A",
                               repeat=kind == Kind.CHIRP and self._last_chirp == (status, payload),
                               chirp_slot=self._chirp_slot(at) if kind == Kind.CHIRP else 0)
 
@@ -1015,25 +1215,44 @@ class P4Turn:
         return round((at - self._chirp_origin) / (CYCLE[Kind.CHIRP] * self.fs))
 
     def _advance(self, at):
-        if self.ladder:
+        if self._closing_failure:
+            self._requeue()
+            self._body(at, 0x20, State.ISS_CLOSE)
+        elif not self.sends_data:
+            self.state = State.ISS_HOLD
+            self._idle(at)
+        elif self.ladder:
             self._short(at, 0)
         else:
             self._data(at)
 
     def _after_ladder(self, at):
-        if self.hold_after_ladder:
-            self._next = Proposal(Kind.LONG, at, state=State.ISS_HOLD)
-        else:
-            if self.data_kind == Kind.CHIRP:
-                # A failed c0 still precedes the negotiated c1, but its bytes
-                # remain unacked and must be recut to the 22-byte chirp field.
-                if self._first_data and not self._word_yield:
-                    self.counter = (self.counter + 1) % 4
-                    self._first_data = False
-                self._requeue()
-                self._data_packet = None
-                self._chirp_origin = None
-            self._data(at)
+        if self.data_kind == Kind.LONG:
+            if self._restart_packet is not None:
+                packet, self._restart_packet = self._restart_packet, None
+                self.outbox.transfer(len(packet.payload))
+                self._next = replace(packet, stream_sample=at, repeat=True)
+                return
+            self._last_data_ack = self._last_data_form = None
+        if self.data_kind == Kind.CHIRP:
+            # A failed c0 still precedes the negotiated c1; its loan is not committed.
+            if self._first_data and not self._word_yield:
+                self.counter = (self.counter + 1) % 4
+                self._first_data = False
+            self._requeue()
+            self._data_packet = None
+            self._chirp_origin = None
+        self._data(at)
+
+    def _finish_data_turn(self, at):
+        self._next = None
+        self._clear_ack_wait()
+        self._hold_until = None
+        self._clear_offer()
+        self.state = State.IRS_ANSWER
+        self._open_receive_epoch(at)
+        self._awaiting_peer_turn = True
+        self.link_events.append(dict(event='data-turn-ended', at=at))
 
     def _clear_ack_wait(self):
         self._waiting_ack = self._waiting_until = self._deferred_ack = None
@@ -1047,6 +1266,16 @@ class P4Turn:
         self._waiting_until = obs.stream_sample + round(
             (WORD_HORIZON_S + CYCLE[kind]) * self.fs
         )
+
+    def armed_repeat(self):
+        """The next slot of an unacknowledged body or normal, which its repeat (or
+        the close its exhausted budget owes) holds until an ACK read in time
+        swaps it; None when nothing is owed."""
+        if (self.state not in (State.ISS_DATA, State.ISS_DATA_ACK) or self._next is not None
+                or self._data_packet is None or self._data_packet.kind not in (Kind.BODY, Kind.NORMAL)
+                or self.last is None or self.last.payload != self._data_packet.payload):
+            return None
+        return self.last.stream_sample + round(CYCLE[self.last.kind] * self.fs)
 
     def next_raster(self, now):
         if ((self._breaking_in() or self.peer_watch is not None)
@@ -1067,6 +1296,13 @@ class P4Turn:
         floor = max(now + self.lead, self._refused_due or 0)
         k = max(1, (floor - self.last.stream_sample + cycle - 1) // cycle)
         return self.last.stream_sample + k * cycle
+
+    def _turn_raster(self, now):
+        self.revoke_peer_watch()
+        self.peer_phase = None
+        self._peer_consumed = None
+        self._peer_cycle = 1.25
+        return self.next_raster(now)
 
     def breakin_due(self, now, *, lead=None):
         phase = self.peer_phase
@@ -1141,69 +1377,9 @@ class P4Turn:
             self._next = replace(self._next,
                                  stream_sample=self.breakin_due(max(obs.stream_sample, now)))
 
-    def _end_irs_silence(self, at=None, reason='cycles complete'):
-        self._irs_silent_done = True
-        if at is not None:
-            self._irs_silent_until = at
-        self.link_events.append(dict(event='irs-silence-end', at=at, reason=reason))
-
-    def _irs_silent(self, at):
-        if self._irs_silent_until is None or self._irs_silent_done:
-            return False
-        if at >= self._irs_silent_until:
-            self._end_irs_silence(self._irs_silent_until)
-            return False
-        return True
-
-    def _silent_receive(self, reg):
-        if not self.irs_silent_cycles:
-            return False
-        obs = reg.observation
-        at = obs.stream_sample
-        packet = obs.kind in CYCLE and obs.kind != Kind.WORD
-        live = reg.outcome not in (Registered.EXPIRED, Registered.DUPLICATE)
-        if (self._irs_silent_start is None
-                and self.state in (State.IRS_ANSWER, State.ISS_LADDER)
-                and live and not obs.unexpected
-                and (obs.kind == Kind.SHORT and obs.value is not None and obs.value != 37
-                     or obs.kind == Kind.BODY and obs.frame is not None
-                     and obs.frame.status.protocol == 0)):
-            self._irs_silent_start = at
-            self._irs_silent_onset = at
-            self._irs_silent_until = at + self.irs_silent_cycles * self._irs_silent_cycle
-            # Receiving the greeting takes the IRS role even when its first
-            # answer is deliberately withheld; no fictitious Keyed ack.
-            self.state = State.IRS_ANSWER
-            if self._opening:
-                self._opening = False
-                self.ladder = self._payload_ladder
-                self.index = 0
-            self._next = self._deferred = None
-            self.pending.clear()
-            self._blocked_redue = False
-            self._clear_ack_wait()
-            self.link_events.append(dict(event='irs-silence-start', at=at,
-                                         cycles=self.irs_silent_cycles, reason='key nothing'))
-        if self._irs_silent_until is None:
-            return False
-        if (not self._irs_silent_done and packet and live
-                and at >= self._irs_silent_onset - self.fs // 10):
-            # Count peer raster cycles, not refinements or decoded copies.
-            # A chirp/long changes the length of the remaining cycles.
-            remaining = round((self._irs_silent_until - at) / self._irs_silent_cycle)
-            self._irs_silent_onset = max(at, self._irs_silent_onset)
-            if remaining <= 0:
-                self._end_irs_silence(at)
-            elif CYCLE[obs.kind] * self.fs != self._irs_silent_cycle:
-                self._irs_silent_cycle = round(CYCLE[obs.kind] * self.fs)
-                self._irs_silent_until = at + remaining * self._irs_silent_cycle
-        # Late refinements from the window must never become deferred answers.
-        return (self._irs_silent(at)
-                or self._irs_silent_start <= at < self._irs_silent_until - self.fs // 10)
-
     def observe(self, reg, *, now=None):
         obs = reg.observation
-        if (self._next is not None and obs.kind in (Kind.NORMAL, Kind.BODY, Kind.LONG, Kind.CHIRP)
+        if (self._next is not None and obs.kind in DATA_KINDS
                 and reg.outcome not in (Registered.EXPIRED, Registered.CONTRADICTED,
                                         Registered.DUPLICATE)
                 and self._overtaken(self._next, obs)):
@@ -1260,7 +1436,7 @@ class P4Turn:
                 or self._next is not None and self._next.state in (State.ISS_GRANT, State.IRS_BREAKIN))
             self._recover_peer_turn()
         admit = ((lambda: self.sf8_eligible(obs))
-                 if obs.sf8 and self.sf8_eligible is not None else None)
+                 if obs.kind == Kind.LONG and self.sf8_eligible is not None else None)
         try:
             with self.adapter.admission(admit):
                 return self._observe(reg, now=now)
@@ -1294,7 +1470,10 @@ class P4Turn:
         now = obs.stream_sample if now is None else now
         if self.state == State.DOWN:
             return
-        if self._close_expired(now):
+        if self._close_expired(now, obs):
+            return
+        if (self.close_context is not None and self.close_context.expired_at is not None
+                and obs.stream_sample >= self.close_context.expired_at):
             return
         if self._train_expired(now, decision=False):
             return
@@ -1306,7 +1485,7 @@ class P4Turn:
                      or reg.outcome not in (Registered.NEW, Registered.CONFIRMED, Registered.ENRICHED))):
             return
         if (self.state == State.IRS_ANSWER
-                and obs.kind in (Kind.NORMAL, Kind.BODY, Kind.LONG, Kind.CHIRP)
+                and obs.kind in DATA_KINDS
                 and not obs.weak and not obs.unexpected
                 and reg.outcome in (Registered.NEW, Registered.ENRICHED,
                                     Registered.CONFIRMED, Registered.CONTRADICTED)
@@ -1378,29 +1557,16 @@ class P4Turn:
                 and not obs.provisional and not obs.weak and not obs.unexpected
                 and reg.outcome not in (Registered.EXPIRED, Registered.DUPLICATE)):
             self._train_active = False
-        if obs.frame is None or obs.kind not in (Kind.BODY, Kind.NORMAL, Kind.LONG, Kind.CHIRP):
+        if obs.frame is None or obs.kind not in DATA_KINDS:
             self._record_peer_phase(reg, now)
         self.events.append(reg)
-        silent = self._silent_receive(reg)
-        if silent and self._irs_silent_done:
-            # An old refinement must not replace a current, answerable packet.
-            return
-        try:
-            self._observe_registered(reg, now)
-            if (obs.kind == Kind.SHORT and self._next is not None
-                    and self._next.kind == Kind.WORD
-                    and self._next.responds_to == obs.stream_sample):
-                if (reg.outcome in (Registered.NEW, Registered.ENRICHED, Registered.CONFIRMED)
-                        and not obs.provisional and not obs.weak and not obs.unexpected):
-                    self._next = self._hold_control(reg, self._next)
-        finally:
-            if silent:
-                # Keep receiving/delivering data, but discard all response work
-                # so neither an immediate nor deferred answer escapes later.
-                self._next = self._deferred = None
-                self.pending.clear()
-                self._blocked_redue = False
-                self._clear_ack_wait()
+        self._observe_registered(reg, now)
+        if (obs.kind == Kind.SHORT and self._next is not None
+                and self._next.kind == Kind.WORD
+                and self._next.responds_to == obs.stream_sample):
+            if (reg.outcome in (Registered.NEW, Registered.ENRICHED, Registered.CONFIRMED)
+                    and not obs.provisional and not obs.weak and not obs.unexpected):
+                self._next = self._hold_control(reg, self._next)
 
     def _observe_registered(self, reg, now):
         obs = reg.observation
@@ -1417,6 +1583,22 @@ class P4Turn:
         if self.state == State.ISS_LADDER and obs.kind == Kind.WORD:
             target = self._emissions.get(reg.responds_to)
             if target is not None and target.kind == Kind.SHORT:
+                if not obs.provisional:
+                    expected = (ACK.get(target.value, 'any') if self._sl5_turn()
+                                else ','.join(self.ladder_admit)
+                                if not self._opening and self.data_kind == Kind.LONG
+                                and self.index == len(self.ladder)-1
+                                else 'X27' if not self._opening and self.data_kind == Kind.LONG
+                                else ACK.get(target.value))
+                    reliable = (not obs.weak and not obs.unexpected
+                                and reg.outcome not in (Registered.EXPIRED, Registered.DUPLICATE)
+                                and target.value == self.ladder[self.index])
+                    verdict = ('ambiguous' if not reliable or obs.word is None
+                               else 'ack' if self._ack(obs, self.index)
+                               else 'refused' if obs.word == 'Z27' else 'repeat')
+                    self.link_events.append(dict(event='IssAck', at=obs.stream_sample,
+                                                 responds_to=reg.responds_to, word=obs.word,
+                                                 expected=expected, verdict=verdict))
                 if reg.outcome not in (Registered.EXPIRED, Registered.DUPLICATE):
                     if target is self.last:
                         if obs.word in (None, 'BREAKIN', 'Y27'):
@@ -1425,6 +1607,8 @@ class P4Turn:
                             self._ladder_head_onset = None
                     if (not obs.provisional and obs.word in p4words.STEPS and not obs.unexpected
                             and self.last is not None and target.value == self.last.value
+                            and (self._opening or self.data_kind != Kind.LONG
+                                 or not obs.weak and self._ack(obs, self.index))
                             and (self._ladder_answered is None
                                  or target.stream_sample > self._ladder_answered)):
                         self._ladder_answered = target.stream_sample
@@ -1491,7 +1675,8 @@ class P4Turn:
             if obs.frame is not None:
                 # Its held answer already owns this committed source. Do not
                 # re-enter parsing or replace the accepted SourceResult.
-                eligible = not obs.sf8 or self.sf8_eligible is None or self.sf8_eligible(obs)
+                eligible = (obs.kind != Kind.LONG
+                            or self.sf8_eligible is None or self.sf8_eligible(obs))
                 if reg.peer_watch_generation is not None:
                     if (self.adapter._delivery_journal is not None
                             or self.adapter._admit is not None and not self.adapter._admit()):
@@ -1520,6 +1705,19 @@ class P4Turn:
             self._held_word_yield = HeldWordYield(
                 self._data_episode, obs.stream_sample, reg.responds_to,
                 reg.response_generation)
+        if qualifying and obs.kind == Kind.WORD and not obs.provisional:
+            expected = self._expected_data_ack()
+            reliable = (not obs.weak and not obs.unexpected
+                        and reg.outcome not in (Registered.EXPIRED, Registered.DUPLICATE))
+            verdict = ('ambiguous' if not reliable or obs.word is None else 'ack' if self._data_ack(obs)
+                       else 'refused' if obs.word == 'Z27' else 'repeat'
+                       if obs.word in (self._last_data_ack, 'U27', 'X27',
+                                        self._ack_partner(self._data_packet.kind,
+                                                          self._packet_form(self._data_packet)))
+                       else 'ambiguous')
+            self.link_events.append(dict(event='IssAck', at=obs.stream_sample,
+                                         responds_to=reg.responds_to, word=obs.word,
+                                         expected=expected, verdict=verdict))
         refused = obs.word == 'Z27'
         if (qualifying and refused and not obs.provisional and not obs.weak
                 and not obs.unexpected and reg.outcome not in (Registered.EXPIRED, Registered.DUPLICATE)):
@@ -1529,8 +1727,11 @@ class P4Turn:
                 self._clear_ack_wait()
                 self._speculative.clear()
                 self._rollback_until = None
+                if self.data_kind == Kind.LONG:
+                    self._restart_packet = self._data_packet
                 self._requeue()
                 self._data_packet = None
+                self.data_repeats = 0
                 if (self.ladder and not self._ladder_returned
                         and all(w == 'Z27' for w in self._data_refusals.values())):
                     self._ladder_returned = True
@@ -1544,6 +1745,8 @@ class P4Turn:
             self.weak_ack = None
         if obs.kind == Kind.WORD and not obs.provisional and self._data_packet is not None:
             accepted_words = (self._expected_data_ack(),)
+            if self._data_packet.kind == Kind.LONG and self.iss_u27 == 'ack':
+                accepted_words += ('U27',)
             if obs.word not in accepted_words or reg.outcome == Registered.EXPIRED:
                 self.weak_ack = None
             elif obs.weak and qualifying:
@@ -1597,6 +1800,16 @@ class P4Turn:
                 self._dropped.remove(reg.replaced.stream_sample)
                 self._dropped.add(obs.stream_sample)
         if reg.outcome == Registered.EXTENDED:
+            # WS8EOC 15:38Z: a chirp peer's V27 grant is measured only once the
+            # confirmed word is extended, 0.945 s after our Y27.
+            if (self.state == State.IRS_BREAKIN and not reg.observation.unexpected
+                    and self._breakin_granted(reg)):
+                self._take_breakin_turn(reg, now)
+                return
+            if (self._opening_unread_head is not None and obs.word == 'Y27'
+                    and obs.extent_s is not None
+                    and abs(obs.stream_sample - self._opening_unread_head) < self.fs//10):
+                self._opening_unread_head = None
             if (
                 obs.stream_sample in self.pending
                 and obs.stream_sample not in self._decided
@@ -1731,7 +1944,8 @@ class P4Turn:
             self.pending.setdefault(obs.stream_sample,
                                     {"word": None, "accepted": False, "text": False})['body'] = obs
         if (obs.kind in (Kind.LONG, Kind.CHIRP) and obs.frame is None
-                and (self.require_long_crc or obs.kind == Kind.CHIRP)):
+                and (self.require_long_crc or obs.kind == Kind.CHIRP
+                     or self.long_ack.startswith('toggle'))):
             self.pending.setdefault(obs.stream_sample,
                 {'word': None, 'accepted': False, 'text': False})['body'] = obs
             if not obs.provisional:
@@ -1740,7 +1954,9 @@ class P4Turn:
         if obs.kind in (Kind.BODY, Kind.CHIRP) or obs.kind in (Kind.NORMAL, Kind.LONG) and obs.frame is not None:
             if obs.frame is None:
                 return
-            if obs.sf8 and self.sf8_eligible is not None and not self.sf8_eligible(obs):
+            if obs.kind == Kind.BODY and not obs.provisional and not obs.weak:
+                self._opening_unread_head = None
+            if obs.kind == Kind.LONG and self.sf8_eligible is not None and not self.sf8_eligible(obs):
                 return
             if (self.close_context is not None and self.state in (State.ISS_CLOSE, State.IRS_ANSWER)
                     and source_payload(obs.frame.status, obs.frame.data)):
@@ -1754,6 +1970,8 @@ class P4Turn:
                     and not obs.frame.status.source_mode and not obs.frame.status.extended
                     and obs.frame.status.protocol in (0, 2)):
                 self._acked_idle = reg.responds_to
+                self._last_data_ack = obs.word
+                self._last_data_form = self._packet_form(self.last)
                 self.counter = (self.counter + 1) % 4
                 self._first_data = self._word_yield = False
                 data_reply = True
@@ -1766,11 +1984,15 @@ class P4Turn:
                     and (source_payload(obs.frame.status, obs.frame.data)
                          or obs.kind == Kind.BODY and obs.frame.status.protocol == 2)
                     and qualifying
-                    and self._data_packet.kind in (Kind.BODY, Kind.NORMAL)):
+                    and (self._data_packet.kind in (Kind.BODY, Kind.NORMAL)
+                         or self._data_packet.kind == Kind.LONG and self._data_packet.final)):
                 # The checked reply, including an empty turn request, accepts
                 # our field before a synchronous client can queue more bytes.
                 data_reply = True
+                final = self._data_packet.final
                 self._commit_data()
+                if final:
+                    self._finish_data_turn(obs.stream_sample)
                 self._clear_ack_wait()
                 self._next = None
                 self.link_events.append(dict(event='data-reply-ack', at=obs.stream_sample,
@@ -1802,7 +2024,7 @@ class P4Turn:
                     changeover=obs.kind == Kind.BODY and obs.frame.status.protocol == 2,
                     counted=obs.kind in (Kind.NORMAL, Kind.LONG),
                     receipt_context=ReceiptContext(receipt, obs.kind),
-                    admit=(lambda: self.sf8_eligible(obs)) if obs.sf8 and self.sf8_eligible else None))
+                    admit=(lambda: self.sf8_eligible(obs)) if obs.kind == Kind.LONG and self.sf8_eligible else None))
             except P4LateFrame:
                 raise
             except P4StreamFailure as exc:
@@ -1846,7 +2068,7 @@ class P4Turn:
                         and not obs.frame.status.source_mode and not obs.frame.status.extended
                         and not source_payload(obs.frame.status, obs.frame.data)):
                     self._clear_offer()
-            if obs.sf8:
+            if obs.kind == Kind.LONG:
                 self._sf8_acks[(obs.frame.status.byte, obs.frame.data)] = obs
             if not control_only and obs.kind in (Kind.NORMAL, Kind.LONG):
                 result = self.adapter.result
@@ -1911,11 +2133,17 @@ class P4Turn:
                 return
             pending = dict(self.pending.get(obs.stream_sample,
                            dict(word=None, accepted=False, text=False)))
+            if obs.stream_sample in self._dropped:
+                pending.update(current_slot=obs.stream_sample, current_slot_accepted=True)
+            self._unread_data_due = None
             pending.update(accepted=True, text=bool(text), body=obs,
                            responds_to=reg.responds_to, data_reply=data_reply,
                            receive_epoch=self._receive_epoch,
                            source_root=root if obs.kind in (Kind.BODY, Kind.CHIRP) else None,
-                           watch_recovery=self._watch_recovery)
+                           watch_recovery=self._watch_recovery,
+                           peer_handover=self._awaiting_peer_turn)
+            if self._awaiting_peer_turn and source_payload(obs.frame.status, obs.frame.data):
+                self._awaiting_peer_turn = False
             answer = self._accepted_answer(obs, pending)
             if answer is not None and not obs.provisional and not obs.weak:
                 pending['answer'] = self._hold_answer(obs, answer, pending)
@@ -1999,7 +2227,9 @@ class P4Turn:
                 self._break_in(self.breakin_due(now) if phase_ready else due)
             elif obs.kind != Kind.NORMAL and not obs.provisional:
                 word = "X27" if obs.kind == Kind.LONG else self.peer_ack.get(obs.value)
-                if (self._v59_answer == 'w27' and self.state == State.IRS_ANSWER
+                if obs.value == 59 and word == "W27":
+                    word = PEER_ACK.get(59)
+                if (self.peer_ack.get(59) == 'W27' and self.state == State.IRS_ANSWER
                         and obs.kind == Kind.SHORT and obs.value == 59
                         and obs.frame is None and obs.word is None
                         and obs.placed and obs.header in ('A', 'B')
@@ -2030,44 +2260,42 @@ class P4Turn:
             return
         if (self.state == State.ISS_HOLD and self.last is not None
                 and self.last.kind == Kind.NORMAL and reg.responds_to == self.last.stream_sample
-                and obs.word == counter_ack(self.last.status)
+                and obs.word == self._expected_data_ack(idle=True)
                 and reg.responds_to != self._acked_idle):
             if obs.provisional:
                 self._wait_for_ack(obs)
             elif not obs.weak:
                 self._acked_idle = reg.responds_to
+                self._last_data_ack = obs.word
+                self._last_data_form = self._packet_form(self.last)
                 self._clear_ack_wait()
                 self.counter = (self.counter + 1) % 4
                 self._first_data = self._word_yield = False
-                self._data(self.next_raster(now))
+                if self.sends_data:
+                    self._data(self.next_raster(now))
+                else:
+                    self._idle(self.next_raster(now))
             return
         if obs.word == "V27" and self._grant_ack(reg):
             if (self._long_peer_open() and (obs.weak or obs.unexpected
                     or reg.outcome not in (Registered.NEW, Registered.CONFIRMED, Registered.ENRICHED)
-                    or obs.extent_s is None or obs.extent_s < .240)):
+                    or not (obs.extent_s is not None and obs.extent_s >= .240
+                            or obs.extent_s is None and obs.word_span_supported))):
                 return
             if obs.provisional:
                 self._wait_for_ack(obs)
                 return
             self.link_events.append(dict(event='turn', at=obs.stream_sample,
                                          word=obs.word, responds_to=reg.responds_to))
+            due = self._turn_raster(now)
             if self.sends_data:
-                self._begin_data_turn(self.next_raster(now), word_yield=True)
+                self._begin_data_turn(due, word_yield=True)
             else:
-                self._advance(self.next_raster(now))
+                self._advance(due)
             return
         if self.state == State.IRS_BREAKIN:
-            if (obs.word == "V27" and not obs.provisional and not obs.weak
-                    and self._requesting() and reg.responds_to == self.last.stream_sample
-                    and (not self._long_peer_open() or not obs.unexpected
-                         and reg.outcome in (Registered.NEW, Registered.CONFIRMED, Registered.ENRICHED)
-                         and obs.extent_s is not None and obs.extent_s >= .240)):
-                self.link_events.append(dict(event='turn', at=obs.stream_sample,
-                                             word=obs.word, responds_to=reg.responds_to))
-                if self.sends_data:
-                    self._begin_data_turn(self.next_raster(now), word_yield=True)
-                else:
-                    self._advance(self.next_raster(now))
+            if self._breakin_granted(reg):
+                self._take_breakin_turn(reg, now)
             elif not obs.provisional and obs.word != "V27":
                 self.state = State.IRS_ANSWER
             return
@@ -2115,6 +2343,8 @@ class P4Turn:
                             self.session_end or self._train_root + round(10*1.25*self.fs))
                     self._next = None
                     self._clear_ack_wait()
+                elif self._turn_body is not None:
+                    self._after_turn_ladder(self.next_raster(now))
                 else:
                     self._train_active = False
                     self._after_ladder(self.next_raster(now))
@@ -2129,7 +2359,8 @@ class P4Turn:
                 if obs.provisional:
                     if obs.weak:
                         self._wait_for_ack(obs)
-                    elif self.state == State.ISS_DATA_ACK and self.ladder:
+                    elif (self.state == State.ISS_DATA_ACK and self.ladder
+                          and self._data_packet.kind != Kind.LONG):
                         self._speculative[obs.stream_sample] = (
                             self.state,
                             0,
@@ -2139,9 +2370,15 @@ class P4Turn:
                     else:
                         self._wait_for_ack(obs)
                     return
-                self._commit_data()
+                final = self._data_packet.final
+                first_body = self._data_packet.kind == Kind.BODY and self._first_data
+                self._commit_data(obs.word)
                 self._train_active = False
-                if self.state == State.ISS_DATA_ACK:
+                if final:
+                    self._finish_data_turn(obs.stream_sample)
+                elif first_body and self.data_kind == Kind.LONG:
+                    self._advance(self.next_raster(now))
+                elif self.state == State.ISS_DATA_ACK:
                     self._advance(self.next_raster(now))
                 else:
                     self._data(self.next_raster(now))
@@ -2157,18 +2394,19 @@ class P4Turn:
             # 1, 3, 7 and 17 copies; holds ran 41 and 99.
             leave = self._wants_turn(due)
             self.link_events.append(dict(event='v53-hold-exit', at=obs.stream_sample, copies=copies,
-                                         action='break-in' if leave else 'link-down'))
+                                         action='break-in' if leave else 'close'))
             if leave:
                 self._break_in(due)
             else:
-                self.link_down(f'no progress after {copies} peer control 53 copies')
+                self._closing_failure = self.app_done = True
+                self.reason = f'no progress after {copies} peer control 53 copies'
+                self._requeue()
+                self.revoke_peer_watch()
+                self.state = State.IRS_CLOSE
+                self._break_in(due)
             return None
-        word = self.ack_53_b if obs.header == 'B' and self.ack_53_b else self.ack_53
-        if self.ack_53_rotate:
-            order = (V53_ROTATION[V53_ROTATION.index(word):] + V53_ROTATION[:V53_ROTATION.index(word)]
-                     if word in V53_ROTATION else (word, *V53_ROTATION))
-            word = order[(copies-1)//self.ack_53_rotate % len(order)]
-        return word
+        key = '53/B' if obs.header == 'B' and '53/B' in self.peer_ack else 53
+        return self.peer_ack.get(key, 'U27')
 
     def _wants_turn(self, candidate=None):
         if self.peer_watch is not None:
@@ -2206,6 +2444,12 @@ class P4Turn:
                                   peer_watch_generation=self.peer_watch.generation)
         elif self.breakins >= 4:
             self.link_down("break-in unanswered")
+        elif self._closing_turn(due):
+            # Closing asks with a word in the peer's answer slot, and keeps
+            # reading the peer's raster: a body request sat over K4MSU's own
+            # shorts at 05:05Z 88.781.
+            self._next = Proposal(Kind.WORD, due, word='Y27', state=State.IRS_BREAKIN,
+                                  purpose='close-request')
         elif self.peer_phase is not None and self.peer_phase.kind in (Kind.LONG, Kind.CHIRP):
             self._next = Proposal(Kind.WORD, due, word='Y27', state=State.IRS_BREAKIN)
         elif self.breakin == "y27":
@@ -2213,12 +2457,50 @@ class P4Turn:
         else:
             self._body(due, 0x40, State.IRS_BREAKIN)
 
+    def _closing_turn(self, now):
+        """Closing while the peer holds the ISS raster (a close resumed into its
+        turn, K4MSU 05:05Z) or keys its long slots (K4SPB 05:11Z): our 0x20 waits
+        for its grant. Any other close asks with the 0x40 body gateways grant."""
+        return (self._closing_failure and self.state in (State.IRS_CLOSE, State.IRS_BREAKIN)
+                and (self._close_resumed_in_peer_turn
+                     or self._peer_holds_turn(now) and self.peer_phase.kind in (Kind.LONG, Kind.CHIRP)))
+
+    def _peer_holds_turn(self, now):
+        phase = self.peer_phase
+        return (phase is not None and phase.generation == self._peer_generation
+                and now - phase.onset <= 2 * phase.cycle)
+
+    def _breakin_granted(self, reg):
+        obs = reg.observation
+        return (obs.kind == Kind.WORD and obs.word == "V27" and not obs.provisional and not obs.weak
+                and self._requesting() and reg.responds_to == self.last.stream_sample
+                and (not self._long_peer_open() or not obs.unexpected
+                     and reg.outcome in (Registered.NEW, Registered.CONFIRMED,
+                                         Registered.ENRICHED, Registered.EXTENDED)
+                     and (obs.extent_s is not None and obs.extent_s >= .240
+                          or obs.extent_s is None and obs.word_span_supported)))
+
+    def _take_breakin_turn(self, reg, now):
+        self.link_events.append(dict(event='turn', at=reg.observation.stream_sample,
+                                     word=reg.observation.word, responds_to=reg.responds_to))
+        due = self._turn_raster(now)
+        if self.sends_data:
+            self._begin_data_turn(due, word_yield=True)
+        else:
+            self._advance(due)
+
     def _requesting(self):
         return (self.state == State.IRS_BREAKIN and self.last is not None
                 and self.last.kind == Kind.WORD and self.last.word == "Y27")
 
     def _ack(self, obs, index):
         value = self.ladder[index]
+        if self._sl5_turn():
+            return (obs.word in p4words.BANK and obs.word not in ('Z27', 'Y27')
+                    if index == len(self.ladder) - 1 else obs.word == ACK[value])
+        if self.data_kind == Kind.LONG and not self._opening:
+            return (obs.word in self.ladder_admit if index == len(self.ladder) - 1
+                    else obs.word == 'X27')
         if self.ladder == LADDER_CHIRP and not self._opening:
             return (obs.word in ('X27', 'V27', 'U27') if value in (49, 53)
                     else obs.word == ACK[value])
@@ -2282,7 +2564,8 @@ class P4Turn:
                     and self._waiting_ack is None and not self.pending
                     and not any(end > now for end in self._train_heads.values())):
                 self._next = replace(self.last, stream_sample=due, repeat=True,
-                                     header='B' if self.last.kind == Kind.SHORT else self.last.header)
+                                     header='B' if self.last.kind in (Kind.SHORT, Kind.NORMAL)
+                                     else self.last.header)
             self._train_fallback = True
         return False
 
@@ -2307,29 +2590,12 @@ class P4Turn:
     def _accepted_answer(self, obs, pending):
         status = obs.frame.status
         identity = status.byte, obs.frame.data
-        cached = (self._held_answer.answer if self._held_answer is not None
-                  and self._held_answer.answer.ack_identity == identity
-                  and self._held_answer.kind == obs.kind else None)
-        reason = None
-        if status.protocol == 1:
+        if not (status.protocol in (0, 3) or status.protocol == 2 and (
+                obs.kind in (Kind.LONG, Kind.CHIRP)
+                or obs.kind == Kind.BODY and (source_payload(status, obs.frame.data)
+                    or pending.get('peer_handover')))):
             return None
-        if obs.kind == Kind.CHIRP and status.protocol in (0, 2, 3):
-            word = self._chirp_word(identity)
-        elif obs.kind == Kind.NORMAL and status.protocol in (0, 3):
-            word, reason = self._normal_ack(identity, cached)
-        elif obs.kind == Kind.LONG and status.protocol in (0, 2, 3):
-            word, reason = self._long_ack(identity)
-        elif obs.kind == Kind.BODY and status.protocol == 3:
-            word = 'U27'
-        elif obs.kind == Kind.BODY and (status.protocol == 0 or
-                status.protocol == 2 and source_payload(obs.frame.status, obs.frame.data)):
-            if cached is not None:
-                word, reason = cached.word, cached.ack_reason
-            else:
-                word = 'X27' if self.first_body else 'V27'
-                reason = 'opening body' if self.first_body else None
-        else:
-            return None
+        word, reason = self._counted_ack(obs)
         return Proposal(Kind.WORD, obs.stream_sample+round(self.t[obs.kind]*self.fs),
             word=word, ack_reason=reason, ack_identity=identity, state=State.IRS_ANSWER,
             receive_epoch=pending['receive_epoch'], source_root=pending['source_root'],
@@ -2374,30 +2640,65 @@ class P4Turn:
                 <= self.fs//10
                 and self._acks_unread(proposal.word, obs.kind))
 
-    def _held_proposal(self, due, incoming=None):
+    def _held_proposal(self, due, incoming=None, *, slot=None, log=True):
         held = self._held_answer
-        slot = incoming.stream_sample if incoming is not None else None
+        if slot is None and incoming is not None:
+            slot = incoming.stream_sample
+        kind = incoming.kind if incoming is not None else held.kind if held else Kind.BODY
+        unread = self._unread_data_due
+        form = self._packet_form(incoming) if incoming is not None else self._ack_form
+        if incoming is None and unread is not None and due >= unread[0]:
+            kind, form = unread[1:3]
+        x27 = self._ack_policy(kind) == 'x27'
+        toggle = self._ack_policy(kind).startswith('toggle')
+        partner = self._ack_partner(kind, form)
+        repeat_word = ('X27' if self.first_ack == 'V27' else partner) if toggle else 'U27'
+        if not self._chain_starts(form):
+            repeat_word = self._ack_chain[1]
+        if x27:
+            repeat_word = 'V27'
+        if unread is not None and (kind, form) == unread[1:3]:
+            repeat_word = unread[3]
+        self._unread_data_due = due, kind, form, repeat_word
         if (held is None or held.answer.receive_epoch != self._receive_epoch
                 or held.generation != self._peer_generation):
-            return Proposal(Kind.WORD, due, word='V27', state=State.IRS_ANSWER,
-                            current_slot=slot, current_slot_accepted=False)
-        if (held.answer.ack_identity is None and self._unread_data_due is not None
-                and due == self._unread_data_due[0]
-                and self._acks_unread(held.answer.word, self._unread_data_due[1])):
-            # Review 1107: a ladder control's answer (X27 under a v53 trial) is
-            # also a data ack, so it never answers an unread packet.
-            return None
+            answer = Proposal(Kind.WORD, due, word=repeat_word, state=State.IRS_ANSWER,
+                              purpose='repeat-request', current_slot=slot, current_slot_accepted=False)
+            if log:
+                self._log_answer('repeat-request', slot, answer, kind, repeat=True)
+            return answer
         answer = replace(held.answer, stream_sample=due, current_slot=slot,
                          current_slot_accepted=False)
+        source = held.context['body']
+        # Control replies have no read identity, but cannot own an unread data slot.
+        # Under x27 an X27 to an unread slot would advance whatever it held.
+        retain = (not x27 and self._read_unacknowledged()
+            or answer.peer_control is not None and kind not in DATA_KINDS and (
+                toggle and not self._chain_starts(form)
+                or not self._acks_unread(answer.word, kind)
+                and (toggle or not self._chain_starts(form)))
+            or source.frame is not None and (
+            held.kind == kind == Kind.LONG and self._ack_policy(kind) == 'counter-even-t27'
+            or source.frame.status.protocol == 2 and source.frame.data
+            or self.close_context is not None or held.context.get('watch_recovery')))
+        if not retain:
+            answer = replace(answer, word=repeat_word, ack_identity=None,
+                             purpose='repeat-request', peer_control=None)
+        if answer.purpose == 'repeat-request':
+            answer = replace(answer, ack_reason=None)
         self._answer_kinds[due] = (held.kind, answer.ack_identity,
-                                  answer.receive_epoch, self._peer_generation)
-        if held.kind == Kind.LONG and self.long_ack in ('counter-odd-t27', 'counter-even-t27'):
-            self.link_events.append(dict(event='acked-repeat', at=slot if slot is not None else held.onset, kind=answer.kind,
-                ack_policy=self.long_ack, word=answer.word, reason=answer.ack_reason,
-                counter=answer.ack_identity[0] & 3, status=answer.ack_identity[0],
-                repeat=True, accepted_target=answer.accepted_target,
-                current_slot=slot, current_slot_accepted=False))
+                                  answer.receive_epoch, self._peer_generation,
+                                  self._packet_form(held.context['body']))
+        if log and answer.ack_identity is not None:
+            self._log_answer('acked-repeat', slot if slot is not None else held.onset,
+                             answer, held.kind, repeat=True)
         return answer
+
+    def _read_unacknowledged(self):
+        held = self._held_answer
+        return (held is not None and held.answer.receive_epoch == self._receive_epoch
+                and held.generation == self._peer_generation and not held.acknowledged
+                and held.answer.ack_identity is not None)
 
     def _past(self, now, due):
         # A zero lead decides at the due itself, which is still keyable.
@@ -2420,26 +2721,53 @@ class P4Turn:
                    and sample <= due < sample + round(self.t[Kind.LONG] * self.fs)
                    for sample, pending in self.pending.items())
 
+    def _unread_opening_breakin(self):
+        """A requested opening repeat whose packet form is still unknown."""
+        return (self.state == State.ISS_LADDER and self._opening and self.first_body
+                and self.normal_ack in ('toggle', 'x27')
+                and self._opening_unread_head is not None
+                and self.last is not None and self.last.purpose == 'repeat-request')
+
     def _answer_unresolved(self, due, incoming, now, head=None):
         if (self._next is not None and self._next.current_slot_accepted
                 or self._past(now, due) or self._long_owns_answer(due)):
             return
-        if (self.state == State.IRS_ANSWER and incoming is not None
-                and incoming.kind in (Kind.NORMAL, Kind.BODY, Kind.LONG, Kind.CHIRP)
-                and (incoming.kind in (Kind.LONG, Kind.CHIRP) or not self._long_peer_open())):
+        # A Y27 head can repeat an established BODY answer; it cannot create
+        # the first answer or turn a held NORMAL/control into a BODY context.
+        if (self.state == State.IRS_ANSWER
+                and (incoming is None and head is not None and head.word == 'Y27'
+                     and not head.provisional and not head.weak
+                     and self._held_answer is not None
+                     and self._held_answer.kind == Kind.BODY
+                     and not self._long_peer_open()
+                     or incoming is not None and incoming.kind in DATA_KINDS
+                     and (incoming.kind in (Kind.LONG, Kind.CHIRP) or not self._long_peer_open()))):
             self._blocked_redue = False
-            self._unread_data_due = due, incoming.kind
-            self._next = self._held_proposal(due, incoming)
+            self._next = self._held_proposal(due, incoming,
+                slot=head.stream_sample if incoming is None else incoming.stream_sample)
         elif (self.state == State.ISS_LADDER and self._opening and self.first_body
               and head is not None and head.word == 'Y27'
               and not head.provisional and not head.weak and not self._long_peer_open()):
             # WS8EOC 1107 17.242: the gateway's Y27 + body broke into our opening
-            # and three unread copies drew silence. V27 asks for it again: the
-            # first body's ack is X27, and a 0x40 request's is our grant. The
+            # and three unread copies drew silence. The opposite chain-start
+            # word asks for a repeat; a 0x40 request's answer is our grant. The
             # role stays until the body is read, which decides it.
             self._blocked_redue = False
-            self._next = Proposal(Kind.WORD, due, word='V27', state=None,
+            # The 1114 break-in interrupted the first opening short, before
+            # the v38 train. A completed opening retains its existing WORD
+            # receive path, including when it later repeats the first short.
+            first_stage = all(e.value == self.ladder[0] for e in self._emissions.values()
+                              if e.kind == Kind.SHORT)
+            self._opening_unread_head = (head.stream_sample
+                if first_stage and head.extent_s is None else None)
+            word = (('X27' if self.first_ack == 'V27' else 'V27') if self.normal_ack == 'toggle'
+                    else 'V27' if self.normal_ack == 'x27' else 'U27')
+            self._next = Proposal(Kind.WORD, due, word=word, state=None,
                                   purpose='repeat-request', current_slot_accepted=False)
+        elif (self._unread_opening_breakin() and incoming is not None
+              and incoming.kind == Kind.NORMAL):
+            self._blocked_redue = False
+            self._next = replace(self._held_proposal(due, incoming), state=None)
 
     def _cancel_deferred(self, reason):
         if self._deferred is not None:
@@ -2459,15 +2787,17 @@ class P4Turn:
         repeat = (abs(obs.stream_sample - sample - round(CYCLE[body.kind] * self.fs)) <= self.fs // 10
                   and (obs.kind == body.kind or body.kind == Kind.BODY and obs.word == 'Y27'))
         if repeat and obs.frame is None and obs.kind != Kind.SHORT:
+            pending.update(current_slot=obs.stream_sample, current_slot_accepted=False)
             return False
         same = (obs.frame is not None and body.frame is not None
                 and (obs.frame.status.byte, obs.frame.data) == (body.frame.status.byte, body.frame.data)
                 or obs.kind == body.kind == Kind.SHORT and obs.value == body.value)
         if repeat and same:
+            self._unread_data_due = None
             pending.update(current_slot=obs.stream_sample, current_slot_accepted=True)
             if obs.frame is not None:
                 identity = obs.frame.status.byte, obs.frame.data
-                if not obs.sf8:
+                if obs.kind != Kind.LONG:
                     self._sf8_acks.pop(identity, None)
                 elif self.sf8_eligible is None or self.sf8_eligible(obs):
                     self._sf8_acks[identity] = obs
@@ -2476,6 +2806,8 @@ class P4Turn:
         return False
 
     def decide(self, now):
+        if self._turn_body is not None and self.state != State.ISS_LADDER:
+            self._turn_body, self.index = None, 0
         if self._application_limits(now):
             return None
         context = self._accepted_proposal
@@ -2496,11 +2828,10 @@ class P4Turn:
                 and self.state == State.IRS_ANSWER and receive_at is not None
                 and now >= min(ctx.end, (ctx.progress_at or receive_at) + 5*self.fs)):
             self._resume_close(now)
-        if self._irs_silent(now):
-            return None
+        # A current-slot decision must supersede an earlier slot's fallback.
         entries = list(self.pending.items())
         if self._deferred is not None:
-            entries.append(self._deferred)
+            entries.insert(0, self._deferred)
         for sample, pending in entries:
             selected_repeat_answer = False
             deferred = pending.get('due')
@@ -2538,9 +2869,16 @@ class P4Turn:
                     return None
                 self._decided.add(sample)
                 self._blocked_redue = False
-                if (bare or empty_request) and not late and not ctx.grants:
+                if empty_request and not late and not ctx.grants:
+                    # K4MSU 05:05Z 81.611: Y27 + idle 0x40 is the peer taking the
+                    # turn; it keys on 1.25 s from there, so its answer is a word.
+                    self._next = Proposal(Kind.WORD, due, word='V27',
+                                          state=State.IRS_ANSWER, purpose='close-grant',
+                                          current_slot=sample)
+                elif bare and not late and not ctx.grants:
                     self._next = Proposal(Kind.BODY, due, status=0x40,
-                                          state=State.IRS_ANSWER, purpose='close-grant')
+                                          state=State.IRS_ANSWER, purpose='close-grant',
+                                          current_slot=sample)
                 else:
                     self._dropped.add(sample)
                     self.unread += 1
@@ -2564,6 +2902,15 @@ class P4Turn:
                 and "body" not in pending
             )
             accepted = pending["accepted"]
+            grant = (accepted and incoming is not None and incoming.kind == Kind.BODY
+                     and incoming.frame.status.protocol == 2
+                     and not source_payload(incoming.frame.status, incoming.frame.data))
+            if self._closing_turn(due) and not grant:
+                # K4SPB 05:11Z: the gateway held its fill longs for 26 s while
+                # we keyed nothing. Every slot, read or not, asks for the turn.
+                if not late:
+                    self._break_in(due)
+                continue
             if accepted and self._past(now, due):
                 if not deferred:
                     self._defer(sample, pending, due)
@@ -2588,28 +2935,24 @@ class P4Turn:
                     and self.state == State.IRS_ANSWER and accepted
                     and incoming.frame.status.byte == 0x40
                     and not source_payload(incoming.frame.status, incoming.frame.data)):
-                self._resume_close(due, exact=True)
+                self._resume_close(due, exact=True, reply_to=sample)
                 continue
             if (ctx is not None and ctx.grants and self.state == State.IRS_ANSWER
                     and bare):
+                if ctx.expired_at is not None:
+                    self._resume_close(due, exact=True, reply_to=sample)
                 continue
-            governed = (accepted and incoming.kind == Kind.NORMAL
-                        and incoming.frame.status.protocol in (0, 3))
             repeat = False
             status = incoming.frame.status if accepted else None
-            if status is not None:
-                if status.counter != self.acked_counter:
-                    self._peer_continuing_counter = None
-                if status.protocol == 3 or status.extended:
-                    self._peer_continuing_counter = status.counter
             queued_turn = (
                 self.state == State.IRS_ANSWER
-                and (self.sends_data and self._bytes_waiting()
+                and (self.identification_closing or (self.sends_data and self._bytes_waiting()
                      if self._long_peer_open()
-                     else self.outbox.queued and self.allow_breakin)
+                     else self.outbox.queued and self.allow_breakin))
                 and self._wants_turn(due)
                 and self.close_context is None
                 and not pending.get('data_reply')
+                and not pending.get('peer_handover')
             )
             field = incoming.frame.data if status is not None else b''
             link_idle = (field == spec.field_fill(len(field))
@@ -2618,21 +2961,19 @@ class P4Turn:
                     and not status.extended and not status.source_mode and link_idle)
             invitation = (status is not None and status.protocol == 2
                           and not status.extended and not status.source_mode and link_idle)
-            answered_repeat = (status is not None and status.protocol == 0
-                               and not status.extended and not status.source_mode
-                               and self._last_ack is not None
-                               and self._last_ack[1].state == State.IRS_ANSWER
-                               and self.acked_counter == status.counter
-                               and self._peer_continuing_counter != status.counter)
             long_invitation = (accepted and incoming.kind in (Kind.LONG, Kind.CHIRP)
                                and status.protocol == 2 and pending.get('answer') is not None)
-            if long_invitation:
+            if pending.get('peer_handover') and accepted and pending.get('answer') is not None:
+                self._next = replace(pending['answer'], stream_sample=due)
+            elif long_invitation:
                 if (queued_turn and not pending.get('watch_recovery')
                         and (self.next_offer_at is None or due >= self.next_offer_at)):
                     self._break_in(due)
                 else:
                     self._next = replace(pending['answer'], stream_sample=due)
-            elif queued_turn and (idle or invitation or answered_repeat):
+            # Not on a repeat of a packet we acked: that gets the ack again.
+            # WS8EOC 02:06Z and 04:48Z kept sending under every uninvited request.
+            elif queued_turn and (idle or invitation or self.identification_closing):
                 self._break_in(due)
             elif (self.state == State.IRS_BREAKIN and idle
                   and self.outbox.queued and self.allow_breakin):
@@ -2664,23 +3005,10 @@ class P4Turn:
                              and self.state in ISS_TURN and self._bytes_waiting())):
                 response = self._last_ack[1]
                 repeat = True
-                if response.kind == Kind.WORD and incoming.kind == Kind.CHIRP:
-                    response = replace(response, word=self._chirp_word(identity))
-                elif response.kind == Kind.WORD and pending.get('answer') is not None:
+                if response.kind == Kind.WORD and pending.get('answer') is not None:
                     response = pending['answer']
-                elif response.kind == Kind.WORD and response.ack_reason is not None and governed:
-                    word, reason = self._normal_ack(identity, response)
-                    response = replace(response, word=word, ack_reason=reason)
-                elif response.kind == Kind.WORD and incoming.kind == Kind.LONG:
-                    word, reason = self._long_ack(identity)
-                    response = replace(response, word=word, ack_reason=reason)
-                self.link_events.append(dict(event='acked-repeat', at=sample,
-                                             kind=response.kind, word=response.word,
-                                             ack_policy=(self.long_ack if incoming.kind == Kind.LONG and self.long_ack != 'fixed-x27'
-                                                         else self.normal_ack if response.ack_reason else None),
-                                             reason=response.ack_reason))
-                if incoming.kind == Kind.LONG and self.long_ack in ('counter-odd-t27', 'counter-even-t27'):
-                    self.link_events[-1].update(counter=identity[0] & 3, status=identity[0], repeat=True)
+                if not deferred:
+                    self._log_answer('acked-repeat', sample, response, incoming.kind, repeat=True)
                 if response.kind == Kind.WORD:
                     state = (State.IRS_ANSWER if self.state == State.IRS_BREAKIN
                              and incoming.kind == Kind.NORMAL
@@ -2713,7 +3041,7 @@ class P4Turn:
                 self._next = replace(pending['answer'], stream_sample=due)
             elif accepted and incoming.frame.status.protocol == 1:
                 self._next = Proposal(Kind.WORD, due, word='V27', state=State.IRS_CLOSE,
-                                      ack_identity=identity)
+                                      ack_identity=identity, current_slot=sample)
             elif bare or accepted and incoming.frame.status.protocol == 2:
                 self._grant(due, incoming)
             answering_current = (self._next is not None
@@ -2728,26 +3056,19 @@ class P4Turn:
                          and (incoming.kind in (Kind.LONG, Kind.CHIRP)
                               or incoming.kind == Kind.BODY and source_payload(status, field)))):
                 self._answer_kinds[self._next.stream_sample] = (
-                    incoming.kind, identity, self._next.receive_epoch, self._peer_generation)
+                    incoming.kind, identity, self._next.receive_epoch, self._peer_generation,
+                    self._packet_form(incoming))
             if answering_current and identity is not None and self._next.kind != Kind.SHORT:
                 self._next = replace(self._next, ack_identity=identity)
-                if self._next.ack_reason is not None:
-                    long_answer = incoming.kind == Kind.LONG
-                    self.link_events.append(dict(event='long-answer' if long_answer else 'normal-answer', at=sample,
-                        protocol=int(incoming.frame.status.protocol),
-                        ack_policy=self.long_ack if long_answer else self.normal_ack,
-                        word=self._next.word,
-                        reason=self._next.ack_reason, counter=identity[0] & 3,
-                        status=identity[0], repeat=repeat,
-                        previous=self._packet_ack[1] if long_answer and self._packet_ack else self.ack_word))
-                elif incoming.kind == Kind.NORMAL:
-                    self.link_events.append(dict(event='normal-answer', at=sample,
-                        protocol=int(incoming.frame.status.protocol),
-                        ack_policy='protocol-3 short' if incoming.frame.status.protocol == 3 else 'status'))
             if (answering_current and accepted and self._next.kind == Kind.WORD
                     and self._next.state == State.IRS_ANSWER):
                 slot = pending.get('current_slot', due-round(self.t[incoming.kind]*self.fs))
+                if (deferred and self.state == State.IRS_ANSWER
+                        and not pending.get('current_slot_accepted')):
+                    self._next = self._held_proposal(due, incoming, slot=slot, log=False)
                 self._next = replace(self._next, accepted_target=sample, current_slot=slot,
+                                     receive_epoch=pending.get('receive_epoch'),
+                                     source_root=pending.get('source_root'),
                                      current_slot_accepted=pending.get('current_slot_accepted', not deferred))
                 self._accepted_proposal = (self._next, sample, dict(pending),
                                            self._peer_generation)
@@ -2756,14 +3077,14 @@ class P4Turn:
                     and not self._next.payload and self._next.stream_sample == due):
                 self._accepted_proposal = (self._next, sample, dict(pending),
                                            self._peer_generation)
-            if (self._next is not None and self._next.kind == Kind.WORD
-                    and self._next.ack_reason is not None and incoming.kind == Kind.LONG
-                    and self.long_ack in ('counter-odd-t27', 'counter-even-t27')
-                    and self.link_events[-1]['event'] == 'long-answer'):
-                self.link_events[-1].update(accepted_target=self._next.accepted_target,
-                    current_slot=self._next.current_slot,
-                    current_slot_accepted=self._next.current_slot_accepted,
-                    repeat=bool(repeat or deferred))
+            if answering_current and identity is not None and self._next.kind != Kind.SHORT:
+                self._log_answer('long-answer' if incoming.kind == Kind.LONG else 'normal-answer',
+                                 sample, self._next, incoming.kind, repeat=repeat or deferred)
+        if (self._closing_turn(now) and self.peer_phase is not None
+                and (self._next is None or self._next.state == State.IRS_BREAKIN)):
+            # This decision's slot, even before its long decodes, and not one a
+            # cycle on that an earlier request was placed at.
+            self._break_in(now + self.lead - round(.035 * self.fs))
         if self._train_expired(now):
             return self._next
         if self._opening_wait and not self.pending:
@@ -2802,46 +3123,75 @@ class P4Turn:
             self._idle(self.next_raster(now))
         return self._next
 
-    def _chirp_word(self, identity):
-        if self.chirp_ack == 'x27':
-            return 'X27'
-        return 'X27' if identity[0] & 1 else 'V27'
+    def _ack_policy(self, kind):
+        return (self.long_ack if kind == Kind.LONG else
+                self.chirp_ack if kind == Kind.CHIRP else self.normal_ack)
 
-    def _normal_ack(self, identity, cached):
-        if self.normal_ack in ('v27', 'x27'):
-            return self._counter_word(identity[0]), 'fixed'
-        if self.normal_ack in ('parity', 'x27-u27'):
-            counter = identity[0] & 3
-            return self._counter_word(counter), f'counter {counter}'
-        if self.long_ack == 'alternate-packet':
-            key = self._receive_epoch, Kind.NORMAL, identity
-            if key in self._packet_words:
-                word = self._packet_words[key]
-                return word, f'repeat keeps {word}'
-            previous = self._packet_ack[1] if self._packet_ack else None
-            if previous is not None:
-                return ('V27' if previous == 'X27' else 'X27'), f'new packet after {previous}'
-        if cached is not None:
-            return cached.word, f'repeat keeps {cached.word}'
-        if self.ack_word is None:
-            return 'V27', 'no previous ack'
-        return ('V27' if self.ack_word == 'X27' else 'X27'), f'new packet after {self.ack_word}'
+    @staticmethod
+    def _packet_form(packet):
+        if packet.kind == Kind.LONG and (
+                (getattr(packet, 'form', None) or '').startswith('normal-long')
+                or getattr(packet, 'speedlevel', None) in (
+                    'SL5-long', 'SL6-long', 'SL7-long', 'SL8-long', 'SL9-long', 'SL10-long')):
+            return 'normal long'
+        return 'robust' if packet.kind in (Kind.LONG, Kind.CHIRP) else 'normal short'
 
-    def _long_ack(self, identity):
-        if self.long_ack == 'fixed-x27':
-            return 'X27', None
-        if self.long_ack in ('counter-odd-t27', 'counter-even-t27'):
-            counter = identity[0] & 3
-            t27 = counter % 2 == (1 if self.long_ack == 'counter-odd-t27' else 0)
-            return ('T27' if t27 else 'X27'), f'{self.long_ack} counter {counter}'
-        key = self._receive_epoch, Kind.LONG, identity
-        if key in self._packet_words and self._long_policies.get(key) == self.long_ack:
-            word = self._packet_words[key]
+    def _chain_starts(self, form):
+        return (self._ack_chain is None or self._ack_boundary
+                or 'form' in self.chain_reset.split(',') and self._ack_form != form)
+
+    def _ack_partner(self, kind, form):
+        policy = self._ack_policy(kind)
+        return ('T27' if kind == Kind.LONG and (
+            policy == 'toggle-t27' or policy == 'toggle'
+            and form == 'normal long') else 'V27')
+
+    def _counted_ack(self, obs):
+        status = obs.frame.status
+        counter = status.counter
+        policy = self._ack_policy(obs.kind)
+        if policy == 'x27':
+            return 'X27', 'x27 every new packet'
+        if not policy.startswith('toggle'):
+            if obs.kind == Kind.BODY:
+                held = self._held_answer
+                if (held is not None and held.kind == Kind.BODY
+                        and held.answer.ack_identity == (status.byte, obs.frame.data)):
+                    return held.answer.word, held.answer.ack_reason
+                if status.protocol == 3:
+                    return 'U27', None
+                return ('X27', 'opening body') if self.first_body else ('V27', None)
+            if obs.kind == Kind.LONG:
+                t27 = counter % 2 == 0
+                return ('T27' if t27 else 'X27'), f'{policy} counter {counter}'
+            if obs.kind == Kind.CHIRP:
+                return ('X27' if counter & 1 else 'V27'), None
+            partner = 'V27'
+            return (partner if counter & 1 else 'X27'), f'counter {counter}'
+        if self._ack_boundary:
+            return self.first_ack, 'chain start'
+        if (self._ack_chain is not None and self._ack_epoch == self._receive_epoch
+                and counter == self._ack_chain[0]):
+            word = self._ack_chain[1]
             return word, f'repeat keeps {word}'
-        previous = (self._packet_previous[key] if key in self._packet_previous
-                    else self._packet_ack[1] if self._packet_ack else None)
-        word = 'V27' if previous == 'X27' else 'X27'
-        return word, f'new packet after {previous}' if previous else 'no previous packet'
+        if self._chain_starts(self._packet_form(obs)):
+            return self.first_ack, 'chain start'
+        previous_word = self._ack_chain[1]
+        partner = self._ack_partner(obs.kind, self._packet_form(obs))
+        word = partner if previous_word == 'X27' else 'X27'
+        return word, f'new packet after {previous_word}'
+
+    def _log_answer(self, event, at, answer, kind, *, repeat):
+        identity = answer.ack_identity
+        if answer.purpose == 'repeat-request':
+            event = 'repeat-request'
+        self.link_events.append(dict(event=event, at=at, kind=answer.kind,
+            ack_policy=self._ack_policy(kind), word=answer.word,
+            reason=answer.ack_reason, previous=self._ack_chain[1] if self._ack_chain else None,
+            counter=identity[0] & 3 if identity else None,
+            status=identity[0] if identity else None, repeat=bool(repeat),
+            accepted_target=answer.accepted_target, current_slot=answer.current_slot,
+            current_slot_accepted=answer.current_slot_accepted))
 
     def peer_cycle(self, silent, at):
         if self.state == State.IRS_YIELD and silent >= 2:
@@ -2914,8 +3264,26 @@ class P4Turn:
         # Bind admitted source metadata before the physical key replaces its slot.
         answer = self._answer_kinds.get(proposal.stream_sample)
         packet_kind = (answer[0] if answer is not None
-                       and answer[1:] == (proposal.ack_identity, proposal.receive_epoch,
+                       and answer[1:4] == (proposal.ack_identity, proposal.receive_epoch,
                                           self._peer_generation) else None)
+        self.keyed_ack = {}
+        if proposal.kind == Kind.WORD:
+            form = answer[4] if packet_kind is not None else self._ack_form
+            starts = (proposal.ack_identity is not None and proposal.purpose != 'repeat-request'
+                      and packet_kind is not None and self._chain_starts(form) and (
+                proposal.ack_reason == 'chain start' or
+                not self._ack_policy(packet_kind).startswith('toggle')))
+            if starts:
+                self._chain_epoch += 1
+                if not self._ack_boundary and self._ack_chain is not None:
+                    self._chain_reason = 'form'
+            source_kind = (packet_kind or
+                           (self._held_answer.kind if self._held_answer else None) or
+                           (self.peer_phase.kind if self.peer_phase else Kind.BODY))
+            self.keyed_ack = dict(
+                ack_policy='peer' if proposal.peer_control is not None else self._ack_policy(source_kind),
+                chain_epoch=self._chain_epoch, chain_reason=self._chain_reason,
+                answers_counter=proposal.ack_identity[0] & 3 if proposal.ack_identity else None)
         proposal = replace(
             proposal, stream_sample=proposal.stream_sample if at is None else at
         )
@@ -3016,7 +3384,7 @@ class P4Turn:
                 self._offer_at = proposal.stream_sample
                 self._hold_until = proposal.stream_sample + round(4*1.25*self.fs)
                 self.next_offer_at = proposal.stream_sample + round(HANDBACK_REOFFER_SECONDS*self.fs)
-        elif self.state not in (State.ISS_HOLD, State.ISS_GRANT):
+        elif self.state not in (State.ISS_HOLD, State.ISS_GRANT) and self._turn_body is None:
             self._clear_offer()
         if proposal.payload or self.state == State.IRS_ANSWER:
             self._hold_until = None
@@ -3061,28 +3429,22 @@ class P4Turn:
                     and proposal.word not in (None, 'Z27', 'Y27')):
                 self.adapter.arm(self._receipt)
                 self._negotiation = 3
-        # A counter-chosen LONG answer keeps its own history; the normal ack
-        # alternates on the normal packets alone.
-        if proposal.ack_reason is not None and not (
-                packet_kind == Kind.LONG and self.long_ack in ('counter-odd-t27', 'counter-even-t27')):
-            self.ack_word = proposal.word
-        if (proposal.kind == Kind.WORD and packet_kind is not None
-                and proposal.ack_identity is not None
-                and (proposal.word in ('X27', 'V27') or proposal.word == 'T27'
-                     and packet_kind == Kind.LONG
-                     and self.long_ack in ('counter-odd-t27', 'counter-even-t27'))):
-            epoch = proposal.receive_epoch if proposal.receive_epoch is not None else self._receive_epoch
-            key = epoch, packet_kind, proposal.ack_identity
-            if key not in self._packet_words:
-                self._packet_previous[key] = self._packet_ack[1] if self._packet_ack else None
-                self._packet_words[key] = proposal.word
-                self._packet_ack = key, proposal.word
-            elif key[1] == Kind.LONG and self._long_policies.get(key) != self.long_ack:
-                self._packet_words[key] = proposal.word
-                if self._packet_ack is not None and self._packet_ack[0] == key:
-                    self._packet_ack = key, proposal.word
-            if key[1] == Kind.LONG:
-                self._long_policies[key] = self.long_ack
+        if proposal.kind == Kind.WORD:
+            if proposal.ack_identity is not None and proposal.purpose != 'repeat-request':
+                self._unread_data_due = None
+                if self._read_unacknowledged():
+                    self._held_answer = replace(self._held_answer, acknowledged=True)
+            if proposal.peer_control is not None:
+                if 'ladder' in self.chain_reset.split(','):
+                    self._ack_boundary = True
+                    self._chain_reason = 'ladder'
+            elif (packet_kind is not None and proposal.ack_identity is not None
+                  and proposal.receive_epoch == self._receive_epoch
+                  and proposal.word in ('X27', 'V27', 'T27', 'U27')):
+                self._ack_chain = proposal.ack_identity[0] & 3, proposal.word
+                self._ack_form = answer[4]
+                self._ack_epoch = proposal.receive_epoch
+                self._ack_boundary = False
         if (proposal.ack_identity is not None
                 and (self._last_ack is None or proposal.ack_identity != self._last_ack[0]
                      or proposal.current_slot_accepted)):
@@ -3095,7 +3457,7 @@ class P4Turn:
         self._blocked_redue = False
         self._rollback_until = None
         self._refused_due = None
-        if proposal.kind in (Kind.BODY, Kind.NORMAL, Kind.CHIRP) and proposal.payload:
+        if proposal.kind in DATA_KINDS and proposal.payload:
             if (not proposal.repeat or self._data_episode is None
                     or not self._data_episode.matches(proposal)):
                 self._retire_data_episode()
@@ -3136,7 +3498,7 @@ class P4Turn:
                 self.first_body = True
         return proposal
 
-    def refused(self, reason):
+    def refused(self, reason, now=None):
         if self._next is None:
             return
         if (self._train_active and self._train_fallback
@@ -3156,14 +3518,7 @@ class P4Turn:
         if self._next.purpose == 'close-grant':
             self._next = None
             return
-        if self._next.kind == Kind.LONG and reason == "no renderer":
-            self.state = State.ISS_HOLD
-            self._hold_until = self._next.stream_sample + round(
-                self.hold_cycles * 1.25 * self.fs
-            )
-            self._hold_started = self._next.stream_sample
-            self._next = None
-        elif self._next.state == State.IRS_BREAKIN:
+        if self._next.state == State.IRS_BREAKIN:
             self._blocked_redue = False
             refused_at = self._next.stream_sample
             self._refused_due = refused_at + 1
@@ -3171,8 +3526,11 @@ class P4Turn:
         elif self._next.kind == Kind.WORD:
             self._next = None
         else:
-            at = self._next.stream_sample + (self.peer_watch.cycle if self.peer_watch is not None
-                                            else round(CYCLE[self._next.kind] * self.fs))
+            cycle = (self.peer_watch.cycle if self.peer_watch is not None
+                     else round(CYCLE[self._next.kind] * self.fs))
+            # A refusal found late steps to the first slot still keyable.
+            steps = 1 if now is None else max(1, -(-(now + self.lead - self._next.stream_sample) // cycle))
+            at = self._next.stream_sample + steps * cycle
             self._next = replace(
                 self._next,
                 stream_sample=at,
@@ -3201,7 +3559,10 @@ class P4Turn:
 
     def _retry_data(self, at):
         if self.data_repeats >= 7:
-            if self.ladder:
+            if self.ladder and (self.data_kind != Kind.LONG or not self._ladder_returned):
+                if self.data_kind == Kind.LONG:
+                    self._ladder_returned = True
+                    self._restart_packet = self._data_packet
                 self._requeue()
                 self._rollback_until = None
                 self._data_packet = None
@@ -3243,19 +3604,30 @@ class P4Turn:
             return
         at = (self.last.stream_sample + round(CYCLE[self.last.kind] * self.fs)
               if now is None else self.next_raster(now))
-        if (self.state == State.ISS_LADDER and not self._opening
+        if (self.state == State.ISS_LADDER and not self._opening and self.data_kind == Kind.CHIRP
                 and self.ladder == LADDER_CHIRP and self.index < len(self.ladder) - 1
                 and self.last.header == 'B'):
             self._short(at, self.index + 1)
             return
+        if (self.state in (State.ISS_DATA, State.ISS_DATA_ACK)
+                and self._data_packet is not None and self._data_packet.kind == Kind.LONG):
+            self._retry_data(at)
+            return
         repeats, budget = self.retry_budget()
         if repeats >= budget - 1:
-            if self.state == State.ISS_LADDER and self._word_yield:
+            if self.state == State.ISS_LADDER and self._turn_body is not None:
+                self._handback_exit(at)
+            elif (self.state == State.ISS_LADDER
+                  and (self._word_yield or self.data_kind == Kind.LONG and not self._opening)):
                 self._requeue()
                 self._body(at, 0x20, State.ISS_CLOSE)
             elif self.state == State.ISS_HANDBACK:
                 self._handback_exit(at)
-            elif self.state in (State.ISS_DATA_ACK, State.ISS_GRANT) and self.ladder:
+            elif (self.state in (State.ISS_DATA_ACK, State.ISS_GRANT) and self.ladder
+                  and (self.data_kind != Kind.LONG or not self._ladder_returned)):
+                if self.data_kind == Kind.LONG:
+                    self._ladder_returned = True
+                    self._restart_packet = self._data_packet
                 self._requeue()
                 self._data_packet = None
                 self.data_repeats = 0
@@ -3270,7 +3642,7 @@ class P4Turn:
                     self._handback_exit(at)
             elif (self.state in (State.ISS_DATA, State.ISS_DATA_ACK)
                   and self._data_packet is not None
-                  and self._data_packet.kind in (Kind.BODY, Kind.NORMAL, Kind.CHIRP)):
+                  and self._data_packet.kind in DATA_KINDS):
                 self._exhaust_data(at)
             elif self.state != State.ISS_GRANT:
                 self.link_down("retry budget exhausted")
@@ -3283,6 +3655,7 @@ class P4Turn:
             header=(
                 "B"
                 if self.last.kind == Kind.SHORT and self.last.value != 37
+                or self.last.kind == Kind.NORMAL
                 else self.last.header
             ),
             repeat=True,
@@ -3307,8 +3680,6 @@ class P4Turn:
             if at < start + 5*self.fs:
                 return
             self._resume_close(at)
-            return
-        if self._irs_silent(at):
             return
         if (self.weak_ack is not None and self.last is not None
                 and self.last.stream_sample > self.weak_ack and self._waiting_ack is None):
@@ -3338,7 +3709,9 @@ class P4Turn:
         if self.peer_watch is not None and self.state in (State.ISS_GRANT, State.IRS_BREAKIN):
             self._repeat(at)
             return
-        if self.state == State.IRS_CLOSE:
+        if self.state == State.IRS_CLOSE and self._closing_failure:
+            self._break_in(self.next_raster(at))
+        elif self.state == State.IRS_CLOSE:
             self.link_down("peer closed")
         elif self.state == State.ISS_CLOSE and self.last:
             if self.last.kind == Kind.BODY:
@@ -3359,7 +3732,7 @@ class P4Turn:
                 self.link_down("close silence")
         elif self._breaking_in():
             self._break_in(self.next_raster(at))
-        elif self.state == State.IRS_ANSWER:
+        elif self.state == State.IRS_ANSWER or self._unread_opening_breakin():
             due = answer_due if answer_due is not None else self.next_raster(at)
             if self._long_owns_answer(due):
                 return
@@ -3369,6 +3742,8 @@ class P4Turn:
                 self._break_in(due)
             else:
                 self._next = self._held_proposal(due)
+                if self._unread_opening_breakin():
+                    self._next = replace(self._next, state=None)
         elif self.state not in (State.ISS_HOLD, State.IRS_YIELD, State.DOWN):
             self._repeat(at)
         if expired is not None and self._next is not None:
@@ -3399,8 +3774,6 @@ class P4Turn:
             # shutdown is not permission to publish bytes after admission.
             self.adapter.failure = self.adapter.failure or "P4 source delivery incomplete at link end"
             self.link_events.append(dict(event="source-release-deferred", reason=reason))
-        if self._irs_silent_until is not None and not self._irs_silent_done:
-            self._end_irs_silence(reason=reason)
         self._cancel_deferred('link down')
         self._clear_opening_credit()
         self.weak_ack = None

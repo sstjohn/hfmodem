@@ -9,6 +9,7 @@ import time
 
 import numpy as np
 
+from hfmodem.core import gil
 from hfmodem.core.recording import inherit_boundaries
 
 from .audio_runtime import AudioHostRuntime
@@ -58,6 +59,11 @@ class StationTransport(VaraIO):
         self._freshness = (0, 0)
         self._seen_flush = 0
         self.messages = deque(maxlen=128)
+
+    def diagnostic(self, kind, *, authority=None, **fields):
+        router = getattr(self.link.station, 'diagnostics', None)
+        if router is not None:
+            router.put(kind, authority=authority, **fields)
 
     @property
     def hs(self):
@@ -191,12 +197,16 @@ class StationTransport(VaraIO):
         if metadata is None or str(metadata.get('bandwidth_hz')) not in ('500', '2300', '2750'):
             raise ValueError('VARA burst lacks a qualified bandwidth declaration')
         self._reset_rx(int(self.link.station.audio.samples))
+        # Only a host-owned handshake carries chat authority; a bare VaraIO has none.
+        modem = getattr(self.hs.io, 'modem', None) if self.hs is not None else None
         self.link._transmitting = True
         try:
             playback = {'marks': marks} if marks is not None else {}
             self._sent = self.link.emit(samples, str(metadata['bandwidth_hz']),
                                        **playback,
                                        on_ptt=self._report_ptt,
+                                       authority=getattr(modem, 'authority', None),
+                                       fence=getattr(modem, 'control_fence', None),
                                        responding=self.hs is not None and
                                        (self.hs.role == 'responder' or
                                         self.hs.state in (VaraState.CONNECTED, VaraState.DISCONNECTING)))
@@ -247,7 +257,9 @@ class StationTransport(VaraIO):
         with self._claimant_lock:
             if self.stop.is_set() or self._claimant not in (None, modem):
                 return False
-            if not self.contact.admit(receive_epoch=self._channel_boundary[0]):
+            if not self.contact.admit(receive_epoch=self._channel_boundary[0],
+                                      authority=getattr(modem, 'authority', None),
+                                      fence=getattr(modem, 'control_fence', None)):
                 return False
             self._claimant = modem
             return True
@@ -338,11 +350,65 @@ class StationTransport(VaraIO):
 
 class StationVaraRuntime:
     def __init__(self, link):
+        from hfmodem.station.chat import AttachmentGate
+        self.attachments = AttachmentGate()
         inherit_boundaries(self, link.station)
         self.transport = inherit_boundaries(StationTransport(link), self)
         self.owner = AudioHostRuntime(self.transport)
         self._thread = None
         self.failure = None
+        self._calls = queue.Queue(maxsize=1)
+        self._paused = False
+
+    @property
+    def paused(self):
+        return self._paused
+
+    def retune(self, callback, valid, *, timeout=10):
+        """Run bounded CAT work at an audio-owner boundary, never concurrently."""
+        if self.transport.stop.is_set() or self._thread is None or not self._thread.is_alive():
+            raise ConnectionAbortedError('VARA station owner is not running')
+        call = dict(callback=callback, valid=valid, lock=threading.Lock(),
+                    done=threading.Event(), cancelled=False, result=None, error=None)
+        try:
+            self._calls.put_nowait(call)
+        except queue.Full as error:
+            raise TimeoutError('VARA owner retune queue is full') from error
+        if not call['done'].wait(timeout):
+            # The callback owns this lock through completion. A running CAT
+            # operation cannot be reported as cancelled while it still moves.
+            if call['lock'].acquire(blocking=False):
+                try:
+                    if not call['done'].is_set():
+                        call['cancelled'] = True
+                        raise TimeoutError('VARA owner retune timed out before execution')
+                finally:
+                    call['lock'].release()
+            else:
+                raise TimeoutError('VARA owner retune remains in progress')
+        if call['error'] is not None:
+            raise call['error']
+        return call['result']
+
+    def _service_calls(self):
+        try:
+            call = self._calls.get_nowait()
+        except queue.Empty:
+            return
+        with call['lock']:
+            if call['cancelled']:
+                call['done'].set()
+                return
+            try:
+                if self.transport.stop.is_set() or not call['valid']():
+                    raise ConnectionAbortedError('VARA retune authority changed')
+                self._paused = True
+                call['result'] = call['callback']()
+            except BaseException as error:
+                call['error'] = error
+            finally:
+                self._paused = False
+                call['done'].set()
 
     @property
     def clock(self):
@@ -358,10 +424,10 @@ class StationVaraRuntime:
                     (modem._intent_active or modem.station.state in
                      (VaraState.CONNECTING, VaraState.CONNECTED, VaraState.DISCONNECTING)))
 
-    def modem_factory(self):
+    def modem_factory(self, *, authority=None, fence=None):
         if self.transport.stop.is_set():
             raise ConnectionAbortedError('VARA station owner stopped')
-        return self.owner.modem_factory()
+        return self.owner.modem_factory(authority=authority, fence=fence)
 
     def start(self):
         if self._thread is not None:
@@ -369,15 +435,19 @@ class StationVaraRuntime:
         self._thread = threading.Thread(target=self._run, name='station-vara-owner', daemon=True)
         self._thread.start()
 
+    @gil.joined()
     def _run(self):
         try:
             while not self.transport.stop.is_set():
                 try:
+                    self._service_calls()
                     self.owner.step(timeout=.05)
                 except Exception as exc:
                     self.failure = str(exc)
                     modem = self.owner.modem
                     if modem is not None:
+                        self.transport.diagnostic('runtime_failure',
+                            authority=getattr(modem, 'authority', None), text=str(exc))
                         observer, was_connected = modem.observer, modem.connected
                         if observer is not None:
                             observer.modem_warning(f'VARA station owner: {exc}')
@@ -399,6 +469,11 @@ class StationVaraRuntime:
             self._retire()
 
     def _retire(self):
+        while not self._calls.empty():
+            call = self._calls.get_nowait()
+            with call['lock']:
+                call['error'] = ConnectionAbortedError('VARA station owner stopped')
+                call['done'].set()
         modem = self.owner.modem
         if modem is not None:
             modem.stop()

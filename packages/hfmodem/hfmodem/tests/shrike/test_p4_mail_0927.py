@@ -194,7 +194,7 @@ def test_partial_ack_waits_for_confirmation_then_uses_the_deferred_slot(step, re
     from hfmodem.shrike.p4observation import Registered
     from hfmodem.shrike.p4turn import State
 
-    turn, queue = machine(data='body')
+    turn, queue = machine(data='long' if step == 'ladder' else 'body')
     queue.on_host_data(b'A' * 31 + b'B' * 31)
     if step == 'ladder':
         turn._short(0, 1)
@@ -218,8 +218,8 @@ def test_partial_ack_waits_for_confirmation_then_uses_the_deferred_slot(step, re
         assert turn._waiting_ack is None
         return
     proposal = turn.decide(round(2.426 * FS))
-    assert proposal.kind == ('body' if step == 'ladder' else 'normal') and proposal.stream_sample == round(2.5 * FS)
-    assert proposal.payload == (b'A' if step == 'ladder' else b'B') * 31
+    assert proposal.kind == ('long' if step == 'ladder' else 'normal') and proposal.stream_sample == round(2.5 * FS)
+    assert proposal.payload == (b'A'*31+b'B'*31 if step == 'ladder' else b'B'*31)
     assert queue._buffer_raw == (62 if step == 'ladder' else 31)
     if step == 'data':
         stale = word('V27', round(2.170 * FS), partial=True)
@@ -232,33 +232,6 @@ def test_partial_ack_waits_for_confirmation_then_uses_the_deferred_slot(step, re
         assert queue._buffer_raw == 31 and turn.outbox.inflight == b'B' * 31
 
 
-def test_text_is_queued_once_behind_one_sid(monkeypatch):
-    from hfmodem.winlink.session import sid_line
-
-    args = options(monkeypatch, '--p4-text', 'FC_TEST', '--p4-link-timeout', '8')
-    audio = np.zeros(10 * FS)
-    for onset, wave in (
-        (.923, stock.body(b'hello', 0)),
-        (2.173, p4robusttx.robust_short(13)),
-        (4.013, stock.body(b'', 0x40)),
-    ):
-        at = round(onset * FS)
-        audio[at:at + len(wave)] = wave
-    stream = Stream(audio)
-    tx = Tx(stream)
-    tx.p4_link_options = args
-    host = PtcHost(SimPeer(), mycall='W9SSJ')
-    host.arq.state = arq.State.CONNECTED
-    tx.p4_link_host = host
-    onair._run_p4_link(tx, stream, onair._MasterGrid(
-        0, 60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800))
-    expected = compress.transparent((sid_line() + 'FC_TEST').encode('latin-1'))
-    assert bytes(host.arq._outbuf) == expected
-    assert host._txbuf == host.arq._buffer_raw == len(expected)
-    assert not host.arq._p4_lent and host.sent_total == 0
-    packets = tx.p4_probe.emissions[3:]
-    assert len(packets) == 3 and all(p['status'] == 0 for p in packets)
-    assert len({p['waveform_sha256'] for p in packets}) == 1
 
 
 @pytest.mark.parametrize('step', ['ladder', 'data', 'peer-close', 'close-silence'])
@@ -267,7 +240,7 @@ def test_unresolved_ack_cannot_suspend_retry_or_close_forever(step):
     from hfmodem.tests.shrike.test_p4turn import machine, word
     from hfmodem.shrike.p4turn import State
 
-    turn, queue = machine(data='body')
+    turn, queue = machine(data='long' if step == 'ladder' else 'body')
     queue.on_host_data(b'A' * 31)
     if step == 'ladder':
         turn._short(0, 1)
@@ -306,9 +279,8 @@ def test_unresolved_ack_cannot_suspend_retry_or_close_forever(step):
             turn.keyed()
             turn.silence(limit + (cycle + 1) * round(1.25 * FS))
         assert turn.state == State.DOWN
-        assert turn.reason == ('retry budget exhausted' if step == 'ladder' else 'close silence')
-        if step == 'data':
-            assert closing[0].kind == 'body' and closing[0].status == 0x20
-            assert [p.value for p in closing[1:]] == [37, 37, 37]
+        assert turn.reason == 'close silence'
+        assert closing[0].kind == 'body' and closing[0].status == 0x20
+        assert [p.value for p in closing[1:]] == [37, 37, 37]
     assert queue._buffer_raw == len(queue._outbuf) == 31
     assert not queue._p4_lent

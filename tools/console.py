@@ -107,7 +107,8 @@ def watts(text):
 
 def fly_arguments(parser, mode, own, flight):
     """Everything that shapes one arm: the substrate's flags, then the mode's own."""
-    flight.add_argument('--level', default='current', choices=tuple(mode.levels))
+    flight.add_argument('--level', default='current', choices=tuple(mode.levels),
+                        help='transmit power and drive preset for this arm (default %(default)s)')
     choice = flight.add_mutually_exclusive_group(required=True)
     choice.add_argument('--sense', action='store_true',
                         help='check occupancy once; refuse if busy')
@@ -136,8 +137,10 @@ def fly_arguments(parser, mode, own, flight):
     add_recording_argument(recording)
     recording.add_argument('--record', type=Path, help='select everything and its destination')
     recording.add_argument('--no-record', action='store_true', help='select off')
-    recording.add_argument('--no-witness', dest='witness', action='store_false')
-    recording.add_argument('--witness-seconds', type=int, default=arm.WITNESS_SECONDS)
+    recording.add_argument('--no-witness', dest='witness', action='store_false',
+                           help='do not place a remote receiver to record the session')
+    recording.add_argument('--witness-seconds', type=int, default=arm.WITNESS_SECONDS,
+                           help='how long the remote receiver records, in seconds (default %(default)s)')
     recording.add_argument('--kiwi', metavar='HOST',
                            help='place this receiver rather than the nearest free one')
     recording.add_argument('--no-retune', dest='retune', action='store_false',
@@ -192,7 +195,8 @@ def parser_for(mode):
     dump.add_argument('--band', type=int, metavar='M',
                       help="name a band and the codec line reads exactly as an arm's does")
     recent = commands.add_parser('status', help='recent arms and their verdicts')
-    recent.add_argument('--limit', type=int, default=12)
+    recent.add_argument('--limit', type=int, default=12,
+                        help='how many recent arms to show (default %(default)s)')
 
     air = commands.add_parser('fly', help='one arm; --dry-run prints it and opens nothing',
                               usage=f'console {mode.name} fly PEER (--sense | --pounce SECONDS | --force) '
@@ -200,7 +204,8 @@ def parser_for(mode):
                               formatter_class=sections_help)
     air.add_argument('peer', help=f'a call or a full ID from `console {mode.name} peers`')
     flight = air.add_argument_group('flight')
-    flight.add_argument('--band', type=int, choices=tuple(mode.bands))
+    flight.add_argument('--band', type=int, choices=tuple(mode.bands),
+                        help='the band to call on, in metres')
     fly_arguments(air, mode, mode.arguments, flight)
 
     many = commands.add_parser(
@@ -216,7 +221,8 @@ def parser_for(mode):
     pick.add_argument('--only', nargs='+', default=[], metavar='CALL',
                       help='restrict this campaign to these calls or full peer IDs')
     pick.add_argument('--limit', type=int, default=0, help='call at most this many channels')
-    pick.add_argument('--order', choices=tuple(roster.ORDERS), default='roster')
+    pick.add_argument('--order', choices=tuple(roster.ORDERS), default='roster',
+                      help='the order channels are tried in (default %(default)s)')
     pick.add_argument('--prefer', choices=('near', 'far', 'dx'),
                       help='try this distance group first: near <1000 km, far 1000–4000 km, '
                            'dx >=4000 km; other stations remain eligible')
@@ -280,7 +286,8 @@ def power_parser():
                     'interface back after the ATU has hunted a match and taken it down '
                     'with its RFI; the tuner keeps its stored matches across the cut. It '
                     'refuses to switch a rig that is drawing more than idle receive.')
-    parser.add_argument('action', choices=('status', 'on', 'off', 'cycle'))
+    parser.add_argument('action', choices=('status', 'on', 'off', 'cycle'),
+                        help='report the outlet, switch it on or off, or cycle it off and on')
     return parser
 
 
@@ -326,7 +333,8 @@ def monitor_parser(mode=None):
         parser.add_argument('--mode', metavar='NAME', help='receive waveform setting; see --list-modes')
         parser.add_argument('--framing', default='SYNC', metavar='SYNC|8N1|7E1',
                             help='Bateleur character framing (default: raw synchronous bytes)')
-        parser.add_argument('--bit-order', choices=('lsb', 'msb'), default='lsb')
+        parser.add_argument('--bit-order', choices=('lsb', 'msb'), default='lsb',
+                            help='bit order of each received character (default %(default)s)')
         parser.add_argument('--audio-centre', type=float, default=700, metavar='HZ',
                             help='CW audio tone (default: 700 Hz)')
         parser.set_defaults(monitor_mode=mode, dispatch='whole-band')
@@ -338,16 +346,18 @@ def log_parser():
         prog='console log',
         description='Every arm this station has flown, across modes, read out of the '
                     'provenance each one wrote. Nothing here writes anything.')
-    parser.add_argument('--mode', nargs='*', choices=modes.KNOWN, metavar='NAME')
-    parser.add_argument('--station', metavar='CALL')
-    parser.add_argument('--band', type=int, metavar='M')
+    parser.add_argument('--mode', nargs='*', choices=modes.KNOWN, metavar='NAME',
+                        help='only arms in these modes')
+    parser.add_argument('--station', metavar='CALL', help='only arms with this station')
+    parser.add_argument('--band', type=int, metavar='M', help='only arms on this band, in metres')
     parser.add_argument('--hours', metavar='HH-HH',
                         help='UTC hours, inclusive, and they may wrap midnight')
     parser.add_argument('--since', metavar='WHEN', help='a date, 2026-09-16, or a timestamp')
-    parser.add_argument('--until', metavar='WHEN')
+    parser.add_argument('--until', metavar='WHEN', help='a date or a timestamp to stop at')
     parser.add_argument('--reached', action='store_true',
                         help='only the arms that reached a milestone')
-    parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--limit', type=int, default=0,
+                        help='show at most this many arms; 0 shows them all')
     return parser
 
 

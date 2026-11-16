@@ -25,14 +25,15 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 import sys
 
 import numpy as np
 import pytest
 
-from hfmodem.shrike import onair, p1rx, p3acquire, pactor1, ptc, rxfront, spec
+from hfmodem.shrike import onair, p1rx, p3acquire, p4oracle, pactor1, ptc, rxfront, spec
 from hfmodem.shrike.arq import ISS, State
-from hfmodem.tests.shrike import test_grid as bench
+from hfmodem.tests.shrike import p4_stock_peer as stock, test_grid as bench
 from hfmodem.tests.shrike.test_ackplace import _receive_cs
 
 FS = onair.FS
@@ -75,8 +76,11 @@ class _Caller:
     """The far station: a reference master's clock around our own link layer."""
 
     def __init__(self, air: "_Air", *, variant: str, hz: float, t0_s: float,
-                 noise: float, rng, ppm: float = 0.0):
+                 noise: float, rng, ppm: float = 0.0, offer: bool = False):
         self.air, self.hz, self.variant = air, hz, variant
+        # A peer leading into PACTOR-4: its data packets go out as P4 ones, at
+        # the band centre, and `offered` is where each starts.
+        self.offer, self.offered = offer, []
         self.slot_n = (spec.CYCLE_SHORT_LONGPATH_S if variant == "longpath"
                        else spec.CYCLE_SHORT_S) * FS * (1 + ppm * 1e-6)
         self.ear = rng.normal(0, noise, air.audio.size).astype(np.float32)
@@ -226,9 +230,14 @@ class _Caller:
         if not queue:
             return
         what, audio = queue[0]
-        burst = onair._trim_silence(np.asarray(audio, float))
-        burst = p3acquire.compensate(burst, -self.hz).astype(np.float32)
         at = self.tx(k)
+        if self.offer and what.startswith("PKT#"):
+            self.offered.append(at)
+            what = "P4"
+            burst = 0.5 * stock.body(b"P4 OFFER", 0x40).astype(np.float32)
+        else:
+            burst = onair._trim_silence(np.asarray(audio, float))
+            burst = p3acquire.compensate(burst, -self.hz).astype(np.float32)
         end = min(at + burst.size, self.air.audio.size)
         self.air.audio[at:end] += burst[:end - at]
         self.sent.append((at, end, what))
@@ -267,7 +276,9 @@ def _tones(burst: np.ndarray, hz: float) -> tuple[float, float]:
 
 
 def _fly(monkeypatch, tmp_path, *, variant: str, hz: float, noise: float = 0.05,
-         seed: int = 1, ppm: float = 0.0):
+         seed: int = 1, ppm: float = 0.0, argv: tuple = (), offer: bool = False,
+         scan_s: float = 0.0):
+    """`scan_s` charges each P4 word scan that much of the bench clock."""
     rng = np.random.default_rng(seed)
     made: dict = {}
 
@@ -276,9 +287,19 @@ def _fly(monkeypatch, tmp_path, *, variant: str, hz: float, noise: float = 0.05,
         air.audio += rng.normal(0, noise, air.audio.size).astype(np.float32)
         air.ours = []
         air.caller = _Caller(air, variant=variant, hz=hz, t0_s=3.1,
-                             noise=noise, rng=rng, ppm=ppm)
+                             noise=noise, rng=rng, ppm=ppm, offer=offer)
         made["air"] = air
         return air
+
+    scan = p4oracle.word_scan
+
+    def charged(*a, **kw):
+        if "air" in made:
+            made["air"].spend(round(scan_s * FS))
+        return scan(*a, **kw)
+
+    if scan_s:
+        monkeypatch.setattr(p4oracle, "word_scan", charged)
 
     class Host(ptc.PtcHost):
         def __init__(self, *a, **kw):
@@ -294,7 +315,7 @@ def _fly(monkeypatch, tmp_path, *, variant: str, hz: float, noise: float = 0.05,
     monkeypatch.setattr(sys, "argv", [
         "shrike.onair", "--transmit", "--answer", "20", "--mycall", MYCALL,
         "--dial", "7100000", "--serial", os.devnull, "--outdir", str(tmp_path / "capture"),
-        "--hold", "8", "--message", SAID])
+        "--hold", "8", "--message", SAID, *argv])
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         onair.main()
@@ -350,3 +371,45 @@ def test_an_answered_call_carries_data_both_ways(monkeypatch, tmp_path,
     assert host.arq.dxcall == CALLER
     assert b"GOOD MORNING FROM THE CALLER" in bytes(host.channel(host.ptchn).rx)
     assert host.arq.goodbye_acked, log[-3000:]
+
+
+# A called station listened for PACTOR-4 words on every control-signal read,
+# even on a link that can never leave PACTOR-1: on the Mac that scan alone
+# made the replayed IRS late to its key 11-12 times in 17 cycles.
+@pytest.mark.parametrize("argv,scans", [((), True), (("--pactor1-only",), False)])
+def test_a_called_station_scans_for_p4_only_where_p4_can_follow(
+        monkeypatch, tmp_path, argv, scans):
+    calls = []
+    scan = p4oracle.word_scan
+
+    def counted(*a, **kw):
+        calls.append(1)
+        return scan(*a, **kw)
+
+    monkeypatch.setattr(p4oracle, "word_scan", counted)
+    _, host, log = _fly(monkeypatch, tmp_path, variant="normal", hz=120.0, argv=argv)
+    assert "CALLED:" in log and host.arq.goodbye_acked, log[-3000:]
+    assert bool(calls) is scans, len(calls)
+
+
+# ...and where P4 can follow, the scan is the watch for a peer leading into it,
+# which `upgrade_scan` already keeps behind the key. Charged the 40 ms it costs
+# on the Mac, in front of the key it made the replayed IRS late in 5-12 of 17
+# cycles; the answer itself never depended on it.
+def test_a_called_station_watches_for_p4_behind_its_key(monkeypatch, tmp_path):
+    _, host, log = _fly(monkeypatch, tmp_path, variant="normal", hz=120.0, scan_s=0.040)
+    assert "CALLED:" in log and host.arq.goodbye_acked, log[-3000:]
+    late = [l for l in log.splitlines()
+            if onair.LATE_KEY in l or onair.SLOT_GONE in l or onair.KEYED_LATE in l]
+    assert not late, late[:3]
+
+
+# ...and still hears the peer lead: every P4 packet it sends is registered where
+# it starts. The first P4 word to reach the FSM used to end the session, on a
+# codeword lookup that found none (`_SessionRx._last_cs`).
+def test_a_called_station_still_hears_a_peer_lead_into_p4(monkeypatch, tmp_path):
+    air, _, log = _fly(monkeypatch, tmp_path, variant="normal", hz=120.0, offer=True)
+    offered = air.caller.offered
+    heard = [round(float(t) * FS) for t in re.findall(r"RX +([\d.]+) word Y27 new", log)]
+    assert len(offered) > 3, log[-3000:]
+    assert all(any(abs(at - o) < FS // 50 for at in heard) for o in offered), (offered, heard)

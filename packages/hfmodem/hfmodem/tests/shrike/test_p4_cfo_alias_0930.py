@@ -67,7 +67,7 @@ def test_2221_first_lock_and_greeting_in_driver(recordings):
     stream.pos = first+36367
     tx = Tx(stream)
     tx.p4_probe.emissions = [dict(audio_start=first, audio_end=first+36367)]
-    tx.p4_link_options.p4_ladder = 'none'
+
     tx.p4_link_options.p4_data = 'body'
     tx.p4_link_options.p4_normal_ack = 'parity'
     tx.p4_link_options.p4_breakin = 'body'

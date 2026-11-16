@@ -225,3 +225,29 @@ def test_protocol_tables_do_not_replace_selected_rig_name():
     raw["protocols"] = {"pactor": {"enabled": False}}
     cfg = config.parse(raw, environ={"HFMODEM_RIG": "ftdx10"})
     assert cfg.selected_rig == "ftdx10"
+
+
+def test_receive_only_x6100_station_loads_without_keying_port(tmp_path):
+    path = tmp_path / "station.toml"
+    path.write_text('''schema=1
+[station]
+control="local"
+regulatory="unregulated"
+because="offline fixture"
+transmit=false
+[rig]
+model="x6100"
+[rig.profiles.x6100]
+cat_port="fixture-cat"
+[audio.chains.x6100_usb]
+input="X6100 capture codec"
+output="X6100 playback codec"
+''', encoding="utf-8")
+    cfg = config.load(path, environ={})
+    assert cfg.selected_rig == "x6100" and cfg.station.transmit is False
+    assert cfg.rig.cat == "civ" and cfg.full_scale_w == 10
+    assert cfg.audio_chain == "x6100_usb"
+    assert cfg.audio.input == "X6100 capture codec"
+    assert cfg.audio.output == "X6100 playback codec"
+    assert cfg.resolved_profile["cat_port"] == "fixture-cat"
+    assert cfg.rig.ptt.port == "" and "ptt_port" not in cfg.resolved_profile

@@ -15,7 +15,7 @@ from hfmodem.tests.shrike.test_p4turn import FS, machine
 
 
 def armed():
-    m, a = machine(role='irs', data='body', ladder='none', breakin='body')
+    m, a = machine(role='irs', data='body',  breakin='body')
     m._body(3 * FS, 0x40, State.ISS_GRANT)
     m.keyed()
     r = P4Receiver(FS, admitted=True)
@@ -24,7 +24,6 @@ def armed():
     r.note_emission(Emission(Kind.BODY, Role.ISS, 3 * FS, .798, packet_reply=True))
     onair._p4_peer_normal_reader(m, r)
     return m, a, r
-
 
 
 @pytest.mark.parametrize('state', [State.ISS_GRANT, State.IRS_ANSWER])

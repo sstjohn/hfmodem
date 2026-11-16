@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Include the reviewed operator tools in wheels and source distributions."""
 from pathlib import Path
+import os
 import shutil
+import subprocess
+import sys
 import tomllib
 
-from setuptools import setup
+from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
 
@@ -55,4 +59,60 @@ class OperatorSdist(sdist):
         copy_operator(Path(base_dir) / '_operator_source')
 
 
-setup(cmdclass={'build_py': OperatorBuild, 'sdist': OperatorSdist})
+native_options = {}
+if os.environ.get('HFMODEM_NATIVE') == '1':
+    from setuptools_rust import Binding, RustExtension
+
+    # setuptools-rust is not a declared build requirement, so default builds stay
+    # pure; an opt-in build brings its own. From packages/hfmodem, in place:
+    #   HFMODEM_NATIVE=1 python setup.py build_rust --inplace --release
+    # or a wheel: HFMODEM_NATIVE=1 pip wheel --no-build-isolation --no-deps .
+    native_options = {
+        'rust_extensions': [RustExtension('hfmodem.core._dsp',
+                                         path='native/Cargo.toml', binding=Binding.PyO3,
+                                         args=['--locked'])],
+        'options': {'bdist_wheel': {'py_limited_api': 'cp313'}},
+        'zip_safe': False,
+    }
+
+
+class NativeBuild(build_ext):
+    def get_ext_filename(self, fullname):
+        if fullname != 'hfmodem.shrike._p4long_native':
+            return super().get_ext_filename(fullname)
+        target = os.environ.get('CARGO_BUILD_TARGET', '')
+        platform = ('win32' if 'windows' in target else 'darwin' if 'apple' in target
+                    else 'linux') if target else sys.platform
+        suffix = '.dll' if platform == 'win32' else '.dylib' if platform == 'darwin' else '.so'
+        return os.path.join(*fullname.split('.')) + suffix
+
+    def build_extension(self, ext):
+        # LONG replies need the native kernel to meet the slot; measured Python exceeds the budget.
+        cargo = shutil.which('cargo')
+        if cargo is None:
+            self.warn('cargo unavailable; installing P4 LONG Python fallback')
+            return
+        crate = HERE / 'native/p4long'
+        target = os.environ.get('CARGO_BUILD_TARGET', '')
+        # ARMv7 cross-builds need the armv7-unknown-linux-gnueabihf target and linker.
+        environment = os.environ.copy()
+        environment.pop('RUSTFLAGS', None)
+        environment.pop('CARGO_ENCODED_RUSTFLAGS', None)
+        try:
+            subprocess.run([cargo, 'build', '--offline', '--release', '--locked',
+                            '--manifest-path', str(crate / 'Cargo.toml'),
+                            '--target-dir', str(crate / 'target')], check=True, env=environment)
+            destination = Path(self.get_ext_fullpath(ext.name))
+            suffix = destination.suffix
+            source = crate / 'target' / target / 'release' / (
+                ('hfmodem_p4long' if suffix == '.dll' else 'libhfmodem_p4long') + suffix)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        except (OSError, subprocess.CalledProcessError) as error:
+            self.warn(f'P4 LONG native build unavailable; installing Python fallback: {error}')
+
+
+setup(cmdclass={'build_py': OperatorBuild, 'sdist': OperatorSdist, 'build_ext': NativeBuild},
+      ext_modules=[Extension('hfmodem.shrike._p4long_native',
+                             ['native/p4long/src/lib.rs'], optional=True)],
+      **native_options)

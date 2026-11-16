@@ -12,6 +12,10 @@ from hfmodem.shrike.p4observation import Kind
 from hfmodem.shrike.p4receiver import Clock, Expect, Emission, Role
 from hfmodem.tests.shrike.test_p4_link_0927 import Tx, Stream, FS
 from hfmodem.tests.shrike.test_p4_part_a_1011 import AT, KEY, packet
+from hfmodem.tests.shrike.p4_declared_clock_1111 import declared_time
+from hfmodem.tests.shrike.test_p4_part_a_driver_1011 import (
+    assert_long42_copies, selected_watch_support, assert_watch_support,
+)
 
 
 class AbsoluteStream(Stream):
@@ -40,7 +44,7 @@ def test_recording_c_real_dispatch(historical):
     tx.settle = .025
     tx.p4_probe.emissions = []
     tx.p4_probe.peer_breakin = True
-    tx.p4_link_options.p4_ladder = 'none'
+
     tx.p4_link_options.p4_data = 'body'
     tx.p4_link_options.p4_link_timeout = 31
     rx = tx.sessrx.p4
@@ -48,6 +52,7 @@ def test_recording_c_real_dispatch(historical):
     rx.cfo_hz = -.19
     rx.expected = True
     supports = []
+    selections = {}
     cycles = []
     finish_cycle = rx.finish_cycle
     def counted(onset):
@@ -62,11 +67,14 @@ def test_recording_c_real_dispatch(historical):
         def read(audio, origin, _method=method, _name=name, **kw):
             owner = getattr(rx, '_watch_read_generation', None)
             at, expect = rx.clock.next_due, rx.clock.expects
+            selected = selected_watch_support(rx, at)
             result = _method(audio, origin, **kw)
-            supports.append((_name, expect, at, origin, origin+len(audio), owner,
+            row = (_name, expect, at, origin, origin+len(audio), owner,
                              stream.sample_now(), [(r.observation.kind, r.observation.stream_sample,
                                  r.observation.frame.status.byte if r.observation.frame else None)
-                                 for r in result]))
+                                 for r in result])
+            supports.append(row)
+            selections[id(row)] = selected
             return result
         setattr(rx, name, read)
     machines = []
@@ -102,19 +110,17 @@ def test_recording_c_real_dispatch(historical):
                 em = replace(em, duration_s=(tx.tx_end-KEY)/FS)
             return note(em, **kw)
         rx.note_emission = historical_note
-    with patch.object(p4turn, 'P4Turn', factory):
+    # Capture, decoder, publication and key checks share this
+    # fixture's declared sample clock; host CPU is not a second elapsed clock.
+    with declared_time(stream.sample_now, fs=FS), patch.object(p4turn, 'P4Turn', factory):
         onair._run_p4_link(tx, stream, onair._MasterGrid(0, 60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800))
     heard = tx.p4_probe.heard
-    longs = [r for r in heard if r['kind'] == Kind.LONG and r.get('status') == 0x42 and r.get('data') == '1e'*40 and not r['provisional']]
-    assert [r['onset_sample'] for r in longs] == pytest.approx([8748327, 8928325, 9108324], abs=48)
+    longs = assert_long42_copies(heard, tx.p4_probe.link_events)
     assert not any(r.get('status') == 0x41 and 8200000 < r['onset_sample'] < 8250000 for r in heard)
-    for nominal in (AT+180000*k for k in (1, 2, 3, 7)):
+    # Copies 3 and 7 recover; both unread controls remain unaccepted.
+    for nominal in (AT+180000*k for k in (1, 2)):
         assert not any(r.get('status') is not None and r['kind'] in (Kind.LONG, Kind.CHIRP)
                        and abs(r['onset_sample']-nominal) <= 1680 for r in heard)
-    decodes = [e for e in tx.p4_probe.link_events if e['event'] == 'long decode' and e.get('crc_valid')]
-    for nominal in (AT+180000*k for k in (4, 5, 6)):
-        assert any(abs(e['at']-nominal) <= 1680 and e['speedlevel'] == 2
-                   and e['corrected_bits'] == 0 for e in decodes)
     assert tx.p4_link_host.arq.tx_acked_bytes == 0
     assert stream.pos == 9504000 and machines[0].reason in ('session ceiling', 'capture ended')
     keyed = [e for e in tx.p4_probe.link_events if e['event'] == 'Keyed']
@@ -122,19 +128,16 @@ def test_recording_c_real_dispatch(historical):
                for e in keyed[1 if historical else 0:])
     if not historical:
         assert (keyed[0]['kind'], keyed[0]['word'], keyed[0]['at']) == (Kind.WORD, 'X27', KEY)
-    for row in longs:
-        answers = [e for e in keyed if e.get('accepted_target') == row['onset_sample']]
-        assert answers and all(e['state'] == p4turn.State.IRS_ANSWER and e['word'] == 'T27' for e in answers)
-        assert any(e['at'] in (row['onset_sample']+163200, row['onset_sample']+343200) for e in answers)
     assert not any(e['event'] == 'Decision' and e.get('state') == p4turn.State.DOWN and e['at'] < 9504000 for e in tx.p4_probe.link_events)
     for nominal in (AT+180000*k for k in range(1, 8)):
         full = [r for r in supports if r[0] == 'read_window' and r[1] == Expect.PACKET
                 and abs(r[2]-nominal) <= 1680 and r[4] >= r[2]+157440]
         assert full, (nominal, supports)
-        for _, expect, at, origin, end, owner, feed_at, outcomes in full:
+        for row in full:
+            _, expect, at, origin, end, owner, feed_at, outcomes = row
             assert origin <= max(8016000, at-24000)
             if owner is not None:
-                assert end >= at+161040
+                assert_watch_support(selections[id(row)], at, end)
             else:
                 # Coincident PACKET uses the parent's first full read; a later
                 # conditional retry/refinement reports its actual support too.
@@ -142,7 +145,7 @@ def test_recording_c_real_dispatch(historical):
     if historical:
         assert any(expect == Expect.WORD and at == 8236750
                    for _, expect, at, origin, end, owner, feed_at, outcomes in supports)
-        assert any(owner is not None and expect == Expect.PACKET and end >= at+161040
+        assert any(owner is not None and expect == Expect.PACKET and end >= at+round(3.330*FS)
                    for _, expect, at, origin, end, owner, feed_at, outcomes in supports)
     assert cycles
     for onset, end, previous, before, after in cycles:
@@ -171,7 +174,7 @@ def test_primary_checked_body_enrichment_keeps_920_data_opportunity():
     tx.p4_probe.emissions = []
     tx.p4_probe.peer_breakin = True
     args = tx.p4_link_options
-    args.p4_ladder, args.p4_data, args.p4_link_timeout = 'none', 'body', (stop-start)/FS
+    args.p4_data, args.p4_link_timeout = 'body', (stop - start) / FS
     tx.p4_link_host.arq.on_host_data(b'TEST\r')
     rx = tx.sessrx.p4
     cls = p4turn.P4Turn
@@ -205,7 +208,7 @@ def test_final_admission_rechecks_current_rendered_peer_span():
     tx.p4_probe.emissions = []
     tx.p4_probe.peer_breakin = True
     args = tx.p4_link_options
-    args.p4_ladder, args.p4_data, args.p4_link_timeout = 'none', 'body', (stop-start)/FS
+    args.p4_data, args.p4_link_timeout = 'body', (stop - start) / FS
     rx = tx.sessrx.p4
     rx.clock = Clock(Expect.PACKET, AT, .330, 3.75, 0.)
     cls, machines = p4turn.P4Turn, []

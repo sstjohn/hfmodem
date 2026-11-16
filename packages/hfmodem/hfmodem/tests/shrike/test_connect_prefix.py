@@ -254,8 +254,7 @@ def test_the_command_line_makes_the_call_the_operator_asked_for(monkeypatch, tmp
     ["--connect", "robust", "--connect-fallback-after", "0"],
     ["--after-connect", "listen", "--after-connect-cycles", "0"],
     ["--after-connect", "listen", "--message", "TEST DE W9SSJ"],
-    ["--after-connect", "chirp", "--message", "TEST DE W9SSJ"],
-    ["--after-connect", "listen", "--p4-entry"],
+    ["--after-connect", "listen", "--p4-link"],
 ])
 def test_an_incoherent_call_is_refused_before_the_hardware_opens(monkeypatch, argv):
     with pytest.raises(SystemExit):

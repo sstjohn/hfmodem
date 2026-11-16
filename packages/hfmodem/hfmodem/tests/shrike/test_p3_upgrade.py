@@ -797,8 +797,10 @@ def _granted_station() -> tuple[PtcHost, list]:
     keyed: list[tuple[Protocol, np.ndarray]] = []
     tx = onair.RadioTx(None, transmit=False, outdir=Path("."))
     host = ptc.PtcHost(peer=tx, mycall="W9SSJ")
-    tx._tx = lambda audio, what, **kw: keyed.append(
-        (host.protocol, onair._trim_silence(np.asarray(audio, np.float32))))
+    def record(audio, what, **kw):
+        keyed.append((host.protocol, onair._trim_silence(np.asarray(audio, np.float32))))
+        tx.slots_used.append(tx.slot)
+    tx._tx = record
     tx.attach(host)
     host.arq.on_host_connect("W9SSJ", DXCALL)
     host.on_rx_event(cs_event(pactor1.CS_SPEED))      # CS4: the link runs 100 Bd

@@ -38,7 +38,10 @@ SPDX-License-Identifier = "NOASSERTION"
 
 # The code and notes we write beside that data are ours.
 [[annotations]]
-path = ["packages/**/fixtures/**.py", "packages/**/fixtures/**README.md"]
+path = ["packages/**/fixtures/**.py", "packages/**/fixtures/**README.md",
+        "packages/hfmodem/hfmodem/tests/contact/fixtures/main_varac_chat.py.txt",
+        "packages/hfmodem/hfmodem/tests/shrike/fixtures/p3_repeated_cs4_0924.md",
+        "packages/hfmodem/hfmodem/tests/shrike/fixtures/p3_unread_parity_census.md"]
 SPDX-FileCopyrightText = "2026 Saul St John (W9SSJ)"
 SPDX-License-Identifier = "AGPL-3.0-only"
 

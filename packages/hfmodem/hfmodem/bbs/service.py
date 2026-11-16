@@ -26,6 +26,8 @@ class Service:
         self.config = config
         self.config_path = Path(config_path).resolve() if config_path is not None else None
         self._reload_pool = None
+        self._reload_futures = []
+        self._closing = False
         root = catalog_root(config, legacy_root)
         self.catalog = None
         self.store = None
@@ -52,11 +54,16 @@ class Service:
         Live changes are limited to default/per-callsign limits. Identity,
         timezone, runtime and catalog changes require stopping the service.
         """
+        if self._closing:
+            raise RuntimeError('BBS service is closing')
         if self.config_path is None:
             raise ValueError('no configuration file associated with this service')
         if self._reload_pool is None:
             self._reload_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='bbs-config')
-        return self._reload_pool.submit(self._load_policy)
+        self._reload_futures = [future for future in self._reload_futures if not future.done()]
+        future = self._reload_pool.submit(self._load_policy)
+        self._reload_futures.append(future)
+        return future
 
     def _load_policy(self):
         updated = load(self.config_path)
@@ -65,25 +72,50 @@ class Service:
                 raise ValueError(f'{field} cannot change during live policy reload')
         return updated
 
-    def close(self, *, timeout=5):
+    def close(self, *, timeout=5, deadline=None):
+        """Retire workers before releasing resources, within five seconds.
+
+        ``deadline`` is an optional absolute monotonic deadline supplied by an
+        enclosing teardown. A failed retirement keeps the Store owner lock;
+        callers must retain this service and can retry close after workers exit.
+        Like core polling and reload submission, close runs on the owner thread.
+        """
+        end = time.monotonic() + max(0, min(timeout, 5))
+        if deadline is not None:
+            end = min(end, deadline)
+        self._closing = True
         if self._reload_pool is not None:
+            for future in self._reload_futures:
+                future.cancel()
             self._reload_pool.shutdown(wait=False, cancel_futures=True)
-            self._reload_pool = None
         if self.store is None:
             return
         self.core.shutdown()
-        deadline = time.monotonic() + timeout
-        while not self.core.quiescent and time.monotonic() < deadline:
+        while not self.core.quiescent and time.monotonic() < end:
             self.core.tick()
-            time.sleep(.01)
+            if not self.core.quiescent:
+                time.sleep(min(.01, max(0, end - time.monotonic())))
         if not self.core.quiescent:
             # Never release the owner lock while a worker can mutate state.
             raise RuntimeError('BBS shutdown still pending; owner lock retained')
         self.core.shutdown()
-        self.store.close()
-        self.store = None
+        # Future completion alone precedes executor worker exit. shutdown(False)
+        # queues the exit sentinel; join its tracked threads with the same budget.
+        # ThreadPoolExecutor has no public bounded-join API. These are the actual
+        # workers of our two private executors, not the process's other threads.
+        for pool in (self._reload_pool, self.core._executor):
+            if pool is None:
+                continue
+            for worker in tuple(pool._threads):
+                worker.join(max(0, end - time.monotonic()))
+                if worker.is_alive():
+                    raise RuntimeError('BBS worker retirement still pending; owner lock retained')
+        self._reload_pool = None
+        self._reload_futures.clear()
         if self.catalog is not None:
             self.catalog.close()
+        self.store.close()
+        self.store = None
 
     def __enter__(self):
         return self

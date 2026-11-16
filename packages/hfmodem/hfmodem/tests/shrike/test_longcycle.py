@@ -87,7 +87,7 @@ def _link(*, long_cycle: bool = True):
     a_io, b_io = _LoopIO("A"), _LoopIO("B")
     # speed_up_after=1 so the ladder climbs within a short session, as the
     # reference IRS climbs within ten data cycles.
-    cfg = ArqConfig(speed_up_after=1, long_cycle=long_cycle)
+    cfg = ArqConfig(speed_up_after=1, p3_speed_up_after=1, long_cycle=long_cycle)
     A, B = PactorArq(a_io, cfg), PactorArq(b_io, ArqConfig(long_cycle=long_cycle))
     a_io.fsm, b_io.fsm = A, B
 
@@ -408,8 +408,8 @@ def test_the_answer_to_a_long_packet_is_read_at_3_390_seconds():
 def test_the_qrm_guard_can_pass_a_long_packet_at_all():
     """`key_refusal`'s fit is `phase + air_n <= slot_n`, and a long keying is
     3.41 s against a 1.25 s slot -- unsatisfiable, so every cycle with anything in
-    `_peer_air` was refused `GUARD_MAX_DROPS` times and then keyed anyway by the
-    stand-down, over the peer. The projection belongs on the cycle: a station
+    `_peer_air_evidence` was refused `GUARD_MAX_DROPS` times and then keyed anyway
+    by the stand-down, over the peer. The projection belongs on the cycle: a station
     transmits once a turn of the link, not once a grid slot.
     """
     raster = _grid(long=True)

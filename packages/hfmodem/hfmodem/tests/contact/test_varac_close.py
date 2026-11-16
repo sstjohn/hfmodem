@@ -192,7 +192,9 @@ def test_farewell_hard_cap_aborts_despite_continuing_drain_progress(bw, drained)
         desk.hear('BUFFER 0', 'PTT OFF')
         desk.drive(until=lambda: 'DISCONNECT' in desk.sent)
     desk.drive(until=lambda: 'ABORT' in desk.sent)
-    assert 60 <= desk.host.now - start <= 60.1 + 1e-9
+    # A DISCONNECT the drain never reached still gets the close bound to key.
+    late = 0 if drained else 10
+    assert 60 + late <= desk.host.now - start <= 60.1 + late + 1e-9
     desk.drive()
     at = desk.sent.index('CLEANTXBUFFER')
     assert desk.sent[at:at + 4] == ['CLEANTXBUFFER', 'DISCONNECT', 'VERSION', 'ABORT']
@@ -208,9 +210,48 @@ def test_idle_host_activity_does_not_extend_the_farewell_deadline(bw, window):
         desk.drive(until=lambda: desk.host.now >= start + at)
         desk.hear('PTT OFF', 'PTT ON', 'BUSY ON', 'BUSY OFF',
                   'BUFFER 10', 'BUFFER 10', 'BUFFER 0 junk', 'BUFFER nope', 'OK')
-    desk.drive(until=lambda: 'ABORT' in desk.sent)
+    desk.drive(until=lambda: 'DISCONNECT' in desk.sent)
     assert window <= desk.host.now - start <= window + .1 + 1e-9
+    desk.drive(until=lambda: 'ABORT' in desk.sent)
+    assert window + 10 <= desk.host.now - start <= window + 10.1 + 1e-9
     desk.drive()
+
+
+def test_an_incoming_delivery_extends_the_farewell_until_our_73_is_acknowledged():
+    """kestrel self-pair, 3/moderate: the answerer held the turn with a delivery for
+    25 s of our farewell, and we aborted 0.1 s before its ACK of our 73."""
+    desk = stuck_desk(**{'DISCONNECT': ['OK']})
+    start = desk.host.now
+    desk.session.command('/bye')
+    framed = v.frame_message('de K9TST ' + 'x' * 200 + ' <R-02>')
+    for at in (10, 20, 30, 40):
+        desk.drive(until=lambda: desk.host.now >= start + at)
+        desk.host.data.incoming.append(framed[(at - 10) * 6:at * 6 if at < 40 else None])
+        desk.tick()
+        assert 'DISCONNECT' not in desk.sent
+    assert desk.host.client.messages[-1][1].endswith('<R-02>')
+    desk.drive(until=lambda: desk.host.now >= start + 55)
+    assert 'DISCONNECT' not in desk.sent
+    desk.hear('BUFFER 0', 'PTT OFF')
+    desk.drive(until=lambda: 'DISCONNECT' in desk.sent)
+    desk.hear('DISCONNECTED')
+    desk.drive()
+    assert 'CLEANTXBUFFER' not in desk.sent and 'ABORT' not in desk.sent
+
+
+def test_an_expired_drain_lets_disconnect_complete_on_vara_hf_timing_without_abort():
+    """A VARA HF station reports DISCONNECTED 4.5-6.3 s after DISCONNECT (varac-p0 items
+    2, 5 and 7); an ABORT behind it at once never let the close frame key."""
+    desk = stuck_desk(**{'DISCONNECT': ['OK'], 'ABORT': ['OK', 'PTT OFF']})
+    start = desk.host.now
+    desk.session.command('/bye')
+    desk.drive(until=lambda: 'DISCONNECT' in desk.sent)
+    assert 25 <= desk.host.now - start <= 25.1 + 1e-9
+    desk.drive(until=lambda: desk.host.now >= start + 31.3)
+    desk.hear('DISCONNECTED', 'PTT OFF')
+    desk.drive()
+    assert 'ABORT' not in desk.sent and desk.session.steps is None
+    assert not desk.host.client.connected and not desk.host.client.ptt
 
 
 @pytest.mark.parametrize('bw,window', [(500, 25), (2300, 25), (2750, 25)])

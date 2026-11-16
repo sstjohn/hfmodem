@@ -349,8 +349,12 @@ class ParkedStore:
         return copy.deepcopy(row)
 
     def pending(self, owner, recipient=None, *, snapshot=True):
-        from .varac import canonical_call
         self.expire()
+        return self.peek_pending(owner, recipient, snapshot=snapshot)
+
+    def peek_pending(self, owner, recipient=None, *, snapshot=True):
+        from .varac import canonical_call
+        self._require()
         owner = canonical_call(owner)
         recipient = None if recipient is None else canonical_call(recipient)
         rows = self._pending.get((owner, recipient), ())
@@ -503,7 +507,14 @@ class MailParking:
     def active(self):
         s = self.session
         return s.mail_ack.busy or bool(self.started == s.client.link_generation
-                                       and self.stopped != self.started and self.pending())
+                                       and self.stopped != self.started and self.peek_pending())
+
+    def peek_pending(self):
+        s = self.session
+        if not self.store.available or not s.peer:
+            return []
+        # Guards and projections must observe the same committed lifecycle state.
+        return self.store.peek_pending(s.client.mycall, s.peer, snapshot=False)
 
     def pending(self):
         s = self.session
@@ -621,13 +632,19 @@ class MailParking:
         if pending:
             self._send(pending[0])
 
-    def send_direct(self, mail, *, composed=None):
+    def check_direct(self, *, preflight=False):
         from .varac import CALLING_HZ, HostError
         s, c = self.session, self.session.client
         if (not c.connected or c.closed or s.mail_ack.busy or s.steps is not None
                 or s.bbs.owned or s.files.active or s.bbs_host.active
                 or s.email.draft is not None or s.flow.dial in CALLING_HZ.values()):
             raise HostError('VMail requires an off-CF link with no other mail or service exchange')
+        if preflight:
+            s.mail_ack.check()
+
+    def send_direct(self, mail, *, composed=None):
+        self.check_direct()
+        s, c = self.session, self.session.client
         composed = composed or datetime.fromtimestamp(self.store.clock(), timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         row, duplicate = self.store.accept(owner=c.mycall, sender=c.mycall, recipient=s.peer,
                                            via=c.mycall, subject=mail.subject, body=mail.body,
@@ -811,6 +828,8 @@ class MailParking:
     def tick(self):
         from .varac import HostError
         try:
+            if self.store.available:
+                self.store.expire()
             self._deliver()
             self._notice_tick()
         except (OSError, ValueError, HostError) as error:

@@ -28,7 +28,7 @@ def yielded(arm='2028'):
     recorded = probe(arm)
     h = next(h for h in recorded['heard'] if h.get('word') == 'V27'
              and not h['provisional'] and h['outcome'] == 'confirmed')
-    m, a = machine(role='irs', ladder='chirp', data='chirp', normal_ack='parity', prekey_lead=.044)
+    m, a = machine(role='irs', data='chirp', normal_ack='parity', prekey_lead=.044)
     a.on_host_data(BLOCK)
     m._body(h['responds_to'], 0x40, State.IRS_BREAKIN)
     m.keyed()
@@ -188,7 +188,7 @@ def test_2031_short_cadence_registers_at_least_thirty_held_v27(monkeypatch):
 
 
 def held_irs():
-    m, a = machine(role='irs', ladder='chirp', data='chirp', normal_ack='parity', prekey_lead=.044)
+    m, a = machine(role='irs', data='chirp', normal_ack='parity', prekey_lead=.044)
     a.on_host_data(BLOCK)
     # 2031's final v53/U27 pair; the next peer word begins at 71.605 s.
     m._next = p4turn.Proposal(Kind.WORD, 3392326, word='U27', state=State.IRS_ANSWER,

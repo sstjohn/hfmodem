@@ -14,8 +14,8 @@ T = round(.920 * FS)
 MAIL = b'queued mail in two chirp fields for the hand-back test'
 
 
-def offer(entry, *, ladder='chirp', data='chirp', managed=False):
-    m, arq = machine(role='irs', ladder=ladder, data=data, hold_cycles=16,
+def offer(entry, *, data='chirp', managed=False):
+    m, arq = machine(role='irs', data=data, hold_cycles=16,
                      managed_application=managed)
     if entry == 'irs-word':
         m._next = Proposal(Kind.WORD, 0, word='X27', state=State.IRS_ANSWER)
@@ -317,7 +317,7 @@ def test_refuted_speculative_v27_retries_offer_before_mail(entry, resolution, el
 @pytest.mark.parametrize('exit', ['x27', 'counted-idle'])
 @pytest.mark.parametrize('eligible', [False, True], ids=['gated-mail', 'eligible-mail'])
 def test_body_mode_retains_counted_continuation_and_mail_gate(entry, exit, eligible):
-    m, arq, deadline = offer(entry, ladder='none', data='body')
+    m, arq, deadline = offer(entry, data='body')
     arq.on_host_data(MAIL)
     m.allow_breakin = eligible
     if exit == 'x27':

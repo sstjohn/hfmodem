@@ -12,3 +12,10 @@ def admitted(monkeypatch):
     in-process tests have none. Admission order is pinned in
     test_radio_startup_flow, the claim itself in tests/core and tests/coexist."""
     return fakeclaim.install(monkeypatch)
+
+
+@pytest.fixture(scope="module")
+def long_encoder():
+    """The private independent scalar normal-LONG encoder; skips where it is absent."""
+    from hfmodem.tests.shrike import test_p4_long_rates_1003 as rates
+    return rates.independent_encoder()

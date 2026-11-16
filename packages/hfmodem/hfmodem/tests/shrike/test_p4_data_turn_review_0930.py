@@ -51,7 +51,7 @@ def test_k0003_empty_reply_commits_f_gt_once_then_yields_and_receives_fs(queued)
 
 @pytest.mark.parametrize('suffix', [b'', b'additional source\r'])
 def test_k0003_fs_prefix_credit_delivers_suffix_and_expires_on_next_counted_frame(suffix):
-    m, _ = machine(role='irs', data='body', ladder='none')
+    m, _ = machine(role='irs', data='body')
     delivered = []
     m.adapter.host = SimpleNamespace(deliver=delivered.append, supervisor=lambda *a: None)
     receive(m, FS, b'FS YY\r')
@@ -68,7 +68,7 @@ def test_k0003_fs_prefix_credit_delivers_suffix_and_expires_on_next_counted_fram
 
 
 def test_k0003_prefix_credit_does_not_drop_a_mismatching_next_packet():
-    m, _ = machine(role='irs', data='body', ladder='none')
+    m, _ = machine(role='irs', data='body')
     received = []
     m.adapter.host = SimpleNamespace(deliver=received.append, supervisor=lambda *a: None)
     receive(m, FS, b'FS YY\r')
@@ -131,7 +131,7 @@ def test_0058_prompt_then_scripted_parity_delivery_idle_and_peer_reply(monkeypat
     tx.p4_probe.emissions.clear()
     tx.p4_probe.handoff_audio = stream.pos-FS, audio[stream.pos-FS:stream.pos].copy()
     tx.p4_link_options.p4_data = 'body'
-    tx.p4_link_options.p4_ladder = 'none'
+
     tx.p4_link_options.p4_hold_cycles = 16
     tx.p4_link_options.p4_link_timeout = 23
     rx = tx.sessrx.p4

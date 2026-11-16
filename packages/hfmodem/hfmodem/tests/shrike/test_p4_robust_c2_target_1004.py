@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
-"""Approved placed-domain orchestration; no recorded target recovery before freeze."""
+"""Placed-domain compatibility and original C2 resource provenance."""
 from pathlib import Path
 import json
 import hashlib
@@ -95,7 +95,6 @@ def test_input_shape_and_finiteness_before_decoder(sl,kind):
 def test_all_zero_precedence_without_kernel_or_budget(monkeypatch,sl):
     def forbidden(*args,**kwargs):raise AssertionError('decoder work for zero input')
     monkeypatch.setattr(target,'_eligible_members',forbidden)
-    monkeypatch.setattr(target,'_decode_member',forbidden)
     result=target.decode_placed(np.zeros(target._geometry(sl).symbols+1),speedlevel=sl,component_budget=0)
     assert result.complete and result.reason=='no-hit' and result.frame is None
     assert result.eligible_members==result.completed_members==result.component_calls==result.crc_checks==0
@@ -122,61 +121,6 @@ def test_sf8_declared_order_is_all_unit_then_all_amplitude():
     assert all(len(m.fields)==1392 for m in members)
 
 
-@pytest.mark.parametrize('budget',[0,1,2,None])
-def test_sticky_ambiguity_and_incomplete_precedence_with_controlled_candidates(monkeypatch,budget):
-    a,b=_fixed(4),_fixed(4,100301)
-    raw=a['clean_symbols'];unchanged=raw.copy()
-    def members(raw,g):return (target._Member('unit',0,np.ones(1392)),)
-    def kernel(member,g,order,iterations,work):
-        yield target._Candidate('systematic',0,a['systematic'])
-        work.call('c1-only',g.systematic,lambda:None)
-        yield target._Candidate('c1-only',0,b['systematic'])
-        work.call('iteration-1-c1',g.systematic,lambda:None)
-        yield target._Candidate('turbo',1,a['systematic'])
-    monkeypatch.setattr(target,'_eligible_members',members)
-    monkeypatch.setattr(target,'_decode_member',kernel)
-    result=target.decode_placed(raw,speedlevel=4,iterations=1,component_budget=budget)
-    assert np.array_equal(raw,unchanged)
-    assert result.frame is None
-    assert result.identity_count==(1 if budget==0 else 2)
-    assert result.ambiguous==(budget!=0)
-    assert result.complete==(budget is None or budget>=2)
-    assert result.reason==('ambiguous' if result.complete else 'incomplete-work')
-    assert result.completed_members==int(result.complete)
-    assert result.crc_checks==(1 if budget==0 else 2 if budget==1 else 3)
-    assert len(result.identities)==result.identity_count
-    assert len(result.provenance)==result.crc_checks
-
-
-def test_constituent_exchange_and_transmitted_suffix_are_exact(monkeypatch):
-    from types import SimpleNamespace
-    g=target._geometry(4)
-    order=target._resources()[4]
-    fields=np.linspace(-2.0,3.0,2*g.symbols)
-    member=target._Member('unit',0,fields)
-    calls=[]
-    def component(systematic,parity,apriori=None,*,initial_state=None,end_state=None):
-        calls.append((systematic.copy(),parity.copy(),None if apriori is None else apriori.copy(),initial_state,end_state))
-        index=len(calls)
-        return SimpleNamespace(posterior=np.full(g.systematic,index,dtype=float),
-                               extrinsic=np.arange(g.systematic,dtype=float)+index)
-    monkeypatch.setattr(target.p4decode,'component_decode',component)
-    work=target._Work(None)
-    outcomes=list(target._decode_member(member,g,order,1,work))
-    assert [(o.method,o.iteration) for o in outcomes]==[('systematic',0),('c1-only',0),('turbo',1)]
-    assert work.calls==3 and work.positions==3*g.systematic
-    assert [c[3:] for c in calls]==[(0,0),(0,0),(0,None)]
-    assert calls[0][2] is None and np.array_equal(calls[1][2],np.zeros(g.systematic))
-    expected1=np.zeros(g.systematic);expected1[::10]=fields[g.systematic:g.systematic+g.parity]
-    expected2=np.zeros(g.systematic);expected2[4::10]=fields[g.systematic+g.parity:]
-    assert np.array_equal(calls[0][1],expected1) and np.array_equal(calls[1][1],expected1)
-    assert np.array_equal(calls[2][1],expected2)
-    assert np.array_equal(calls[2][0],fields[:g.systematic][order])
-    assert np.array_equal(calls[2][2],(np.arange(g.systematic)+2)[order])
-    assert calls[0][1][1150]!=0 and calls[2][1][1154]!=0
-    assert len(calls[2][0])==1160
-
-
 @pytest.mark.parametrize('sl',[2,4])
 def test_clean_independent_fixed_member_completes_declared_domain(sl):
     fixture=_fixed(sl)
@@ -185,10 +129,10 @@ def test_clean_independent_fixed_member_completes_declared_domain(sl):
     assert result.complete and result.reason=='unique' and result.frame is not None
     assert np.array_equal(original,fixture['clean_symbols'])
     assert result.iterations==8 and result.completed_members==result.eligible_members
-    assert result.component_calls==17*result.eligible_members
+    assert result.component_calls==16*result.eligible_members
     assert result.crc_checks==10*result.eligible_members
     assert result.constituent_positions==target._geometry(sl).systematic*result.component_calls
-    assert result.component_calls<=(68 if sl==2 else 136)
+    assert result.component_calls<=(64 if sl==2 else 128)
     if sl==4:assert result.eligible_members==8
     assert result.identity_count==1 and not result.ambiguous
     assert result.selected_provenance is not None
@@ -198,16 +142,32 @@ def test_clean_independent_fixed_member_completes_declared_domain(sl):
     assert actual==expected
 
 
-@pytest.mark.parametrize('budget',[0,1,2,3,17,135,136])
+@pytest.mark.parametrize('budget',[0,1,2,3,8,16,17,127,128])
 def test_actual_sf8_component_budget_never_publishes_partial_domain(budget):
     fixture=_fixed(4)
     result=target.decode_placed(fixture['clean_symbols'],speedlevel=4,component_budget=budget)
-    assert result.component_calls==budget
-    assert result.complete==(budget==136)
-    if budget<136:
+    # An unfinished tier is resumable,
+    # while publication still requires the complete declared member domain.
+    # C1 and the saved-C1 half of turbo iteration one each cost one call;
+    # subsequent member iterations cost two calls and cannot be split.
+    expected = budget if budget <= 16 else 16 + 2*((budget-16)//2)
+    assert result.component_calls == expected
+    checks = 8 + min(expected, 16) + max(0, expected-16)//2
+    assert result.crc_checks == len(result.provenance) == checks
+    declared = [(method, iteration, member)
+                for method, iteration in [('systematic', 0), ('c1-only', 0)]
+                    + [('turbo', iteration) for iteration in range(1, 9)]
+                for member in range(8)]
+    assert [(p.method, p.iteration, p.member_index) for p in result.provenance] == declared[:checks]
+    assert result.eligible_members == 8
+    assert result.identity_count == 1 and not result.ambiguous
+    assert result.complete == (budget == 128)
+    if budget < 128:
         assert result.reason=='incomplete-work' and result.frame is None
+        assert result.completed_members == 0
     else:
         assert result.reason=='unique' and result.frame is not None
+        assert result.completed_members == result.eligible_members == 8
     assert result.component_calls*1160==result.constituent_positions
 
 

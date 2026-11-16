@@ -42,7 +42,7 @@ class Recorder:
         names=('state','_receive_active','_receive_epoch','_receive_boundary','_last_source_onset',
                '_accepted_roots','_root_epoch','pending','_decided','_dropped','unread','_next',
                '_accepted_proposal','_deferred','_last_ack','_held_answer','_answer_kinds','acked_counter',
-               'ack_word','_peer_generation','_peer_consumed')
+               '_ack_chain','_peer_generation','_peer_consumed')
         rnames=('clock','_responds_to','_response_evidence','_answered','_answered_generations',
                 'turnarounds','_tau_seen','observations','emissions','peer_onset','silent_cycles',
                 '_receive_generation','_train_generation')

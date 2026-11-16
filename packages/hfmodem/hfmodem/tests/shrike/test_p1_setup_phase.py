@@ -27,8 +27,7 @@ def setup(tmp_path, phase="reply", *, p1_only=True, p4=False):
     tx = onair.RadioTx(transmit=False, outdir=tmp_path)
     tx.p1_setup_phase = phase
     if p4:
-        tx.p4_probe = EntryProbe(2, 20.0, packet="robust", values=(7, 38),
-                                 headers=("A", "A"), trigger_word="P1 ACK")
+        tx.p4_probe = EntryProbe(timeout=20.0, values=(7, 38), trigger_word="P1 ACK")
     emitted = []
     tx._tx = lambda audio, what, **kw: emitted.append((audio, what))
     host = ptc.PtcHost(peer=tx, mycall="W9SSJ")
@@ -190,7 +189,7 @@ def test_cli_explicit_experiment_in_p1_arm(flags):
     (("--p3-uninvited", "--mail-fetch"), "replace --p3-uninvited with --pactor1-only"),
 ])
 def test_cli_refuses_experiment_in_upgrade_arm(flags, fix):
-    with pytest.raises(SystemExit, match=f"P4-entry arms: {fix}, or enter P4 with --p4-entry"):
+    with pytest.raises(SystemExit, match=f"P4-entry arms: {fix}, or enter P4 with --p4-link"):
         _armed(*flags, "--p1-setup-phase", "call")
 
 
@@ -202,21 +201,17 @@ def _resolved(*argv):
     return args
 
 
-P4_MAIL = ("--p1-grant-only", "--p1-status-bits45", "2", "--p1-robust-stall", "12",
-           "--p4-entry", "--p4-probe-packet", "robust", "--p4-probe-values", "7,38",
-           "--p4-probe-headers", "A,A", "--p4-probe-cadence", "consecutive",
-           "--p4-link", "--p4-ladder", "long", "--p4-data", "body",
-           "--after-connect", "p1-robust")
+P4_MAIL = ('--p4-link', '--p1-status-bits45', '2', '--p4-opening', '7,38',
+           '--p4-data', 'body', '--after-connect', 'p1-robust')
 
 
-@pytest.mark.parametrize("flags", [P4_MAIL, ("--p4-entry",), ("--p4-mail",)])
+@pytest.mark.parametrize("flags", [P4_MAIL, ('--p4-link',)])
 def test_cli_accepts_experiment_on_p4_entry_arm(flags):
     args = _resolved(*flags, "--p1-setup-phase", "call")
     assert args.p1_setup_phase == "call" and args.p4_entry and not args.pactor1_only
 
 
 @pytest.mark.parametrize("flags,early", [
-    (("--after-connect", "chirp"), "--after-connect chirp"),
     (("--connect", "robust", "--after-robust", "p3"), "--after-robust p3"),
     (("--connect", "robust", "--after-robust", "p4-robust"), "--after-robust p4-robust"),
 ])

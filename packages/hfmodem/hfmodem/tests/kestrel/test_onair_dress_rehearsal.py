@@ -690,6 +690,23 @@ def _transmissions(s: Session) -> list[dict]:
     return [e for e in played if e["dbfs"] > _SILENT_DBFS]
 
 
+def test_the_identification_unkeys_before_the_device_claim_is_settled(monkeypatch):
+    """The claim bookkeeping after a play cost 3.5 s once under load, and the
+    station ID's unkey waited on it: an unmodulated key on a shared band."""
+    order = []
+
+    @contextlib.contextmanager
+    def claimed(*a, **kw):
+        yield None
+        order.append("claim settled")
+    monkeypatch.setattr(S, "device_claim", claimed)
+    monkeypatch.setattr(S.sd, "query_devices", lambda *a: {"max_output_channels": 1})
+    monkeypatch.setattr(S, "play_drained", lambda *a: order.append("drained"))
+    monkeypatch.setattr(S, "device_opened", lambda: order.append("opened"))
+    S.play(np.zeros(480, np.float32), "card", emitted=lambda: order.append("unkey"))
+    assert order == ["drained", "unkey", "opened", "claim settled"]
+
+
 @PTY
 def test_the_key_brackets_the_audio_closely_at_both_edges(rigctld, session):
     """Both edges of the keyed region, and each of them has cost something.

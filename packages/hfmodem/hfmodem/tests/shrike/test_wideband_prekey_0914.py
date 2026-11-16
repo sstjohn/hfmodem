@@ -164,7 +164,8 @@ def test_other_wideband_levels_are_not_given_an_early_crc_trial(sl, swapped, mon
 
 @pytest.mark.parametrize("long_reply", [False, True])
 def test_enabled_flag_preserves_existing_cs6_acquisition(tmp_path, long_reply):
-    from hfmodem.tests.shrike.test_cs6_driver import _arm, _window
+    from hfmodem.tests.shrike.p3_cycle_support import _arm
+    from hfmodem.tests.shrike.test_cs6_driver import _window
     from hfmodem.tests.shrike.test_cs6_rx import FIXTURES, ROWS, recorded
     if not ROWS or not (FIXTURES / "reference-long.wav").is_file():
         pytest.skip(f"no CS6 recorded PCM under {FIXTURES}")
@@ -177,7 +178,7 @@ def test_enabled_flag_preserves_existing_cs6_acquisition(tmp_path, long_reply):
     s, tx, grid, clock = _arm(tmp_path, pcm, sl=3 if long_reply else 1,
                             expected_seq=0 if long_reply else 1)
     s.rx.p3_wideband_prekey = True
-    slot, _, _ = _window(s, tx, grid, clock)
+    slot, _, _, _ = _window(s, tx, grid, clock)
     assert slot == (3 if long_reply else 1)
     assert len(s.packets) == 1
     assert s.packets[0].cycle_long == long_reply
@@ -236,7 +237,7 @@ def test_full_receive_tick_render_keeps_first_packet_reply(recording, tmp_path, 
         onair._scan_frame(s.rx, pcm, row["start"], tracked_only=True)
         assert s.host.arq.rx_seq == 1
         assert tx._pending_p3_cs == arq.CS_REQUEST
-        slot, _, _ = onair._regrid(bench, g, tx, s.host, s.rx, slot, pcm, row["start"], 1920)
+        slot, _, _, _ = onair._regrid(bench, g, tx, s.host, s.rx, slot, pcm, row["start"], 1920)
         # Charge the tick and control render as well as the receive stages.
         tick = time.perf_counter()
         s.host.tick()
@@ -255,9 +256,9 @@ def test_full_receive_tick_render_keeps_first_packet_reply(recording, tmp_path, 
     assert tx.n == 1 and not tx.refused
     assert len(bench.emissions) == 1
     assert abs(tx.tx_audio_start - key) < round(.005 * onair.FS)
-    # `P3_REPLY_S` moved from 0.890 to 0.910 after this fixture was cut; a
+    # `P3_COMB_REPLY_S` moved from 0.890 to 0.910 after this fixture was cut; a
     # future move of the reply slot has to show up here as a deliberate delta.
-    assert abs(key - row["key"] - round((onair.P3_REPLY_S - 0.890) * onair.FS)) <= 1
+    assert abs(key - row["key"] - round((onair.P3_COMB_REPLY_S - 0.890) * onair.FS)) <= 1
     assert not tx._pending_p3_cs
     said = capsys.readouterr().out
     assert "CS2 ACK seq=1" in said

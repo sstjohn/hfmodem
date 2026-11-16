@@ -854,7 +854,7 @@ def test_session_id_is_stable_across_callsign_spellings():
 
 @pytest.mark.parametrize("control", ["BREAK", "IDLE", "ConAck500"])
 def test_a_data_frame_minted_into_a_control_frame_is_never_acknowledged(control):
-    """`WWTD6QMC61TV`, 2026-08-23: `expected SOH, got byte 0xfd` — the 65th byte of
+    """`WTDQ6MCT16VW`, 2026-08-23: `expected SOH, got byte 0xfd` — the 65th byte of
     the message, because the 64 in front of it were acknowledged and never
     delivered.
 

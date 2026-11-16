@@ -40,6 +40,7 @@ def test_recorded_control_order_at_renderer(tmp_path, monkeypatch, row, elapsed)
     # experiment now that the defaults are historical/audio-start.
     tx.p3_control_waveform, tx.p3_control_placement = "current", "pulse-center"
     tx.raster = SimpleNamespace(
+        protocol=onair.Protocol.PACTOR3,
         _p3_peer=(0, round(.81*onair.FS), period, 0),
         _p3_peer_swap=row['packet_swapped'],
         boundary=lambda slot: boundary,

@@ -70,6 +70,7 @@ of the demodulator.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import logging
 import statistics
 import threading
@@ -90,6 +91,14 @@ CARD_RATE_HZ = rates.CARD_RATE_HZ
 CALLBACK_JITTER_ALLOWANCE_S = 0.010
 BLOCKSIZE = 128
 LATENCY = "low"
+#: The capture ring asked of ALSA. On the FTDX10's codec "low" leaves 10.7 ms
+#: past the period in hand, which a GIL hold or decode stall overruns. See
+#: `open_stream`.
+ALSA_CAPTURE_S = 0.040
+#: PortAudio's ALSA periods per buffer, until `PaAlsa_SetNumPeriods` says otherwise.
+_ALSA_PERIODS = 4
+#: `PaAlsa_SetNumPeriods` is process-wide, so one deepened open at a time.
+_ALSA_LOCK = threading.Lock()
 
 #: Callbacks to median the ADC↔DAC offset over before trusting it.
 _LAT_MEDIAN_N = 64
@@ -403,6 +412,52 @@ class Lane(Protocol):
     def resync(self, card_index: int) -> None:
         """A discontinuity happened at `card_index`. Recover, and say so."""
         ...
+
+
+class _RemovableLane:
+    """Optional subscription barrier; ordinary decoder lanes keep their fast path."""
+
+    def __init__(self, lane):
+        self.lane = lane
+        self._lock = threading.Lock()
+        self._active = True
+
+    def __getattr__(self, name):
+        target = getattr(self.lane, name)
+        if not callable(target):
+            return target
+
+        def invoke(*args, **kwargs):
+            with self._lock:
+                if self._active:
+                    return target(*args, **kwargs)
+        return invoke
+
+    def retire(self, timeout):
+        acquired = self._lock.acquire() if timeout is None else self._lock.acquire(timeout=max(0, timeout))
+        if not acquired:
+            raise TimeoutError('audio subscription callback still pending')
+        try:
+            self._active = False
+        finally:
+            self._lock.release()
+
+
+def _subscribe(audio, lane, removable):
+    audio._lanes.append(_RemovableLane(lane) if removable else lane)
+    return lane
+
+
+def _unsubscribe(audio, lane, timeout):
+    for subscribed in audio._lanes:
+        if isinstance(subscribed, _RemovableLane) and subscribed.lane is lane:
+            subscribed.retire(timeout)
+            # Keep an in-flight callback's iterator stable. Its retired wrapper
+            # cannot deliver after the barrier, even from an older list snapshot.
+            audio._lanes = [item for item in audio._lanes if item is not subscribed]
+            return
+    if any(item is lane for item in audio._lanes):
+        raise ValueError('subscription was not created with removable=True')
 
 
 class _BaseLane:
@@ -828,6 +883,60 @@ def host_api_name(stream) -> str | None:
         return None
 
 
+def input_latency(latency) -> float:
+    return latency[0] if isinstance(latency, tuple) else latency
+
+
+def open_stream(make, device, blocksize: int, fs: int = CARD_RATE_HZ):
+    """`make(latency)` as this device's host API wants it, and the input latency
+    a holdback is to be taken from, in seconds.
+
+    `make(LATENCY)` everywhere but ALSA. On ALSA PortAudio's period is
+    `blocksize + latency` frames over `PaAlsa_SetNumPeriods`, rounded up to a
+    block, and the capture ring is that latency plus a period. Scaling the frames
+    and the periods by one factor deepens the ring to `ALSA_CAPTURE_S` and keeps
+    the period, so the callback cadence, the delivery lag, and the playback
+    buffer (the same period plus the unchanged output latency) are exactly what
+    "low" made them. The holdback stays on the "low" stream's figure, opened and
+    closed first: the added depth is reserve that a stall spends, not lag that a
+    read waits out.
+
+    A duplex stream is still bounded by its playback ring: on a playback xrun
+    PortAudio's ALSA host stops and restarts both directions, dropping whatever
+    capture the deeper ring held.
+    """
+    import sounddevice as sd
+    try:
+        info = sd.query_devices(device, "input")
+        alsa = sd.query_hostapis(info["hostapi"])["name"] == "ALSA"
+    except Exception:
+        alsa = False
+    if not alsa:
+        stream = make(LATENCY)
+        return stream, input_latency(stream.latency)
+    with _ALSA_LOCK:
+        stream = make(LATENCY)
+        delivery, shallow = input_latency(stream.latency), stream.latency
+        low = blocksize + max(blocksize, int(info["default_low_input_latency"] * fs))
+        scale = -(-(round(ALSA_CAPTURE_S * fs) + blocksize) // low)
+        if scale == 1:
+            return stream, delivery
+        stream.close()
+        periods = ctypes.CDLL(sd._libname).PaAlsa_SetNumPeriods
+        try:
+            periods(_ALSA_PERIODS * scale)
+            # Half a frame over, so PortAudio's truncation lands on the frame meant.
+            stream = make(((scale * low - blocksize + 0.5) / fs, LATENCY))
+        finally:
+            periods(_ALSA_PERIODS)
+        # A device short of the periods asked for sizes the period another way,
+        # which shows as a playback buffer that moved; that geometry stays "low".
+        if isinstance(shallow, tuple) and stream.latency[1] != shallow[1]:
+            stream.close()
+            stream = make(LATENCY)
+    return stream, delivery
+
+
 class StationAudio:
     """The card. One stream, one clock, N lanes.
 
@@ -838,7 +947,10 @@ class StationAudio:
 
     def __init__(self, *, input_device, output_device, gain: float | None = None,
                  blocksize: int = BLOCKSIZE, tx_latency_n: int = 0,
-                 trace=None) -> None:
+                 trace=None, channels: int = 1) -> None:
+        if not isinstance(channels, int) or channels < 1:
+            raise ValueError("channels must be an int >= 1")
+        self.channels = channels
         self.input_device = input_device
         self.output_device = output_device
         self.gain = levels.WORKING_POINT if gain is None else gain
@@ -869,6 +981,7 @@ class StationAudio:
         self._last: tuple[float, int] | None = None
         self._dac: tuple[float, int] | None = None
         self._ahead: float | None = None
+        self._stamp_shift: float | None = None
         self._floor_loss: rates.FloorLoss | None = None
         self._fit: list[tuple[float, int]] = []
         self._burst: tuple[np.ndarray, int] | None = None
@@ -914,23 +1027,35 @@ class StationAudio:
 
     # -- lanes -------------------------------------------------------------
 
-    def subscribe(self, lane: Lane) -> Lane:
-        self._lanes.append(lane)
-        return lane
+    def subscribe(self, lane: Lane, *, removable=False) -> Lane:
+        return _subscribe(self, lane, removable)
+
+    def unsubscribe(self, lane: Lane, *, timeout=None) -> None:
+        """Remove an opted-in subscription after its active callbacks finish."""
+        _unsubscribe(self, lane, timeout)
 
     # -- lifecycle ---------------------------------------------------------
 
     def open(self) -> None:
         import sounddevice as sd
 
+        self._stamp_shift = None
         options = dict(samplerate=CARD_RATE_HZ, blocksize=self.blocksize,
-                       dtype="float32", channels=1, latency=LATENCY)
+                       dtype="float32", channels=self.channels)
         if self.output_device is None:
-            self._stream = sd.InputStream(device=self.input_device,
-                                          callback=self._input_callback, **options)
+            def make(latency):
+                return sd.InputStream(device=self.input_device, latency=latency,
+                                      callback=self._input_callback, **options)
         else:
-            self._stream = sd.Stream(device=(self.input_device, self.output_device),
-                                     callback=self._callback, **options)
+            def make(latency):
+                return sd.Stream(device=(self.input_device, self.output_device),
+                                 latency=latency, callback=self._callback, **options)
+        self._stream, in_lat = open_stream(make, self.input_device, self.blocksize)
+        if in_lat != input_latency(self._stream.latency):
+            logging.getLogger(__name__).info(
+                "capture ring: input latency %.1f ms, %.1f ms on \"low\" and in the "
+                "holdback; stream latency %s", input_latency(self._stream.latency) * 1e3,
+                in_lat * 1e3, self._stream.latency)
         self.timestamp_limitation = timestamp_limitation(host_api_name(self._stream))
         if self.trace is not None:
             self.trace.timestamp_limitation = self.timestamp_limitation
@@ -964,8 +1089,6 @@ class StationAudio:
         if self.failure is not None:
             self.close()
             raise AudioError(f"the audio callback failed: {self.failure}")
-        lat = self._stream.latency
-        in_lat = lat[0] if isinstance(lat, tuple) else lat
         self.holdback = self.blocksize + round(in_lat * CARD_RATE_HZ)
 
     def breathe(self) -> None:
@@ -1043,8 +1166,41 @@ class StationAudio:
         if self._stream is not None and not self._stream.active:
             raise AudioError("the audio stream is no longer active")
 
+    def _callback_stamp_shift(self, current: float) -> float:
+        # PortAudio's ALSA host stamps on each PCM's own clock: monotonic for
+        # hw, dmix and dsnoop, CLOCK_REALTIME for null, pulse and jack. The
+        # offset is latched from precise reads of fresh stamps to limit capture
+        # index jumps from slow reads or intervening wall steps. Clocks closer
+        # than 0.1 s (a box whose wall clock is not set yet) cannot be told apart
+        # by one stamp's age: classify once, refreshing only wall-clock offsets.
+        candidate = None
+        for _ in range(3):
+            w0, m, w1 = time.time(), time.monotonic(), time.time()
+            if 0 <= w1 - w0 < 1e-4:
+                wall = (w0 + w1) / 2
+                wall_age, mono_age = wall - current, m - current
+                if abs(wall - m) >= .1:
+                    if 0 <= wall_age < .05:
+                        candidate = m - wall
+                    elif 0 <= mono_age < .05:
+                        candidate = 0.0
+                elif self._stamp_shift is None:
+                    self._stamp_shift = m - wall if abs(wall_age) < abs(mono_age) else 0.0
+                elif self._stamp_shift != 0.0 and 0 <= wall_age < .05:
+                    candidate = m - wall
+                break
+        if candidate is not None and (
+                self._stamp_shift is None or abs(candidate - self._stamp_shift) > 1e-3):
+            self._stamp_shift = candidate
+        if self._stamp_shift is not None:
+            return self._stamp_shift
+        return m - w0 if abs(w0 - current) < abs(m - current) else 0.0
+
     def _body(self, indata, outdata, frames, t, status) -> None:
         t_in = time.monotonic() if self.trace is not None else 0.0
+        shift = self._callback_stamp_shift(t.currentTime)
+        adc_time = t.inputBufferAdcTime + shift
+        dac_time = t.outputBufferDacTime + shift if outdata is not None else None
         n0 = self.samples
         self.samples += frames
 
@@ -1066,7 +1222,7 @@ class StationAudio:
                 if stream is not None and stream.emitted and not stream.drained:
                     self._tx_invalid = "an output underrun while the stream was in flight"
 
-        ahead = t.inputBufferAdcTime - n0 / CARD_RATE_HZ
+        ahead = adc_time - n0 / CARD_RATE_HZ
         if self._floor_loss is None:
             lost = rates.lost_step(ahead, self._ahead, self.blocksize, CARD_RATE_HZ)
             lost_at = n0
@@ -1086,9 +1242,9 @@ class StationAudio:
                     lane.fault(lost_at, "timestamp loss")
         self._ahead = ahead
 
-        self._last = (t.inputBufferAdcTime, n0)
+        self._last = (adc_time, n0)
         if outdata is not None:
-            dac = t.outputBufferDacTime
+            dac = dac_time
             if self.timestamp_limitation and self._dac is not None:
                 # WASAPI stamps the DAC as callback time plus queued padding, and
                 # shared-mode padding falls a whole engine period at a time: a
@@ -1102,7 +1258,7 @@ class StationAudio:
             self._dac = (dac, n0)
         if outdata is not None and self.lat is None and not getattr(status, "priming_output", False):
             self._lat_samples.append(
-                round((t.outputBufferDacTime - t.inputBufferAdcTime) * CARD_RATE_HZ))
+                round((dac_time - adc_time) * CARD_RATE_HZ))
             if len(self._lat_samples) >= _LAT_MEDIAN_N:
                 self.lat = self._settle_lat()
 
@@ -1110,7 +1266,7 @@ class StationAudio:
         # than callback-entry time and its load-dependent delivery jitter.
         # It is only an estimate when timestamp_limitation is set: changing
         # capture age can bias that raw stamp even with an exact converter.
-        if not self._fit or t.inputBufferAdcTime - self._fit[-1][0] >= 1.0:
+        if not self._fit or adc_time - self._fit[-1][0] >= 1.0:
             self._fit.append(self._last)
 
         # float32 at card rate, copied out of the driver buffer. Converting to
@@ -1118,12 +1274,13 @@ class StationAudio:
         # takes float in +/-1.0 — measured at 75% of samples on the rail, i.e. a
         # square wave, for every lane not running at the card rate. And scaling by
         # 32767 wraps above full scale: 1.02 became -32114.
-        block = Block(t.inputBufferAdcTime, n0, np.array(indata[:, 0], np.float32))
+        block = Block(adc_time, n0, np.array(indata[:, 0], np.float32))
         for lane in self._lanes:
             lane.push(block)
 
         if outdata is not None:
             self._fill(outdata, frames, n0)
+            outdata[:, 1:] = outdata[:, :1]
             for lane in self._lanes:
                 if hasattr(lane, 'push_tx'):
                     lane.push_tx(n0, outdata[:, 0].copy())
@@ -1439,9 +1596,11 @@ class ReplayAudio:
         #: (card index, samples) for every burst the station would have sent.
         self.transmitted: list[tuple[int, np.ndarray]] = []
 
-    def subscribe(self, lane: Lane) -> Lane:
-        self._lanes.append(lane)
-        return lane
+    def subscribe(self, lane: Lane, *, removable=False) -> Lane:
+        return _subscribe(self, lane, removable)
+
+    def unsubscribe(self, lane: Lane, *, timeout=None) -> None:
+        _unsubscribe(self, lane, timeout)
 
     def open(self) -> None:
         return None

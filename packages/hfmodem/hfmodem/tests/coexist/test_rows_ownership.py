@@ -387,7 +387,7 @@ def test_assessment_under_claim_between_campaign_attempts(harness, request, with
     event = harness.reached('audio_before_open', timeout=10, quiescent=True)
     path = harness.root / 'rig.claim'
     nonce = int(path.read_text().split()[4])
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'],
+    assert_claim_possession(harness.observer.latest, pid=event['pid'],
                             claim_path=path, nonce=nonce)
     assert path.read_text().split()[3] == 'campaign'
     competitor = launch(harness, '''
@@ -504,12 +504,12 @@ def test_console_prepares_under_claim_without_station(harness, request, with_lin
     prepared = harness.reached('console_point', quiescent=True)
     claim_path = harness.root / 'rig.claim'
     nonce = int(claim_path.read_text().split()[4])
-    assert_claim_possession(harness.observer.snapshots[-1], pid=prepared['pid'],
+    assert_claim_possession(harness.observer.latest, pid=prepared['pid'],
                             claim_path=claim_path, nonce=nonce)
     assert not any(e['event'] == 'device_open' for e in harness.events())
     harness.release('console_point')
     child = harness.reached('console-modem-open', quiescent=True)
-    assert_claim_possession(harness.observer.snapshots[-1], pid=child['pid'],
+    assert_claim_possession(harness.observer.latest, pid=child['pid'],
                             claim_path=claim_path, nonce=nonce)
     harness.release('console-modem-open')
     out, _ = completed(console)
@@ -549,7 +549,7 @@ finally:
                                             station_present=True, competing=winner == 'own'))
     harness.reached('console-release-gap', quiescent=True)
     assert not any(d.get('path') == str(harness.audio)
-                   for d in harness.observer.snapshots[-1].descriptors.get(station['pid'], []))
+                   for d in harness.observer.latest.descriptors.get(station['pid'], []))
     if winner == 'legacy':
         harness.release('console-release-gap')
         harness.reached('console_point', quiescent=True)
@@ -568,7 +568,7 @@ finally:
     if winner == 'legacy':
         harness.release('console_point')
         opened = harness.reached('console-modem-open', quiescent=True)
-        assert_claim_possession(harness.observer.snapshots[-1], pid=opened['pid'],
+        assert_claim_possession(harness.observer.latest, pid=opened['pid'],
             claim_path=harness.root / 'rig.claim',
             nonce=int((harness.root / 'rig.claim').read_text().split()[4]))
         harness.release('console-modem-open')
@@ -615,7 +615,7 @@ def test_old_station_reported(harness, fake_yaesu, case):
     event = harness.reached('old-station-held', quiescent=True)
     pid = event['pid']
     inventory(harness, {pid: 'hfmodem station old-code'})
-    snapshot = harness.observer.snapshots[-1]
+    snapshot = harness.observer.latest
     assert any(fd.get('path') == fake_yaesu.port for fd in snapshot.descriptors[pid])
     contender = launch(harness, STATION.replace("cat='none'", "cat='yaesu'") + f'''
 try:
@@ -665,7 +665,7 @@ def test_dead_root_discovery_unlocked_opener(harness, locked):
         os.close(fd)
     ''')
     event = harness.reached('stale-unlocked-opener', quiescent=True)
-    snapshot = harness.observer.snapshots[-1]
+    snapshot = harness.observer.latest
     assert any(fd.get('path') == str(harness.root / 'rig.claim') and fd.get('pos') == 0
                for fd in snapshot.descriptors[event['pid']])
     inventory(harness, {event['pid']: 'unrelated-file-reader'})
@@ -933,7 +933,7 @@ claim.release(9)
 '''
     parent = launch(harness, 'from pathlib import Path\n' + textwrap.dedent(body))
     event = harness.reached('daemon-ready', timeout=10, quiescent=True)
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'],
+    assert_claim_possession(harness.observer.latest, pid=event['pid'],
         claim_path=harness.root / 'rig.claim',
         nonce=int((harness.root / 'rig.claim').read_text().split()[4]))
     shell_entry = entry not in ('collector', 'hfcapture')
@@ -1078,7 +1078,7 @@ assert station._poll_thread is None
 ''')
     event = harness.reached('station-held', quiescent=True)
     path = harness.root / 'rig.claim'
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'], claim_path=path,
+    assert_claim_possession(harness.observer.latest, pid=event['pid'], claim_path=path,
                             nonce=int(path.read_text().split()[4]))
     harness.release('station-held')
     completed(child)
@@ -1246,7 +1246,7 @@ def test_rig_cli_claim_covers_teardown(harness, failed):
     ''')
     event = harness.reached('rig-teardown', quiescent=True)
     path = harness.root / 'rig.claim'
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'], claim_path=path,
+    assert_claim_possession(harness.observer.latest, pid=event['pid'], claim_path=path,
                             nonce=int(path.read_text().split()[4]))
     contender = launch(harness, '''
         try:
@@ -1404,7 +1404,7 @@ def test_release_reads_line_low(harness, proof_line, case):
     event = harness.reached('release-checked', quiescent=True)
     if case != 'low':
         path = harness.root / 'rig.claim'
-        assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'], claim_path=path,
+        assert_claim_possession(harness.observer.latest, pid=event['pid'], claim_path=path,
                                 nonce=int(path.read_text().split()[4]))
     assert line_low(proof_line) == (case != 'stuck-high')
     harness.release('release-checked')
@@ -1638,7 +1638,7 @@ def cli_detach(harness, inherited, line=''):
     ''')
     try:
         harness.reached('cli-started', quiescent=True)
-        snapshot = harness.observer.snapshots[-1]
+        snapshot = harness.observer.latest
         services = [pid for pid, row in snapshot.participants.items()
                     if ' station ' in row.get('argv', '') and '--detach' in row['argv']
                     and pid != guardian.pid]
@@ -1714,7 +1714,7 @@ def test_release_reads_line_low_foreground_cli(harness, request, with_line):
     ''')
     harness.reached('foreground-owned', quiescent=True)
     claim_path = harness.root / 'rig.claim'
-    assert_claim_possession(harness.observer.snapshots[-1], pid=event['pid'], claim_path=claim_path,
+    assert_claim_possession(harness.observer.latest, pid=event['pid'], claim_path=claim_path,
                             nonce=int(claim_path.read_text().split()[4]))
     os.kill(event['pid'], signal.SIGINT)
     harness.release('foreground-owned')

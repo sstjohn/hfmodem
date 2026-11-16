@@ -22,11 +22,11 @@ def test_neutral_request_and_saved_qam_ownership(recording,action):  # noqa: F81
     m,arq=machine(role='irs')
     arq.on_host_data(b'queued composition control')
     queued=arq._buffer_raw
-    history=(m.ack_word,m.acked_counter,m._last_ack,m._last_body_ack,m._held_answer)
+    history=(m._ack_chain,m.acked_counter,m._last_ack,m._last_body_ack,m._held_answer)
     due=row['onset_sample']+round(.920*FS)
     m.silence(due-m.lead,answer_due=due)
     request=m.decide(due-m.lead)
-    assert (request.kind,request.word,request.purpose)==(Kind.WORD,'V27',None)
+    assert (request.kind,request.word,request.purpose)==(Kind.WORD,'V27','repeat-request')
     if action=='refused':
         m.refused('deadline')
         rx.note_refusal(request.kind,request.stream_sample)
@@ -43,9 +43,9 @@ def test_neutral_request_and_saved_qam_ownership(recording,action):  # noqa: F81
     assert (candidate.frame is None)==(action=='keyed')
     if records:
         assert records[0].observation.speedlevel=='SL9/10-short'
-    assert (m.ack_word,m.acked_counter,m._last_ack,m._last_body_ack,m._held_answer)==history
+    assert (m._ack_chain,m.acked_counter,m._last_ack,m._last_body_ack,m._held_answer)==history
     assert arq._buffer_raw==queued and arq._inflight is None
-    assert m.last is None if action!='keyed' else m.last.purpose==None
+    assert m.last is None if action!='keyed' else m.last.purpose=='repeat-request'
     if action=='keyed':
         # The discarded search cannot starve a distinct later recorded copy.
         later=rows[7];at=later['onset_sample']
@@ -55,5 +55,5 @@ def test_neutral_request_and_saved_qam_ownership(recording,action):  # noqa: F81
         assert recovered[0].observation.frame is not None
         assert recovered[0].observation.speedlevel=='SL9/10-short'
         assert entry['obs'].frame is None  # Old cache key may expire after six seconds.
-        assert (m.ack_word,m.acked_counter,m._last_ack,m._last_body_ack,m._held_answer)==history
+        assert (m._ack_chain,m.acked_counter,m._last_ack,m._last_body_ack,m._held_answer)==history
         assert arq._buffer_raw==queued and arq._inflight is None

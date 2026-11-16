@@ -27,7 +27,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hfmodem.shrike import onair, p1rx, p3acquire, p3rx, pactor1, placement, session, spec
+from hfmodem.shrike import onair, p1rx, p3acquire, p3rx, p4probe, pactor1, placement, session, spec
 from hfmodem.shrike.arq import ISS, ArqIO, PactorArq, State
 
 FS = p1rx.FS
@@ -255,7 +255,7 @@ def test_after_robust_names_an_after_connect_path():
     args = SimpleNamespace(after_connect="arq", after_robust="p4-robust")
     assert onair._after_answer(args, SimpleNamespace(robust_answer=None)) == "arq"
     for after, path in (("listen", "listen"), ("p1", "arq"), ("p3", "arq"),
-                        ("p4-robust", "chirp")):
+                        ("p4-robust", "p4-opening")):
         args.after_robust = after
         assert onair._after_answer(args, SimpleNamespace(robust_answer=0)) == path
 
@@ -317,23 +317,22 @@ def test_p1_keys_a_data_packet_carrying_our_call(tmp_path, monkeypatch):
     assert fields and fields[0].startswith(b"W9SSJ\r"), fields
 
 
-@pytest.mark.parametrize("cadence,slots", [
-    ("spaced", [3, 8, 13]), ("consecutive", [3, 4, 5])])
-def test_p4_robust_keys_the_robust_short_packets(tmp_path, cadence, slots):
-    log = _air(tmp_path, "--after-robust", "p4-robust", "--p4-probe-cadence", cadence)
+def test_p4_robust_keys_the_robust_short_packets(tmp_path, monkeypatch):
+    monkeypatch.setattr(onair, '_run_p4_link', lambda *a, **kw: 'opening handed to link')
+    monkeypatch.setattr(p4probe, 'code_revision', lambda *_: None)
+    keyed = _keyed(monkeypatch)
+    log = _air(tmp_path, '--after-robust', 'p4-robust')
     after = _after(log)
-    first = after[after.index("TX["):].splitlines()[0]
-    assert "P4 PROBE ROBUST 1/3 v=6 hdr=A" in first, first
-    probe = json.loads((tmp_path / "out" / "p4-probe.json").read_text())
-    # The answer was read after the call of slot 2 went out; slot 3 is the first
-    # after it.
-    assert [e["slot"] for e in probe["emissions"]] == slots
-    assert probe["cadence"] == cadence
-    gaps = after.count("the gap to the next slot")
-    assert gaps == (2 if cadence == "consecutive" else 0), after
-    assert "receiving continuously for 4 seconds" in after
-    reads = [w for w in probe["windows"] if w["kind"] == "post-chirp"]
-    assert len(reads) == 3
+    first = after[after.index('TX['):].splitlines()[0]
+    assert 'P4 PROBE ROBUST 1/3 v=6 hdr=A' in first
+    probe = json.loads((tmp_path/'out'/'p4-probe.json').read_text())
+    assert [e['value'] for e in probe['emissions']] == [6,9,8]
+    assert [e['header'] for e in probe['emissions']] == ['A']*3
+    slots = [e['slot'] for e in probe['emissions']]
+    calls = [slot for slot, what, _ in keyed if what.startswith('connect')]
+    assert slots == list(range(calls[-1] + 1, calls[-1] + 4)), keyed
+    assert probe['cadence'] == 'consecutive'
+
 
 
 KB5LZK_D_MS, VE3KPG_D_MS = 50.0, 76.0
@@ -486,8 +485,7 @@ def test_consecutive_packets_key_in_consecutive_slots_on_a_live_clock(tmp_path, 
         clock[0] = live.pos - 1200
 
     monkeypatch.setattr(tx, "_tx", keyed)
-    tx.p4_probe = p4probe.EntryProbe(3, packet="robust", values=(6, 9, 8),
-                                     headers=("A",) * 3, cadence="consecutive")
+    tx.p4_probe = p4probe.EntryProbe(values=(6, 9, 8))
     grid = onair._MasterGrid(0, 60000, 0, packet_n=46080, cs_n=5760, d_max_n=6240)
     tx.aim(grid, 0)
     tx.sessrx = SimpleNamespace(bridge=lambda _: None)

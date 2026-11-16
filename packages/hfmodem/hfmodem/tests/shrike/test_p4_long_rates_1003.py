@@ -11,7 +11,7 @@ import sys
 import numpy as np
 import pytest
 
-from hfmodem.shrike import p4decode, p4longrates as rates
+from hfmodem.shrike import p4decode, p4longdecode as engine, p4longrates as rates
 
 ROOT = Path(__file__).resolve().parents[5]
 ORACLE = Path(os.environ.get("P4_NORMAL_LONG_ORACLE", str(ROOT / "working/p4-plan-0930/normal-long-rates-oracle-1003/oracle.py")))
@@ -38,8 +38,7 @@ def _preserve_costs():
             stream.write("\n")
 
 
-@pytest.fixture(scope="module")
-def oracle():
+def independent_encoder():
     if not ORACLE.is_file():
         pytest.skip("set P4_NORMAL_LONG_ORACLE to the private independent scalar oracle")
     spec = importlib.util.spec_from_file_location("normal_long_independent_oracle", ORACLE)
@@ -47,6 +46,11 @@ def oracle():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(scope="module")
+def oracle():
+    return independent_encoder()
 
 
 @pytest.mark.parametrize("sl,d,n,p", [(6,4140,517,1),(7,8280,1034,5),(8,12420,1552,1),(9,16560,2069,5),(10,20700,2587,1)])
@@ -121,8 +125,8 @@ def test_zero_and_incomplete_work_never_publish():
     assert zero.iterations_done == zero.crc_checks == zero.identity_count == 0
     for sl in rates.LEVELS:
         fields = rates.decode_fields(np.zeros(4968*(sl-5)),sl,max_work=0)
-        assert not fields.complete and fields.frame is None and fields.crc_checks == 0
-        assert fields.reason == "incomplete" and fields.modes_completed == ()
+        assert fields.complete and fields.frame is None and fields.crc_checks == 0
+        assert fields.reason == "no-hit" and fields.modes_completed == (sl,)
         assert fields.declared_modes == (sl,) and fields.iterations_done == 0
     incomplete = rates.decode_equalized(np.ones(4968),1,max_work=0)
     assert not incomplete.complete and incomplete.reason == 'incomplete'
@@ -153,15 +157,17 @@ def test_independent_clean_field_and_symbol_roundtrip(sl, oracle):
         assert decoded.declared_modes == (sl,)
         assert decoded.declared_iterations == 8
         assert decoded.identities == (decoded.frame,)
-        assert len(decoded.outcomes) == 8
+        assert len(decoded.outcomes) == 10
+        assert [o.method for o in decoded.outcomes] == ["systematic", "c1-only"] + ["turbo"] * 8
         assert all(o.crc_valid and o.padding_valid and o.flush_valid for o in decoded.outcomes)
         assert all(o.identity_index == 0 for o in decoded.outcomes)
         assert all(o.reencoding.full_hard_disagreements == 0 for o in decoded.outcomes)
         costs = dict(decoded.stage_seconds)
-        assert set(costs) == {"observe", "demap", "depuncture", "constituent-c1", "constituent-c2", "crc", "reencode"}
+        assert 'reencode' in costs
         assert all(value >= 0 and np.isfinite(value) for value in costs.values())
-        assert costs["depuncture"] > 0 and costs["constituent-c1"] > 0
-        assert costs["constituent-c2"] > 0 and costs["crc"] > 0 and costs["reencode"] > 0
+        assert all(costs[f'tier-{tier}-decode'] > 0 and costs[f'tier-{tier}-check'] > 0
+                   for tier in range(10))
+        assert costs['reencode'] > 0
         assert sum(costs.values()) <= decoded.elapsed_seconds
     assert result.coordinates.input_stage == "serialized-llrs"
     assert all(o.reencoding.normalized_complex_distance is None for o in result.outcomes)
@@ -179,35 +185,48 @@ def test_independent_clean_field_and_symbol_roundtrip(sl, oracle):
         ("c1-flush", g.systematic-3, g.systematic)]
 
 
+def _candidate_steps(monkeypatch, choose):
+    """Substitute decoded candidates at the shared engine's tier boundary."""
+    from hfmodem.shrike import p4longnative
+    monkeypatch.setattr(p4longnative, 'backend', None)
+    def step(g, fields, prior, first, tier):
+        calls = 0 if tier == 0 else 1 if tier in (1, 2) else 2
+        return choose(g.speedlevel, tier), prior, first, calls
+    monkeypatch.setattr(engine, '_member_step', step)
+
+
 def test_later_iteration_ambiguity_is_sticky(monkeypatch, oracle):
     a=oracle.generate(6,_payload(6,11001),1)
     b=oracle.generate(6,_payload(6,11002),2)
-    monkeypatch.setattr(rates,'_iterations_for',lambda fields,g,n:iter([a.systematic,b.systematic]+[a.systematic]*6))
-    result=rates.decode_fields(np.ones(4968),6)
+    _candidate_steps(monkeypatch, lambda sl, tier: b.systematic if tier == 3 else a.systematic)
+    # Both codewords have positive evidence in all three serialized regions.
+    fields = 1-2*np.asarray(a.fields, float) + 1-2*np.asarray(b.fields, float)
+    result=rates.decode_fields(fields,6)
     assert result.complete and result.reason=='ambiguous' and result.frame is None and result.identity_count==2
-    cut=rates.decode_fields(np.ones(4968),6,max_work=1)
+    cut=rates.decode_fields(fields,6,max_work=1)
     assert not cut.complete and cut.reason=='incomplete' and cut.identity_count==1 and cut.frame is None
-    cut2=rates.decode_fields(np.ones(4968),6,max_work=2)
+    cut2=rates.decode_fields(fields,6,max_work=2)
     assert not cut2.complete and cut2.reason=='incomplete' and cut2.identity_count==2 and cut2.frame is None
 
 
 def test_later_mode_ambiguity_and_duplicate_identity(monkeypatch, oracle):
     fixtures={sl:oracle.generate(sl,_payload(sl,12000+sl),1) for sl in (6,7)}
-    monkeypatch.setattr(rates,'_iterations_for',lambda fields,g,n:iter([fixtures[g.speedlevel].systematic]*n))
+    _candidate_steps(monkeypatch, lambda sl, tier: fixtures[sl].systematic)
+    monkeypatch.setattr(rates, 'demap', lambda z,n0,sl: 8*(1-2*np.asarray(fixtures[sl].fields,float)))
     result=rates.decode_equalized(np.ones(4968),1,speedlevels=(6,7))
     assert result.complete and result.reason=='ambiguous' and result.identity_count==2 and result.frame is None
     first=rates.decode_equalized(np.ones(4968),1,speedlevels=(6,))
     assert first.complete and first.identity_count==1 and first.frame is not None and first.iterations_done==8
     cut=rates.decode_equalized(np.ones(4968),1,speedlevels=(6,7),max_work=8)
-    assert not cut.complete and cut.identity_count==1 and cut.frame is None and cut.modes_completed==(6,)
+    assert not cut.complete and cut.identity_count==2 and cut.frame is None and cut.modes_completed==()
     assert len(result.identities) == 2
     assert result.identities[0].data != result.identities[1].data
     assert result.declared_modes == (6, 7)
-    assert len(result.outcomes) == 16
+    assert len(result.outcomes) == 20
     assert {o.identity_index for o in result.outcomes} == {0, 1}
-    assert cut.declared_modes == (6, 7) and len(cut.identities) == 1
+    assert cut.declared_modes == (6, 7) and len(cut.identities) == 2
     assert cut.identities[0] == first.frame
-    assert len(cut.outcomes) == cut.iterations_done
+    assert cut.iterations_done == 8 and len(cut.outcomes) == 12
 
 
 @pytest.mark.parametrize("bad", [True,-1,8,.5])
@@ -317,11 +336,29 @@ def test_c2_causally_repairs_fixed_systematic_erasures(oracle,monkeypatch):
     rng=np.random.default_rng(1210043)
     erased=rng.choice(8*rates.geometry(6).data_bytes,16,replace=False)
     fields[erased]=0
-    fields[4140:4554]=0
+    # Preserve positive C1 agreement while making its numerical influence
+    # negligible. Recovery must come from C2, rather than C1 observations.
+    fields[4140:4554] *= 1e-100
     good=rates.decode_fields(fields,6)
     assert good.complete and good.frame is not None and good.frame.data==_payload(6,1110043)
+    assert all(o.identity_index is None for o in good.outcomes if o.method != 'turbo')
+    no_c1 = fields.copy()
+    no_c1[4140:4554] = 0
+    unsupported = rates.decode_fields(no_c1, 6)
+    assert unsupported.complete and unsupported.frame is None and unsupported.identity_count == 0
+    no_c2 = fields.copy()
+    no_c2[4554:] = 0
+    erased_c2 = rates.decode_fields(no_c2, 6)
+    assert erased_c2.complete and erased_c2.frame is None and erased_c2.identity_count == 0
+    reversed_fields = fields.copy()
+    reversed_fields[4554:] = reversed_fields[4554:][::-1]
+    reversed_c2 = rates.decode_fields(reversed_fields, 6)
+    assert reversed_c2.complete and reversed_c2.frame is None and reversed_c2.identity_count == 0
     wrong=np.roll(rates.component_permutation(6),1)
-    monkeypatch.setattr(rates,'component_permutation',lambda sl:wrong)
+    from hfmodem.shrike import p4longnative
+    monkeypatch.setattr(p4longnative, 'backend', None)
+    original = engine._order
+    monkeypatch.setattr(engine, '_order', lambda sl: wrong if sl == 6 else original(sl))
     bad=rates.decode_fields(fields,6)
     assert bad.complete and bad.frame is None
 
@@ -337,8 +374,10 @@ def test_crc_without_declared_padding_or_flush_is_not_accepted(which,oracle,monk
     fixture=oracle.generate(6,_payload(6,1310043),1)
     wrong=np.asarray(fixture.systematic).copy()
     wrong[8*rates.geometry(6).net_bytes if which=='padding' else -1] ^= 1
-    monkeypatch.setattr(rates,'_iterations_for',lambda fields,g,n:iter([wrong]*n))
-    result=rates.decode_fields(np.ones(4968),6)
+    _candidate_steps(monkeypatch, lambda sl, tier: wrong)
+    result=rates.decode_fields(8*(1-2*np.asarray(fixture.fields,float)),6)
+    assert all(o.crc_valid for o in result.outcomes)
+    assert all(not o.padding_valid if which == 'padding' else not o.flush_valid for o in result.outcomes)
     assert result.complete and result.identity_count==0 and result.frame is None
 
 
@@ -403,35 +442,32 @@ def test_fixed_boundary_certainty_and_empty_path_against_oracle(length, oracle):
     assert (impossible > 0) == (length < 3)
 
 
-def test_zero_member_consumes_full_declared_work():
+def test_zero_member_retains_declared_domain_without_constituent_work():
     fields = np.zeros(4968)
-    result = rates.decode_fields(fields, 6)
-    assert result.complete and result.frame is None
-    assert result.iterations_done == result.crc_checks == 8
-    assert result.modes_completed == (6,)
-    refused = rates.decode_fields(fields, 6, max_work=7)
-    assert not refused.complete and refused.frame is None
-    assert refused.iterations_done == refused.crc_checks == 7
-    assert refused.modes_completed == ()
+    for budget in (None, 0, 7):
+        result = rates.decode_fields(fields, 6, max_work=budget)
+        assert result.complete and result.frame is None and result.reason == 'no-hit'
+        assert result.iterations_done == result.crc_checks == 0
+        assert result.modes_completed == result.declared_modes == (6,)
+        assert result.identities == result.outcomes == ()
 
 
 @pytest.mark.parametrize("budget", [0, 39, 40])
 def test_zero_llr_member_cannot_disappear_from_all_mode_domain(monkeypatch, budget):
-    visited = []
-    def candidates(fields, g, iterations):
-        assert not np.any(fields)
-        for iteration in range(iterations):
-            visited.append((g.speedlevel, iteration))
-            yield np.zeros(g.systematic, np.uint8)
-    monkeypatch.setattr(rates, "demap", lambda z, noise, sl: np.zeros(4968*rates.geometry(sl).width))
-    monkeypatch.setattr(rates, "_iterations_for", candidates)
+    observed = []
+    original = engine.LongSearch
+    def search(members, **kwargs):
+        observed.extend(members)
+        return original(members, **kwargs)
+    monkeypatch.setattr(engine, 'LongSearch', search)
+    monkeypatch.setattr(rates, 'demap', lambda z, noise, sl: np.zeros(4968*rates.geometry(sl).width))
     result = rates.decode_equalized(np.ones(4968), 1, max_work=budget)
     assert result.declared_modes == (6, 7, 8, 9, 10)
-    assert result.iterations_done == result.crc_checks == len(visited) == budget
-    assert result.complete == (budget == 40)
-    assert result.frame is None and result.identities == ()
-    assert result.modes_completed == tuple(range(6, 6+budget//8))
-    assert len(result.outcomes) == budget
+    assert tuple(m.geometry.speedlevel for m in observed) == result.declared_modes
+    assert all(not np.any(m.fields) for m in observed)
+    assert result.complete and result.frame is None and result.identities == ()
+    assert result.modes_completed == result.declared_modes
+    assert result.iterations_done == result.crc_checks == 0
 
 
 def test_reencoding_regions_and_distance_use_independent_full_codeword(oracle):
@@ -481,10 +517,28 @@ def test_zero_later_member_retains_earlier_identity_but_requires_completion(monk
     cut = rates.decode_equalized(fixture.symbols, 0.03, speedlevels=(6, 7), max_work=8)
     assert not cut.complete and cut.frame is None
     assert len(cut.identities) == 1 and cut.identities[0].data == _payload(6, 40102)
-    assert cut.modes_completed == (6,) and cut.iterations_done == 8
+    assert cut.modes_completed == () and cut.iterations_done == 8
     full = rates.decode_equalized(fixture.symbols, 0.03, speedlevels=(6, 7), max_work=16)
     assert full.complete and full.frame is not None
     assert full.frame == cut.identities[0]
     assert full.modes_completed == (6, 7)
-    assert full.iterations_done == full.crc_checks == 16
-    assert all(not o.crc_valid for o in full.outcomes[8:])
+    assert full.iterations_done == 16 and full.crc_checks == 20
+    assert all(not o.crc_valid for o in full.outcomes if o.speedlevel == 7)
+
+
+@pytest.mark.parametrize('sl', rates.LEVELS)
+def test_demap_mixed_underflow_marginals(sl):
+    from scipy.special import logsumexp
+    z = np.resize(np.array([1000+30j, -.8+.3j, 0j]), rates.SYMBOLS)
+    noise = .0001
+    actual = rates.demap(z, noise, sl).reshape(rates.SYMBOLS, sl-5)
+    points = rates.constellation(sl)
+    for logical in (0, 1, 101, 4967):
+        observed = z[rates.symbol_permutation()[logical]]
+        metrics = np.array([-abs(observed-point)**2/noise for point in points])
+        for column in range(sl-5):
+            bit = sl-6-column
+            zero = [i for i in range(len(points)) if not (i >> bit) & 1]
+            one = [i for i in range(len(points)) if (i >> bit) & 1]
+            expected = logsumexp(metrics[zero]) - logsumexp(metrics[one])
+            assert actual[logical, column] == pytest.approx(expected, rel=2e-12, abs=2e-6)

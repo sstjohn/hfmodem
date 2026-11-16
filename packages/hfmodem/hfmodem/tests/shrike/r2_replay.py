@@ -62,6 +62,10 @@ def canonical(value):
             row.pop('response_generation', None)
         if row.get('response_slot') is None:
             row.pop('response_slot', None)
+        if row.get('level') is None:
+            row.pop('level', None)
+        if row.get('final') is False:
+            row.pop('final')
         if row.get('peer_watch_generation') is None:
             row.pop('peer_watch_generation', None)
         if row.get('primary_packet_due') is None:

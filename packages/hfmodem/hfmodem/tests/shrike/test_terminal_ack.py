@@ -58,16 +58,21 @@ def test_peer_qrt_keeps_protocol_and_role_until_safe_ack_emission(tmp_path, clos
     assert len(bench.emissions) == 1
 
 
-def test_refused_terminal_ack_retries_without_pretending_close(tmp_path):
+@pytest.mark.parametrize("overlap", [None, "observed", "age"])
+def test_refused_terminal_ack_retries_without_pretending_close(tmp_path, overlap):
     host, rx, tx, grid, bench = harness(tmp_path)
+    if overlap is not None:
+        tx.p3_final_ack_overlap = overlap
     rx._on(_packet(spec.STATUS_QRT))
     onair._reverse_before_key(grid, host, tx, 48)
-    # Put the proposed ACK inside the next peer burst. The comb is held on the
-    # answer slot now, so what covers that slot is the burst this station read:
-    # the real CRC guard must refuse it, and that refusal cannot be reported as
-    # an emitted ACK.
+    # A new decode must establish the next burst; retaining the previous
+    # packet would exercise only a projection, not occupied air.
     at, safe_width, period, seen = grid._p3_peer
+    at += period
+    rx._on(_packet(spec.STATUS_QRT, phase=at))
     grid._p3_peer = (at, round(.95 * onair.FS), period, seen)
+    carrier = tx.boundary - round(tx.settle * onair.FS)
+    assert grid.key_refusal(carrier, 12000).kind == "observed"
     tx.emit_pending_cs()
     assert tx.refused and not bench.emissions
     assert host.arq.state == arq.State.DISCONNECTING
@@ -75,11 +80,33 @@ def test_refused_terminal_ack_retries_without_pretending_close(tmp_path):
     host.tick()
     # The peer repeats its close on its own raster, and that fresh CRC frame is
     # what re-validates the reply phase the guard invalidated.
+    tx.aim(grid, grid.next_slot(tx.slot))
     rx._on(_packet(spec.STATUS_QRT, phase=at + period))
     assert grid._p3_peer[1] == safe_width and not grid._p3_reply_phase_invalid
     tx.emit_pending_cs()
     assert len(bench.emissions) == 1 and not tx.refused
+    assert bench.keyed_at > at + period + safe_width
     assert host.arq.state == arq.State.DISCONNECTED
+
+
+@pytest.mark.parametrize("age", [0, 1])
+@pytest.mark.parametrize("overlap", [None, "observed", "age"])
+def test_terminal_ack_ignores_projected_overlap_from_retained_packet(tmp_path, age, overlap):
+    host, rx, tx, grid, bench = harness(tmp_path)
+    if overlap is not None:
+        tx.p3_final_ack_overlap = overlap
+    rx._on(_packet(spec.STATUS_QRT, phase=300000))
+    onair._reverse_before_key(grid, host, tx, 6)
+    assert host.arq._rx_close_pending and host.arq.role == arq.IRS
+    assert grid._p3_peer[:3] == (300000, 38880, 60000)
+    grid.cycles += age
+    # Recovery can advance the carrier to a projected copy without advancing
+    # the cycle counter; neither age proves that the peer transmitted again.
+    refusal = grid.key_refusal(360001, 12000)
+    assert refusal.kind == "projected"
+    assert tx._refused(360001, 12000, "FINAL ACK") is (overlap == "age")
+    assert tx.refused is (overlap == "age")
+    assert host.arq._rx_close_pending and not bench.emissions
 
 
 @pytest.mark.parametrize("long_cycle", [False, True])

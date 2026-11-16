@@ -48,7 +48,7 @@ def test_ws8eoc_1918_reply_moves_onto_the_accepted_instant():
 
 
 def test_the_long_answer_stays_two_slots_on():
-    assert round((onair.P3_LONG_REPLY_S - onair.P3_REPLY_S) * FS) == 2 * CYCLE
+    assert round((onair.P3_COMB_LONG_REPLY_S - onair.P3_COMB_REPLY_S) * FS) == 2 * CYCLE
 
 
 def changeover(host, *, seq=0):
@@ -86,13 +86,13 @@ def faded_grid():
         g.note_p3_packet(peer0 + k * CYCLE, PACKET_N, CYCLE, identity=IDENTITY)
         g.cycles += 1
     assert g._p3_raster_corroborated
-    slot0 = (peer0 + round(onair.P3_REPLY_S * FS) - g.anchor) // CYCLE
+    slot0 = (peer0 + round(onair.P3_COMB_REPLY_S * FS) - g.anchor) // CYCLE
     return g, peer0, slot0
 
 
 def unread_window(g, peer0, k):
     """Where 1910's answer window opened, d 55 ms after our CS1 ended."""
-    return peer0 + k * CYCLE + round((onair.P3_REPLY_S + 0.236 + 0.055) * FS)
+    return peer0 + k * CYCLE + round((onair.P3_COMB_REPLY_S + 0.236 + 0.055) * FS)
 
 
 def test_ve3kpg_1910_without_peer_energy_the_corroborated_comb_still_keys():
@@ -125,7 +125,7 @@ def test_the_unread_reading_reaches_the_raster_only_when_the_peer_owes_a_packet(
     assert a.peer_qualified
 
     hold = 20
-    ours_end = peer0 + hold * CYCLE + round((onair.P3_REPLY_S + 0.236) * FS)
+    ours_end = peer0 + hold * CYCLE + round((onair.P3_COMB_REPLY_S + 0.236) * FS)
     seg_start = ours_end + round(0.020 * FS)
     seg = np.zeros(CYCLE // 2, np.float32)
     onair._report_answer_band(onair._AnswerBand(), host, g, seg,
@@ -176,7 +176,7 @@ def test_prior_row_history_cannot_substitute_for_current_peer_qualification(monk
             assert not a.qualify_peer(token, a._link_generation, "unit-short-header")
     assert not a.peer_qualified
     hold = 20
-    ours_end = peer0 + hold * CYCLE + round((onair.P3_REPLY_S + 0.236) * FS)
+    ours_end = peer0 + hold * CYCLE + round((onair.P3_COMB_REPLY_S + 0.236) * FS)
     seg_start = ours_end + round(0.020 * FS)
     seg = np.zeros(CYCLE // 2, np.float32)
     before = g._p3_heard_at

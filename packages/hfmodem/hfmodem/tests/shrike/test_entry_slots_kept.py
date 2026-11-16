@@ -148,11 +148,11 @@ def _cycle(prekey_n: int, offset_hz: float, *, forgive: bool = True):
     """
     real_regrid, real_forgive = onair._regrid, onair._clamp_forgives
 
-    def charged(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n):
+    def charged(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n, **kwargs):
         sessrx.p3_receive_offset_hz = offset_hz
         live.spend(prekey_n)
         return real_regrid(live, raster, tx, host, sessrx, slot, seg, seg_start,
-                           settle_n)
+                           settle_n, **kwargs)
 
     onair._regrid = charged
     if not forgive:

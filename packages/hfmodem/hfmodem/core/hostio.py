@@ -120,9 +120,9 @@ class Connection:
     def settimeout(self, value):
         self.sock.settimeout(0.5 if value is None else min(0.5, max(0.01, value)))
 
-    def join_workers(self, timeout=2.):
+    def join_workers(self, timeout=2., *, deadline=None):
         """Verify retirement before a supervisor releases this attachment."""
-        deadline = time.monotonic()+timeout
+        deadline = time.monotonic()+timeout if deadline is None else deadline
         for worker in (self._writer, self._delivery_thread, self._opening_thread):
             if worker is not None and worker is not threading.current_thread():
                 worker.join(max(0., deadline-time.monotonic()))

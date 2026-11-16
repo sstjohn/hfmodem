@@ -71,7 +71,7 @@ def lifecycle(managed, recovery):
     tx = Tx(live)
     tx.settle = .025
     tx.p4_probe.emissions, tx.p4_probe.peer_breakin = [], True
-    tx.p4_link_options.p4_ladder, tx.p4_link_options.p4_data = 'none','body'
+    tx.p4_link_options.p4_data = 'body'
     tx.p4_link_options.p4_link_timeout = (stop-start)/FS
     tx.p4_link_host.arq.on_host_data(b'TEST\r')
     rx = tx.sessrx.p4
@@ -181,6 +181,8 @@ def test_d1_actual_driver_empty_cooldown_slot():
     assert tx.p4_link_host.arq.tx_acked_bytes == 0 and not m.outbox.inflight
     assert bytes(tx.p4_link_host.arq._outbuf) == b'TEST\r'
 
+# The live link bounds LONG work by the wall clock, so a loaded host changes what it decides.
+@pytest.mark.realtime
 @pytest.mark.parametrize('managed',[False,True])
 @pytest.mark.parametrize('recovery',['continuation','exhaustion'])
 def test_c3_real_recovery_rejects_frozen_initial_and_final_guard(managed,recovery):
@@ -193,7 +195,7 @@ def test_c3_real_recovery_rejects_frozen_initial_and_final_guard(managed,recover
     assert cells['proposal'] is captured and guard.__code__.co_freevars == tuple(cells)
     assert all(c.cell_contents is cells[n] for n,c in zip(guard.__code__.co_freevars,guard.__closure__))
     assert hashlib.sha256(guard.__code__.co_code).hexdigest()
-    answer = 'T27' if recovery=='continuation' else 'X27'
+    answer = 'X27'
     assert any(p.word==answer and p.state==p4turn.State.IRS_ANSWER for p in keys)
     if recovery=='exhaustion':
         assert counts[:5] == [0,1,2,3,4]

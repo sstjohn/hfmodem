@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
-"""The recorded WS8EOC long-cycle prompt must give queued mail a turn."""
+"""Repeats of a packet we acked are acked again; idle and invitations give queued mail a turn."""
 
 from pathlib import Path
 from dataclasses import replace
@@ -18,7 +18,7 @@ from hfmodem.tests.shrike.test_p4turn import machine
 from hfmodem.tests.shrike.p4_nak_qam_support import neutral_keys
 
 
-def test_2142_repeated_chirp_prompt_requests_mail_turn_within_four_cycles(monkeypatch):
+def test_2142_repeated_chirp_prompt_is_acked_again(monkeypatch):
     path = stored(CAPTURES / 'onair-1002-2142' / 'stream.flac')
     manifest = Path(__file__).with_name('fixtures') / 'prompt-repeat-1002' / 'external.json'
     checked_record(path, manifest)
@@ -39,8 +39,8 @@ def test_2142_repeated_chirp_prompt_requests_mail_turn_within_four_cycles(monkey
     tx.settle = .0435
     tx.p4_probe.emissions.clear()
     options = tx.p4_link_options
-    options.p4_data, options.p4_ladder, options.p4_normal_ack = 'body', 'none', 'parity'
-    options.p4_hold_cycles, options.p4_breakin, options.p4_chirp_ack = 16, 'body', 'alternate'
+    options.p4_data, options.p4_normal_ack = 'body', 'parity'
+    options.p4_hold_cycles, options.p4_breakin, options.p4_chirp_ack = 16, 'body', 'toggle'
     options.p4_link_timeout = len(audio) / FS
     tx.p4_link_host.arq.on_host_data(proposal)
     receiver = tx.sessrx.p4
@@ -67,13 +67,13 @@ def test_2142_repeated_chirp_prompt_requests_mail_turn_within_four_cycles(monkey
               if o.kind == Kind.CHIRP and o.frame is not None]
     assert all(f.status.byte == 0x03 and f.data == b' >\r' + b'\x1e' * 19
                for f in frames), 'all decoded fields must be the identical recorded c3 prompt'
+    # A break-in on a repeat we had acked went unanswered (WS8EOC 02:06Z,
+    # 04:48Z). On this arm the gateway gave the turn itself after the prompt
+    # repeats, with an 0x40 long at 151.012 (log :610).
     sent = [e for e in tx.p4_probe.link_events if e['event'] == 'Keyed']
-    summary = [(e['at'], e.get('state'), e.get('word')) for e in sent]
-    assert any(e.get('state') == p4turn.State.IRS_BREAKIN or e.get('payload')
-               for e in sent), (
-        f'queued proposal never gets a turn in four recorded chirp cycles: {summary}; '
-        f'buffered={tx.p4_link_host.arq._buffer_raw}; '
-        f'acked-repeat={sum(e["event"] == "acked-repeat" for e in machines[0].link_events)}')
+    assert sent and all((e['kind'], e.get('state'), e.get('word')) == (Kind.WORD, p4turn.State.IRS_ANSWER, 'X27')
+                        for e in sent), sent
+    assert sum(e['event'] == 'acked-repeat' for e in machines[0].link_events) == len(sent) - 1
 
 
 def answer(m, at, counter, data=b'peer bytes', protocol=0, *, valid=True):
@@ -85,8 +85,8 @@ def answer(m, at, counter, data=b'peer bytes', protocol=0, *, valid=True):
 
 
 @pytest.mark.parametrize('queued,allowed', [(True, True), (False, True), (True, False)])
-def test_counter_repeat_requires_queued_permitted_mail(queued, allowed):
-    m, a = machine(role='irs', data='body', ladder='none')
+def test_counter_repeat_is_acked_again_with_or_without_mail(queued, allowed):
+    m, a = machine(role='irs', data='body')
     m.first_body = False
     m.allow_breakin = allowed
     if queued:
@@ -95,15 +95,12 @@ def test_counter_repeat_requires_queued_permitted_mail(queued, allowed):
     assert first.kind == Kind.WORD and first.state == p4turn.State.IRS_ANSWER
     m.keyed()
     second = answer(m, FS+round(1.25*FS), 0, b'different bytes')
-    assert (second.state == p4turn.State.IRS_BREAKIN) is (queued and allowed)
-    if queued and allowed:
-        assert second.kind == Kind.BODY and second.status == 0x40
-    else:
-        assert second.kind == Kind.WORD
+    # WS8EOC 02:06Z, 04:48Z: a break-in on a repeat we had acked went unanswered.
+    assert (second.kind, second.word, second.state) == (Kind.WORD, first.word, p4turn.State.IRS_ANSWER)
 
 
 def test_advancing_counter_and_continuation_defer_request():
-    m, a = machine(role='irs', data='body', ladder='none')
+    m, a = machine(role='irs', data='body')
     m.first_body = False
     a.on_host_data(b'outbound')
     cycle = round(1.25*FS)
@@ -112,13 +109,15 @@ def test_advancing_counter_and_continuation_defer_request():
         assert p.kind == Kind.WORD and p.state == p4turn.State.IRS_ANSWER
         m.keyed()
     p = answer(m, FS+5*cycle, 2, b'other bytes')
+    assert p.kind == Kind.WORD and p.state == p4turn.State.IRS_ANSWER
+    p = answer(m, FS+6*cycle, 3, b'\x1e'*40)
     assert p.kind == Kind.BODY and p.state == p4turn.State.IRS_BREAKIN
 
 
 @pytest.mark.parametrize('protocol', [0, 2])
 @pytest.mark.parametrize('queued,allowed', [(True, True), (False, True), (True, False)])
 def test_link_idle_or_turn_invitation_requests_immediately(protocol, queued, allowed):
-    m, a = machine(role='irs', data='body', ladder='none')
+    m, a = machine(role='irs', data='body')
     m.allow_breakin = allowed
     if queued:
         a.on_host_data(b'outbound')
@@ -134,44 +133,42 @@ def test_link_idle_or_turn_invitation_requests_immediately(protocol, queued, all
 
 
 def test_explicit_y27_request_uses_bare_word():
-    m, a = machine(role='irs', data='body', ladder='none', breakin='y27')
+    m, a = machine(role='irs', data='body',  breakin='y27')
     a.on_host_data(b'outbound')
     first = answer(m, FS, 0)
     assert first.kind == Kind.WORD
     m.keyed()
-    p = answer(m, FS+round(1.25*FS), 0)
+    p = answer(m, FS+round(1.25*FS), 1, b'\x1e'*40)
     assert p.kind == Kind.WORD and p.word == 'Y27'
     assert p.state == p4turn.State.IRS_BREAKIN
 
 
 @pytest.mark.parametrize('data', [b'F>\r', b'body\x1e'])
 def test_source_bytes_and_trailing_padding_do_not_classify_idle(data):
-    m, a = machine(role='irs', data='body', ladder='none')
+    m, a = machine(role='irs', data='body')
     a.on_host_data(b'outbound')
     p = answer(m, FS, 0, data)
     assert p.kind == Kind.WORD and p.state == p4turn.State.IRS_ANSWER
 
 
 def test_unread_or_crc_bad_packet_cannot_start_repeat_request():
-    m, a = machine(role='irs', data='body', ladder='none')
+    m, a = machine(role='irs', data='body')
     a.on_host_data(b'outbound')
     wire = bytearray(p4frame.encode_field(b'peer bytes'.ljust(40, b'\x1e'),
                                             p4frame.Status.from_byte(0)))
     wire[-1] ^= 1
     assert p4frame.decode_field(bytes(wire), data_bytes=40) is None
-    history_names=('ack_word','acked_counter','_last_ack','_last_body_ack',
-                   '_held_answer','_packet_ack')
+    history_names=('_ack_chain','acked_counter','_last_ack','_last_body_ack',
+                   '_held_answer','_ack_chain')
     queued=(bytes(a._outbuf),a._buffer_raw,a._inflight,m.outbox.inflight,m.counter)
     def unread(at,held):
         history=tuple(getattr(m,n) for n in history_names)
         request=answer(m,at,0,valid=False)
-        # An unread NORMAL repeats the held answer (or the V27 seed), but
-        # cannot acquire a mail turn or credit the unread slot.
-        word,identity,reason=(held.word,held.ack_identity,held.ack_reason) if held else ('V27',None,None)
+        word = held.word if held else 'V27'
         assert (request.kind,request.state,request.word,request.purpose)==(
-            Kind.WORD,p4turn.State.IRS_ANSWER,word,None)
-        assert request.payload==b'' and request.ack_identity==identity
-        assert request.ack_reason==reason and request.responds_to is None
+            Kind.WORD,p4turn.State.IRS_ANSWER,word,'repeat-request')
+        assert request.payload==b'' and request.ack_identity is None
+        assert request.ack_reason is None and request.responds_to is None
         assert not request.current_slot_accepted and request.current_slot==at
         assert tuple(getattr(m,n) for n in history_names)==history
         with neutral_keys() as neutral:
@@ -190,24 +187,25 @@ def test_unread_or_crc_bad_packet_cannot_start_repeat_request():
 
 @pytest.mark.parametrize('accepted_first',[False,True])
 def test_refused_unread_request_cannot_establish_ack_or_mail_turn(accepted_first):
-    m,a=machine(role='irs',data='body',ladder='none')
+    m,a=machine(role='irs',data='body',)
     a.on_host_data(b'queued refusal control')
     if accepted_first:
         ordinary=answer(m,FS,0)
         assert ordinary.purpose is None and ordinary.ack_identity is not None
         m.keyed()
     last=m.last
-    names=('ack_word','acked_counter','_last_ack','_last_body_ack','_held_answer',
-           '_packet_ack','counter','breakins','grants','first_body')
+    names=('_ack_chain','acked_counter','_last_ack','_last_body_ack','_held_answer',
+           '_ack_chain','counter','breakins','grants','first_body')
     history=tuple(getattr(m,n) for n in names)
     queued=(bytes(a._outbuf),a._buffer_raw,a._inflight,m.outbox.inflight)
     request=answer(m,FS+round(1.25*FS),0,valid=False)
-    assert request.purpose is None and request.state==p4turn.State.IRS_ANSWER
+    assert request.purpose == 'repeat-request'
+    assert request.state==p4turn.State.IRS_ANSWER
     assert request.kind==Kind.WORD and request.payload==b''
     assert not request.current_slot_accepted
     assert request.word==(ordinary.word if accepted_first else 'V27')
-    assert request.ack_identity==(ordinary.ack_identity if accepted_first else None)
-    assert request.ack_reason==(ordinary.ack_reason if accepted_first else None)
+    assert request.ack_identity is None
+    assert request.ack_reason is None
     m.refused('deadline')
     assert m.last is last and m.state==p4turn.State.IRS_ANSWER
     assert tuple(getattr(m,n) for n in names)==history
@@ -215,7 +213,7 @@ def test_refused_unread_request_cannot_establish_ack_or_mail_turn(accepted_first
 
 
 def test_repeat_requests_are_idempotent_and_bounded():
-    m, a = machine(role='irs', data='body', ladder='none')
+    m, a = machine(role='irs', data='body')
     a.on_host_data(b'outbound')
     cycle = round(1.25*FS)
     first = answer(m, FS, 0)
@@ -223,11 +221,11 @@ def test_repeat_requests_are_idempotent_and_bounded():
     m.keyed()
     for i in range(1, 5):
         at = FS+i*cycle
-        p = answer(m, at, 0)
+        p = answer(m, at, 1, b'\x1e'*40)
         assert p is m.decide(at+round(.920*FS)-m.lead)
         assert p.kind == Kind.BODY and p.status == 0x40
         m.keyed()
         assert m.breakins == i
-    answer(m, FS+5*cycle, 0)
+    answer(m, FS+5*cycle, 1, b'\x1e'*40)
     assert m.state == p4turn.State.DOWN
     assert m.breakins == 4

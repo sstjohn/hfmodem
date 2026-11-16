@@ -21,7 +21,7 @@ from hfmodem.tests.shrike import p4_stock_peer as stock
 def test_iss_word_parity_property():
     for counter in range(4):
         for name in ('X27', 'V27', 'T27', 'U27', 'Z27', 'Y27'):
-            m, a = machine(data='body', ladder='none')
+            m, a = machine(data='body',  normal_ack='parity')
             a.on_host_data(b'packet')
             m.counter = counter
             m._data(0)
@@ -134,7 +134,7 @@ def test_recorded_x27_repeat_through_real_iss_data_driver(monkeypatch, arm):
     tx.p4_probe.emissions.clear()
     tx.p4_probe.handoff_audio = stream.pos-FS, audio[stream.pos-FS:stream.pos].copy()
     tx.p4_link_options.p4_data = 'body'
-    tx.p4_link_options.p4_ladder = 'none'
+
     tx.p4_link_options.p4_normal_ack = 'parity'
     tx.p4_link_options.p4_link_timeout = 9
     tx.p4_link_host.arq.on_host_data(b''.join(bytes.fromhex(e['payload']) for e in bodies[:3])+b'end'*30)
@@ -157,11 +157,14 @@ def test_recorded_x27_repeat_through_real_iss_data_driver(monkeypatch, arm):
     tx._tx = transmit_audio
     keyed = P4Turn.keyed
     def peer(turn, at=None):
+        prev = turn.last
         p = keyed(turn, at)
         if p.payload:
             sent.append(p)
             if p.kind == Kind.NORMAL:
-                np.testing.assert_array_equal(waves[-1], p4shorttx.short_packet(p.payload, p.status))
+                # Stock keys header B on every copy after a packet's first.
+                again = prev is not None and prev.kind == Kind.NORMAL and prev.status == p.status
+                np.testing.assert_array_equal(waves[-1], p4shorttx.short_packet(p.payload, p.status, header="B" if again else "A"))
             if abs(p.stream_sample-(first+3*CYCLE)) < FS//100:
                 rx.cfo_hz = 0.
                 wave = stock.word('V27')
@@ -197,7 +200,7 @@ def test_recorded_refusals_end_data_loop_without_settlement(monkeypatch, arm, co
     tx.p4_probe.emissions.clear()
     tx.p4_probe.handoff_audio = stream.pos-FS, audio[stream.pos-FS:stream.pos].copy()
     tx.p4_link_options.p4_data = 'body'
-    tx.p4_link_options.p4_ladder = 'none'
+
     tx.p4_link_options.p4_link_timeout = 15
     tx.p4_link_host.arq.on_host_data(payload)
     rx = tx.sessrx.p4
@@ -241,9 +244,9 @@ def test_recorded_refusals_end_data_loop_without_settlement(monkeypatch, arm, co
 
 @pytest.mark.parametrize('speculative', [False, True])
 def test_deferred_iss_data_ack_resolution_requires_parity(speculative):
-    m, a = machine(data='body', ladder='long')
+    m, a = machine(data='long')
     a.on_host_data(b'packet')
-    m._data(0, State.ISS_DATA_ACK)
+    m._data(0, State.ISS_DATA_ACK, Kind.BODY)
     m.keyed()
     early = word('X27' if speculative else 'V27', T, partial=True, responds_to=0)
     m.observe(early)

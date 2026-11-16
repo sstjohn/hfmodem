@@ -57,10 +57,10 @@ def test_retaining_the_raster_does_not_waive_age_or_turnaround_guards():
 def test_saved_raster_does_not_keep_a_receiving_collision_guard_alive():
     grid = _arm30_grid()
     grid.sending = False
-    assert grid._peer_air() is not None
+    assert grid._peer_air_evidence() is not None
     grid.update([], linked=True)
     assert grid.peer_at == 5473296
-    assert grid._peer_air() is None
+    assert grid._peer_air_evidence() is None
 
 
 @pytest.mark.parametrize("changeover", (False, True))

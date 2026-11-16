@@ -117,6 +117,7 @@ def test_p3_bare_words_do_not_turn_retained_p1_turnaround_into_a_reply_clock(tmp
     g.protocol = spec.Protocol.PACTOR3
     g._p3_peer_confirmed = True
     tx = onair.RadioTx(_Rig(), transmit=True, out_dev=0, outdir=tmp_path, settle=.04)
+    tx.p3_breakin_unplaced = "held"  # the default keys slot 12's answer instead
     host = ptc.PtcHost(peer=tx, mycall="W9SSJ")
     tx.host = host
     tx.live = bench = _Bench()

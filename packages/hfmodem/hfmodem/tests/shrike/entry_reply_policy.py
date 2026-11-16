@@ -38,8 +38,8 @@ def observe_entry_policy():
         evidence['host'] = sessrx.host
         return result
 
-    def grid(live, raster, tx, host, sessrx, slot, audio, origin, settle):
-        result = regrid(live, raster, tx, host, sessrx, slot, audio, origin, settle)
+    def grid(live, raster, tx, host, sessrx, slot, audio, origin, settle, **kwargs):
+        result = regrid(live, raster, tx, host, sessrx, slot, audio, origin, settle, **kwargs)
         evidence['refused'].update(s for s in range(slot, result[0])
                                    if s not in tx.slots_used)
         return result

@@ -482,7 +482,7 @@ def test_station_runtime_wires_server_queue_and_releases_retired_claimant(monkey
         claim_contact=lambda protocol, token, **kw: token or object(),
         release_contact=lambda protocol, token: released.append(token))
     station = SimpleNamespace(arbiter=arbiter, audio=SimpleNamespace(samples=0))
-    def emit(samples, bandwidth, *, on_ptt, responding, marks):
+    def emit(samples, bandwidth, *, on_ptt, responding, marks, authority, fence):
         reserved.append(bandwidth)
         on_ptt(True)
         for k in range(len(marks[0])):

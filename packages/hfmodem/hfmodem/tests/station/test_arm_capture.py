@@ -287,7 +287,8 @@ def test_capture_records_callback_loss_and_overflow_with_contiguous_indices(tmp_
     samples = np.zeros((128, 1), np.float32)
     for stamp, overflow in [(1., False), (1.+256/48000, True)]:
         audio._callback(samples, np.zeros_like(samples), 128,
-                        SimpleNamespace(inputBufferAdcTime=stamp, outputBufferDacTime=stamp),
+                        SimpleNamespace(currentTime=stamp, inputBufferAdcTime=stamp,
+                                        outputBufferDacTime=stamp),
                         SimpleNamespace(input_overflow=overflow))
     assert audio.failure is None
     capture.close()

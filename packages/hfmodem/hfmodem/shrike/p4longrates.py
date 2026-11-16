@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
-"""Standalone, placed normal-LONG SL6--10 diagnostics. No live receiver dispatch.
+"""Placed normal-LONG SL6--10 diagnostics and live receiver dispatch.
 
 Constants are immutable generated arrays. The symbol noise parameter
 is complex power E|n|**2 (each real axis has variance noise/2). Body-derived
@@ -16,7 +16,8 @@ import time
 import numpy as np
 from scipy.special import logsumexp
 
-from . import p4c2, tablegen, p4coding, p4decode, p4frame, p4long, p4normal, p4rx
+from . import p4c2, tablegen, p4coding, p4frame, p4long, p4normal, p4rx
+from . import p4longdecode
 
 LEVELS = (6, 7, 8, 9, 10)
 SYMBOLS = 4968
@@ -108,21 +109,75 @@ def _noise(value):
     return float(value)
 
 
+@lru_cache(maxsize=None)
+def _demap_groups(speedlevel):
+    """Both bit classes, so tiny complements are never formed by subtraction."""
+    g = geometry(speedlevel)
+    labels = np.arange(1 << g.width)
+    groups = np.column_stack([
+        ((labels >> bit) & 1) == value
+        for bit in range(g.width - 1, -1, -1) for value in (0, 1)
+    ]).astype(float)
+    return np.frombuffer(groups.tobytes(), dtype=float).reshape(groups.shape)
+
+
 def demap(symbols, noise, speedlevel):
     """Return field-order, MSB label LLRs; positive values mean bit zero."""
     g = geometry(speedlevel)
     z, n0 = _symbols(symbols), _noise(noise)
     points = constellation(speedlevel)
-    metrics = -(np.abs(z[:, None] - points) ** 2) / n0
+    # The symbol-only energy cancels in every bit-class likelihood ratio.
+    metrics = (2 * (z.real[:, None] * points.real + z.imag[:, None] * points.imag)
+               - np.abs(points)**2) / n0
     if not np.all(np.isfinite(metrics)):
         raise ValueError("demapper metric overflow")
-    labels = np.arange(1 << g.width)
-    llr = np.column_stack([
-        logsumexp(metrics[:, ((labels >> bit) & 1) == 0], axis=1)
-        - logsumexp(metrics[:, ((labels >> bit) & 1) == 1], axis=1)
-        for bit in range(g.width - 1, -1, -1)
-    ])
+    if g.width == 1:
+        # Each bit class has one point, so no log-sum-exp is needed.
+        llr = (metrics[:, :1] - metrics[:, 1:2])
+    else:
+        # Every bit class shares the row normalization. Exponentiate each
+        # constellation likelihood once, rather than once per label bit.
+        weights = np.exp(metrics - np.max(metrics, axis=1)[:, None])
+        sums = weights @ _demap_groups(speedlevel)
+        paired = sums.reshape(len(z), g.width, 2)
+        stable = np.all(paired >= np.finfo(float).tiny, axis=2)
+        logs = np.log(np.maximum(paired, np.finfo(float).tiny))
+        llr = logs[:, :, 0] - logs[:, :, 1]
+        # Extreme finite inputs may underflow one whole bit class under
+        # the shared normalization. Preserve separately shifted sums.
+        if not np.all(stable):
+            labels = np.arange(1 << g.width)
+            for column, bit in enumerate(range(g.width - 1, -1, -1)):
+                missing = ~stable[:, column]
+                if not np.any(missing):
+                    continue
+                subset = -abs(z[missing, None] - points)**2 / n0
+                llr[missing, column] = (
+                    logsumexp(subset[:, ((labels >> bit) & 1) == 0], axis=1)
+                    - logsumexp(subset[:, ((labels >> bit) & 1) == 1], axis=1))
     return llr[symbol_permutation()].ravel()
+
+
+def build_members(observed):
+    """Rank the complete normal domain using one training-fixed noise model."""
+    noise = max(observed.noise(6), 1e-12)
+    subset = observed.symbols[::16]
+    ranked = []
+    for sl in range(5, 11):
+        points = constellation(max(6, sl))
+        metrics = -abs(subset[:, None] - points)**2 / noise
+        score = float(np.mean(logsumexp(metrics, axis=1) - np.log(len(points))))
+        ranked.append((score, sl))
+    fields = {}
+    members = []
+    for _, sl in sorted(ranked, key=lambda row: (-row[0], row[1])):
+        modulation = max(6, sl)
+        if modulation not in fields:
+            fields[modulation] = demap(observed.symbols, noise, modulation)
+        for polarity in ((1, -1) if sl <= 6 else (1,)):
+            members.append(p4longdecode.LongMember(p4longdecode.geometry(sl),
+                fields[modulation] * polarity, polarity=polarity, weighting='pilot'))
+    return tuple(members)
 
 
 @dataclass(frozen=True)
@@ -191,13 +246,7 @@ class IterationOutcome:
     flush_valid: bool
     identity_index: int | None
     reencoding: ReencodingDiagnostic | None
-
-
-@dataclass(frozen=True)
-class _Iteration:
-    bits: np.ndarray = field(repr=False)
-    depuncture_seconds: float
-    constituent_seconds: tuple
+    method: str = "turbo"
 
 
 def _check_frame(bits, g):
@@ -209,11 +258,6 @@ def _check_frame(bits, g):
     termination = p4coding.rsc_terminate(encoded.final_state)
     flush_ok = bool(np.array_equal(bits[-3:], termination.systematic))
     return decoded, padding_ok, flush_ok
-
-
-def _frame(bits, g):
-    decoded, padding_ok, flush_ok = _check_frame(bits, g)
-    return decoded if padding_ok and flush_ok else None
 
 
 def _reencoding(bits, g, fields, symbols):
@@ -253,89 +297,64 @@ def _reencoding(bits, g, fields, symbols):
                                 distance(0, len(coded)))
 
 
-def _iterations_for(fields, g, iterations):
-    started = time.monotonic()
-    n = g.systematic
-    systematic = fields[:n]
-    p1, p2 = np.zeros(n), np.zeros(n)
-    p1[::10] = fields[n:n + g.parity_each]
-    p2[4::10] = fields[n + g.parity_each:]
-    order = component_permutation(g.speedlevel)
-    prior = np.zeros(n)
-    depuncture = time.monotonic() - started
-    for _ in range(iterations):
-        started = time.monotonic()
-        first = p4decode.component_decode(systematic, p1, prior,
-                                         end_state=0, initial_state=0)
-        first_seconds = time.monotonic() - started
-        started = time.monotonic()
-        second = p4decode.component_decode(systematic[order], p2,
-                                          first.extrinsic[order], initial_state=0)
-        second_seconds = time.monotonic() - started
-        prior[order] = second.extrinsic
-        bits = np.empty(n, np.uint8)
-        bits[order] = second.posterior < 0
-        yield _Iteration(bits, depuncture, (first_seconds, second_seconds))
-        depuncture = 0.0
-
-
 def _decode(members, iterations, max_work, started, *, declared_modes=None,
             symbols=None, coordinates=None, noise_diagnostics=(),
             observation=None, stage_seconds=None):
-    found, completed, outcomes = {}, [], []
-    costs = {name: 0.0 for name in ("observe", "demap", "depuncture",
-             "constituent-c1", "constituent-c2", "crc", "reencode")}
-    if stage_seconds:
-        costs.update(stage_seconds)
-    # Every declared member is retained even if its LLR vector is all zero.
+    """Adapt the shared exhaustive engine result to the diagnostic API.
+
+    Work is measured in member turbo iterations: two constituent calls
+    per work unit. The engine admits complete tiers across the whole domain,
+    and also reports systematic and C1-only outcomes explicitly.
+    """
     members = tuple(members)
     domain = tuple(g.speedlevel for g, _ in members) if declared_modes is None else tuple(declared_modes)
-    work = checks = 0
-    def result(complete, reason):
-        frames = tuple(found.values())
-        return DecodeResult(complete, reason,
-            frames[0] if complete and len(frames) == 1 else None,
-            len(frames), tuple(completed), work, checks, time.monotonic()-started,
-            domain, iterations, frames, tuple(outcomes), tuple(costs.items()),
-            coordinates, tuple(noise_diagnostics), observation)
-    for g, fields in members:
-        stream = _iterations_for(fields, g, iterations)
-        for iteration in range(1, iterations + 1):
-            if max_work is not None and work >= max_work:
-                return result(False, "incomplete")
-            step = next(stream)
-            if isinstance(step, _Iteration):
-                bits = step.bits
-                costs["depuncture"] += step.depuncture_seconds
-                costs["constituent-c1"] += step.constituent_seconds[0]
-                costs["constituent-c2"] += step.constituent_seconds[1]
-            else:
-                bits = step  # controlled candidate-stream substitution in tests
-            work += 1
-            checked = time.monotonic()
-            frame, padding_ok, flush_ok = _check_frame(bits, g)
-            costs["crc"] += time.monotonic() - checked
-            checks += 1
-            identity_index = None
-            diagnostic = None
-            if frame is not None:
-                encoded = time.monotonic()
-                diagnostic = _reencoding(bits, g, fields, symbols)
-                costs["reencode"] += time.monotonic() - encoded
-                if padding_ok and flush_ok:
-                    key = (frame.data, frame.status.byte, frame.crc)
-                    if key not in found:
-                        found[key] = frame
-                    identity_index = tuple(found).index(key)
-            outcomes.append(IterationOutcome(g.speedlevel, iteration,
-                frame is not None, padding_ok, flush_ok, identity_index, diagnostic))
-        completed.append(g.speedlevel)
-    reason = "unique" if len(found) == 1 else "ambiguous" if found else "no-hit"
-    return result(True, reason)
+    canonical = tuple(p4longdecode.LongMember(p4longdecode.geometry(g.speedlevel), fields)
+                      for g, fields in members)
+    search = p4longdecode.LongSearch(canonical, policy='exhaustive', iterations=iterations,
+                                   component_budget=None if max_work is None else 2 * max_work)
+    result = search.advance()
+    outcomes, diagnostics = [], {}
+    reencode_seconds = 0.0
+    for outcome in result.provenance:
+        member = canonical[outcome.member_index]
+        g = geometry(member.geometry.speedlevel)
+        diagnostic = None
+        if outcome.identity_index is not None:
+            key = (outcome.member_index, outcome.identity_index)
+            if key not in diagnostics:
+                reencode_started = time.monotonic()
+                frame = result.identities[outcome.identity_index]
+                wire = p4frame.encode_field(frame.data, frame.status)
+                prefix = np.r_[np.unpackbits(np.frombuffer(wire, np.uint8), bitorder='little'),
+                               np.zeros(g.padding, dtype=np.uint8)]
+                first = p4coding.rsc_encode(prefix, initial_state=(0, 0, 0))
+                bits = np.r_[prefix, p4coding.rsc_terminate(first.final_state).systematic]
+                diagnostics[key] = _reencoding(bits, g, member.fields, symbols)
+                reencode_seconds += time.monotonic() - reencode_started
+            diagnostic = diagnostics[key]
+        outcomes.append(IterationOutcome(g.speedlevel, outcome.iteration,
+            outcome.crc_valid, outcome.padding_valid, outcome.flush_valid,
+            outcome.identity_index, diagnostic, outcome.method))
+    costs = dict(stage_seconds or ())
+    costs.update(result.stage_seconds)
+    costs['reencode'] = costs.get('reencode', 0.0) + reencode_seconds
+    completed = domain if result.complete else ()
+    reason = 'no-hit' if result.state == 'unread' else result.state
+    return DecodeResult(result.complete, reason, result.frame,
+        len(result.identities), completed,
+        sum(o.method == 'turbo' for o in result.provenance), len(result.provenance),
+        time.monotonic() - started, domain, iterations, result.identities,
+        tuple(outcomes), tuple(costs.items()), coordinates, tuple(noise_diagnostics),
+        observation)
 
 
 def decode_fields(fields, speedlevel, iterations=8, *, max_work=None):
-    """Decode one declared mode, retaining every iteration's CRC identity."""
+    """Decode one mode through the exhaustive shared LONG engine.
+
+    ``max_work`` grants two constituent calls per unit. Whole-domain tiers
+    complete together; systematic checks cost no constituent calls. Outcomes
+    include systematic, C1-only, and turbo checks, identified by ``method``.
+    """
     started = time.monotonic()
     g = geometry(speedlevel)
     iterations, max_work = _iterations(iterations), _budget(max_work)
@@ -354,7 +373,11 @@ def _levels(levels):
 
 
 def decode_equalized(symbols, noise, *, speedlevels=LEVELS, iterations=8, max_work=None):
-    """Decode a complete declared mode domain; supplied N0 is complex variance."""
+    """Decode a declared mode domain; supplied N0 is complex variance.
+
+    ``max_work`` counts pairs of constituent calls across complete engine tiers,
+    as in :func:`decode_fields`; it cannot complete only an early mode.
+    """
     started = time.monotonic()
     z, n0 = _symbols(symbols), _noise(noise)
     modes = _levels(speedlevels)
@@ -413,7 +436,6 @@ def observe_body(baseband, *, first_training_start: int,
             or not np.isfinite(frequency_offset)):
         raise ValueError("frequency_offset must be finite and real")
     start = first_training_start
-    spacing = 32 + p4long.LAYOUT.block_symbols
     if len(z) < start + p4long.LAYOUT.total_symbols * p4rx.SAMPLES_PER_CHIP + 128:
         return None
     peak = np.max(abs(z))
@@ -421,6 +443,16 @@ def observe_body(baseband, *, first_training_start: int,
         return None
     z = z / peak * np.exp(-2j * np.pi * frequency_offset * np.arange(len(z)) / 28800)
     matched = p4rx.matched_filter(z)
+    return observe_matched_body(matched, first_training_start=start,
+                                frequency_offset=frequency_offset,
+                                input_samples=len(baseband))
+
+
+def observe_matched_body(matched, *, first_training_start, frequency_offset,
+                         input_samples):
+    """Apply the same all-training fit to retained causal matched windows."""
+    start = first_training_start
+    spacing = 32 + p4long.LAYOUT.block_symbols
     targets = np.arange(10, 22)
     trainings = len(p4long.LAYOUT.training_offsets)
     training = np.array([p4normal.training_sequence(k + 1) for k in range(trainings)])
@@ -456,12 +488,16 @@ def observe_body(baseband, *, first_training_start: int,
                            float(np.vdot(inverse, inverse).real),
                            float(np.vdot(residual, residual).real),
                            SourceCoordinates("placed-baseband", int(first_training_start),
-                                             float(frequency_offset), len(baseband)))
+                                             float(frequency_offset), input_samples))
 
 
 def decode_body(baseband, *, first_training_start, frequency_offset=0.0,
                 speedlevels=LEVELS, iterations=8, max_work=None):
-    """Standalone placed-body decode. Pilot/ISI variance is a diagnostic proxy."""
+    """Placed-body diagnostic decode with shared-engine work accounting.
+
+    Pilot/ISI variance is a diagnostic proxy. ``max_work`` has the complete-tier
+    semantics documented by :func:`decode_fields`.
+    """
     started = time.monotonic()
     modes = _levels(speedlevels)
     iterations, max_work = _iterations(iterations), _budget(max_work)

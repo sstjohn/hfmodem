@@ -5,6 +5,8 @@
 import pytest
 
 from hfmodem.shrike import arq, onair, placement, spec
+from hfmodem.shrike.p3trial import ReplyClock
+from hfmodem.tests.shrike.p3_reply_support import old_clamp
 from hfmodem.tests.shrike.recorded_pcm import recorded_pcm
 from hfmodem.tests.shrike.test_control_profiles import _received_reply
 from hfmodem.tests.shrike.test_entry_candidate_body import META
@@ -41,6 +43,7 @@ def test_recorded_repeat_keys_cs3_on_the_held_grid_when_historical_phase_disagre
     # used to refuse the CS3 and fall back to the owed ACK. The slot keys the
     # changeover on the held grid instead, with the clamp's reason warned.
     grid.anchor -= placement.historical_control_pulse_lead(arq.CS_ACK)
+    old_clamp(tx)
     session.host.tick()
     trace = capsys.readouterr().out
     assert "CHANGEOVER ON THE HELD GRID" in trace and "18 ms" in trace
@@ -51,6 +54,71 @@ def test_recorded_repeat_keys_cs3_on_the_held_grid_when_historical_phase_disagre
     assert a.role == arq.ISS and a.unconfirmed_breakin
     assert a._inflight.payload + bytes(a._outbuf) == b"ABCDEF"
     assert tx._pending_p3_cs is None
+
+
+def _recorded_repeat_armed(tmp_path, monkeypatch):
+    session, tx, live, grid, slot, emitted = _received_reply(
+        tmp_path, monkeypatch, "historical", "audio-start")
+    tx.emit_pending_cs()
+    session.host.arq.on_host_data(b"ABCDEF")
+    session.host.arq.on_host_breakin()
+    shift = 2 * grid.cycle_n
+    origin = META["first_sample"] + shift
+    crop = recorded_pcm(META)
+    live.audio[origin:origin+len(crop)] = crop
+    end = session.rx._p3_delivered_at + shift + round(.83 * FS)
+    live.pos = live.now = end
+    grid.cycles += 2
+    session.rx.new_cycle()
+    tx.aim(grid, slot + 2)
+    onair._scan_frame(session.rx, live.audio[origin:end].copy(), origin)
+    assert session.host.arq._breakin_armed and len(emitted) == 1
+    return session, tx, grid, slot, emitted
+
+
+def test_recorded_repeat_keys_cs3_at_the_read_when_the_comb_sits_in_front(
+        tmp_path, monkeypatch, capsys):
+    session, tx, grid, slot, emitted = _recorded_repeat_armed(tmp_path, monkeypatch)
+    assert grid._p3_reply_timing() is not None
+    grid.anchor -= placement.historical_control_pulse_lead(arq.CS_ACK)
+    read = grid.peer_packet_end(slot + 2).at_slot + grid.peer_read_gap
+    session.host.tick()
+    trace = capsys.readouterr().out
+    assert "past the peer's packet end" in trace
+    assert "HELD GRID" not in trace and "NOT PLACED" not in trace
+    assert len(emitted) == 2 and not tx.refused
+    assert tx.tx_audio_start + min(tx.tx_pulse_offsets) == read
+    assert session.host.arq.role == arq.ISS and session.host.arq.unconfirmed_breakin
+
+
+def test_recorded_repeat_with_no_fresh_pair_keys_the_owed_ack_instead(
+        tmp_path, monkeypatch, capsys):
+    """WS8EOC 11-07 17:40Z: refused for want of a pair, CS2 answered the duplicate."""
+    session, tx, grid, slot, emitted = _recorded_repeat_armed(tmp_path, monkeypatch)
+    grid._clear_p3_reply_timing()
+    assert grid.p3_pair_stale
+    # A reply clock whose pulse sits one ACK control lead off the comb, as on
+    # K4MSU 05:22Z and WS8EOC 05:42Z/15:53Z (rot +31.8 against +14.1): the
+    # displaced ACK keyed there and seeded a pair 16-19 ms late.
+    comb = grid.boundary(slot + 2)
+    tx.reply_clock = grid.reply_clock = ReplyClock(
+        entry_phase=1, pulse_epoch=comb + round(.01775 * onair.FS) - 10 * 60000)
+    old_anchor, old_seq = grid.anchor, session.host.arq._next_seq
+    session.host.tick()
+    trace = capsys.readouterr().out
+    assert "CHANGEOVER NOT PLACED" in trace and "no fresh corroborated" in trace
+    assert any("unkeyed changeover refused -> ACK received packet" in line
+               for line in session.host.log_lines)
+    assert len(emitted) == 1  # The CS3 never reached the device.
+    a = session.host.arq
+    assert a.role == arq.IRS and not grid.sending and grid.anchor == old_anchor
+    assert a._inflight is None and a._next_seq == old_seq
+    assert bytes(a._outbuf) == b"ABCDEF" and a._breakin_pending
+    assert tx._pending_p3_cs == arq.CS_ACK
+    tx.emit_pending_cs()
+    assert len(emitted) == 2 and not tx.refused
+    assert tx.slots_used[-1] == slot + 2
+    assert tx.tx_audio_start == comb
 
 
 class RefusingTurn(arq.ArqIO):

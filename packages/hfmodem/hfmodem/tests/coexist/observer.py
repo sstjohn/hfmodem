@@ -412,6 +412,13 @@ class Snapshot:
 
 
 class _PollingObserver:
+    @property
+    def latest(self):
+        """The newest snapshot taken at a named point. The sampler keeps appending
+        between a barrier and the assertions on it, so `snapshots[-1]` can be a
+        background sample that carries none of the barrier's probes."""
+        return next(s for s in reversed(self.snapshots) if s.clock['point'] != 'sample')
+
     def start(self):
         self._stop = threading.Event()
         self._errors = []

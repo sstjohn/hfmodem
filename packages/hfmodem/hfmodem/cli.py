@@ -273,7 +273,11 @@ def cmd_ale_list(args) -> int:
 
 
 def cmd_version(args) -> int:
+    from importlib.util import find_spec
     print(__version__)
+    # The kernel is admitted against NumPy on first use; `version` imports no numerics.
+    print('native: built (admitted against NumPy on first use)' if find_spec('hfmodem.core._dsp')
+          else 'native: no (extension not built)')
     return 0
 
 

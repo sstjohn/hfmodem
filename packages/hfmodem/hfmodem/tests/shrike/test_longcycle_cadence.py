@@ -23,9 +23,10 @@ from scipy.io import wavfile
 
 from hfmodem.shrike import arq, onair, spec
 from hfmodem.tests.shrike.test_cs6_driver import (
-    FIXTURES, _arm, _window, recorded, requires_recorded)
+    FIXTURES, _window, recorded, requires_recorded)
+from hfmodem.tests.shrike.p3_cycle_support import _arm
 from hfmodem.tests.shrike.test_cs6_rx import ROWS
-from hfmodem.tests.shrike.test_cs6_stalls import _duplex
+from hfmodem.tests.shrike.p3_cycle_support import _duplex
 
 FS = 48000
 SETTLE_N = 1920
@@ -51,24 +52,24 @@ def _cycle(clock, g, tx, s, slot):
     tx.defer_p3_cs = True
     probing = (host.protocol == spec.Protocol.PACTOR3
                and host.arq.role == arq.IRS and host.arq.cycle_command_emitted)
-    slot, _ = onair._regear_next_slot(
-        g, slot, False if probing else host.arq.cycle_long)
+    slot, _ = onair._regear_next_slot(g, slot, host.arq.cycle_long)
     tx.aim(g, slot)
     onair._p3_place_reply(g, tx, slot)
     early = g.boundary(slot) - tx.key_instant(g, slot)
     slot = onair._keyable_slot(clock, g, slot, SETTLE_N + early)
     tx.aim(g, slot)
     key_at = tx.key_instant(g, slot)
-    until = onair._p3_frame_ready(
-        s.rx, onair._p3_decode_deadline(clock, key_at, SETTLE_N))
+    # Collecting to the long key first makes a timely short revert impossible.
+    until = onair._p3_window_close(
+        clock, s.rx, host, tx, g, key_at, SETTLE_N, flowing=True)
     audio, origin, _ = onair._collect(
         clock, s.rx, np.zeros(0, np.float32), clock.pos, until)
     if audio.size:
         onair._scan_frame(s.rx, audio, origin, tracked_only=True)
     if probing:
-        slot, audio, origin = onair._p3_transition_window(
+        slot, audio, origin, _ = onair._p3_transition_window(
             clock, g, tx, s.host, s.rx, slot, audio, origin, SETTLE_N)
-    slot, audio, origin = onair._regrid(
+    slot, audio, origin, _ = onair._regrid(
         clock, g, tx, s.host, s.rx, slot, audio, origin, SETTLE_N)
     tx.emit_pending_cs()
     host.arq.on_cycle()
@@ -143,7 +144,7 @@ def test_an_overrun_hands_back_one_slot_where_the_old_mask_took_three(
         # The +58.2 ms overrun the arm printed: a key instant well gone, with
         # nothing else wrong.
         clock.samples = tx.key_instant(g, 3) - clock.key_notice + 2794
-        recovered[name], _, _ = onair._regrid(
+        recovered[name], _, _, _ = onair._regrid(
             clock, g, tx, s.host, s.rx, 3, np.zeros(0, np.float32), 0, SETTLE_N)
         monkeypatch.undo()
     assert recovered['old'] == 6      # the cadence the arm flew
@@ -158,7 +159,7 @@ def test_an_overrun_hands_back_one_slot_where_the_old_mask_took_three(
     monkeypatch.setattr(onair, '_listen_until_answer', _buffered_listen)
     tx.aim(g, 3)
     clock.samples = tx.key_instant(g, 3) - clock.key_notice + 10
-    kept, _, _ = onair._regrid(
+    kept, _, _, _ = onair._regrid(
         clock, g, tx, s.host, s.rx, 3, np.zeros(0, np.float32), 0, SETTLE_N)
     assert kept == 3
 
@@ -171,7 +172,7 @@ def test_the_comb_moves_to_the_long_geometry_only_on_a_crc_valid_long_frame(
     `_arm` leaves an emitted CS6 outstanding with no frame behind it yet: the
     request alone leaves the link on the 1.25 s raster with a one-slot comb. The
     recorded long answer is what moves both, and where it puts the reply is the
-    spec's own number (`docs/protocols/pactor/pactor3.md`; `P3_LONG_REPLY_S`).
+    spec's own number (`docs/protocols/pactor/pactor3.md`; `P3_COMB_LONG_REPLY_S`).
     """
     _, audio = wavfile.read(FIXTURES / 'reference-long.wav')
     s, tx, g, clock = _arm(tmp_path, audio.astype(float) / 32768,
@@ -179,14 +180,14 @@ def test_the_comb_moves_to_the_long_geometry_only_on_a_crc_valid_long_frame(
     assert not s.host.arq.cycle_long and g.ticks == 1
     assert s.host.arq.cycle_request is True and s.host.arq.cycle_command_emitted
 
-    slot, _, _ = _window(s, tx, g, clock)
+    slot, _, _, _ = _window(s, tx, g, clock)
     assert [ev.cycle_long for ev in s.packets] == [True]
     assert s.host.arq.cycle_long and g.ticks == 3
     onair._p3_place_reply(g, tx, slot)
     at, _, cycle_n, _ = g._p3_peer
     assert cycle_n == round(spec.CYCLE_LONG_S * FS)
     assert (g.boundary(slot) - at) % g.slot_n == (
-        round(onair.P3_LONG_REPLY_S * FS) % g.slot_n)
+        round(onair.P3_COMB_LONG_REPLY_S * FS) % g.slot_n)
 
 
 @requires_recorded

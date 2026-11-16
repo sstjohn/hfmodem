@@ -83,7 +83,7 @@ def test_only_emitted_entry_establishes_mail_clock(tmp_path):
 
 @pytest.mark.parametrize('flags', [
     ('--p3-timing-trial', 'B'), ('--p3-timing-unbounded',),
-    ('--pactor1-only',), ('--p4-entry',), ('--p3-changeover-p1-cs',),
+    ('--pactor1-only',), ('--p4-link',), ('--p3-changeover-p1-cs',),
     ('--p3-control-placement', 'pulse-center'), ('--p3-entry-delay', '0'),
 ])
 def test_mail_profile_refuses_conflicts_before_io(flags):

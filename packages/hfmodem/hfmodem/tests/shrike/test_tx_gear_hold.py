@@ -11,49 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from hfmodem.shrike import arq, p3acquire, placement, rxfront, spec, traffic
-from hfmodem.shrike.ptc import PtcHost
-from hfmodem.tests.shrike.test_repeat_gear_stall import Seam
+from hfmodem.shrike import arq, p3acquire, rxfront, spec, traffic
+from hfmodem.tests.shrike.p3_arq_support import (
+    BODY,
+    Seam as Seam,
+    Sender as Sender,
+    control,
+    sender,
+)
 
 FIXTURE = Path(__file__).with_name('fixtures')/'gear-0920'
-BODY = bytes(range(32, 127))*4
-
-
-class Sender(Seam):
-    def __init__(self):
-        super().__init__()
-        self.frames = []
-        self.refuse = False
-
-    def send_packet(self, sl, payload, status, breakin=False):
-        if self.refuse:
-            return arq.REFUSED
-        n = (placement.CHANGEOVER if breakin else placement.SPEED_PATHS[sl]).crc_bytes-3
-        self.frames.append((sl, status, payload[:n]))
-        return n
-
-
-def sender(enabled=True, *, payload=b'\x01/W' + BODY, hostmode=False):
-    seam = Sender()
-    host = PtcHost(peer=seam, mycall='W9SSJ')
-    if hostmode:
-        host.feed(b'\x1bJHOST4\r')
-    host.arq.role, host.arq.dxcall = arq.ISS, 'K0NTS'
-    host.arq._enter_connected()
-    host.protocol = spec.Protocol.PACTOR3
-    host.p3_tx_gear_hold = enabled
-    a = host.arq
-    a.cfg.long_cycle = False
-    a.on_host_data(payload)
-    wire = bytes(a._outbuf)
-    a._inflight = arq._Packet(0,wire[:3],1,breakin=True)
-    a._next_seq = 1
-    del a._outbuf[:3]
-    return host,seam
-
-
-def control(host, cs):
-    host.on_rx_event(rxfront.Event(0,'cs','test',protocol=spec.Protocol.PACTOR3,cs=cs-1))
 
 
 def recorded_controls():

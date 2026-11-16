@@ -31,7 +31,7 @@ def recorded_answers(arm):
 
 
 def answer(onset, decision_at, **kw):
-    m, _ = machine(role='irs', prekey_lead=LEAD/FS, **kw)
+    m, _ = machine(role='irs', normal_ack='parity', prekey_lead=LEAD/FS, **kw)
     m.first_body = False
     m.observe(RegisteredObservation(normal(onset), Registered.NEW), now=onset+round(.810*FS))
     return m.decide(decision_at)
@@ -122,7 +122,7 @@ def test_measured_late_peer_ack_settles_bytes_at_every_own_offset(offset):
     import numpy as np
     from hfmodem.tests.shrike import p4_stock_peer as stock
     from hfmodem.shrike.p4turn import State
-    m, queue = machine(data='body', ladder='none', answer_offset=offset)
+    m, queue = machine(data='body',  answer_offset=offset)
     queue.on_host_data(b'outgoing')
     m._data(0, State.ISS_DATA_ACK)
     m.keyed()

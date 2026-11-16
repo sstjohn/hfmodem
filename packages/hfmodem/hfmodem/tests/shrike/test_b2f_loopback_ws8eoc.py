@@ -174,7 +174,11 @@ class Ws8eoc:
             self.mode = "taking"
         return len(payload)
 
-    def send_cs(self, index):
+    def p3_slot_keyed(self) -> bool | None:
+        return None
+
+    def send_cs(self, index, *, p1_codeword=False, unread=False, maxdown=False,
+                packet_phase=None, cycle_long=None):
         self.words.append(index)
         self.tape.append(f"us  CS{index + 1}")
 
@@ -301,12 +305,12 @@ class Ws8eoc:
 def linked(gw: Ws8eoc, *, announce: bytes = b"", **kw) -> tuple[PtcHost, B2FSession]:
     """A PACTOR-3 link the moment before the gateway's break-in.
 
-    `speed_up_after` is parked out of reach and `long_cycle` is off, as every
+    `p3_speed_up_after` is parked out of reach and `long_cycle` is off, as every
     arm in `working/pactor3-header-0913` flew them. `announce` is the PACTOR-1
     callsign announcement the grant path puts back at the head of the buffer.
     """
     host = PtcHost(gw, mycall="W9SSJ")
-    host.arq.cfg.speed_up_after = 1000
+    host.arq.cfg.p3_speed_up_after = 1000
     host.arq.cfg.long_cycle = False
     host.arq.role, host.arq.dxcall = arq.ISS, "WS8EOC"
     host.arq._enter_connected()

@@ -41,11 +41,13 @@ def recovery_scene(tmp_path, monkeypatch, kind):
     return live, raster, tx, host, rx, seg, y
 
 
+# The hold read runs on a wall-clock work budget, so a loaded host changes what it reads.
+@pytest.mark.realtime
 @pytest.mark.parametrize('kind', ['bare', 'good', 'bad'])
 def test_recovered_p1_window_hands_y27_to_link_before_next_key(tmp_path, monkeypatch, kind):
     live, raster, tx, host, rx, seg, y = recovery_scene(tmp_path, monkeypatch, kind)
     receiver = rx.p4
-    slot, audio, origin = onair._regrid(live, raster, tx, host, rx, 1, seg, 0, round(.04*FS))
+    slot, audio, origin, _ = onair._regrid(live, raster, tx, host, rx, 1, seg, 0, round(.04*FS))
     assert tx.p4_probe.requested
     assert tx.p4_probe.receiver is receiver
     assert tx.p4_probe.peer_breakin
@@ -75,7 +77,7 @@ def test_no_p4_read_preserves_recovered_p1_key_budget(tmp_path, monkeypatch, def
     monkeypatch.setattr(onair, '_p4_hold_word', read)
     monkeypatch.setattr(onair, '_scan_frame', lambda *a, **kw: live.spend(round(.021*FS)))
     rx.flush = lambda: live.spend(round(.027*FS))
-    slot, _, _ = onair._regrid(live, raster, tx, host, rx, 1, seg, 0, round(.04*FS))
+    slot, _, _, _ = onair._regrid(live, raster, tx, host, rx, 1, seg, 0, round(.04*FS))
     assert slot == 2
     assert not reads
     assert not onair._late_at_key(live, tx.key_instant(raster, slot), tx.cycle_cost_n())
@@ -86,7 +88,7 @@ def test_main_transfers_recovered_word_before_legacy_tick(tmp_path, monkeypatch)
     regrid, tick, drive = onair._regrid, PtcHost.tick, onair._run_p4_link
     recovered, handed = [], []
 
-    def recover(live, raster, tx, host, rx, slot, seg, origin, settle):
+    def recover(live, raster, tx, host, rx, slot, seg, origin, settle, *, long_crc=None):
         if not recovered and host.p4_after_first_ack and 4.5*FS < live.pos < 5.2*FS:
             start = live.pos
             more = live.take_until(round(6.235*FS))
@@ -97,8 +99,8 @@ def test_main_transfers_recovered_word_before_legacy_tick(tmp_path, monkeypatch)
             found = onair._p4_peer_breakin(tx, live, raster, seg, origin, tx.tx_end)
             assert found is not None
             recovered.append(live.pos)
-            return slot, seg, origin
-        return regrid(live, raster, tx, host, rx, slot, seg, origin, settle)
+            return slot, seg, origin, long_crc
+        return regrid(live, raster, tx, host, rx, slot, seg, origin, settle, long_crc=long_crc)
 
     def p1_tick(self, **kwargs):
         assert not recovered or handed, 'legacy tick after recovered Y27'
@@ -149,16 +151,3 @@ def test_breakin_handoff_keeps_live_word_overlapping_window_tail(provisional):
         SimpleNamespace(anchor=0, slot_n=60000), np.zeros(round(.3*FS)), origin, origin, read=False)
     assert found == 0 and probe.requested
     assert probe.receiver is receiver
-
-
-@pytest.mark.parametrize('position,now,remaining', [(1, 7, 13), (9, 7, 11), (1, 25, 0)])
-def test_silent_listen_reports_remaining_entry_ceiling(monkeypatch, capsys, position, now, remaining):
-    probe = EntryProbe(attempts=0, timeout=20., packet='robust')
-    tx = SimpleNamespace(p4_probe=probe, slot=0, sessrx=None)
-    live = SimpleNamespace(pos=position*FS, sample_now=lambda: now*FS)
-    raster = SimpleNamespace(next_slot=lambda slot: slot+1)
-    monkeypatch.setattr(onair, '_listen_for_p4_word', lambda *a, **kw: None)
-    onair._run_p4_probe(tx, live, raster, stalled=12)
-    text = capsys.readouterr().out
-    assert 'path: silent listen -- our first P1 packet drew 12' in text
-    assert f'entry ceiling in {remaining:.1f}s' in text

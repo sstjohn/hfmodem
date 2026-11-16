@@ -39,10 +39,9 @@ from scipy.signal import hilbert
 from hfmodem.shrike import (modem, onair, p3frame, p3rx, placement, rx, rxfront,
                             session, spec)
 from hfmodem.shrike.arq import CS_ACK, CS_BREAKIN, IRS, ISS
-from hfmodem.shrike.ptc import PtcHost
-from hfmodem.shrike.spec import Protocol
 from hfmodem.tests.kestrel import corpora
-from hfmodem.tests.shrike.test_p3level_session import _Seam, _cycle_audio
+from hfmodem.tests.shrike.test_p3level_session import _cycle_audio
+from hfmodem.tests.shrike.onair_support import _Seam as _Seam, _Session
 
 FS, SPS = onair.FS, rxfront.SPS
 RECORDING = corpora.RF_CORPUS / "PIII_Complete_1.wav"
@@ -62,38 +61,6 @@ STATUS = 0x20
 FIELD = bytes.fromhex("0d5054202761")
 """The IRS's own three bytes and status byte, which `placement.changeover_packet`
 reproduces exactly -- so a rendered arm and the recording are the same field."""
-
-
-class _Session:
-    """A `_SessionRx` on a linked PACTOR-3 host that keeps what it delivered."""
-
-    def __init__(self, *, role=ISS, entry_pending: bool = False) -> None:
-        host = PtcHost(peer=_Seam(), mycall="W9SSJ")
-        host.arq.on_host_listen(True)
-        host.arq.role, host.arq.dxcall = role, "DL6MAA"
-        host.arq._enter_connected()
-        host.protocol = Protocol.PACTOR3
-        host.arq.entry_pending = entry_pending
-        host.peer.sent.clear()
-        self.host = host
-        self.rx = onair._SessionRx(host, tag="TEST")
-        self.events: list = []
-        deliver = host.on_rx_event
-
-        def record(ev):
-            self.events.append(ev)
-            return deliver(ev)
-
-        host.on_rx_event = record
-
-    def changeover(self, audio: np.ndarray, head_at: int):
-        """The cycle a CS3 is due in, read where the grid says it is."""
-        self.rx.new_cycle()
-        return self.rx.control_signal(audio, 0, head_at)
-
-    @property
-    def packets(self) -> list:
-        return [ev for ev in self.events if ev.kind == "packet"]
 
 
 def _head_at(audio: np.ndarray, search_from: int):

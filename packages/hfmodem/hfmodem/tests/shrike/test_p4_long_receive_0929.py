@@ -354,14 +354,14 @@ def test_incomplete_long_failure_can_retry_then_reuses_accepted_crc(monkeypatch)
     rx = receiver(at)
     rx.clock.cycle_s = 3.75
     origin = at-6*FS
-    decode = p4robustrx.decode_symbols
+    decode = p4robustrx.build_members
     calls = []
 
     def counted(*a, **kw):
         calls.append(len(a[0]))
         return decode(*a, **kw)
 
-    monkeypatch.setattr(p4robustrx, 'decode_symbols', counted)
+    monkeypatch.setattr(p4robustrx, 'build_members', counted)
     early = rx._packet(audio[origin:at+round(3.295*FS)], origin)
     assert early is None or early.frame is None
     full = rx._packet(audio[origin:at+round(3.311*FS)], origin)
@@ -381,7 +381,7 @@ def test_full_long_registry_enrichment_delivers_once_and_keeps_repeat_ack(kind, 
     from hfmodem.tests.shrike.test_p4turn import machine
 
     rx = receiver(FS)
-    turn, _ = machine(role='irs', data='body')
+    turn, _ = machine(role='irs', data='body', chirp_ack='parity', long_ack='counter-even-t27')
     received = []
     turn.adapter.host = SimpleNamespace(deliver=received.append, supervisor=lambda *a: None)
     old = Observation(kind, FS, 0, FS, FS, 3.28, 0., .8)
@@ -394,8 +394,7 @@ def test_full_long_registry_enrichment_delivers_once_and_keeps_repeat_ack(kind, 
     due = FS+round(3.4*FS)
     if late:
         first = turn.decide(due-turn.lead)
-        assert (first.purpose if first is not None else None) == (
-            None)
+        assert first is not None and first.purpose == 'repeat-request'
     full = replace(old, stream_sample=FS+shift, first_chip=FS+shift, frame=frame)
     records = []
     rx._emit(full, records)

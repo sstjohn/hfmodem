@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from hfmodem.kestrel.host.station_runtime import StationTransport
 from hfmodem.kestrel.vara import vara_arq as A, vara_mfsk as M, vara_frames as F
@@ -63,6 +64,32 @@ def open_modem(link):
     modem.set_bandwidth('500')
     modem.set_compression('OFF')
     return modem, observer
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_decoder_worker_joins_capture_yield_and_retires_on_stop_or_error(monkeypatch, failure):
+    from hfmodem.core import gil
+    st, _ = station()
+    link = KestrelLink(st)
+    entered, release = threading.Event(), threading.Event()
+    observed = []
+    def step(**kwargs):
+        observed.append((threading.get_ident() in gil._due, gil._tool is not None))
+        entered.set()
+        release.wait(2)
+        link.runtime.transport.stop.set()
+        if failure: raise RuntimeError('worker test failure')
+    monkeypatch.setattr(link.runtime.owner, 'step', step)
+    with gil.breathing():
+        link.start()
+        try:
+            assert entered.wait(2)
+            assert observed == [(True, True)]
+        finally:
+            release.set()
+            link.stop()
+        assert link.runtime._thread.ident not in gil._due
+    assert link.runtime.failure == ('worker test failure' if failure else None)
 
 
 def test_host_commands_reach_real_owner_and_only_station_arbiter():

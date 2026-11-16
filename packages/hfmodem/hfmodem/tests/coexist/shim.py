@@ -38,6 +38,8 @@ class CallbackFlags:
 
 default = SimpleNamespace(device=(0, 0), samplerate=48000, channels=(1, 1),
                           dtype=('float32', 'float32'), latency=('low', 'low'))
+# Only PortAudio's ALSA host loads the library by name, and this host is not ALSA.
+_libname = None
 _streams = set()
 _last = None
 

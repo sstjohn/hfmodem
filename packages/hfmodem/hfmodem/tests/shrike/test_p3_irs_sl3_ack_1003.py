@@ -143,7 +143,8 @@ def audio_callback_load():
         due = time.perf_counter()
         while not stop.is_set():
             t = station.samples / cardaudio.CARD_RATE_HZ
-            stamps = SimpleNamespace(inputBufferAdcTime=t, outputBufferDacTime=t + .02)
+            stamps = SimpleNamespace(currentTime=t, inputBufferAdcTime=t,
+                                     outputBufferDacTime=t + .02)
             station._callback(inputs, outputs, 128, stamps, False)
             ready.set()
             due += 128 / cardaudio.CARD_RATE_HZ
@@ -173,9 +174,9 @@ def test_requested_sl3_reaches_current_ack(tmp_path, monkeypatch, hold, tx, dige
     radio.defer_p3_cs = True
     radio.send_cs(arq.CS_ACK)
     sent = s.host.peer.send_cs
-    def queue(ci):
-        sent(ci)
-        return radio.send_cs(ci)
+    def queue(ci, **kw):
+        sent(ci, **kw)
+        return radio.send_cs(ci, **kw)
     monkeypatch.setattr(s.host.peer, 'send_cs', queue)
     spent, trace = budget(s, monkeypatch, allowance)
     if allowance == 18.:

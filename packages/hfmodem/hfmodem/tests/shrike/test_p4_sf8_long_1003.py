@@ -43,13 +43,13 @@ def copies():
 
 
 def test_recorded_sf8_fields_and_budget(copies):
+    # The second copy requires C2 in the common exact engine and must retain
+    # its identity.
     assert [None if row[2] is None else row[2].correction for row in copies] == [
-        'systematic', None, 'amplitude-c1', 'unit-c1', *(['systematic']*8)]
+        'systematic', 'unit-turbo', 'amplitude-c1', 'unit-c1', *(['systematic']*8)]
     for n, (_, observed, reception, times) in enumerate(copies):
         assert .50 <= observed.coherence <= .90
-        if n == 1:
-            assert reception is None
-            continue
+        assert reception is not None
         assert reception.quarter_turn == 0
         assert reception.frame.status.byte == 0x03
         assert len(reception.frame.data) == 141

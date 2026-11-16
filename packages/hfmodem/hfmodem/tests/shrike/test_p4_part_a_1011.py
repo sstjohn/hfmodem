@@ -23,7 +23,7 @@ def packet(at=AT, kind=Kind.CHIRP, status=0x41, data=None, **kw):
 
 
 def setup(queued=b'', **kw):
-    m, a = machine(role='irs', data='body', ladder='none', prekey_lead=.025,
+    m, a = machine(role='irs', data='body',  prekey_lead=.025,
                    managed_application=True, **kw)
     m.first_body = False
     if queued:
@@ -33,10 +33,8 @@ def setup(queued=b'', **kw):
 
 @pytest.mark.parametrize('gated', [False, True])
 @pytest.mark.parametrize('kind,status,policy,expected', [
-    (Kind.CHIRP, 0x41, 'fixed-x27', 'X27'),
-    (Kind.LONG, 0x42, 'fixed-x27', 'X27'),
     (Kind.LONG, 0x42, 'counter-even-t27', 'T27'),
-    (Kind.LONG, 0x41, 'counter-odd-t27', 'T27')])
+    (Kind.LONG, 0x41, 'counter-even-t27', 'X27')])
 def test_no_eligible_long_invitation(gated, kind, status, policy, expected):
     m, a = setup(b'TEST\r' if gated else b'', long_ack=policy)
     m.allow_breakin = not gated
@@ -67,7 +65,7 @@ def test_bare_long_request_and_distinct_release(breakin, release):
     r = (word('V27', grant, responds_to=KEY, extent=.245) if release == 'V27' else
          packet(grant, Kind.BODY, 0x40, responds_to=KEY))
     m.observe(r, now=grant+round((.245 if release == 'V27' else .805)*FS))
-    due = 8371870 if release == 'V27' else 8280910
+    due = KEY + round(1.25*FS) if release == 'V27' else 8280910
     p = m.decide(due-m.lead)
     assert (p.kind, p.status, p.stream_sample, p.payload) == (Kind.BODY, 0x40 if release == 'V27' else 0, due, b'TEST\r')
     assert m.peer_watch is None and a.tx_acked_bytes == 0
@@ -94,7 +92,7 @@ def test_legacy_emission_has_independent_watch():
     generation = m.peer_watch.generation
     m.observe(packet(AT+CYCLE, Kind.LONG, 0x42, peer_watch_generation=generation), now=AT+CYCLE+158400)
     assert m.state == State.IRS_ANSWER and m.next_offer_at == KEY+960000
-    assert m.decide(8371870-m.lead).word == 'T27'
+    assert m.decide(8371870-m.lead).word == 'X27'
 
 
 def test_four_actual_keys_and_strict_cooldown():
@@ -244,7 +242,7 @@ def test_real_fq_recovery_keeps_answer_transaction(ownership, failure):
     else:
         assert (m.pending, m._deferred, m._accepted_proposal, m._next) == owned
         p = m.decide(due+(CYCLE if ownership == 'deferred' else 0)-m.lead)
-        assert p.word == 'T27' and p.state == State.IRS_ANSWER and m.can_key(p)
+        assert p.word == 'X27' and p.state == State.IRS_ANSWER and m.can_key(p)
         m.keyed()
     assert a.tx_acked_bytes == 0
 
@@ -290,7 +288,7 @@ def test_continuations_do_not_renew_cooldown_or_application_deadline():
         m.observe(packet(at, Kind.LONG, 0x42, peer_watch_generation=m.peer_watch.generation), now=at+158400)
         assert m.next_offer_at == KEY+1+960000 and m.application_deadline == 20.
         p = m.decide(at+163200-m.lead)
-        assert p.word == 'T27'
+        assert p.word == 'X27'
         m.keyed()
     wall[0] = 20.
     m.reschedule_breakin(9811870-m.lead)
@@ -377,7 +375,7 @@ def test_managed_renewal_after_recovery_ack_and_live_invitation():
         at, due = AT+i*CYCLE, KEY+i*CYCLE
         m.observe(packet(at, Kind.LONG, 0x42, peer_watch_generation=m.peer_watch.generation), now=at+158400)
         p = m.decide(due-m.lead)
-        assert p.word == ('Y27' if due >= KEY+960000 else 'T27')
+        assert p.word == ('Y27' if due >= KEY+960000 else 'X27')
         m.keyed()
         if p.word == 'Y27':
             assert m.peer_watch.attempts == 1
@@ -540,7 +538,7 @@ def test_previous_call_generation_and_nonmail_groups_stay_finite():
     old, _ = setup()
     old.observe(packet(), now=AT+158400)
     generation = old.peer_watch.generation
-    m, a = machine(role='irs', data='body', ladder='none', prekey_lead=.025)
+    m, a = machine(role='irs', data='body',  prekey_lead=.025)
     a.on_host_data(b'TEST\r')
     m.observe(packet(), now=AT+158400)
     for i in range(4):
@@ -723,7 +721,7 @@ def test_late_watched_continuation_keys_recovered_ack_at_next_legal_slot():
     held = m._held_answer
     p = m.decide(1951645-m.lead)
     assert (p.kind, p.word, p.state, p.stream_sample) == (
-        Kind.WORD, 'T27', State.IRS_ANSWER, 1951645)
+        Kind.WORD, 'X27', State.IRS_ANSWER, 1951645)
     assert p.ack_identity == held.answer.ack_identity and p.accepted_target == 1608445
     m.keyed()
     assert not m.outbox.inflight and bytes(a._outbuf) == b'TEST\r'

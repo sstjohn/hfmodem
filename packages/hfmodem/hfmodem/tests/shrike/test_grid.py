@@ -78,6 +78,7 @@ from hfmodem.shrike import (arq, modem, onair, pactor1, placement, ptc, rxfront,
                             spec)
 from hfmodem.shrike.arq import State
 from hfmodem.shrike.spec import Protocol
+from hfmodem.tests.shrike.onair_support import _Bench, _Rig
 
 FS = rxfront.FS
 SLOT_N = round(spec.CYCLE_SHORT_S * FS)
@@ -153,342 +154,6 @@ def check(label: str, passed: bool, detail: str = "") -> None:
     global ok
     ok &= passed
     print(f"  [{'PASS' if passed else 'FAIL'}] {label}" + (f": {detail}" if detail else ""))
-
-
-class _Bench:
-    """The duplex stream's contract, on a clock made of arithmetic.
-
-    `_LiveInput` is the session's master clock: the converter runs at 48 kHz
-    whatever the OS is doing, readers ask for absolute sample positions, and the
-    transmitter schedules against the same counter. All of that is reproduced
-    here exactly, with one substitution -- the converter advances when audio is
-    read or when work is charged against it, rather than when wall time passes.
-    That makes an overrun a number in the test rather than a race, and it is the
-    only way this measurement can be taken without a radio.
-
-    The notice and the clamp are `_LiveInput`'s own methods, run on this clock,
-    NOT copies: the bench supplies `samples`, `_lat` and `_blk` and borrows the
-    arithmetic, so breaking the production placeability breaks these scenes.
-
-    The peer is REACTIVE, which the corpus cannot be: it answers `d` after our
-    carrier drops, in the shift we sent in, so a session that transmits in the
-    wrong slot is answered in the wrong slot too.
-    """
-
-    # Measured on this machine and hard-coded in `_LiveInput`: 1152 samples from
-    # a sample's ADC to its DAC, at a 128-frame block, and three blocks of notice
-    # before the callback that fills the buffer after next.
-    LAT = 1152
-
-    # The turnaround the schedule is designed for, and it is measured: 105 ms is
-    # what `D_NOMINAL_S` reads off a W4DNA -> KE5YTA exchange between two
-    # commercial modems. It stood at 55 here, which is `TR_SWITCH_S` exactly --
-    # a peer answering at the precise instant this rig stops being deaf, so
-    # every tolerance derived from the gap collapsed to nothing and the bench
-    # was measuring the edge of audibility rather than a working link.
-    D_S = 0.105
-
-    def __init__(self, *, seconds: float = 200.0, blk: int = 128,
-                 holdback: int = 608, d: float = D_S, peer=None,
-                 lat_in: int = 0):
-        self.fs = FS
-        self.audio = np.zeros(int(seconds * FS), np.float32)
-        # A session that never keys again is the failure this file exists to
-        # catch and it does not announce itself: the loop keeps handing slots
-        # back, `host.tick()` is never reached, so the ARQ never advances and
-        # `--max-cycles` never decrements. Nothing but a clock cap turns that
-        # into a result. The scenes here run to ~95 s of bench clock; a
-        # non-converging re-grid burns a slot an iteration, so the headroom is
-        # about eighty iterations of one.
-        self.limit = self.audio.size
-        self.now = 0            # the converter's position
-        self.pos = 0            # the next sample a reader will get
-        self.floor = 0
-        # The counters a capture source carries, which the session loop reads
-        # straight into every sidecar. `lost` is the blocks a starved
-        # interpreter never accepted; a bench is never starved, and the loop
-        # still asks.
-        self.xruns, self.xrun_at, self.underruns, self.lost = 0, None, 0, 0
-        self.holdback, self._blk, self._lat = holdback, blk, self.LAT
-        self.tx_latency_n = 0     # a bench station has measured no residue
-        self.lat_in = lat_in
-        self.keyed_s = 0.0
-        self.keyed_at: int | None = None
-        self.d_n = round(d * FS)
-        self.peer = peer
-        self.emissions: list[tuple[int, int]] = []
-        self.signal_ends: list[int] = []
-        self.leads: list[float] = []      # PTT lead each burst actually got
-        self.taken: list[tuple[int, int]] = []      # spans handed to the reader
-        self.drained: list[tuple[int, int, int, int]] = []
-        # (read start, read end, charge instant, charged samples), retained so
-        # the final ID's all-at-once drain is accounted separately from CS work.
-        self.charge = 0         # samples of clock the cycle's decode overruns by
-        self.flush_n = 0        # ...and what one flush costs
-        self.scan_n = 0         # ...and one frame scan
-        self.cs_n = 0           # ...and the anchored control-signal read
-        self.upgrade_n = 0      # ...and the blind scan for a protocol we are not in
-        # ...and the same costs charged PER SAMPLE of the audio handed to them,
-        # which is the only way a window's length can pay for itself. Zero unless
-        # a scene asks for it, so the fixed-cost scenes above measure what they
-        # always measured.
-        self.feed_rate = 0.0
-        self.scan_rate = 0.0
-        self.upgrade_rate = 0.0
-        self.drain_rate = 0.0
-        # Where the clock stood for every charge since the last carrier, so what
-        # a cycle spends INSIDE THE KEYING SETTLE is a measurement rather than an
-        # inference. That window is the one this file exists about: work in it is
-        # charged to the rig's PTT lead, and past `key_notice` it costs the slot.
-        self.spent: list[tuple[int, int]] = []
-        self.prekey: list[int] = []
-        self.armed = False      # the bulk is one cycle's, not one decode's
-        self.answered = False   # ...and so is the peer's transmission
-        self.always_placeable = False
-
-    # -- the session's view of the codec ----------------------------------
-    @property
-    def samples(self) -> int:
-        """What the CALLBACK HAS HANDED OVER -- not where the converter stands.
-
-        THE TWO NUMBERS THE ADMISSION GUARD IS THE DIFFERENCE OF. `_LiveInput`
-        hands Python one `_blk`-frame block at a time, so the delivered count is
-        always a multiple of the block and always lags `sample_now()`; the guard
-        (`clamp_late`) is taken on this one while the cycle's last read is
-        scheduled on the other. This returned `self.now` -- one continuous
-        counter standing in for both -- so the quantisation at the heart of the
-        2026-09-11 entry-slot losses did not exist here, and no test in this
-        repository could fail the way that arm did. 60000 samples a slot is
-        468.75 blocks, so the room a cycle has before the guard trips takes four
-        values and returns; a budget sitting on the threshold then loses one slot
-        in four, deterministically, which is what
-        `test_granted_entry_slots` reproduces.
-        """
-        return max(0, (self.now - self.lat_in) // self._blk * self._blk)
-
-    @property
-    def key_notice(self) -> int:
-        return _LIVE.key_notice.fget(self)
-
-    def _advance(self, to: int) -> None:
-        self.now = max(self.now, to)
-        if self.now > self.limit:
-            raise RuntimeError(
-                f"the session ran past {self.limit / FS:.0f} s of bench clock "
-                f"without finishing: {len(self.emissions)} carriers on the air. "
-                f"A loop that hands slots back forever occupies nothing and "
-                f"reports nothing wrong.")
-
-    def spend(self, n: int) -> None:
-        """Charge `n` samples of clock to work that consumed no audio."""
-        self.spent.append((self.now, n))
-        self._advance(self.now + n)
-
-    def _grab(self, a: int, b: int) -> np.ndarray:
-        seg = np.zeros(max(0, b - a), np.float32)
-        lo, hi = min(max(a, 0), self.audio.size), min(max(b, 0), self.audio.size)
-        if hi > lo:
-            seg[:hi - lo] = self.audio[lo:hi]
-        return seg
-
-    def _hand_over(self, a: int, b: int) -> np.ndarray:
-        self.pos = b
-        if b > a:
-            self.taken.append((a, b))
-        return self._grab(a, b)
-
-    def read(self, count: int) -> np.ndarray:
-        a = max(self.pos, self.floor)
-        b = a + max(0, int(count))
-        # Live audio cannot be read early: not before it is delivered, an
-        # input latency after the converter took it.
-        self._advance(b + self.lat_in)
-        got = self._hand_over(a, b)
-        # A read is not free of the backlog it drains -- see DRAIN_RATE. Charged
-        # here rather than at the decode because `RadioTx._tx` runs one of these
-        # after the bridge sleep, inside the keying settle, and decodes nothing.
-        if self.drain_rate and got.size:
-            cost = round(got.size * self.drain_rate)
-            self.drained.append((a, b, self.now, cost))
-            self.spend(cost)
-        return got
-
-    def take(self, seconds: float) -> np.ndarray:
-        return self.read(int(seconds * self.fs))
-
-    def take_until(self, index: int) -> np.ndarray:
-        return self.read(max(0, index - self.pos))
-
-    def read_ready(self) -> np.ndarray:
-        return self.read(max(0, self.samples - max(self.pos, self.floor)))
-
-    def sample_now(self) -> float:
-        return float(self.now)
-
-    def wait_until(self, index: int) -> float:
-        slept = max(0, index - self.now)
-        self._advance(index)
-        return slept / self.fs * 1e3
-
-    def clamp_late(self, at: int) -> int:
-        # `always_placeable` is the assumption the loop used to run on -- that a
-        # boundary aimed at is a boundary reachable -- and it is set only by the
-        # negative controls below, to put the session back the way it flew.
-        if self.always_placeable:
-            return 0
-        return _LIVE.clamp_late(self, at)
-
-    def flush_to(self, index: int) -> None:
-        self.floor = self.pos = index
-
-    def flush(self, before: float | None = None) -> None:
-        self.floor = self.pos = self.now
-
-    # -- an answer armed ahead of its decode (`_LiveInput.arm`) --------------
-    # Its audio is in the stream on its instant and its PTT is the keyer's, so
-    # a commit that comes late keys the armed audio on time; one in time,
-    # while the DAC's notice allows, replaces it.
-    _armed = None
-    missed = 0
-
-    @property
-    def armed_at(self):
-        return None if self._armed is None else self._armed[0]
-
-    def arm(self, audio, *, at, settle, key=None, max_key: float = 40.0) -> None:
-        earliest = self.samples + 3 * self._blk
-        if at - self.LAT < earliest:
-            raise onair._MissedTxSlot(earliest - (at - self.LAT))
-        self._armed = (at, np.asarray(audio, np.float32), settle, key)
-
-    def disarm(self) -> bool:
-        if self._armed is None:
-            return True
-        at, _, settle, _ = self._armed
-        if self.now >= at - round(settle * self.fs):
-            return False                 # its PTT is up: it goes out as armed
-        self._armed = None
-        return True
-
-    def abort(self) -> None:
-        self._armed = None
-
-    def transmit(self, audio, *, at=None, settle: float = 0.0, key=None,
-                 max_key: float = 40.0, admit=None) -> tuple[int, int]:
-        if admit is not None:
-            admit()
-        earliest = self.samples + 3 * self._blk
-        armed, self._armed = self._armed, None
-        if armed is not None and (at is None or abs(at - armed[0]) > FS // 4):
-            armed = None                 # given way to a burst nothing committed it to
-        if armed is not None:
-            armed_at, armed_audio, settle, key = armed
-            late = earliest - (min(at, armed_at) - self.LAT)
-            self.missed = max(late, 0)
-            if late > 0:
-                audio, at = armed_audio, armed_at
-            # On its instant, its PTT the keyer's a whole settle ahead.
-            first, lead = at, settle
-        else:
-            start = earliest if at is None else max(at - self.LAT, earliest)
-            first = start + self.LAT
-            # PTT cannot be asserted in the past either, so an aim point accepted
-            # with less notice than the rig's settle comes out as a SHORT SETTLE
-            # rather than as a late burst. That is silent on the air -- the carrier is
-            # where it was asked for and the log says so -- and it is what a slot
-            # search blind to the settle buys: on the x6100, 32 ms of 400.
-            lead = min(settle, max(0.0, (first - self.now) / self.fs))
-        self.leads.append(lead)
-        # What this burst spent between the bridge and its own key. The bridge
-        # runs to `onair._prekey_lead` in front of the boundary -- the PTT instant
-        # plus the measured admission reserve -- so a charge recorded at or after
-        # that instant is work done inside the window the whole cycle is arranged
-        # to keep empty, and the window the admission guard adjudicates.
-        # THE OVERLAP, not the charges that START inside it. A decode that begins
-        # two milliseconds before the key instant and runs for twenty is twenty
-        # milliseconds of work in front of a keyed transmitter, and counting it as
-        # none is a gate that cannot see the thing it was written for.
-        keyed_at = (None if at is None else
-                    at - onair._prekey_lead(self, round(settle * self.fs)))
-        self.prekey.append(
-            0 if keyed_at is None else
-            sum(min(pos + n, first) - max(pos, keyed_at) for pos, n in self.spent
-                if pos + n > keyed_at))
-        del self.spent[:]
-        self._advance(first + audio.size)
-        self.keyed_s = lead + audio.size / self.fs
-        # Where the carrier came up, which is the audio less the lead the rig
-        # actually got rather than the one it was promised.
-        self.keyed_at = first - round(lead * self.fs)
-        self.emissions.append((first, first + audio.size))
-        if key is not None:
-            key(True)
-            key(False)
-        # The peer runs its own clock: a P1 packet's held key is not a later
-        # drop for it to answer.
-        self.signal_ends.append(first + np.trim_zeros(audio, "b").size)
-        if self.peer is not None:
-            self.peer(self, self.signal_ends[-1])
-        return first, first + audio.size
-
-    def clock_report(self) -> str:
-        return f"bench clock: {self.now} samples, no wall time involved"
-
-    def stream_report(self) -> str:
-        return "session stream: not taken -- this session had no sound card"
-
-    def close(self) -> None:
-        pass
-
-
-class _Rig:
-    """A rig that keys nothing. No serial device is opened by this file."""
-
-    def __init__(self, *a, **kw):
-        self.edges: list[bool] = []
-        self.dial: int | None = None
-        self.mode: str | None = None
-        self.passband: int | None = None
-        self.closed = False
-
-    def set_freq(self, hz):
-        self.dial = int(hz)
-        return True
-
-    def get_freq(self):
-        # A working rig, which is what these cycle-timing cases are about. It
-        # answered None until 2026-08-15, when that stopped meaning "no opinion"
-        # and started meaning "the dial this would key on is unknown" -- shrike
-        # refuses on it now, the way besra and sabir already did.
-        return self.dial
-
-    def set_mode(self, mode, *, passband=3000):
-        self.mode = mode
-        self.passband = int(passband)
-        return True
-
-    def get_mode(self):
-        from hfmodem.core.rxreadiness import RadioMode
-        return RadioMode(self.mode, self.passband,
-                         f"{self.mode}\n{self.passband}\n")
-
-    def _close(self):
-        self.closed = True
-
-    def arm(self):
-        pass
-
-    def ptt(self, on):
-        self.edges.append(bool(on))
-        return True
-
-    def key_failure(self):
-        # A rig that keys nothing has nothing to doubt: this file measures
-        # where carriers land, not whether a keying channel stood.
-        return None
-
-    def stop(self):
-        pass
 
 
 def _answer(shift, cs=pactor1.CS_ACK_A, quiet_after: int | None = None,
@@ -692,10 +357,10 @@ def _session(*, cycles: int, hold: int, charge: int, peer: bool,
         _spend(bench_box[0].cs_n if bench_box else 0)
         return _cs(self, seg, seg_start, at, **kwargs)
 
-    def _charged_upgrade(self, audio):
+    def _charged_upgrade(self, audio, **kwargs):
         b = bench_box[0] if bench_box else None
         _spend(b.upgrade_n if b else 0, b.upgrade_rate if b else 0.0, audio.size)
-        return _up(self, audio)
+        return _up(self, audio, **kwargs)
 
     def _charged_feed(self, chunk):
         # The listen loop's own decode, per slice as it arrives. Charged nowhere
@@ -1178,15 +843,15 @@ def the_carrier_keeps_the_shift_it_was_rendered_in() -> None:
               f"{held['log'].count(onair.LATE_KEY)} late keys")
 
 
-def _no_regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n):
+def _no_regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n, *, long_crc=None):
     """The loop as it flew on 2026-08-01: whatever the window did, key anyway."""
-    return slot, seg, seg_start
+    return slot, seg, seg_start, long_crc
 
 
 _REGRID = onair._regrid
 
 
-def _fed_regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n):
+def _fed_regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n, *, long_crc=None):
     """The re-grid as it flew on 2026-08-02: the recovered slot is rolling-decoded.
 
     The same function, with one number put back: `_regrid` asks for its window to
@@ -1200,12 +865,12 @@ def _fed_regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n):
         listen(live_, want, host_, sessrx_, 10 ** 9, *a, **kw))
     try:
         return _REGRID(live, raster, tx, host, sessrx, slot, seg, seg_start,
-                       settle_n)
+                       settle_n, long_crc=long_crc)
     finally:
         onair._listen_until_answer = listen
 
 
-def _deaf_regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n):
+def _deaf_regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n, *, long_crc=None):
     """The cheap fix: hand the slot back, then sleep through it.
 
     `flush_to` IS the sleeping, and it has to be written out: a stream nobody
@@ -1218,7 +883,7 @@ def _deaf_regrid(live, raster, tx, host, sessrx, slot, seg, seg_start, settle_n)
         slot += 1
         tx.aim(raster, slot)
     live.flush_to(tx.boundary - settle_n)
-    return slot, seg, seg_start
+    return slot, seg, seg_start, long_crc
 
 
 def the_recovered_slot_is_listened_through() -> None:
@@ -1503,7 +1168,7 @@ def the_regrid_window_keeps_its_origin_across_its_own_key() -> None:
         # boundary, so the slot is demonstrably gone.
         seg = bench.read(raster.boundary(1) + round(0.10 * FS))
         with contextlib.redirect_stdout(io.StringIO()):
-            slot, out, out_start = onair._regrid(
+            slot, out, out_start, _ = onair._regrid(
                 bench, raster, tx, _Host(), rx, 1, seg, 0, settle_n)
     check("the recovered slot's scan really keyed, through the production "
           "transmit path", len(bench.emissions) == 1 and bool(tx.slots_used),

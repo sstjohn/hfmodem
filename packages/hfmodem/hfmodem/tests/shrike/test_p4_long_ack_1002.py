@@ -24,11 +24,10 @@ def opening(turn):
 
 
 @pytest.mark.parametrize('policy,expected', [
-    ('fixed-x27', ('X27', 'X27', 'X27')),
-    ('alternate-packet', ('X27', 'V27', 'V27')),
+    ('toggle', ('X27', 'V27', 'V27')),
 ])
 def test_k4msu_c1_then_33_c2_copies(policy, expected):
-    turn, _ = machine(role='irs', normal_ack='parity')
+    turn, _ = machine(role='irs', normal_ack='parity', long_ack='counter-even-t27')
     opening(turn)
     c1 = ack_frame(300000, b'first packet', 0x61, Kind.LONG)
     first = propose_ack(turn, c1)
@@ -50,51 +49,48 @@ def test_k4msu_c1_then_33_c2_copies(policy, expected):
 
 
 def test_long_refusal_unread_and_status_do_not_advance_history():
-    turn, _ = machine(role='irs', normal_ack='parity')
+    turn, _ = machine(role='irs', normal_ack='parity', long_ack='counter-even-t27')
     opening(turn)
     propose_ack(turn, ack_frame(300000, b'first packet', 0x61, Kind.LONG))
     turn.keyed()
-    turn.long_ack = 'alternate-packet'
+    turn.long_ack = 'toggle'
     c2 = ack_frame(480000, b'second packet', 0x62, Kind.LONG)
     assert propose_ack(turn, c2).word == 'V27'
     turn.refused('deadline')
-    assert turn._packet_ack[1] == 'X27' and turn.acked_counter == 1
+    assert turn._ack_chain[1] == 'X27' and turn.acked_counter == 1
     unread = replace(c2.observation, stream_sample=660000, frame=None)
     turn.observe(RegisteredObservation(unread, Registered.NEW), now=660000)
-    assert turn._packet_ack[1] == 'X27' and turn.acked_counter == 1
+    assert turn._ack_chain[1] == 'X27' and turn.acked_counter == 1
     turn.adapter.terminal = False
     turn.observe(ack_frame(840000, b'wrong status', 0x82, Kind.LONG), now=840000)
-    assert turn._packet_ack[1] == 'X27' and turn.acked_counter == 1
+    assert turn._ack_chain[1] == 'X27' and turn.acked_counter == 1
     assert propose_ack(turn, ack_frame(1020000, b'second packet', 0x62, Kind.LONG,
                                        header='B')).word == 'V27'
     turn.keyed()
-    assert turn._packet_ack[1] == 'V27' and turn.acked_counter == 2
+    assert turn._ack_chain[1] == 'V27' and turn.acked_counter == 2
 
 
 def test_cached_long_reselected_when_policy_changes():
-    turn, _ = machine(role='irs', normal_ack='parity', long_ack='fixed-x27')
+    turn, _ = machine(role='irs', long_ack='counter-even-t27')
     opening(turn)
-    propose_ack(turn, ack_frame(300000, b'first packet', 0x61, Kind.LONG))
+    assert propose_ack(turn, ack_frame(300000, b'first', 0x61, Kind.LONG)).word == 'X27'
     turn.keyed()
-    assert propose_ack(turn, ack_frame(480000, b'second packet', 0x62, Kind.LONG)).word == 'X27'
+    assert propose_ack(turn, ack_frame(480000, b'second', 0x62, Kind.LONG)).word == 'T27'
+    turn.long_ack = 'toggle'
+    repeated = propose_ack(turn, ack_frame(480000, b'second', 0x62, Kind.LONG, header='B'))
+    assert repeated.word == 'T27'
     turn.keyed()
-    turn.long_ack = 'alternate-packet'
-    repeat = propose_ack(turn, ack_frame(660000, b'second packet', 0x62, Kind.LONG, header='B'))
-    assert repeat.word == 'V27' and repeat.ack_reason == 'new packet after X27'
-    assert turn._packet_ack[1] == 'X27'
-    turn.keyed()
-    assert turn._packet_ack[1] == 'V27'
-    turn.long_ack = 'fixed-x27'
-    repeat = propose_ack(turn, ack_frame(840000, b'second packet', 0x62, Kind.LONG))
-    assert repeat.word == 'X27' and repeat.ack_reason is None
+    assert turn._ack_chain == (2, 'T27')
+    turn.long_ack = 'counter-even-t27'
+    assert propose_ack(turn, ack_frame(660000, b'second', 0x62, Kind.LONG)).word == 'T27'
 
 
 def test_late_long_keeps_history_until_deferred_answer_is_keyed():
-    turn, _ = machine(role='irs', prekey_lead=.049)
+    turn, _ = machine(role='irs', prekey_lead=.049, long_ack='counter-even-t27')
     opening(turn)
     propose_ack(turn, ack_frame(300000, b'first packet', 0x61, Kind.LONG))
     turn.keyed()
-    turn.long_ack = 'alternate-packet'
+    turn.long_ack = 'toggle'
     c2 = ack_frame(3528420, b'second packet', 0x62, Kind.LONG)
     due = c2.observation.stream_sample + round(3.4 * FS)
     cutoff = due - turn.lead
@@ -104,34 +100,34 @@ def test_late_long_keeps_history_until_deferred_answer_is_keyed():
     assert current.word == 'V27' and current.stream_sample == due
     turn.refused('deadline')
     assert turn._deferred is not None
-    assert turn._packet_ack[1] == 'X27' and turn.acked_counter == 1
+    assert turn._ack_chain[1] == 'X27' and turn.acked_counter == 1
     later = due + round(3.75 * FS)
     reply = turn.decide(later - turn.lead)
     assert reply.word == 'V27' and reply.stream_sample == later
-    assert turn._packet_ack[1] == 'X27' and turn.acked_counter == 1
+    assert turn._ack_chain[1] == 'X27' and turn.acked_counter == 1
     turn.keyed()
-    assert turn._packet_ack[1] == 'V27' and turn.acked_counter == 2
+    assert turn._ack_chain[1] == 'V27' and turn.acked_counter == 2
 
 
 def test_distinct_long_identity_does_not_advance_without_key():
-    turn, _ = machine(role='irs', long_ack='alternate-packet')
+    turn, _ = machine(role='irs', long_ack='toggle')
     opening(turn)
     c1 = ack_frame(300000, b'first packet', 0x61, Kind.LONG)
-    assert propose_ack(turn, c1).word == 'V27'
+    assert propose_ack(turn, c1).word == 'X27'
     turn.keyed()
     c2 = ack_frame(480000, b'second packet', 0x62, Kind.LONG)
-    assert propose_ack(turn, c2).word == 'X27'
+    assert propose_ack(turn, c2).word == 'V27'
     turn.refused('deadline')
-    assert turn._packet_ack[1] == 'V27' and turn.acked_counter == 1
+    assert turn._ack_chain[1] == 'X27' and turn.acked_counter == 1
     repeat = propose_ack(turn, ack_frame(660000, b'first packet', 0x61, Kind.LONG,
                                          header='B'))
-    assert repeat.word == 'V27'
+    assert repeat.word == 'X27'
     turn.keyed()
-    assert turn._packet_ack[1] == 'V27' and turn.acked_counter == 1
+    assert turn._ack_chain[1] == 'X27' and turn.acked_counter == 1
 
 
 def test_protocol_three_normal_preserves_merged_handback_counter_policy():
-    for policy, expected in [('fixed-x27', 'X27'), ('alternate-packet', 'X27')]:
+    for policy, expected in [('toggle', 'X27')]:
         turn, _ = machine(role='irs', normal_ack='parity', long_ack=policy)
         opening(turn)
         reply = propose_ack(turn, ack_frame(300000, b'protocol three', 0x62))
@@ -139,7 +135,7 @@ def test_protocol_three_normal_preserves_merged_handback_counter_policy():
 
 
 def test_chirp_policy_is_unchanged_by_long_ack():
-    turn, _ = machine(role='irs', chirp_ack='alternate', long_ack='alternate-packet')
+    turn, _ = machine(role='irs', chirp_ack='toggle', long_ack='toggle')
     words = []
     for i, status in enumerate((0x61, 0x62, 0x62, 0x63)):
         reply = propose_ack(turn, ack_frame(48000 + i * 180000, b'chirp', status,
@@ -150,7 +146,7 @@ def test_chirp_policy_is_unchanged_by_long_ack():
 
 
 def test_ve3kpg_normal_c1_copies_stay_v27():
-    turn, _ = machine(role='irs', long_ack='alternate-packet')
+    turn, _ = machine(role='irs', long_ack='toggle')
     opening(turn)
     words = []
     for i in range(6):
@@ -187,59 +183,61 @@ def test_invalid_long_ack_policy():
         machine(long_ack='unknown')
 
 
-@pytest.mark.parametrize('long_policy', ['fixed-x27', 'alternate-packet'])
+@pytest.mark.parametrize('long_policy', ['toggle'])
 def test_refused_chirp_does_not_advance_either_selection_history(long_policy):
-    turn, _ = machine(role='irs', chirp_ack='alternate', long_ack=long_policy)
+    turn, _ = machine(role='irs', chirp_ack='toggle', long_ack=long_policy)
     first = propose_ack(turn, ack_frame(FS, b'first chirp', 0x61, Kind.CHIRP))
     assert first.word == 'X27'
-    assert turn._last_ack is None and turn._packet_ack is None
+    assert turn._last_ack is None and turn._ack_chain is None
     turn.refused('deadline')
-    assert turn._last_ack is None and turn._packet_ack is None
+    assert turn._last_ack is None and turn._ack_chain is None
     second = propose_ack(turn, ack_frame(300000, b'different chirp', 0x62, Kind.CHIRP))
-    assert second.word == 'V27'
+    assert second.word == 'X27'
     turn.keyed()
     assert turn._last_ack[0] == second.ack_identity
-    assert turn._packet_ack[0][1] == Kind.CHIRP and turn._packet_ack[1] == 'V27'
+    assert turn._ack_chain[1] == 'X27'
     repeat = propose_ack(turn, ack_frame(480000, b'different chirp', 0x62, Kind.CHIRP,
                                         header='B'))
-    assert repeat.word == 'V27'
+    assert repeat.word == 'X27'
     turn.keyed()
     third = propose_ack(turn, ack_frame(660000, b'third chirp', 0x63, Kind.CHIRP))
-    assert third.word == 'X27'
+    assert third.word == 'V27'
 
 
 def test_keyed_shared_packet_history_across_body_chirp_long_and_normal():
-    turn, _ = machine(role='irs', long_ack='alternate-packet',
-                      normal_ack='alternate-packet', chirp_ack='alternate')
+    turn, _ = machine(role='irs', long_ack='toggle',
+                      normal_ack='toggle', chirp_ack='toggle')
     opening(turn)
     for i, (kind, status, expected) in enumerate([
         (Kind.CHIRP, 0x61, 'X27'), (Kind.LONG, 0x62, 'V27'),
-        (Kind.NORMAL, 0x03, 'X27'), (Kind.CHIRP, 0x60, 'V27')]):
+        (Kind.NORMAL, 0x03, 'X27'), (Kind.CHIRP, 0x60, 'X27')]):
         reg = ack_frame(300000+i*180000, f'packet {i}'.encode(), status, kind)
-        before = turn._packet_ack
+        before = turn._ack_chain
         reply = propose_ack(turn, reg)
-        assert reply.word == expected and turn._packet_ack == before
+        assert reply.word == expected and turn._ack_chain == before
         turn.keyed()
-        assert turn._packet_ack[0][1] == kind and turn._packet_ack[1] == expected
+        assert turn._ack_chain == (status & 3, expected)
 
 
 @pytest.mark.parametrize('policy,words', [
-    ('v27', ('V27', 'V27')), ('x27', ('X27', 'X27')),
-    ('parity', ('V27', 'X27')), ('x27-u27', ('U27', 'X27')),
-    ('alternate-packet', ('V27', 'X27')),
+    ('parity', ('V27', 'X27')),
+    ('toggle', ('X27', 'V27')),
 ])
-@pytest.mark.parametrize('long_policy', ['fixed-x27', 'alternate-packet'])
+@pytest.mark.parametrize('long_policy', ['toggle'])
 def test_protocol_three_normal_iss_expectations_follow_selected_policy(policy, words, long_policy):
     turn, _ = machine(normal_ack=policy, long_ack=long_policy)
     for status, expected in zip((0x61, 0x62), words, strict=True):
         turn._data_packet = Proposal(Kind.NORMAL, 0, status=status)
         assert turn._expected_data_ack() == expected
-        if policy != 'alternate-packet':
-            assert turn._normal_ack((status, b'normal'), None)[0] == expected
+        turn._last_data_ack = expected
+        turn._last_data_form = turn._packet_form(turn._data_packet)
+        irs, _ = machine(role='irs', normal_ack=policy)
+        if policy != 'toggle':
+            assert propose_ack(irs, ack_frame(FS, b'normal', status)).word == expected
 
 
-def test_alternate_long_trial_enabled_from_opening_c0_is_v27_x27_x27():
-    turn, _ = machine(role='irs', long_ack='alternate-packet', normal_ack='parity')
+def test_toggle_long_form_change_from_opening_is_x27_v27_v27():
+    turn, _ = machine(role='irs', long_ack='toggle', normal_ack='parity')
     opening(turn)
     words = []
     for i, status in enumerate((0x61, 0x62, 0x62)):
@@ -247,15 +245,15 @@ def test_alternate_long_trial_enabled_from_opening_c0_is_v27_x27_x27():
                                             b'c1' if i == 0 else b'c2', status, Kind.LONG))
         words.append(reply.word)
         turn.keyed()
-    assert words == ['V27', 'X27', 'X27']
+    assert words == ['X27', 'V27', 'V27']
 
 
 def test_history_neutral_repeat_request_preserves_late_long_deferred_answer():
-    turn, _ = machine(role='irs', prekey_lead=.049)
+    turn, _ = machine(role='irs', prekey_lead=.049, long_ack='counter-even-t27')
     opening(turn)
     propose_ack(turn, ack_frame(300000, b'first packet', 0x61, Kind.LONG))
     turn.keyed()
-    turn.long_ack = 'alternate-packet'
+    turn.long_ack = 'toggle'
     c2 = ack_frame(3528420, b'second packet', 0x62, Kind.LONG)
     due = 3691620
     turn.observe(c2, now=3689414)
@@ -263,55 +261,54 @@ def test_history_neutral_repeat_request_preserves_late_long_deferred_answer():
     turn.refused('deadline')
     deferred = turn._deferred
     assert deferred[1]['due'] == due+round(3.75*FS)
-    before = (turn.ack_word, turn.acked_counter, turn._packet_ack,
+    before = (turn._ack_chain, turn.acked_counter, turn._ack_chain,
               turn._last_ack, turn.first_body)
     turn._next = Proposal(Kind.WORD, due, word='X27', state=State.IRS_ANSWER,
                           current_slot_accepted=False)
     request = turn.keyed()
     assert request.ack_identity is None and request.ack_reason is None
     assert turn._deferred == deferred
-    assert (turn.ack_word, turn.acked_counter, turn._packet_ack,
+    assert (turn._ack_chain, turn.acked_counter, turn._ack_chain,
             turn._last_ack, turn.first_body) == before
     reply = turn.decide(due+round(3.75*FS)-turn.lead)
     assert reply.word == 'V27' and reply.ack_identity == (0x62, c2.observation.frame.data)
     turn.keyed()
-    assert turn.acked_counter == 2 and turn._packet_ack[1] == 'V27'
+    assert turn.acked_counter == 2 and turn._ack_chain[1] == 'V27'
 
 
 @pytest.mark.parametrize('delta', [0, 1, 100])
 @pytest.mark.parametrize('kind,status,first_word', [
-    (Kind.BODY, 0, 'X27'), (Kind.NORMAL, 0x61, 'V27'),
+    (Kind.BODY, 0, 'X27'), (Kind.NORMAL, 0x61, 'X27'),
     (Kind.LONG, 0x61, 'X27'), (Kind.CHIRP, 0x61, 'X27'),
 ])
 def test_physical_key_shift_keeps_admitted_family_history_and_repeats(
         delta, kind, status, first_word):
-    turn, _ = machine(role='irs', normal_ack='alternate-packet',
-                      long_ack='alternate-packet', chirp_ack='alternate')
+    turn, _ = machine(role='irs', normal_ack='toggle',
+                      long_ack='toggle', chirp_ack='toggle')
     first = propose_ack(turn, ack_frame(FS, b'first packet', status, kind))
     assert first.word == first_word
-    assert turn._packet_ack is None and turn._last_ack is None
+    assert turn._ack_chain is None and turn._last_ack is None
     keyed = turn.keyed(first.stream_sample+delta)
     assert keyed.stream_sample == first.stream_sample+delta
-    assert turn._packet_ack == ((turn._receive_epoch, kind, first.ack_identity), first_word)
+    assert turn._ack_chain == (status & 3, first_word)
     assert turn._last_ack[0] == first.ack_identity
     repeat = propose_ack(turn, ack_frame(300000, b'first packet', status, kind, header='B'))
-    before = turn._packet_ack
+    before = turn._ack_chain
     assert repeat.word == first_word
     turn.keyed(repeat.stream_sample+delta)
-    assert turn._packet_ack == before
+    assert turn._ack_chain == before
     next_packet = propose_ack(turn, ack_frame(480000, b'different packet', 0x62, Kind.CHIRP))
-    assert next_packet.word == 'V27'
-    assert turn._packet_ack == before
+    assert next_packet.word == ('X27' if kind in (Kind.BODY, Kind.NORMAL) else 'V27')
+    assert turn._ack_chain == before
     turn.keyed(next_packet.stream_sample+delta)
     assert turn._last_ack[0] == next_packet.ack_identity
-    assert turn._packet_ack[0][1] == Kind.CHIRP
-    assert turn._packet_ack[1] == next_packet.word
+    assert turn._ack_chain[1] == next_packet.word
 
 
 @pytest.mark.parametrize('delta', [0, 1, 100])
 @pytest.mark.parametrize('case', ['refused', 'identity', 'generation', 'epoch', 'control'])
 def test_physical_key_shift_does_not_credit_unrelated_admission_metadata(delta, case):
-    turn, _ = machine(role='irs', chirp_ack='alternate', long_ack='alternate-packet')
+    turn, _ = machine(role='irs', chirp_ack='toggle', long_ack='toggle')
     reply = propose_ack(turn, ack_frame(FS, b'admitted packet', 0x61, Kind.CHIRP))
     if case == 'refused':
         turn.refused('deadline')
@@ -330,7 +327,7 @@ def test_physical_key_shift_does_not_credit_unrelated_admission_metadata(delta, 
             turn._next = Proposal(Kind.WORD, reply.stream_sample, word='X27',
                                   state=State.IRS_ANSWER, current_slot_accepted=False)
         turn.keyed(reply.stream_sample+delta)
-    assert turn._packet_ack is None and turn._packet_words == {}
+    assert turn._ack_chain is None
 
 
 @pytest.mark.parametrize('delta', [0, 1, 100])
@@ -347,9 +344,9 @@ def test_driver_records_shifted_body_and_chirp_keys_using_actual_writer_sample(m
         audio[at:at+len(wave)] = wave
     stream = Stream(audio)
     tx = Tx(stream)
-    tx.p4_link_options.p4_ladder = 'chirp'
-    tx.p4_link_options.p4_long_ack = 'alternate-packet'
-    tx.p4_link_options.p4_chirp_ack = 'alternate'
+    tx.p4_link_options.p4_data = 'chirp'
+    tx.p4_link_options.p4_long_ack = 'toggle'
+    tx.p4_link_options.p4_chirp_ack = 'toggle'
     tx.p4_link_options.p4_link_timeout = 14.5
     machines = []
     keyed_history = []
@@ -362,7 +359,7 @@ def test_driver_records_shifted_body_and_chirp_keys_using_actual_writer_sample(m
 
         def observed(at=None):
             sent = key(at)
-            keyed_history.append((sent, result._packet_ack, result._last_ack))
+            keyed_history.append((sent, result._ack_chain, result._last_ack))
             return sent
 
         result.keyed = observed
@@ -385,19 +382,16 @@ def test_driver_records_shifted_body_and_chirp_keys_using_actual_writer_sample(m
     assert all(e['keyed_at'] == e['audio_start'] == e['proposed_at']+delta for e in emitted)
     assert not [e for e in tx.p4_probe.link_events if e['event'] == 'Refused']
     turn, = machines
-    assert len(turn._packet_words) == 3
-    assert {key[1] for key in turn._packet_words} == {Kind.BODY, Kind.CHIRP}
+    assert turn._ack_chain == (2, 'V27')
     assert keyed_history[-1][1][1] == keyed_history[-1][2][1].word == 'V27'
     assert [sent.stream_sample for sent, _, _ in keyed_history] == [
         e['audio_start'] for e in emitted]
 
 
-COUNTER_POLICIES = ('counter-odd-t27', 'counter-even-t27')
+COUNTER_POLICIES = ('counter-even-t27',)
 
 
 @pytest.mark.parametrize('policy,expected', [
-    (None, ('T27', 'X27')), ('fixed-x27', ('X27', 'X27')),
-    ('counter-odd-t27', ('X27', 'T27')),
     ('counter-even-t27', ('T27', 'X27')),
 ])
 def test_counter_recorded_fields_duplicates_refusal_and_held_unread(policy, expected):
@@ -425,9 +419,9 @@ def test_counter_recorded_fields_duplicates_refusal_and_held_unread(policy, expe
         assert (reply.word, reply.stream_sample, reply.ack_identity) == (word, at+163200, (status, data))
         words.append(reply.word)
         if index == 2:
-            history = turn._last_ack, turn._packet_ack, dict(turn._packet_words)
+            history = turn._last_ack, turn._ack_chain, turn._ack_chain
             turn.refused('deadline')
-            assert (turn._last_ack, turn._packet_ack, turn._packet_words) == history
+            assert (turn._last_ack, turn._ack_chain, turn._ack_chain) == history
             assert turn._deferred[1]['due'] == 2131366
             slot = at+180000
             turn.observe(unread(Kind.LONG, slot), now=slot+158400)
@@ -435,17 +429,17 @@ def test_counter_recorded_fields_duplicates_refusal_and_held_unread(policy, expe
             assert (reply.word, reply.stream_sample, reply.accepted_target) == (word, 2131366, at)
             assert not reply.current_slot_accepted and not turn.pending[slot]['accepted']
         turn.keyed()
-        assert turn._packet_ack[1] == word
-        assert turn._packet_words[(turn._receive_epoch, Kind.LONG, (status, data))] == word
+        assert turn._ack_chain[1] == word
+        assert turn._ack_chain == (status & 3, word)
     assert words == [expected[0], expected[0], expected[1], expected[1]]
     assert delivered == [DATA_62, DATA_03[:39]]
-    history = turn._last_ack, turn._packet_ack, dict(turn._packet_words)
+    history = turn._last_ack, turn._ack_chain, turn._ack_chain
     due = 2148166+180000+163200
     turn.silence(due-turn.lead, answer_due=due)
     silent = turn.decide(due-turn.lead)
     assert silent.word == expected[1] and not silent.current_slot_accepted
     assert silent.current_slot is None and silent.accepted_target == 2148166
-    assert (turn._last_ack, turn._packet_ack, turn._packet_words) == history
+    assert (turn._last_ack, turn._ack_chain, turn._ack_chain) == history
     if policy in COUNTER_POLICIES:
         events = [e for e in turn.link_events if e['event'] == 'long-answer']
         assert events and all(e['ack_policy'] == policy for e in events)
@@ -462,14 +456,15 @@ def test_counter_maps_all_counters_and_wrap(policy, protocol, header):
         reg = ack_frame(FS+index*180000, f'packet {index}'.encode(),
                         protocol*32+counter, Kind.LONG, header=header)
         reply = propose_ack(turn, reg)
-        t27 = counter % 2 == (1 if policy == 'counter-odd-t27' else 0)
+        t27 = counter % 2 == 0
         assert reply.word == ('T27' if t27 else 'X27')
         assert reply.ack_reason == f'{policy} counter {counter}'
         for upper in (0x04, 0x1c, 0x80, 0x9c):
-            assert turn._long_ack(((protocol*32+counter) | upper, b'other payload')) == (
+            assert turn._counted_ack(replace(reg.observation, frame=replace(reg.observation.frame,
+                status=p4turn.Status.from_byte((protocol*32+counter) | upper)))) == (
                 reply.word, reply.ack_reason)
         turn.keyed()
-        assert turn._long_policies[(turn._receive_epoch, Kind.LONG, reply.ack_identity)] == policy
+        assert turn._ack_chain == (counter, reply.word)
 
 
 @pytest.mark.parametrize('policy', COUNTER_POLICIES)
@@ -482,10 +477,10 @@ def test_counter_acceptance_retains_word_before_refused_first_key(policy, status
     reg = accepted(1428171, b'held'.ljust(69, b'\x1e'), status)
     turn.observe(reg)
     selected = turn.decide(1591371-turn.lead)
-    assert selected.word == ('T27' if status % 2 == (1 if policy == 'counter-odd-t27' else 0) else 'X27')
+    assert selected.word == ('T27' if status % 2 == 0 else 'X27')
     turn.refused('deadline')
     held = turn._held_answer
-    assert turn._last_ack is None and turn._packet_ack is None and not turn._packet_words
+    assert turn._last_ack is None and turn._ack_chain is None
     for invalid in [
         unread(Kind.LONG, 1608171),
         replace(reg, observation=replace(reg.observation, stream_sample=1608171, provisional=True)),
@@ -504,7 +499,7 @@ def test_counter_acceptance_retains_word_before_refused_first_key(policy, status
     assert event['accepted_target'] == 1428171 and event['current_slot'] == 1608171
     assert not event['current_slot_accepted']
     turn.keyed()
-    assert turn._packet_ack[1] == selected.word
+    assert turn._ack_chain[1] == selected.word
 
 
 @pytest.mark.parametrize('policy', COUNTER_POLICIES)
@@ -512,27 +507,27 @@ def test_counter_policy_reselection_and_epoch_keys(policy):
     turn, _ = machine(role='irs', long_ack=policy)
     first = propose_ack(turn, ack_frame(FS, b'packet', 3, Kind.LONG))
     turn.keyed()
-    turn.long_ack = COUNTER_POLICIES[1] if policy == COUNTER_POLICIES[0] else COUNTER_POLICIES[0]
+    turn.long_ack = 'toggle-t27'
     repeat = propose_ack(turn, ack_frame(FS+180000, b'packet', 3, Kind.LONG))
-    assert repeat.word != first.word
+    assert repeat.word == first.word
     turn.keyed()
-    assert turn._packet_ack[1] == repeat.word
-    old_key = turn._packet_ack[0]
+    assert turn._ack_chain[1] == repeat.word
+    old_epoch = turn._receive_epoch
     turn._close_receive_epoch('test')
     assert turn._held_answer is None
     turn._open_receive_epoch(FS+360000)
     newer = propose_ack(turn, ack_frame(FS+360000, b'packet', 3, Kind.LONG))
     turn.keyed()
-    new_key = turn._packet_ack[0]
-    assert new_key[0] != old_key[0] and new_key[1:] == old_key[1:]
-    assert turn._packet_words[new_key] == newer.word == repeat.word
+    assert turn._receive_epoch != old_epoch
+    assert turn._ack_chain == (3, newer.word)
+    assert newer.word == repeat.word
     held = turn._held_answer
     turn.observe(ack_frame(FS+180000, b'stale', 2, Kind.LONG))
     assert turn._held_answer is held
 
 
-def test_omitted_and_explicit_counter_even_long_proposals_and_events_are_identical():
-    turns = [machine(role='irs', **options)[0] for options in ({}, {'long_ack': 'counter-even-t27'})]
+def test_omitted_and_explicit_toggle_long_proposals_and_events_are_identical():
+    turns = [machine(role='irs', **options)[0] for options in ({}, {'long_ack': 'toggle'})]
     for index, status in enumerate((0x62, 3, 3)):
         reg = ack_frame(FS+index*180000, b'packet', status, Kind.LONG)
         assert propose_ack(turns[0], reg) == propose_ack(turns[1], reg)
@@ -543,7 +538,7 @@ def test_omitted_and_explicit_counter_even_long_proposals_and_events_are_identic
 @pytest.mark.parametrize('policy', COUNTER_POLICIES)
 def test_counter_long_policy_preserves_short_normal_chirp_and_iss_t27_rules(policy):
     from hfmodem.tests.shrike.test_p4turn import body, word
-    turn, _ = machine(role='irs', long_ack=policy, normal_ack='parity')
+    turn, _ = machine(role='irs', long_ack=policy, normal_ack='parity', chirp_ack='parity')
     turn.observe(replace(body(FS), observation=replace(body(FS).observation, kind=Kind.SHORT, frame=None, value=12, header='A')))
     assert turn.decide(FS+44160-turn.lead).word == 'T27'
     turn.keyed()
@@ -561,17 +556,24 @@ def test_counter_long_policy_preserves_short_normal_chirp_and_iss_t27_rules(poli
     assert iss.acked_counter is None
 
 
-@pytest.mark.parametrize('policy', ['fixed-x27', 'alternate-packet', *COUNTER_POLICIES])
-def test_onair_forwards_chosen_long_policy_to_turn(monkeypatch, policy):
+@pytest.mark.parametrize('name,policy', [
+    *[('normal_ack', p) for p in ('toggle', 'parity')],
+    *[('long_ack', p) for p in ('toggle', 'toggle-t27', *COUNTER_POLICIES)],
+    *[('chirp_ack', p) for p in ('toggle', 'parity')],
+    *[('first_ack', p) for p in ('x27', 'v27')],
+    *[('chain_reset', p) for p in ('turn', 'form', 'ladder', 'turn,form', 'turn,ladder', 'form,ladder', 'turn,form,ladder')],
+])
+def test_onair_forwards_chosen_ack_policy_to_turn(monkeypatch, name, policy):
     stream = Stream(np.zeros(2*FS, np.float32))
     tx = Tx(stream)
-    tx.p4_link_options.p4_long_ack = policy
+    parsed = onair.build_parser().parse_args(['--p4-'+name.replace('_', '-'), policy])
+    setattr(tx.p4_link_options, 'p4_'+name, getattr(parsed, 'p4_'+name))
     class ReachedTurn(Exception):
         pass
     original = p4turn.P4Turn
     def checked(*args, **kwargs):
         turn = original(*args, **kwargs)
-        assert turn.long_ack == policy
+        assert getattr(turn, name) == (policy.upper() if name == 'first_ack' else policy)
         raise ReachedTurn
     monkeypatch.setattr(p4turn, 'P4Turn', checked)
     with pytest.raises(ReachedTurn):
@@ -582,7 +584,7 @@ def test_onair_forwards_chosen_long_policy_to_turn(monkeypatch, policy):
 def test_ws8eoc_1108_c1_c2_c2_default_answers_x27_t27_t27():
     # 2026-11-08 23:33Z: fixed-x27 keyed a second X27 here, WS8EOC took it as
     # a repeat request and re-sent c2 until the link stalled.
-    turn, _ = machine(role='irs', normal_ack='parity')
+    turn, _ = machine(role='irs', normal_ack='parity', long_ack='counter-even-t27')
     opening(turn)
     words = []
     for at, status, data in [

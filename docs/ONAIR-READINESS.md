@@ -15,8 +15,12 @@ audio codec. The FT-891 profile uses model 1036 with an external audio interface
 Configure your own serial endpoints rather than copying another station's
 adapter IDs. Put FTDX10 endpoints and timing in `[rig.profiles.ftdx10]`, and
 input/output devices, drive and measurements in `[audio.chains.ftdx10_usb]`.
-The flat `[audio]` remains the FT-891 chain. Profile entries for X6100 and G90
-are planned support, with incomplete timing and readback qualification.
+The flat `[audio]` remains the FT-891 chain. The X6100 profile uses Hamlib
+model 3087 at 19200 baud, with CI-V CAT and the radio's USB audio codec on one
+cable. Put its CAT port in `[rig.profiles.x6100]` and the codec's device names
+in `[audio.chains.x6100_usb]`. It is receive-only until its keying line is
+qualified: set `[station] transmit = false`. Its timing is unmeasured, and
+PACTOR is not available at its provisional PTT settle. G90 support is planned.
 
 FTDX10 operation was confirmed by the operator on 2026-10-02, including two
 PTT tail checks that recorded the radio identity and clean unkey. Those

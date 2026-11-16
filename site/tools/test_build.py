@@ -89,6 +89,12 @@ class SiteBuild(unittest.TestCase):
                 # standalone files as well as the site, or page rules win again.
                 self.assertGreater(source.index('href="guide.css"'), source.rfind('</style>'))
 
+    def test_every_console_schema_option_says_what_it_does(self):
+        schema = json.loads((build.ROOT / 'site/demo/console-schema.json').read_text())
+        bare = [(' '.join(c['argv']), f['flags'] or [f['dest']]) for c in schema['commands']
+                for f in c['fields'] if not (f.get('help') or '').strip()]
+        self.assertEqual(bare, [])
+
     def test_every_local_link_and_fragment_resolves(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
@@ -96,7 +102,7 @@ class SiteBuild(unittest.TestCase):
             pages = list(root.rglob('*.html'))
             primary = {('docs/'+name) for name, _, _ in build.DOCUMENTS} | {('docs/viz/'+name) for name in build.ROUTES}
             rendered = {source for source in build.REFERENCE_FILES - primary if not source.endswith('.z')}
-            self.assertEqual(len(pages), 30 + len(rendered) + len(build.MOVED))
+            self.assertEqual(len(pages), 31 + len(rendered) + len(build.MOVED))
             for page in pages:
                 parsed = Links(page.read_text())
                 for href in parsed.hrefs + parsed.assets:
@@ -379,7 +385,7 @@ class SiteBuild(unittest.TestCase):
                 for item in value:
                     yield from references(item)
 
-        for route in ('pactor3-send', 'pactor3-receive', 'vara-send', 'vara-receive',
+        for route in ('pactor3-mail', 'pactor3-send', 'pactor3-receive', 'vara-send', 'vara-receive',
                       'ardop-send', 'ardop-receive'):
             page = build.ROOT / 'site/examples' / route
             data = page / 'data'

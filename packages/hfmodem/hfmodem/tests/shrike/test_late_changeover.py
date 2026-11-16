@@ -41,8 +41,8 @@ def test_final_decoder_changeover_rotates_before_receive_grid_update(
     if reader == "upgrade_scan":
         scan = onair._SessionRx.upgrade_scan
 
-        def late_scan(self, audio):
-            scan(self, audio)
+        def late_scan(self, audio, **kwargs):
+            scan(self, audio, **kwargs)
             inject(self)
 
         monkeypatch.setattr(onair._SessionRx, "upgrade_scan", late_scan)
@@ -97,8 +97,8 @@ def test_a_changeover_found_by_the_hand_back_rotates_before_the_key(tmp_path,
     regrid = onair._regrid
     injected = []
 
-    def late_cs3(live, raster, tx, host, sessrx, *rest):
-        out = regrid(live, raster, tx, host, sessrx, *rest)
+    def late_cs3(live, raster, tx, host, sessrx, *rest, **kwargs):
+        out = regrid(live, raster, tx, host, sessrx, *rest, **kwargs)
         if (not injected and sessrx.tag == tag
                 and host.arq.state == arq.State.CONNECTED
                 and host.arq.role == arq.ISS):

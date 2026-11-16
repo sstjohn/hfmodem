@@ -212,7 +212,8 @@ def test_ws8eoc_0927_greeting_is_answered_x27_not_granted(monkeypatch):
     assert abs(keyed['at']-631897) <= 96
 
 
-def test_p4turn_repeat_of_the_acked_body_requests_queued_turn():
+def test_p4turn_repeat_of_the_acked_body_is_acked_again_with_mail_queued():
+    # WS8EOC 04:48Z: a break-in on the repeat of an acked packet went unanswered.
     turn, queue = machine(role='irs')
     turn.observe(word('Y27', FS, extent=.8))
     turn.observe(body(FS))
@@ -224,8 +225,8 @@ def test_p4turn_repeat_of_the_acked_body_requests_queued_turn():
     turn.observe(word('Y27', at, extent=.8))
     turn.observe(body(at))
     repeat = turn.decide(at+round(.846*FS))
-    assert repeat.kind == Kind.BODY and repeat.status == 0x40
-    assert repeat.state == p4turn.State.IRS_BREAKIN
+    assert (repeat.kind, repeat.word, repeat.state) == (Kind.WORD, first.word, p4turn.State.IRS_ANSWER)
+    assert bytes(queue._outbuf) == b'ready'
     turn.keyed()
     receiver, records = kb_receiver(capture('onair-0927-1544'), copies=4)
     head = max(o.stream_sample for o in receiver.observations if o.word == 'Y27')

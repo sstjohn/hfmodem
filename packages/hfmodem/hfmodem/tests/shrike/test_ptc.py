@@ -779,7 +779,11 @@ def main() -> int:
         def attach(self, host):
             pass
 
-        def send_cs(self, i):
+        def p3_slot_keyed(self) -> bool | None:
+            return None
+
+        def send_cs(self, i, *, p1_codeword=False, unread=False, maxdown=False,
+                packet_phase=None, cycle_long=None):
             self.p3.append(i)
 
         def send_p1_cs(self, i):

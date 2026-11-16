@@ -4,6 +4,7 @@
 """S5(a,d,f): recorded deferred answers, first longs and off-raster words."""
 
 import json
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from hfmodem.shrike.p4receiver import (
     Clock, Emission, Expect, Kind, Observation, P4Receiver, Role,
 )
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Stream, Tx
+from hfmodem.tests.shrike.p4_declared_clock_1111 import declared_time
 
 ROOT = Path(__file__).resolve().parents[5]
 
@@ -105,22 +107,70 @@ def test_first_recorded_long_opens_capture_and_retains_long_raster(monkeypatch, 
     tx.settle = .044
     tx.p4_probe.emissions.clear()
     tx.p4_link_options.p4_link_timeout = 8.
+    delivered = []
+    deliver = tx.p4_link_host.deliver
+    def collected(blob):
+        delivered.append(blob)
+        return deliver(blob)
+    tx.p4_link_host.deliver = collected
     rx = tx.sessrx.p4
     rx.cfo_hz = cfo
     rx.clock = Clock(Expect.PACKET, at, .330, 1.25, cfo)
     tx.p4_probe.handoff_audio = at - 6 * FS, audio[at - 6 * FS:live.pos].copy()
     turn = p4turn.P4Turn
-    monkeypatch.setattr(p4turn, 'P4Turn', lambda *a, **kw: turn(*a, **{**kw, 'role': 'irs'}))
-    onair._run_p4_link(tx, live, onair._MasterGrid(0, 60000, 0,
-                         packet_n=36000, cs_n=12000, d_max_n=4800))
+    # This offline stream advances only at capture/TX, so all
+    # decoder and driver deadlines use that same declared sample clock.
+    with declared_time(live.sample_now, fs=FS):
+        monkeypatch.setattr(p4turn, 'P4Turn', lambda *a, **kw: turn(*a, **{**kw, 'role': 'irs'}))
+        onair._run_p4_link(tx, live, onair._MasterGrid(0, 60000, 0,
+                             packet_n=36000, cs_n=12000, d_max_n=4800))
     reads = [e for e in rx.live_events if e['event'] == 'long decode']
     for k in range(2):
         assert any(abs(e['at'] - at - k * 180000) < round(.035 * FS)
                    and e['symbols'] >= 369 for e in reads), reads
     assert rx.clock.cycle_s == 3.75
-    assert tx.p4_probe.emissions and all(e['word'] == 'V27' for e in tx.p4_probe.emissions)
-    assert all(e['event'] != 'Keyed' or not e.get('current_slot_accepted', True)
-               for e in tx.p4_probe.link_events)
+    frames = [row for row in tx.p4_probe.heard if row['kind'] == Kind.LONG
+              and row.get('status') is not None and not row['provisional']]
+    keys = [row for row in tx.p4_probe.link_events if row['event'] == 'Keyed']
+    if arm == '2138':
+        # This unread control retains the original hold-only behavior.
+        assert not frames and not delivered
+        assert tx.p4_probe.emissions and all(e['word'] == 'V27' for e in tx.p4_probe.emissions)
+        assert all(not e.get('current_slot_accepted', True) for e in keys)
+        return
+    # Exact C1/C2 recovery admits actual CRC identities;
+    # Toggle starts each chain at X27 and a held repeat retains it; the
+    # partner word belongs only to the next distinct packet.
+    expected = {
+        '1917': ([2568147, 2748212], 0x61, '2', 40,
+                 '9e2a9dd79c7502836cef42e45055a08c889b610c161afc407271d7e038904ef2', 'X27', 1),
+        '1303': ([2147856], 0x02, 'SL4-long', 141,
+                 '6f39372a173091db2a8efa13dccb21c2aa9192ae82cb95d8b6365430b18289bb', 'X27', 2),
+    }
+    onsets, status, form, length, digest, ack, tier = expected[arm]
+    assert [row['onset_sample'] for row in frames] == pytest.approx(onsets, abs=48)
+    for row in frames:
+        data = bytes.fromhex(row['data'])
+        assert row['status'] == status and row['speedlevel'] == form
+        assert row['placed'] and len(data) == length and hashlib.sha256(data).hexdigest() == digest
+        assert any(key['at'] == row['onset_sample']+163200
+                   and key['accepted_target'] == row['onset_sample']
+                   and key['current_slot_accepted'] and key['word'] == ack
+                   and key['state'] == p4turn.State.IRS_ANSWER for key in keys)
+    assert delivered == [bytes.fromhex(frames[0]['data']).rstrip(b'\x1e')]
+    engines = [event for event in tx.p4_probe.link_events if event['event'] == 'long-engine'
+               and abs(event['at']-frames[0]['onset_sample']) <= 48]
+    assert any(event['state'] == 'unique' and event['tier'] == tier
+               and event['crc_valid'] and event['timely'] and not event['relaxed'] for event in engines)
+    assert len(keys) == len(tx.p4_probe.emissions) == 2
+    assert all(key['word'] == ack for key in keys)
+    if arm == '1303':
+        # The second physical copy remains unread. Its held answer stays
+        # associated with the first validated identity, not current acceptance.
+        held = keys[1]
+        assert held['at'] == frames[0]['onset_sample']+343200
+        assert held['accepted_target'] == frames[0]['onset_sample']
+        assert not held['current_slot_accepted']
 
 
 def test_off_raster_word_preserves_heads_and_following_crc_normals():

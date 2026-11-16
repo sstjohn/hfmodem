@@ -125,6 +125,29 @@ def test_linked_legacy_subject_beginning_with_callsign_is_not_a_destination():
     assert d.session.parking.store.get(row['id'])['state'] == 'delivered'
 
 
+def test_release_line_send_saves_custody_before_incomplete_frame_refusal(tmp_path):
+    from hfmodem.contact.mail_parking import ParkedStore
+    d = Desk(mailbox=tmp_path)
+    off_channel_link(d, 'N0XYZ')
+    d.session.command('/vmail send retained subject')
+    d.session.command('retained body')
+    composed = d.session._compose_link[2]
+    d.host.client._messages.pending.extend(b'partial')
+    before = list(d.host.data.sent)
+    d.session.command('.')
+    assert d.host.data.sent == before
+    assert any('incomplete incoming application frame' in line for line in d.said)
+    d.session.parking.store.close()
+    restarted = ParkedStore(tmp_path)
+    try:
+        row, = restarted.records
+        assert (row['subject'], row['body'], row['composed_utc'], row['state'], row['origin']) == (
+            'retained subject', 'retained body', composed, 'queued', 'direct')
+        assert row['attempts'] == 0 and row['owner'] == 'W9SSJ' and row['to'] == 'N0XYZ'
+    finally:
+        restarted.close()
+
+
 def test_unsupported_deposits_refuse_and_parking_off_preserves_inbox():
     d = answered()
     for destination in ('ALL', 'CQ', 'W9SSJ-16', 'X-W9SSJ', 'a@example.org'):

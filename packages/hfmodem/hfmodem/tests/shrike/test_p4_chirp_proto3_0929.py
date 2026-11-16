@@ -16,8 +16,8 @@ def chirp(frame, fs, at):
     return Observation(Kind.CHIRP, fs, 0, at, at, 3.28, 0., .8, frame=frame)
 
 
-def answer(frame, fs=48000, at=48000):
-    m, arq = machine()
+def answer(frame, fs=48000, at=48000, *, policy='toggle'):
+    m, arq = machine(chirp_ack=policy)
     m.state = State.IRS_ANSWER
     m.first_body = False
     m.observe(RegisteredObservation(chirp(frame, fs, at), Registered.NEW),
@@ -51,7 +51,7 @@ def test_other_chirp_protocols_keep_their_answers(status, kind, word):
     data = b'[BPQ-6.0.25.1-B2FWIHJM'
     frame = p4frame.decode_field(p4frame.encode_field(data, p4frame.Status.from_byte(status)),
                                  data_bytes=len(data))
-    proposal, _ = answer(frame)
+    proposal, _ = answer(frame, policy='parity')
     assert (proposal.kind, proposal.word) == (kind, word)
 
 
@@ -60,7 +60,7 @@ def test_other_chirp_protocols_keep_their_answers(status, kind, word):
 def test_protocol3_exchange_answers_repeats_after_refused_keys(kind, delay, cycle, refused):
     from hfmodem.tests.shrike.test_p4turn import body
     from dataclasses import replace
-    m, _ = machine(role='irs')
+    m, _ = machine(role='irs', normal_ack='parity', chirp_ack='parity')
     first = body(48000, b'gateway', 0x61)
     first = replace(first, observation=replace(first.observation, kind=kind))
     due = 48000+round(delay*48000)

@@ -59,7 +59,8 @@ def publish_policy(session, *, write=None):
 
 
 def add_recording_argument(parser):
-    parser.add_argument('--recording', choices=POLICIES, default=None)
+    parser.add_argument('--recording', choices=POLICIES, default=None,
+                        help='what audio to keep: off, contacts or everything; default from the station file')
 
 
 @dataclass(frozen=True)

@@ -6,6 +6,7 @@ Missing state is an explicit fixture failure; it is not a passed full-session
 claim. Decoder-only evidence never becomes a receiver registration.
 """
 from copy import deepcopy
+import hashlib
 import importlib.util
 import json
 
@@ -21,7 +22,7 @@ replay = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(replay)
 
 
-def test_manifest_and_full_inputs():
+def test_manifest_and_full_inputs(monkeypatch):
     m = replay.manifest()
     assert m['sets'] == replay.SETS
     assert len(m['fixtures']) == 20
@@ -50,11 +51,31 @@ def test_manifest_and_full_inputs():
     # Required missing queued suffix must fail, without skip or invented bytes.
     with pytest.raises(BoundaryError, match='missing queued authentication bytes'):
         replay.replay('1001-0336')
-    evidence = replay.decoder_evidence()
-    assert sum(x is not None for x in evidence['robust']) == 12
-    assert evidence['robust'][12] is None
+    from hfmodem.shrike import p4robustrx
+    decode = p4robustrx.decode_symbols
+    decoded = []
+    def record_identity(*args, **kwargs):
+        result = decode(*args, **kwargs)
+        decoded.append(result)
+        return result
+    with monkeypatch.context() as capture:
+        capture.setattr(p4robustrx, 'decode_symbols', record_identity)
+        evidence = replay.decoder_evidence()
+    # Exact C2 recovers fixed copies 12 and 13 with the
+    # same SL2 identity as their neighbours; the genuinely unread copy stays
+    # pinned. Assert every identity, rather than only increasing a hit count.
+    def identity(rec):
+        return None if rec is None else (rec.speedlevel, rec.frame.status.byte,
+            rec.frame.crc, hashlib.sha256(rec.frame.data).hexdigest())
+    sl3 = (3, 0x61, 11032,
+        'c5c6932c2dc89ccc3a6493df9e55dd2800321b6e7818faa5a25215f97bdf92c2')
+    sl2 = (2, 0x61, 25059,
+        'a1bf403c7ac939f983a04eed67d1ad2b4222eacb7f5da6d5d58c3639e88da58f')
+    assert len(decoded) == 16
+    assert [identity(rec) for rec in decoded[:15]] == [sl3]*6+[None]+[sl3]*2+[sl2]*6
+    assert identity(decoded[15]) == sl2
+    assert evidence['robust'] == [0x61]*6+[None]+[0x61]*8
     assert evidence['shifted_status'] == 0x61
-    assert sum(x is not None for x in evidence['robust'])+1 == 13
     for arm, count in [('1001-1027',5),('1001-1059',12)]:
         rows = evidence[arm]
         assert len(rows) == count and all(r['status']==0x61 for r in rows)
@@ -159,24 +180,44 @@ def _check_saved_result(actual, expected):
 
 
 def _through_0210_close(actual, expected):
-    """Both 0210 results up to the golden's close key, which is now a third data copy.
+    """Both 0210 results up to the golden's break-in on a repeat it had acked.
 
     Word-yield DESIGN-V2 Unit A (working/p4-plan-0930/p4-word-yield-recovery-1004)
-    retries held V27 on the ordinary budget. The fixed tape after that key answers
-    a close we no longer send, so nothing after it is compared.
+    retries held V27 on the ordinary budget, so the golden's close key is now a
+    third data copy. A repeat of an acked packet is acked again (WS8EOC 02:06Z,
+    04:48Z), and the break-in follows on the next peer frame, whose onset sets
+    our raster 3 samples later. The fixed tape after the repeat answers keys we
+    no longer send, so nothing from it on is compared.
     """
+    breakin = next(e for e in expected['emissions'] if e[0]=='body' and e[3]==0x40 and not e[4])
     close = next(e for e in expected['emissions'] if e[0]=='body' and e[3]==0x20)
+    acks = [e for e in actual['emissions'] if e[0]=='word' and e[2] <= breakin[2]]
+    assert acks[-1][2] == breakin[2] and acks[-1][1] == acks[-2][1]
     copies = [e for e in actual['emissions'] if e[0]=='body' and e[4]]
     cycle = round(1.25*FS)
-    assert [e[2] for e in copies[:3]] == [close[2]-2*cycle, close[2]-cycle, close[2]]
+    assert [e[2] for e in copies[:3]] == [close[2]-2*cycle+3, close[2]-cycle+3, close[2]+3]
     assert all(e[3:5] == copies[0][3:5] for e in copies[:3])
     def cut(result):
         kept = {k: v for k, v in result.items() if k not in ('end_sample', 'wall', 'reason')}
-        kept['emissions'] = [e for e in result['emissions'] if e[2] < close[2]]
-        kept['registrations'] = [r for r in result['registrations'] if r['onset_sample'] < close[2]]
-        kept['ledger'] = [r for r in result['ledger'] if r['support'] < close[2]]
+        kept['emissions'] = [e for e in result['emissions'] if e[2] < breakin[2]]
+        kept['registrations'] = [r for r in result['registrations'] if r['onset_sample'] < breakin[2]]
+        kept['ledger'] = [r for r in result['ledger'] if r['support'] < breakin[2]]
         return kept
     return cut(actual), cut(expected)
+
+
+def _stock_repeat_headers(emissions):
+    """The golden with header B on every normal copy after the first, as stock keys
+    it (k0003 N9VC); a first copy keeps header A and its golden waveform."""
+    from hfmodem.shrike.p4shorttx import short_packet
+    result, last = [], None
+    for row in emissions:
+        if row[0]=='normal' and last is not None and last[0]=='normal' and last[3]==row[3]:
+            wave = short_packet(bytes.fromhex(row[4]), row[3], header='B')
+            row = [*row[:5], hashlib.sha256(wave.tobytes()).hexdigest()]
+        result.append(row)
+        last = row
+    return result
 
 
 @pytest.mark.parametrize('arm',replay.SETS['G'])
@@ -195,21 +236,20 @@ def test_saved_legacy_baseline(arm):
         # The original golden is immutable. Exactly two approved neutral keys
         # extend it; every ordinary waveform/byte identity before its close remains required.
         pins=json.loads((PATH.parent/'receive_forms_nak_0210.json').read_text())
-        # The held-answer rule (830721f49) keys them as repeats of the held ACK, unlabelled.
-        assert neutral==[dict({k:row[k] for k in ('at','word','kind','state')},purpose=None)
+        assert neutral==[dict({k:row[k] for k in ('at','word','kind','state')},purpose='repeat-request')
                          for row in pins['neutral_keys']]
         expected['emissions']=sorted(expected['emissions']+pins['neutral_emissions'],
                                      key=lambda row:row[2])
         expected['ledger']=pins['ledger']
         checked,expected=_through_0210_close(actual,expected)
     if arm=='0930-0117':
-        # The opening's unread greeting copy now draws a V27 repeat request
-        # (WS8EOC 1107); only that key and the ledger rows around it differ.
+        # AT Unread slots: parity's unread chain start draws U27.
         pins=json.loads((PATH.parent/'receive_forms_repeat_0117.json').read_text())
         assert neutral==[dict(row,kind='word') for row in pins['neutral_keys']]
         expected['emissions']=sorted(expected['emissions']+pins['neutral_emissions'],
                                      key=lambda row:row[2])
         expected['ledger']=pins['ledger']
+    expected['emissions']=_stock_repeat_headers(expected['emissions'])
     _check_saved_result(checked, expected)
     with neutral_keys() as traced_neutral:
         traced = replay.replay(arm, timing_trace=True)
@@ -296,7 +336,11 @@ def test_reader_log_1009_packet(capsys):
 
 
 @pytest.mark.parametrize('arm', replay.SETS['P'])
-def test_timing_1059_ledger(arm, capsys):
+def test_timing_1059_ledger(arm, capsys, monkeypatch):
+    from hfmodem.shrike import p4longdecode
+    # This ledger owns its callback charges; it does not model decoder CPU.
+    monkeypatch.setattr(p4longdecode, '_python_step_seconds', lambda *args: 0.)
+    monkeypatch.setattr(p4longdecode, '_python_check_seconds', lambda _: 0.)
     plain = replay.replay(arm)
     traced = replay.replay(arm, timing_trace=True)
     rows = traced.pop('timing_trace')
@@ -319,13 +363,41 @@ def test_timing_1059_ledger(arm, capsys):
     # Stress ONLY the first full-support long read; earlier prefix work is unchanged.
     def full_read_cost(audio, origin, **kw):
         return 5760 if origin+len(audio) == 2786796 else 0
+    capsys.readouterr()
     late = replay.replay(arm, timing_trace=True, charges={'read_window': full_read_cost})
+    late_log = capsys.readouterr().out
     decision = next(r for r in late['timing_trace'] if r['stage']=='decision'
                     and r['due']==2791229)
-    assert decision['reason'] == 'answer deferred' and decision['proposed_at'] is None
+    # Design :98,170,203 makes this post-publication cost precede source
+    # admission: the expired first copy cannot create deferred ACK credit.
+    # The unresolved-slot rule still proposes a repeat request at that exact
+    # answer, which the real driver's deadline gate must refuse.
+    assert decision['reason'] == 'body unread at decision' and decision['proposed_at'] == 2791229
     assert decision['start'] > decision['deadline']
+    assert '[p4 link] Refused deadline: word at 58.151' in late_log
     assert not any(e[2] == 2791229 for e in late['emissions'])
-    assert any(e[2] == 2791229+180000 for e in late['emissions'])
+    assert not any(r['kind'] == 'long' and 'status' in r
+                   and abs(r['onset_sample']-2628029) < FS//10
+                   for r in late['registrations'])
+    # Design :125-126 restores the later support needed by unresolved SF16
+    # starts; :172 gives the first timely valid repeat its own onset/deadline,
+    # rather than borrowing the expired copy's old raster. Pin that copy and
+    # its exact source identity, not an arbitrary later successful frame.
+    repeat = next(r for r in late['registrations'] if r['kind'] == 'long'
+                  and not r['provisional'] and 'data' in r
+                  and r['onset_sample'] > 2628029+FS//10)
+    assert repeat['onset_sample'] == 2807941
+    assert repeat['speedlevel'] == '3' and repeat['status'] == 0x61
+    assert hashlib.sha256(bytes.fromhex(repeat['data'])).hexdigest() == (
+        'c5c6932c2dc89ccc3a6493df9e55dd2800321b6e7818faa5a25215f97bdf92c2')
+    due = repeat['onset_sample']+round(3.4*FS)
+    fresh = next(r for r in late['timing_trace'] if r['stage'] == 'decision' and r['due'] == due)
+    assert fresh['reason'] == 'proposal' and fresh['proposed_at'] == due
+    assert repeat['received_at_sample'] == fresh['start'] <= fresh['deadline']
+    answer, = [e for e in late['emissions'] if e[2] == due]
+    assert answer == ['word', 'X27', 2971141, 0, '',
+        '65ec8dcda8ce7f28eb29896977ad16ea1381d91d0ed85e65230affa7c6bff469']
+    assert not any(e[2] == 2791229+180000 for e in late['emissions'])
     charged = [r for r in late['ledger'] if r['stage']=='read_window' and r['end']-r['start']==5760]
     assert len(charged) == 1
     matching = next(r for r in late['timing_trace'] if r['stage']=='read_window'
@@ -745,8 +817,9 @@ def test_declared_replay_ignores_host_delay_with_exact_ledger(delayed_work, monk
         def read(self, audio, origin, **kw):
             result = original(self, audio, origin, **kw)
             if origin+len(audio) == 2486621:
-                # Before the repair this host delay removed the optional
-                # capture/read at 2487341 while all 16 other fields stayed equal.
+                # Design :125-126 replaces the old optional 2487341 horizon
+                # with 373-symbol support at 2487553. Host scheduling cannot
+                # remove that extra capture/read from a declared-cost replay.
                 time.sleep(.040)
                 delays.append(.040)
             return result
@@ -756,7 +829,9 @@ def test_declared_replay_ignores_host_delay_with_exact_ledger(delayed_work, monk
     assert delays and rows
     assert replay.baseline_result(traced) == replay.baseline_result(plain)
     assert traced['ledger'] == plain['ledger']  # retain every call, including zero cost
-    assert any(r.get('support') == 2487341 and r['stage'] == 'capture'
+    assert any(r.get('support') == 2487553 and r['stage'] == 'capture'
+               for r in plain['ledger'])
+    assert any(r.get('support') == 2487553 and r['stage'] == 'read_window'
                for r in plain['ledger'])
     assert time.monotonic is original_clock
     capsys.readouterr()
@@ -775,7 +850,11 @@ def test_declared_long_read_cost_controls_reread_and_exact_trace(capsys):
     assert len(charged) == 1
     assert charged[0]['support'] == 2486621
     assert charged[0]['start'] == 2486621 and charged[0]['end'] == 2488541
-    assert not any(r.get('support') == 2487341 and r['stage'] == 'capture'
+    # The same 40 ms becomes real admission cost when declared. It must
+    # suppress the new full-support request as well as its reader, while the
+    # exact first-read charge and disjoint trace remain authoritative.
+    assert not any(r.get('support') == 2487553
+                   and r['stage'] in ('capture', 'read_window')
                    for r in plain['ledger'])
     assert all(a['end'] == b['start'] for a,b in zip(rows,rows[1:]))
     assert rows[-1]['end'] == traced['wall']
@@ -784,13 +863,14 @@ def test_declared_long_read_cost_controls_reread_and_exact_trace(capsys):
 
 def test_declared_clock_keeps_deadlines_and_restores_all_bindings_on_failure():
     import time
-    from hfmodem.shrike import p4hold, p4receiver, p4shortlevels, p4turn
+    from hfmodem.shrike import p4hold, p4longnative, p4receiver, p4shortlevels, p4turn
     clock = replay.ChargedClock(wall=48000)
     original = (time.monotonic, time.perf_counter, p4hold.monotonic,
                 p4receiver.monotonic, p4shortlevels.ShortDecode.__init__,
-                p4turn.P4Turn.__init__)
+                p4turn.P4Turn.__init__, p4longnative.backend)
     with pytest.raises(RuntimeError, match='replay failed'):
         with replay.declared_time(clock):
+            assert p4longnative.backend is None
             hold = p4hold.BreakinHold(FS)
             decoder = p4shortlevels.ShortDecode([], costs={}, events=[], at=0,
                                                status_ok=lambda frame: True)
@@ -802,13 +882,15 @@ def test_declared_clock_keeps_deadlines_and_restores_all_bindings_on_failure():
             raise RuntimeError('replay failed')
     assert (time.monotonic, time.perf_counter, p4hold.monotonic,
             p4receiver.monotonic, p4shortlevels.ShortDecode.__init__,
-            p4turn.P4Turn.__init__) == original
+            p4turn.P4Turn.__init__, p4longnative.backend) == original
 
 
 @pytest.mark.parametrize('arm,expected_end,keyed_at', [
     ('0930-0117', 1195784, 1112024),
     ('0930-0127', 1255702, 1171942),
-    ('0930-0210', 1287068, 1231868),
+    # The repeat 0210 once broke in on is acked again (WS8EOC 04:48Z); its one
+    # break-in keys a slot later and reads on a first break-in's schedule.
+    ('0930-0210', 1286591, 1231871),
     ('0930-0352', 1435765, 1352005),
 ])
 def test_legacy_breakin_keeps_its_original_read_schedule(monkeypatch, arm, expected_end, keyed_at):

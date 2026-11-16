@@ -16,9 +16,14 @@ from hfmodem.tests.shrike.test_grid import _Bench, _Rig
 FS = onair.FS
 CYCLE = 60000
 PACKET_N = 38880
-REPLY_N = round(onair.P3_REPLY_S * FS)
+REPLY_N = round(onair.P3_COMB_REPLY_S * FS)
 PULL_N = round(onair.MAX_PULL_S * FS)
 IDENTITY = (True, 1, 0, b"RMS")
+
+
+def test_reply_tables_name_their_coordinates():
+    assert (onair.P3_COMB_REPLY_S, onair.P3_COMB_LONG_REPLY_S) == (0.910, 3.410)
+    assert (onair.P3_ANSWER_S, onair.P3_LONG_ANSWER_S) == (0.890, 3.40225)
 
 
 def irs_grid(anchor=2633):

@@ -663,7 +663,7 @@ def inventory():
 try:
     if mode == 'record':
         pid = int(args[0])
-        print(pid, claim.ps_started(pid), flush=True)
+        print(pid, claim.process_started(pid), flush=True)
     elif mode in ('alive', 'end'):
         pid = int(args[0])
         started = recorded().get(pid)

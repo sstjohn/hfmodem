@@ -25,6 +25,9 @@ def configuration(*, transmit=True, cat='none', protocols=None):
 @pytest.fixture(autouse=True)
 def data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv('HFMODEM_DATA_DIR', str(tmp_path / 'data'))
+    import sounddevice
+    monkeypatch.setattr(sounddevice, 'query_devices', lambda *a, **kw: {'hostapi': 0})
+    monkeypatch.setattr(sounddevice, 'query_hostapis', lambda *a: {'name': 'fake'})
 
 
 @pytest.fixture
@@ -383,7 +386,8 @@ def test_station_audio_stream_selection(monkeypatch, capture):
         def start(self):
             for i in range(64):
                 data = np.zeros((128, 1), dtype=np.float32)
-                stamp = NS(inputBufferAdcTime=1 + i * 128 / 48000)
+                stamp = NS(currentTime=1 + i * 128 / 48000,
+                           inputBufferAdcTime=1 + i * 128 / 48000)
                 if capture:
                     self.kw['callback'](data, 128, stamp, None)
                 else:
@@ -1644,3 +1648,27 @@ def test_a_failed_preflight_names_an_unconfirmed_line(tmp_path, monkeypatch, lin
         st.preflight_measure(0.1)
     assert str(exc.value) == reason
     assert st.audio._lanes == []
+
+
+@pytest.mark.parametrize('when', ['before', 'wait', 'lane'])
+def test_shutdown_stops_rf_producing_ticks(station, when, monkeypatch):
+    calls = []
+    station.replay = None
+    monkeypatch.setattr(station._poll_stop, 'wait',
+                        lambda delay: station._stop.set() if when == 'wait' else None)
+    station.lanes = {
+        'first': NS(poll=lambda: (calls.append('first'), station._stop.set())),
+        'second': NS(poll=lambda: calls.append('second')),
+    }
+    station.arbiter = NS(identity=NS(due=True, tone_hz=1500, mycall='K1ABC'), identify=lambda *a: calls.append('identify'))
+    station.rig = NS(dial=lambda: 7100000)
+    if when == 'before':
+        station._stop.set()
+    process.Station._tick(station)
+    assert calls == ([] if when == 'before' else ['identify'] if when == 'wait' else ['identify', 'first'])
+    calls.clear()
+    station._identify_if_due()
+    assert calls == []
+    station.arbiter = station.rig = None
+    station.lanes = {}
+    station._poll_stop = threading.Event()

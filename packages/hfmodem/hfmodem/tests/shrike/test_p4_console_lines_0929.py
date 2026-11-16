@@ -79,7 +79,7 @@ def test_every_cycle_closes_with_its_counters(capsys):
     assert closed == decided[:len(closed)] and len(decided) - len(closed) <= 1
     last = re.findall(r"\[p4 over\] at [\d.]+ (.*)", log)[-1]
     assert last.startswith('state=IRS_ANSWER expect=packet silent=2/16 unread=0 ')
-    assert 'slot_accepted=false' in last and 'purpose=repeat-request' not in last
+    assert 'slot_accepted=false' in last and 'purpose=repeat-request' in last
 
 
 def test_2031_ladder_counts_each_short_against_its_budget(capsys):
@@ -122,10 +122,12 @@ def test_capture_loss_is_said_in_the_cycle_it_happens(capsys):
                      screen('    [p4 probe] path: robust packets on the P1 ACK\n' + log))
 
 
-def test_stall_counts_its_repeat_requests_and_the_listen_its_ceiling(tmp_path, monkeypatch):
-    _, _, log, _ = _stalled_arm(tmp_path, monkeypatch, STALL)
+def test_stall_counts_its_repeat_requests_and_hands_opening_to_link(tmp_path, monkeypatch):
+    _, _, log, probe = _stalled_arm(tmp_path, monkeypatch, STALL)
     assert re.findall(r"\[host\] first P1 packet repeat request (\d/\d) before the stall path", log) \
         == [f'{n}/{STALL}' for n in range(1, STALL)]
-    ceilings = [float(left) for left in re.findall(
-        r"\[p4 probe\] listened to [\d.]+; entry ceiling ([\d.]+) of 90 s left", log)]
-    assert ceilings and ceilings == sorted(ceilings, reverse=True)
+    # Knob rows 13–15: consecutive opening gaps replace the spaced probe's listen.
+    assert re.findall(r"\[p4 probe\] robust (\d/2);.*receiving (\d+) ms", log) == [
+        ('1/2', '422'), ('2/2', '422')]
+    assert probe['timeout_seconds'] == 90
+    assert '[p4 link] LINK DOWN: capture ended' in log

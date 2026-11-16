@@ -150,6 +150,9 @@ def _build_one(name: str, p, station=None) -> Served:
             from hfmodem.core.managed_host import ManagedHost
             factory = kwargs.get('modem_factory', LoopbackModem)
             def serve_pair(command, data):
+                if link is not None:
+                    from hfmodem.station.chat_attachment import serve_pair as serve_owned
+                    return serve_owned(link.runtime, command, data, HostSession)
                 session = HostSession(command, data, factory())
                 try:
                     session.run()
@@ -159,7 +162,23 @@ def _build_one(name: str, p, station=None) -> Served:
             s = ManagedHost(serve_pair, secret=_managed_secret(p), port=p.port)
             return Served(name, s, ('port',), keys=link is not None
                           and station.rig is not None and station.arbiter is not None)
-        s = VaraServer(cmd_port=p.cmd_port, data_port=p.data_port,
+        server_class = VaraServer
+        if link is not None:
+            class StationVaraServer(VaraServer):
+                def _serve_pair(self, command, data):
+                    from hfmodem.station.chat_attachment import serve_pair as serve_owned
+                    def session_factory(command, data, modem):
+                        return self.session_class(command, data, modem,
+                            iamalive_interval=self.iamalive_interval, log=self._log,
+                            kiss=self._kiss)
+                    self._log('server', 'application attached')
+                    try:
+                        return serve_owned(link.runtime, command, data, session_factory,
+                            publish=lambda session: setattr(self, '_session', session))
+                    finally:
+                        self._log('server', 'application detached')
+            server_class = StationVaraServer
+        s = server_class(cmd_port=p.cmd_port, data_port=p.data_port,
                        kiss_port=getattr(p, 'kiss_port', 0) or None, **kwargs)
         return Served(name, s, ("cmd_port", "data_port"),
                       keys=link is not None and station.rig is not None

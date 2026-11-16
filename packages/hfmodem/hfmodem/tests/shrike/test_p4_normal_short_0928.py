@@ -68,6 +68,7 @@ def test_ws8eoc_0928_witness_shorts_decode_through_the_placed_read():
         frames += [x.observation for x in records if x.observation.frame]
         r.new_cycle()
     assert len(frames) == 20
+    assert all(o.form == 'normal-short/SL5' for o in frames)
     assert all(o.frame.status.byte == 1 and o.frame.data.rstrip(b'\x1e') == TEXT for o in frames)
     assert all(abs(o.stream_sample-start-k*60000) <= 48 for k, o in enumerate(frames))
 
@@ -91,6 +92,7 @@ def driver(audio):
     stream = Stream(audio)
     stream.pos = round(28*FS)
     tx = Tx(stream)
+    tx.p4_link_options.p4_normal_ack = 'parity'
     tx.p4_probe.emissions = [dict(audio_start=1382736, audio_end=1419103, value=7, header='A')]
     tx.p4_probe.values = (7, 38)
     stream.pos = 1419103
@@ -138,7 +140,8 @@ def test_ws8eoc_0928_v27_answers_the_short(monkeypatch):
     assert all(e['word'] == 'V27' for e in emissions[1:])
     assert b''.join(delivered).count(TEXT) == 1
     assert any(e.get('event') == 'acked-repeat' for e in tx.p4_probe.link_events)
-    assert any(e.get('ack_policy') == 'v27' for e in tx.p4_probe.link_events)
+    assert any(e.get('ack_policy') == 'parity' and e.get('word') == 'V27'
+               for e in tx.p4_probe.link_events)
     normals = [row for row in tx.p4_probe.heard if row.get('kind') == Kind.NORMAL and row.get('placed')]
     assert normals
     assert all(abs((row['onset_sample']-RASTER+30000) % 60000-30000) <= 240 for row in normals)
@@ -191,7 +194,7 @@ def test_n9vc_k0003_changeover_short_decodes_and_draws_the_grant():
     (0x61, 'V27', Kind.WORD, State.IRS_ANSWER),
 ])
 def test_p4turn_answers_normal_shorts_by_status(status, word, kind, state):
-    m, _ = machine(role='irs')
+    m, _ = machine(role='irs', normal_ack='parity')
     m.first_body = False
     obs = normal(status=status)
     p = decide(m, obs)
@@ -213,13 +216,13 @@ def test_normal_enrichment_delivers_once_and_answers_once():
     m.observe(first, now=48000)
     m.observe(reg, now=48000)
     p = m.decide(48000+44160-m.lead)
-    assert p.word == 'V27'
+    assert p.word == 'X27'
     m.keyed(p.stream_sample)
     assert m.decide(p.stream_sample) is None
 
 
 def test_repeated_changeover_short_replays_the_grant():
-    m, a = machine(role='irs')
+    m, a = machine(role='irs', data='long')
     for k in range(4):
         p = decide(m, normal(48000+k*60000, 0x41))
         assert p and p.kind == Kind.BODY and p.status == 0x40 and p.payload == b''
@@ -397,7 +400,7 @@ def test_late_normal_enrichment_is_delivered_without_a_late_key():
     assert m.adapter.last == (1, obs.frame.data)
     assert m.decide(obs.stream_sample+44160) is None
     following = replace(obs, stream_sample=obs.stream_sample+60000)
-    assert decide(m, following).word == 'V27'
+    assert decide(m, following).word == 'X27'
 
 
 def test_data_response_repeat_keeps_the_same_inflight_bytes():

@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from hfmodem.shrike import onair
-from hfmodem.tests.shrike.test_stream_recording import BLOCK, FS, _Card, _plant, _Status
+from hfmodem.tests.shrike.test_stream_recording import BLOCK, _Card, _plant, _Status
 
 
 class _Packets:

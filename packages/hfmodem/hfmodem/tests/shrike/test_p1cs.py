@@ -753,12 +753,12 @@ def test_the_settle_decides_whether_a_peer_can_be_heard_at_all() -> None:
             (rig, line)
         seen.append((rig, fits))
     assert len(seen) >= 3, seen
-    # The table as it stands: the Yaesus can call and hear an answer, the Xiegus
-    # cannot, and neither can a generic rig on its unmeasured 0.1 s settle. Stated
+    # The table as it stands: the Yaesus and the X6100 keyed from its own board
+    # can call and hear an answer, the Xiegus over USB cannot, and neither can a generic rig on its unmeasured 0.1 s settle. Stated
     # because it is a fact about this station's hardware and it is the reason a
     # g90 session has never connected.
     assert dict(seen) == {"ft891": True, "ftdx10": True, "g90": False,
-                          "generic": False, "x6100": False}, seen
+                          "generic": False, "x6100": False, "x6100_onboard": True}, seen
 
 
 def test_an_empty_acquisition_band_is_said_to_be_empty() -> None:

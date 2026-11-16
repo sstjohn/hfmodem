@@ -77,7 +77,7 @@ def recover(recording, tmp_path, monkeypatch, *, legacy=False):
         # Recover an already lost slot, as the actual loop did. Advancing only
         # wall time retains every sample to be read by production _regrid.
         live.now=max(live.now,tx.key_instant(grid,slot)+480-live.key_notice)
-        slot,seg,origin=onair._regrid(live,grid,tx,host,receiver,slot,
+        slot,seg,origin, _ = onair._regrid(live,grid,tx,host,receiver,slot,
                                     seg,origin,1920)
         if not host.arq.unconfirmed_breakin:
             break

@@ -403,9 +403,11 @@ class Client:
     """Single-owner command/data pump. Sockets and readiness are injectable."""
 
     def __init__(self, command, data, kiss_socket=None, *, clock=time.monotonic,
-                 ready=None, event: Callable[[Event], None] = lambda event: None, kiss_connect=None):
+                 ready=None, event: Callable[[Event], None] = lambda event: None, kiss_connect=None,
+                 beacon_submit=None):
         self.command_socket, self.data_socket, self.kiss_socket = command, data, kiss_socket
         self._kiss = kiss.Parser()
+        self.beacon_submit = beacon_submit
         self._kiss_connect = kiss_connect
         self._pending_bracket = None
         self.pending_caller = lambda: None
@@ -413,6 +415,7 @@ class Client:
         self._kiss_brackets = deque(maxlen=4096)
         self._kiss_submissions = []
         self.clock, self.event = clock, event
+        self.semantic = lambda kind, **details: None
         self.ready = ready or (lambda sockets, timeout: select.select(sockets, [], [], timeout)[0])
         self._command = bytearray()
         self._messages = MessageParser()
@@ -432,6 +435,7 @@ class Client:
         self.busy = None
         self.busy_events = 0
         self.calling = False
+        self.listening = False
         self.ptt = False
         self.pending = False
         self.closed = False
@@ -441,6 +445,7 @@ class Client:
         self.bitrate = None
         self.buffer = 0
         self.buffer_sequence = 0
+        self.received = 0
         self._discard_sequence = 0
         self.version = None
         self.bandwidth = None
@@ -469,6 +474,8 @@ class Client:
             generation, payload = record
             if completion.disposition == 'unknown':
                 self._stream_poisoned = True
+            self.semantic('write_completed', write_id=completion.write_id,
+                          generation=generation, disposition=completion.disposition)
             if generation != self.link_generation:
                 continue
             if self._id_text is not None and self._id_text[0] == completion.write_id:
@@ -604,12 +611,15 @@ class Client:
     def drain(self, *, timeout=30):
         self.finish(self.drain_steps(timeout=timeout))
 
-    def close(self):
+    def close(self, *, deadline=None):
         if self.closed:
             return
         self.closed = True
         if self.data_writer is not None:
-            self.data_writer.close()
+            if deadline is None:
+                self.data_writer.close()
+            else:
+                self.data_writer.close(timeout=max(0, min(.1, deadline - time.monotonic())))
         try:
             for stream in (self.command_socket, self.data_socket, self.kiss_socket):
                 try:
@@ -680,6 +690,7 @@ class Client:
 
     def _line(self, raw):
         self._read_pending_caller()
+        self.semantic('host_before', raw=raw)
         self.sequence += 1
         self._lines.append((self.sequence, raw))
         words = raw.split()
@@ -751,6 +762,7 @@ class Client:
                 held, self._held_text = self._held_text, bytearray()
                 self._text(held)
         self.event(Event('host', raw, self.sequence))
+        self.semantic('host_after', raw=raw)
         if raw.startswith('CONNECTED '):
             # Session must establish its peer/contact before application callbacks
             # display multiline text or enqueue replies on the new generation.
@@ -774,18 +786,9 @@ class Client:
                 raise HostError('VARA host closed its command or data port')
             if stream is self.kiss_socket:
                 for port, command, payload in self._kiss.feed(chunk):
-                    if not port and command == BEACON_KISS:
-                        self.event(Event('kiss', payload.decode('ascii', errors='replace')))
-                    elif not port and command in (0, 1):
-                        from ..kestrel.ui import UIFrame
-                        try:
-                            UIFrame.from_ax25(payload, command=command)
-                        except ValueError:
-                            self.event(Event('broadcast_error', 'invalid UI envelope'))
-                        else:
-                            self.event(Event('broadcast', json.dumps(dict(
-                                command=command, hex=payload.hex()))))
+                    self.receive_frame(port, command, payload)
             elif stream is self.data_socket:
+                self.received += len(chunk)
                 if self.raw_transfer is None or not self.raw_transfer.raw("rx", chunk):
                     self._text(chunk)
             else:
@@ -797,6 +800,19 @@ class Client:
                 if len(self._command) > 65536:
                     raise HostError('Unterminated VARA host line')
         self._poll_writer()
+
+    def receive_frame(self, port, command, payload):
+        if not port and command == BEACON_KISS:
+            self.event(Event('kiss', payload.decode('ascii', errors='replace')))
+        elif not port and command in (0, 1):
+            from ..kestrel.ui import UIFrame
+            try:
+                UIFrame.from_ax25(payload, command=command)
+            except ValueError:
+                self.event(Event('broadcast_error', 'invalid UI envelope'))
+            else:
+                self.event(Event('broadcast', json.dumps(dict(
+                    command=command, hex=payload.hex()))))
 
     def wait(self, predicate, *, after, timeout=10):
         end = self.clock() + timeout
@@ -819,7 +835,10 @@ class Client:
         if not command.isascii() or any(ord(c) < 32 for c in command):
             raise ValueError('Expected one ASCII host command')
         after = self.sequence
+        self.semantic('command_submitting', command=command)
         self.command_socket.sendall(command.encode('ascii') + b'\r')
+        if command in ('LISTEN ON', 'LISTEN CQ', 'LISTEN OFF'):
+            self.listening = command != 'LISTEN OFF'
         if command == 'CLEANTXBUFFER':
             # Text still in the writer may be discarded with the rest: no credit.
             self._id_text = None
@@ -888,12 +907,19 @@ class Client:
                 write_id = self.data_writer.submit(payload, self.link_generation)
             except WriterUnavailable as error:
                 raise HostError(str(error)) from error
+            self.semantic('write_submitting')
             self._writes[write_id] = (self.link_generation, payload)
         else:
-            self.data_socket.sendall(payload)
+            self.semantic('write_submitting')
+            try:
+                self.data_socket.sendall(payload)
+            except Exception:
+                self.semantic('write_failed', payload=payload, text=text)
+                raise
             if self.raw_transfer is not None:
                 self.raw_transfer.raw("tx", payload)
         self.event(Event('sent', text))
+        self.semantic('write_admitted', write_id=write_id, payload=payload, text=text)
         if self._names_station(text):
             if write_id is None:
                 self._identified_frame(self.identity, 'application text', self.sequence)
@@ -1009,17 +1035,24 @@ class Client:
         now = self.clock()
         self._kiss_submissions[:] = [item for item in self._kiss_submissions if now < item['expires']]
 
+    @property
+    def advanced_beacon_available(self):
+        return not self.closed and (self.beacon_submit is not None or self.kiss_socket is not None)
+
     def beacon_steps(self, text, *, timeout=20):
         """VarAC's advanced beacon: the text as a command-2 KISS frame, keyed as a CQFRAME
         is, and like a CQFRAME dropped by the host while it hears the channel busy."""
-        if self.kiss_socket is None:
+        if not self.advanced_beacon_available:
             raise Unsupported('the host has no KISS port')
         if not BEACON_TEXT.fullmatch(text) or len(text) > BEACON_CHARS:
             raise ValueError('a beacon is 2, a digit, a status letter, the locator and the callsign')
         wire = kiss.encode(text.ljust(BEACON_CHARS).encode('ascii'), BEACON_KISS)
 
         def send():
-            self.kiss_socket.sendall(wire)
+            if self.beacon_submit is not None:
+                self.beacon_submit(text.ljust(BEACON_CHARS))
+            else:
+                self.kiss_socket.sendall(wire)
             self.event(Event('kiss-sent', text))
         sequence = yield from self._keyed_steps(send, 'beacon', 'beacon', timeout=timeout, retry=False)
         self._identified_frame(BEACON_TEXT.fullmatch(text)[3], 'advanced beacon text', sequence)
@@ -1044,6 +1077,8 @@ class Client:
         cleared = None
         seen = self.busy_events
         self.calling = True
+        self.semantic('frame_started', verb=verb)
+        completed = False
         try:
             held, told = self.busy and not force, False
             send()
@@ -1057,6 +1092,7 @@ class Client:
                             raise Unsupported('forced beacon did not transmit')
                         if 'PTT ON' not in lines:
                             raise HostError(f'{noun} completed without a reported key-up; not counted as sent')
+                        completed = True
                         return next(seq for seq, line in self._lines
                                     if seq > after and line == 'CANCELPENDING')
                 # The host answers OK and drops a CQFRAME that arrives while it hears the
@@ -1091,6 +1127,8 @@ class Client:
                 raise Unsupported('beacon dropped while busy') from None
             raise Unsupported(f'{verb} rejected (the host answered WRONG)') from None
         finally:
+            self.semantic('frame_finished', completed=completed,
+                          not_submitted='WRONG' in self.since(after) and 'PENDING' not in self.since(after))
             self.calling = False
 
     def connect_steps(self, peer, *, timeout=90, cancelled=lambda: False):
@@ -1099,7 +1137,9 @@ class Client:
             raise HostError('Connect requires an idle host')
         after = self.sequence
         deadline = self.clock() + timeout
+        old_generation = self.link_generation
         self._retire_link_messages()
+        self.semantic('outbound_bound', old=old_generation, new=self.link_generation, peer=peer)
         self._resyncing = False
         self._connect_deadline = deadline
         self._connect_keyed = False
@@ -1604,11 +1644,11 @@ class Flow:
         start = client.clock()
         end, hard_end = start + timeout, start + 60
         cursor, messages = client.sequence, client.message_sequence
-        buffered = client.buffer
+        buffered, received = client.buffer, client.received
         drained = peer_close = disconnected = False
 
         def expired():
-            nonlocal end, cursor, messages, buffered, drained, peer_close, disconnected
+            nonlocal end, cursor, messages, buffered, received, drained, peer_close, disconnected
             now = client.clock()
             if cancelled() or now >= min(end, hard_end):
                 return True
@@ -1637,11 +1677,15 @@ class Flow:
                 if seq > messages and not peer_close and any(
                         part.tag == 'DISC' for part in TextParser().feed(message, final=True)):
                     peer_close = progress = True
-            cursor, messages = client.sequence, client.message_sequence
+            # The peer still holding the turn with a delivery is the link moving:
+            # our farewell keys behind it.
+            progress |= client.received > received
+            cursor, messages, received = client.sequence, client.message_sequence, client.received
             if progress:
                 end = now + timeout
             return False
 
+        asked = False
         try:
             if not cancelled():
                 client.send_text(text + emit_tag('DISC'))
@@ -1649,6 +1693,7 @@ class Flow:
                 if not expired():
                     client.send_command('LISTEN OFF')
                     client.send_command('DISCONNECT')
+                    asked = True
                     end = client.clock() + timeout
                     while True:
                         if expired():
@@ -1660,7 +1705,10 @@ class Flow:
             # Delivery is best effort. A missing peer ACK must never leave ARQ
             # querying forever instead of issuing the host close commands.
             pass
-        yield from self.close_steps(cancelled=lambda: True)
+        # A DISCONNECT not yet asked gets the close bound to key: a VARA HF
+        # station reports DISCONNECTED 4.5-6.3 s after it, and an ABORT behind it at once
+        # leaves the peer to its own timeout.
+        yield from self.close_steps(cancelled=(lambda: True) if asked else cancelled)
 
     def farewell(self, text='73', *, timeout=None):
         self.client.finish(self.farewell_steps(text, timeout=timeout))
@@ -2039,10 +2087,12 @@ class Session:
                  wall_clock=time.time, bbs_core=None, bbs_say=None, bbs_reload=None,
                  identify=lambda bandwidth, after_peer: False, idcall=None, ident_report=None,
                  id_interval_s=ID_INTERVAL_S, closing_cwid=True,
-                 power=None, power_clamp_w=None):
+                 power=None, power_clamp_w=None, delivery_evidence=None, delivery_boundary=None):
         self.client, self.flow, self.mailbox = client, flow, mailbox
         self.power, self.power_clamp_w = power, power_clamp_w
         self._power_owed = None
+        self.delivery_evidence, self.delivery_boundary = delivery_evidence, delivery_boundary
+        self.semantic = lambda kind, **details: None
         self.band_tuner = band_tuner or flow.tuner
         self._band_fault = False
         self.band_setup = None
@@ -2297,6 +2347,7 @@ class Session:
             for line in lines[1:]:
                 self.say(' ' * (len(self.peer) + 2) + line)
             if acknowledged and self.mail_ack.kind == 'direct' and self.mail_ack.result == 'SMR':
+                self.semantic('vmail_received')
                 self.say(f'{self.peer} acknowledged the VMail')
         elif kind == 'incomplete' and self._bbs_waiting:
             self.emit('bbs_incomplete', peer=self.peer, dial_hz=self.flow.dial, text=raw)
@@ -2359,6 +2410,18 @@ class Session:
 
     def diagnostic(self, kind, **details):
         """Actual runtime observations, delivered on the terminal thread."""
+        if kind in ('arbiter', 'tx_meters', 'runtime_failure'):
+            self.emit(kind, **details)
+            if kind == 'arbiter':
+                protocol, outcome = details.get('protocol', 'unknown'), details.get('outcome', 'unknown')
+                self.say(f'Station TX {protocol}: {outcome}')
+            elif kind == 'tx_meters':
+                watts, alc = details.get('peak_watts'), details.get('peak_alc')
+                self.say('Station TX meters: peak power ' + ('unavailable' if watts is None else f'{watts:g} W')
+                         + ', ALC ' + ('unavailable' if alc is None else f'{alc:g}'))
+            else:
+                self.say('Station runtime failed: ' + str(details.get('text', 'unknown failure'))[:4096])
+            return
         if kind in ('link_recovery', 'capture_rate'):
             self.say(details['text'])
             self.emit(kind, **details)
@@ -2704,7 +2767,8 @@ class Session:
         text, after, generation, origin = invitation
         if generation != self.client.link_generation or not self.client.connected:
             raise HostError('Link changed during received QSY')
-        self.flow.received_qsy_target(text, origin)
+        if self.flow.received_qsy_target(text, origin) == origin:
+            self.say(f'{self.peer} asked to stay on {khz(origin)} kHz; no QSY')
         self.bbs.detach('peer QSY')
         self.mail_ack.interrupt('QSY interrupted the mail exchange')
         if self.steps is not None:
@@ -2741,6 +2805,7 @@ class Session:
             return
         for kind, slot, item in self.slots.poll():
             if kind == 'error':
+                self.semantic('monitor_failed', error=item)
                 self.slots = None
                 self._error(HostError(f'slot monitor stopped: {item}'))
                 return
@@ -2749,8 +2814,9 @@ class Session:
             elif kind == 'qso':
                 self._slot_said(item)
             elif kind == 'passband':
-                self.emit('passband', edges={str(level): list(edge) for level, edge in item.passband.edges.items()},
-                          slots=list(item.slots), wide_offset=item.wide)
+                self.emit('passband', edges={str(level): [float(hz) for hz in edge]
+                                             for level, edge in item.passband.edges.items()},
+                          slots=list(item.slots), wide_offset=float(item.wide))
                 self.say(item.line())
             elif kind == 'broadcast':
                 dial = self.calling_hz if slot is None else channel_frequency(self.flow.band, slot, self.flow.codec)
@@ -2794,6 +2860,7 @@ class Session:
 
     def _slot_said(self, said):
         """Retain bounded current-band evidence; display only currently watched channels."""
+        self.semantic('slot_observed', said=said)
         self.emit('slot', slot=said.slot, qso=said.kind, text=said.text, station=said.station or None)
         if said.kind == 'coverage':
             self._coverage_said(said)
@@ -2895,13 +2962,49 @@ class Session:
         for _, said in recent:
             self.say(self._follow_line(said))
 
+    def beacon_pause_reason(self, *, line_state=None):
+        line_state = line_state or self.line_state
+        if self._closing or self._quitting:
+            return 'closing'
+        if self._follow_tuned:
+            return 'passive-follow'
+        if self._band_fault:
+            return 'band-unverified'
+        if self.broadcast.selected is not None:
+            return 'broadcast-selection'
+        if self.contact is not None or self.client.connected:
+            return 'contact-active'
+        if self.steps is not None:
+            return 'operation-active'
+        if not self.idle or line_state() is True:
+            return 'keying-or-pending'
+        if self.flow.state is not State.MONITORING:
+            return 'not-monitoring'
+        if self.hopping.active:
+            if self.hopping.paused:
+                return self.hopping.paused
+            if not self.hopping.ready(self.flow.band):
+                return 'band-unready'
+            if self.hopping.cooldown(self.flow.band):
+                return 'band-cooldown'
+        if self.client.busy and self._beacon_now != 'force':
+            return 'channel-busy'
+        if (self._beacon_now != 'force' and (self._clear_since is None or
+                self.client.clock() - self._clear_since < BEACON_CLEAR_S)):
+            return 'clear-channel-wait'
+        return None
+
     def _beacon_tick(self):
         now = self.client.clock()
         self.hopping.sample(self.flow.band, self._hop_idle())
         if self.beacon and now >= self._beacon_expires:
             pending = self._beacon_now
-            self.set_beacon(None)
-            self._beacon_now = pending
+            self.semantic('beacon_expiry_started')
+            try:
+                self.set_beacon(None)
+                self._beacon_now = pending
+            finally:
+                self.semantic('beacon_expiry_finished', restored=self._beacon_now == pending)
             self.say('beacon expired after 24 hours')
         force = self._beacon_now == 'force'
         quiet = (self.flow.state is State.MONITORING and not self.client.busy
@@ -2921,26 +3024,32 @@ class Session:
                 self._leave('beacon', None, self.bandwidth)
             except (ValueError, HostError, TimeoutError) as error:
                 self._beacon_now = False
+                self.semantic('beacon_failed', error=error)
                 self._error(error)
                 return
             once = self._beacon_now
             self._beacon_now = False
+            self.semantic('beacon_started', once=once)
             self._run(self._beaconing(once=once))
 
     def _error(self, error):
         if self._identification_failed:
             raise self._close_failed
+        self.semantic('error', error=error)
         self.say(f'error: {error}')
         self.emit('error', text=str(error))
 
     def _step(self):
         steps = self.steps
         try:
+            self.semantic('operation_resuming')
             self._hint = next(steps)
-        except StopIteration:
+        except StopIteration as done:
+            self.semantic('operation_finished', steps=steps, value=done.value)
             if self.steps is steps:
                 self.steps = None
         except (ValueError, HostError, TimeoutError) as error:
+            self.semantic('operation_failed', steps=steps, error=error)
             self.steps = None
             if self.flow.state is State.FAILED:
                 self.mail_ack.interrupt('opening or QSY exchange failed')
@@ -2951,12 +3060,14 @@ class Session:
                 raise
             self._error(error)
         except OSError as error:
+            self.semantic('operation_failed', steps=steps, error=error)
             if self._closing:
                 self._close_failed = error
             raise
 
-    def _run(self, steps):
+    def _run(self, steps, *, operation=None):
         self.steps, self._hint = steps, None
+        self.semantic('operation_started', steps=steps, operation=operation)
         self._step()
         self._operator_notice()
 
@@ -2992,6 +3103,7 @@ class Session:
             return
         if self._beacon_now:
             self._beacon_now = False
+            self.semantic('beacon_removed')
             self.say('pending one-shot beacon cancelled')
             if self.steps is None:
                 return
@@ -3297,9 +3409,10 @@ class Session:
         if self.line_state() is True:
             raise HostError('keying line remains HIGH after close; cannot resume monitoring')
 
-    def quit(self):
+    def quit(self, *, unwinding=None):
         # Capture this before cleanup enters any exception handlers of its own.
-        unwinding = sys.exc_info()[0] is not None
+        if unwinding is None:
+            unwinding = sys.exc_info()[0] is not None
         self._quitting = True
         self._closing = True
         self.bbs.hard_stop('operator quit')
@@ -3415,6 +3528,16 @@ class Session:
         else:
             return False
         return True
+
+    def check_application_input(self):
+        if self.bbs.owned:
+            raise HostError('Remote BBS owns this conversation')
+        if self.broadcast.active:
+            raise HostError('Broadcast operation pending')
+        if self._closing:
+            raise HostError('closing; /stop aborts without waiting for delivery')
+        if self.files.active or self.bbs_host.active:
+            raise HostError('File evidence operation active; /stop or /bye ends this contact')
 
     def command(self, line):
         """One operator line; False ends the session."""
@@ -3720,8 +3843,7 @@ class Session:
                      'A service advertisement does not announce auto-QSY readiness.')
         self.say('No BBS request is sent automatically. /help bbs shows this guidance.')
 
-    def inquire_heard(self):
-        """Public LHR request; response formatting/completion is not assumed."""
+    def check_inquire_heard(self):
         if self._closing or self.client.closed or not self.client.connected \
                 or self.flow.state is not State.CONNECTED:
             raise HostError('Last-heard inquiry needs an established link')
@@ -3733,6 +3855,10 @@ class Session:
             raise HostError('Last-heard inquiry not sent: another application exchange is in progress')
         if self.client.pending or self.client.ptt or self._data_status()[0]:
             raise HostError('Last-heard inquiry not sent: wait for pending transmission to settle')
+
+    def inquire_heard(self):
+        """Public LHR request; response formatting/completion is not assumed."""
+        self.check_inquire_heard()
         self.client.send_tag('LHR')
         self.emit('inquiry', kind_requested='heard', peer=self.peer,
                   link_generation=self.client.link_generation, dial_hz=self.flow.dial,
@@ -3745,7 +3871,7 @@ class Session:
         return ('/qsy SLOT moves this link' if self.intent is not None else
                 f'{self.peer} called, so its station starts the QSY')
 
-    def list_bbs(self):
+    def check_list_bbs(self):
         if self.mail_ack.busy or self.parking.active:
             raise HostError('BBS list requires the mail exchange to settle')
         if not self.client.connected or self._closing:
@@ -3756,17 +3882,22 @@ class Session:
                             'wait for it to finish')
         on_cf = self.flow.dial in CALLING_HZ.values()
         if self.steps is not None or (on_cf and self.intent is None):
-            self._bbs_list_queued = self.client.link_generation
-            self.say('BBS list queued: it is requested once this link settles off the calling frequency'
-                     + ('' if self.steps is not None else '; ' + self.qsy_hint()) + '. /stop cancels it')
-            return
+            return True
         if self.flow.state is not State.CONNECTED:
             raise HostError('BBS list needs an established link')
         if on_cf:
             raise HostError('BBS list requires QSY off the calling frequency first; /qsy SLOT moves this link')
+        return False
+
+    def list_bbs(self):
+        if self.check_list_bbs():
+            self._bbs_list_queued = self.client.link_generation
+            self.say('BBS list queued: it is requested once this link settles off the calling frequency'
+                     + ('' if self.steps is not None else '; ' + self.qsy_hint()) + '. /stop cancels it')
+            return
         self.files.entries = ()
         self.files.offer = None
-        self._run(self._bbs_list_steps())
+        self._run(self._bbs_list_steps(), operation='bbs.list')
 
     def _bbs_list_steps(self):
         self._bbs_waiting = True
@@ -3780,9 +3911,11 @@ class Session:
             self.emit('bbs_directory', peer=self.peer, dial_hz=self.flow.dial, text=text)
             if text.strip() == '<BLJ>':
                 self.say(f'{self.peer} rejected the BBS directory request')
-                return
+                self.semantic('directory_rejected')
+                return False
             entries = bbs_files(text)
             self.files.listed(entries)
+            self.semantic('directory_received', entries=entries)
             self.say(f'BBS directory from {self.peer}: {len(entries)} files (sizes in bytes)')
             for n, entry in enumerate(entries, 1):
                 self.say(f'  {n:3d}  {entry.name}  {entry.created}  {entry.size} bytes')
@@ -3817,6 +3950,7 @@ class Session:
         self._connect('call', call, slot, known.bw if known else self.bandwidth, auto_qsy=auto_qsy)
 
     def _connect(self, how, call, slot, bw, *, auto_qsy=True):
+        self.semantic('attempt_started', peer=call)
         self._leave(how, slot, bw)
         self.peer = call
         self._run(self._connecting(call, slot, auto_qsy=auto_qsy))
@@ -3824,7 +3958,7 @@ class Session:
     def _connecting(self, call, slot, *, auto_qsy=True):
         if not (yield from self.flow.call_steps(call, slot=slot)):
             self.say(f'call to {call} stopped')
-            return
+            return False
         if slot is None:
             # Q/AWQ invites the receiving application to open its outgoing-QSY
             # selector. Stock VarAC blocks its DATA listener in that modal UI.
@@ -3846,6 +3980,8 @@ class Session:
             finally:
                 self._opening = False
 
+        return True
+
     def cq(self, slot=None, repeat=False):
         command = '/cq' + (f' {slot}' if slot is not None else '') + (' repeat' if repeat else '')
         if not self.broadcast.confirm_retune(command):
@@ -3862,9 +3998,10 @@ class Session:
         if (yield from self.flow.cq_steps(slot, sniff_seconds=SNIFF_S, wait_seconds=self.wait_seconds)):
             yield from self.flow.opening_steps()
             self.parking.start_delivery()
-            return
+            return True
         self.say(f'CQ on slot {slot} stopped' if self.flow.cancelled else
                  f'no answer on slot {slot}' if self._called else f'slot {slot} is busy; no CQ sent')
+        return False
 
     def _repeating(self, slot):
         n = 1
@@ -3875,7 +4012,7 @@ class Session:
             if (yield from self.flow.cq_steps(slot, sniff_seconds=SNIFF_S, wait_seconds=self.wait_seconds)):
                 yield from self.flow.opening_steps()
                 self.parking.start_delivery()
-                return
+                return True
             if self.flow.cancelled:
                 self.say(f'repeating CQ stopped after CQ {n}')
                 return
@@ -3890,7 +4027,7 @@ class Session:
                      f'{gap} s, then CQ {n} (listening on the calling frequency {share:.0%} '
                      f'of each cycle)')
             if (yield from self._between()):
-                return
+                return True
             if self.flow.cancelled:
                 self.say(f'repeating CQ stopped before CQ {n}')
                 return
@@ -3946,14 +4083,19 @@ class Session:
         if not table:
             self.say('no VarAC channel inside the passband')
 
-    def beacon_now(self, *, force=False):
+    def check_beacon_now(self, *, line_state=None):
+        line_state = line_state or self.line_state
         if (self._band_fault or self._closing or self._quitting or not self.idle
                 or self.contact is not None or self.steps is not None
-                or self.line_state() is True or self.flow.state is not State.MONITORING):
+                or line_state() is True or self.flow.state is not State.MONITORING):
             raise HostError('beacon now requires idle monitoring with no transmission in progress')
         if self.hopping.active and (not self.hopping.ready(self.flow.band)
                                     or self.hopping.cooldown(self.flow.band)):
             raise HostError('hopping beacons require /band ready and 15 min since the last beacon on this band')
+
+    def beacon_now(self, *, force=False):
+        self.check_beacon_now()
+        self.semantic('beacon_scheduled', force=force)
         self._beacon_now = 'force' if force else 'now'
         if force:
             self.say('one forced beacon pending; detected channel occupancy overridden')
@@ -3972,6 +4114,7 @@ class Session:
             self._beacon_expires = None
             self._beacon_due = self._beacon_last = None
             self._beacon_now = False
+            self.semantic('beacon_removed')
             self._beacon_generation += 1
             self.say('beacon off')
             if was_hopping and self._hop_idle():
@@ -3999,6 +4142,7 @@ class Session:
         self.hopping.configure(words)
         self._beacon_generation += 1
         self._beacon_now = False
+        self.semantic('beacon_removed')
         if self.beacon is None:
             self._beacon_expires = self.client.clock() + BEACON_LIFETIME_S
         self.beacon = self.hopping.minutes
@@ -4073,10 +4217,8 @@ class Session:
             return False
         return self._hop_idle() and not hop.cooldown(self.flow.band)
 
-    def change_band(self, band, *, automatic=False):
-        """`/band N`: another band's calling frequency, taken only while nothing is linked or
-        going out, with the keying line disarmed while the rig moves. The slot monitor starts
-        the band afresh; the heard list keeps each station's band, and a beacon its schedule."""
+    def check_change_band(self, band, *, line_state=None):
+        line_state = line_state or self.line_state
         if band not in CALLING_HZ:
             raise ValueError(f'/band N: N is one of {", ".join(map(str, CALLING_HZ))}')
         if self.client.connected or self.contact is not None:
@@ -4084,8 +4226,14 @@ class Session:
         if self.steps is not None:
             raise HostError(f'{OUTGOING.get(self.intent, "a transmission")} is going out; '
                             '/stop first, then /band')
-        if not self.idle or self.line_state() is True:
+        if not self.idle or line_state() is True:
             raise HostError('a link is being set up or the transmitter is keyed; /band once it is over')
+
+    def change_band(self, band, *, automatic=False):
+        """`/band N`: another band's calling frequency, taken only while nothing is linked or
+        going out, with the keying line disarmed while the rig moves. The slot monitor starts
+        the band afresh; the heard list keeps each station's band, and a beacon its schedule."""
+        self.check_change_band(band)
         if band == self.flow.band and not self._band_fault:
             self.say(f'already on {band} m')
             return
@@ -4135,7 +4283,7 @@ class Session:
         otherwise None and the beacon is the standard `CALL-9` CQFRAME."""
         self.bbs_host.advertise()
         grid = (self.flow.profile.get('LOC') or '').upper()
-        if self.client.kiss_socket is None or not re.fullmatch(r'[A-R]{2}[0-9]{2}[A-X]{2}', grid):
+        if not self.client.advanced_beacon_available or not re.fullmatch(r'[A-R]{2}[0-9]{2}[A-X]{2}', grid):
             return None
         return f'20{status_letter(self.flow.services)}{grid}{base_call(self.client.mycall)}'
 
@@ -4163,6 +4311,7 @@ class Session:
             else:
                 yield from self.client.beacon_steps(text)
         except Unsupported as error:
+            self.semantic('beacon_failed', error=error)
             self.say(f'beacon not sent: {error}')
             self._clear_since = None
             if (not once and generation == self._beacon_generation
@@ -4172,6 +4321,7 @@ class Session:
             self.hopping.last_tx[band] = self.client.clock()
             if not once and self.beacon and generation == self._beacon_generation:
                 self._beacon_last = self.client.clock()
+            self.semantic('beacon_sent')
             self.emit('beacon', dial_hz=self.flow.dial, bandwidth_hz=self.client.bandwidth,
                       text=text or f'{call}-9')
             if not once and self.beacon and generation == self._beacon_generation:
@@ -4189,6 +4339,15 @@ class Session:
                 if listening:
                     self.client.listen()
 
+    def check_outgoing(self):
+        if self.steps is not None:
+            raise HostError(f'{self.intent} is in progress; /stop first')
+        if self.client.connected:
+            raise HostError(f'linked with {self.peer}; /bye first')
+        if not self.idle:
+            raise HostError('an incoming link is being set up or the transmitter is keyed; '
+                            'wait for it to settle')
+
     def _settle_outgoing(self):
         if self.steps is not None and (self.repeat or self.intent == 'beacon'):
             self.flow.cancel()
@@ -4203,13 +4362,7 @@ class Session:
             raise HostError('closing identification pending; wait for verified unkey')
         if self.steps is not None and (self.repeat or self.intent == 'beacon'):
             self._settle_outgoing()
-        if self.steps is not None:
-            raise HostError(f'{self.intent} is in progress; /stop first')
-        if self.client.connected:
-            raise HostError(f'linked with {self.peer}; /bye first')
-        if not self.idle:
-            raise HostError('an incoming link is being set up or the transmitter is keyed; '
-                            'wait for it to settle')
+        self.check_outgoing()
         if self.hopping.active and how != 'beacon':
             self.hopping.defer()
         self.broadcast.selected = None
@@ -4258,7 +4411,7 @@ class Session:
         for line in record['body'].replace('\r\n', '\n').split('\n'):
             self.say('  ' + line)
 
-    def compose_vmail(self, subject):
+    def check_compose_vmail(self, subject):
         if not self.client.connected:
             raise HostError('a VMail goes to the linked station; /call or /answer first')
         if self.flow.dial in CALLING_HZ.values():
@@ -4266,6 +4419,9 @@ class Session:
         from .mail_parking import validate_content
         validate_content(subject, '', local=True)
         VMail(subject, '').wire()
+
+    def compose_vmail(self, subject):
+        self.check_compose_vmail(subject)
         self.compose = (subject, [])
         self._compose_link = (self.client.link_generation, self.peer,
                               datetime.fromtimestamp(self.parking.store.clock(), timezone.utc)
@@ -4273,7 +4429,7 @@ class Session:
         self.say(f'VMail to {self.peer}, subject "{subject}": type the body; a line of only . sends it, '
                  '/status and /help preserve it; other /commands drop it')
 
-    def send_vmail(self):
+    def check_send_vmail(self, *, preflight=True):
         from .mail_parking import validate_content
         subject, lines = self.compose
         generation, peer, composed = self._compose_link
@@ -4281,6 +4437,12 @@ class Session:
             raise HostError('VMail draft belongs to an earlier contact; drop it and compose again')
         vmail = VMail(subject, '\r\n'.join(lines))
         validate_content(vmail.subject, vmail.body, local=True)
+        self.parking.check_direct(preflight=preflight)
+        return vmail, composed
+
+    def send_vmail(self):
+        # Legacy sends retain custody before acknowledgement admission can refuse.
+        vmail, composed = self.check_send_vmail(preflight=False)
         try:
             self.parking.send_direct(vmail, composed=composed)
         except OSError as error:
@@ -4291,7 +4453,7 @@ class Session:
                                         dial_hz=self.flow.dial, snr=self.client.snr)
         except OSError as error:
             raise HostError(f'VMail retained in parked queue; sent index could not be saved: {error}') from error
-        self.emit('vmail', direction='out', peer=self.peer, id=record['id'], subject=subject)
+        self.emit('vmail', direction='out', peer=self.peer, id=record['id'], subject=vmail.subject)
         self.say(f'VMail queued for {self.peer}; waiting for peer acknowledgement <SMR>')
 
     @property

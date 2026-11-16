@@ -26,13 +26,17 @@ def test_every_rig_carries_what_a_keying_path_reads(name):
     if name == "generic" and not r.get("ptt_port"):
         assert r["cat"] == "rigctld"
         return
+    # The onboard X6100 has no serial CAT: the guard reads the base for it.
+    if r.get("cat") == "x6100_base":
+        assert r["ptt_backend"] == "i2c" and r["note"]
+        return
     assert {"baud", "note"} <= set(r)
     assert r["baud"] > 0
 
 
-def test_the_settle_values_are_the_measured_ones():
+def test_the_settle_values_are_per_rig():
     assert RIGS["ft891"]["settle"] == 0.04       # external dongle, no codec re-init
-    assert RIGS["x6100"]["settle"] == 0.40       # its USB codec re-initialises on key
+    assert RIGS["x6100"]["settle"] == 0.40
 
 
 def test_only_a_rig_with_a_second_serial_interface_declares_one():
@@ -50,3 +54,11 @@ def test_the_shell_rig_lookup_runs_silently(tmp_path):
     run = subprocess.run([sys.executable, "-m", "hfmodem.core.rigs"], env=env,
                          capture_output=True, text=True, timeout=60)
     assert run.returncode == 0 and run.stderr == "", run
+
+
+def test_x6100_profile_facts():
+    r = RIGS["x6100"]
+    assert (r["model"], r["baud"], r["cat"]) == (3087, 19200, "civ")
+    assert (r["max_watts"], r["min_watts"]) == (10, 1)
+    assert not {"ptt_type", "ptt_iface", "ptt_port", "audio_device"} & r.keys()
+    assert r["tx_latency_status"] == "UNMEASURED"

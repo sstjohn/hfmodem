@@ -206,7 +206,7 @@ def test_timestamp_loss_is_published_without_overflow():
     st = station(transmitter=False)
     audio = st.audio
     for timestamp in (1.0, 1 + 256 / 48000 + 0.1):
-        timing = SimpleNamespace(inputBufferAdcTime=timestamp,
+        timing = SimpleNamespace(currentTime=timestamp, inputBufferAdcTime=timestamp,
                                  outputBufferDacTime=timestamp)
         audio._body(np.zeros((256, 1)), np.zeros((256, 1)), 256, timing, None)
     assert audio.lost > 0 and audio.overflows == 0
@@ -971,7 +971,7 @@ def test_station_releases_ptt_when_rig_startup_fails(monkeypatch, failure):
     cfg = SimpleNamespace(recording=Recording(), 
         selected_rig='ft891', protocols={}, resolved_profile={},
         station=StationSettings(transmit=True, mycall='N0CALL'),
-        rig=SimpleNamespace(ptt=SimpleNamespace(port='/dev/test'), model='ft891',
+        rig=SimpleNamespace(ptt=SimpleNamespace(port='/dev/test', backend='rts'), model='ft891',
                             host='localhost', port=4532, max_key_s=40, cat='rigctld',
                             max_watts=100, identity='', dial_max_age_s=5),
         profile=None, control=None)

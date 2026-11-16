@@ -2,15 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """V27 hand-back and normal ack policy pins."""
 
-from dataclasses import replace
 import json
 
-import numpy as np
 import pytest
 
-from hfmodem.shrike import p4robusttx
 from hfmodem.shrike.p4observation import Kind
-from hfmodem.shrike.p4receiver import Emission, P4Receiver, Role
 from hfmodem.shrike.p4turn import P4Turn, Proposal, State
 from hfmodem.tests.shrike.p4_chirp_deadline_support import FS, replay
 from hfmodem.tests.shrike.test_p4_close_refused_0930 import answered
@@ -62,8 +58,8 @@ def test_1013_pin_rejects_chirp_gate(monkeypatch):
     # B1: unread slots repeat the held counter-1 ACK; neither slot is accepted.
     assert [(e['at'], e['kind'], e['word'], e['purpose'], e['ack_reason'], e['state'],
              e['current_slot_accepted']) for e in late] == [
-                (2312834, Kind.WORD, 'V27', None, 'counter 1', State.IRS_ANSWER, False),
-                (2372834, Kind.WORD, 'V27', None, 'counter 1', State.IRS_ANSWER, False)]
+                (2312834, Kind.WORD, 'V27', 'repeat-request', None, State.IRS_ANSWER, False),
+                (2372834, Kind.WORD, 'V27', 'repeat-request', None, State.IRS_ANSWER, False)]
     assert not [e for e in result['events'] if e['event'] == 'Keyed'
                 and (e.get('kind') in (Kind.BODY, Kind.CHIRP, Kind.LONG)
                      or e.get('word') == 'Y27' or e.get('payload'))]
@@ -90,10 +86,10 @@ def test_2104_seeded_hold_closes_within_four_cycles():
 @pytest.mark.parametrize('data,allow_breakin,handback_expected', [
     ('chirp', False, True),
     ('chirp', True, False),
-    ('hold', False, False),
+    ('none', False, False),
 ])
 def test_queued_bytes_obey_the_greeting_gate(data, allow_breakin, handback_expected):
-    m, a = machine(role='irs', data=data, ladder='chirp', normal_ack='parity')
+    m, a = machine(role='irs', data=data,  normal_ack='parity')
     sent = propose_ack(m, ack_frame(FS, b'greeting', 0x61))
     m.keyed()
     a.on_host_data(b'waiting')
@@ -108,8 +104,6 @@ def test_queued_bytes_obey_the_greeting_gate(data, allow_breakin, handback_expec
 
 @pytest.mark.parametrize('policy,words', [
     ('parity', ('V27', 'X27')),
-    ('x27', ('X27', 'X27')),
-    ('x27-u27', ('U27', 'X27')),
 ])
 def test_protocol_three_normal_uses_counter_policy(policy, words):
     m, _ = machine(role='irs', normal_ack=policy)
@@ -121,70 +115,18 @@ def test_protocol_three_normal_uses_counter_policy(policy, words):
 
 @pytest.mark.parametrize('policy,words', [
     ('parity', ('X27', 'V27', 'X27', 'V27')),
-    ('x27', ('X27',)*4),
-    ('x27-u27', ('X27', 'U27', 'X27', 'U27')),
 ])
 def test_iss_expectation_matches_normal_policy(policy, words):
     m, _ = machine(normal_ack=policy)
     for counter, expected in enumerate(words):
         m._data_packet = Proposal(Kind.NORMAL, 0, status=counter)
         assert m._expected_data_ack() == expected
-        assert m._normal_ack((counter, b''), None)[0] == expected
-    if policy == 'x27-u27':
-        assert m._normal_ack((1, b''), replace(Proposal(Kind.WORD, 0, word='U27'),
-                                                ack_reason='counter 1'))[0] == 'U27'
-
-
-def test_x27_u27_receiver_admits_odd_counter_reply():
-    m, a = machine(normal_ack='x27-u27', data='body')
-    a.on_host_data(b'mail')
-    m.counter = 1
-    m._first_data = False
-    m._data(FS, State.ISS_DATA, Kind.NORMAL)
-    sent = m.keyed()
-    assert sent.status == 1 and sent.payload == b'mail'
-    assert 'U27' in m.expected_words()
-    assert m._expected_data_ack() == 'U27'
-    at = sent.stream_sample+round(.935*FS)
-    rx = P4Receiver(FS, admitted=True)
-    rx.expected_words = m.expected_words()
-    rx.note_emission(Emission(Kind.NORMAL, Role.ISS, sent.stream_sample,
-                              .805, packet_reply=True))
-    wave = p4robusttx.robust_word('U27')
-    audio = np.zeros(at+len(wave)+FS//10, np.float32)
-    audio[at:at+len(wave)] = wave
-    heard = rx.read_window(audio, 0, whole=True)
-    replies = [reg for reg in heard if reg.observation.word == 'U27'
-               and not reg.observation.unexpected and not reg.observation.provisional]
-    assert replies
-    for reg in replies:
-        m.observe(reg, now=at+round(.28*FS))
-    assert m._data_packet is None and a._buffer_raw == 0
-
-
-def test_x27_u27_does_not_admit_u27_after_first_grant():
-    m, _ = machine(normal_ack='x27-u27', data='body')
-    m._body(FS, 0x40, State.ISS_GRANT)
-    grant = m.keyed()
-    assert 'U27' not in m.expected_words()
-    at = grant.stream_sample+round(.935*FS)
-    rx = P4Receiver(FS, admitted=True)
-    rx.expected_words = m.expected_words()
-    rx.note_emission(Emission(Kind.BODY, Role.ISS, grant.stream_sample,
-                              .805, packet_reply=True))
-    wave = p4robusttx.robust_word('U27')
-    audio = np.zeros(at+len(wave)+FS//10, np.float32)
-    audio[at:at+len(wave)] = wave
-    heard = rx.read_window(audio, 0, whole=True)
-    assert any(reg.observation.word == 'U27' and reg.observation.unexpected
-               for reg in heard)
-    for reg in heard:
-        m.observe(reg, now=at+round(.30*FS))
-    assert m.decide(at+round(.30*FS)) is None
+        irs, _ = machine(role='irs', normal_ack=policy)
+        assert propose_ack(irs, ack_frame(FS, b'', counter)).word == expected
 
 
 def seeded_handback(*, allow_breakin, managed=False):
-    m, a = machine(data='chirp', ladder='chirp', hold_cycles=16,
+    m, a = machine(data='chirp',  hold_cycles=16,
                    managed_application=managed)
     m._idle(FS)
     idle = m.keyed()

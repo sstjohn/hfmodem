@@ -16,7 +16,7 @@ DATA = bytes(range(65, 91)) * 4
 
 
 def opening(**options):
-    m, a = machine(role='irs', data='body', ladder='none',
+    m, a = machine(role='irs', data='body',
                    wall_clock=lambda: 0., **options)
     a.on_host_data(DATA)
     m._body(0, 0x40, State.IRS_BREAKIN)

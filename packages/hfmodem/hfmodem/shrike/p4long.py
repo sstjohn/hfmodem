@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import p4c2, p4decode, p4frame, p4normal, p4rx, tablegen
+from . import p4c2, p4frame, p4longdecode, p4normal, p4rx, tablegen
 
 LAYOUT = p4normal.layout("long", terminal_training=True)
 """24 data blocks, 25 trainings, 5768 symbols."""
@@ -98,26 +98,30 @@ def decode_body(baseband, *, first_training_start: int,
 
     Incomplete/silent input or CRC failure returns None; malformed input raises
     ValueError. No CFO/timing search or implicit header/packet classification.
-    Constituent states are free and unresolved parity tails are erased.
+    Both constituents start at zero; C1 terminates at zero, C2 ends freely.
     """
     fields = body_scores(baseband, first_training_start=first_training_start,
                          frequency_offset=frequency_offset)
     if fields is None:
         return None
-    accepted = [frame for polarity in (1, -1)
-                if (frame := decode_scores(fields, iterations=8, polarity=polarity)) is not None]
-    return accepted[0] if len(accepted) == 1 else None
+    result = p4longdecode.LongSearch(build_members(fields)).advance()
+    return result.frame
 
 
-def decode_scores(fields, *, iterations=8, polarity=1):
+def build_members(fields, *, polarities=(1, -1)):
+    """Freeze SL5 serialized scores, retaining every received parity tail."""
     fields = np.asarray(fields, dtype=float)
     if fields.shape != (3 * SYSTEMATIC_BITS,) or not np.all(np.isfinite(fields)):
         raise ValueError("normal long requires 4968 finite scores")
-    if polarity not in (1, -1):
-        raise ValueError("polarity must be +1 or -1")
-    systematic, c1, c2 = np.split(fields * polarity, 3)
-    c1[-8:] = c2[-8:] = 0
-    decoded = p4decode.turbo_decode(systematic, c1, c2,
-                                   component_permutation(), iterations=iterations)
-    wire = np.packbits(decoded.bits[:8 * NET_BYTES], bitorder="little").tobytes()
-    return p4frame.decode_field(wire, data_bytes=NET_BYTES - 3)
+    polarities = tuple(polarities)
+    if len(set(polarities)) != len(polarities) or any(
+            type(polarity) is not int or polarity not in (1, -1) for polarity in polarities):
+        raise ValueError("unique polarities +1 or -1 required")
+    return tuple(p4longdecode.LongMember(p4longdecode.geometry(5), fields * polarity,
+                                        polarity=polarity)
+                 for polarity in polarities)
+
+
+def decode_scores(fields, *, iterations=8, polarity=1):
+    members = build_members(fields, polarities=(polarity,))
+    return p4longdecode.LongSearch(members, iterations=iterations).advance().frame

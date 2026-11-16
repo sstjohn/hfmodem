@@ -73,8 +73,8 @@ def replay(*, queued=False, breakin=True, legacy=False, silent=False, stall_ms=0
     tx.p4_probe.values = (7, 38)
     tx.p4_probe.peer_breakin = True
     args = tx.p4_link_options
-    for name, value in dict(data='body', ladder='none', normal_ack='parity',
-                            hold_cycles=16, breakin='body', chirp_ack='alternate',
+    for name, value in dict(data='body',  normal_ack='parity',
+                            hold_cycles=16, breakin='body', chirp_ack='toggle',
                             train_policy='repeat', irs_silent_cycles=0,
                             rx_scan='legacy', rx_timing_trace=True).items():
         setattr(args, 'p4_' + name, value)

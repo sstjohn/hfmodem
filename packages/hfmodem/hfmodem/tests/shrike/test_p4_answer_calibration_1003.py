@@ -65,8 +65,8 @@ def test_evidence_is_required_and_zero_restores_prior_value(tmp_path):
 
 @pytest.mark.parametrize('offset', [.888, .910, .940])
 def test_offset_workaround_cannot_be_combined(tmp_path, offset):
-    args = SimpleNamespace(tx_timing_plan=plan(tmp_path), p4_answer_offset=offset,
-                           p4_link=True)
+    args = onair.build_parser().parse_args(['--p4-link', '--p4-answer-offset', str(offset)])
+    args.tx_timing_plan = plan(tmp_path)
     with pytest.raises(SystemExit, match='requires --p4-answer-offset 0.920'):
         onair._p4_entry_defaults(args)
 
@@ -181,12 +181,15 @@ class ClockedStream(_Stream):
         return max(0, self.sample_now()+self.key_notice-at)
 
 
-def drive(monkeypatch, timing, kind, *, stall=0):
+def drive(monkeypatch, timing, kind, *, stall=0, geometry_n=0):
     stream = ClockedStream()
+    stream.geometry_n = geometry_n
     tx = Tx(stream)
     tx.settle = .040
     tx.p4_probe.emissions.clear()
     tx.p4_link_options.tx_timing_plan = timing
+    tx.p4_link_options.audio_in = timing.p4_audio_input
+    tx.p4_link_options.audio_out = timing.p4_audio_output
     tx.p4_link_options.p4_link_timeout = (1.3 if stall and kind not in (Kind.LONG, Kind.CHIRP) else 4.3)
     rx = tx.sessrx.p4
     long = kind in (Kind.LONG, Kind.CHIRP)
@@ -248,6 +251,12 @@ def test_driver_nominal_and_local_clocks_and_earlier_decision(tmp_path, monkeypa
     after = next(e for e in tx.p4_probe.link_events if e['event'] == 'Decision')
     assert after['decision_at'] == before['decision_at']-RESIDUAL
     assert after['nominal_due'] == before['nominal_due']
+    for driver, clock, residual in ((plain, base, 0), (tx, stream, RESIDUAL)):
+        keyed = next(e for e in driver.p4_probe.link_events if e['event'] == 'Keyed')
+        assert keyed['nominal_s'] == nominal/FS
+        assert keyed['scheduled_s'] == pytest.approx(
+            (clock.outputs[0][1]+clock._lat)/FS)
+        assert keyed['scheduled_s'] == pytest.approx((nominal-336-residual)/FS)
     assert stream.tx_latency_n == 336
 
 
@@ -335,3 +344,13 @@ def test_nested_scope_cannot_apply_residual_twice(tmp_path):
         scoped(stream, timing, lambda: scoped(stream, timing, lambda: None))
     assert stream.tx_latency_n == 336
     assert not hasattr(stream, 'p4_answer_residual_n')
+
+
+@pytest.mark.parametrize('residual_ms', [0., 31.4, -31.4])
+def test_keyed_schedule_matches_enqueue_with_logical_geometry(tmp_path, monkeypatch, residual_ms):
+    timing = plan(tmp_path, residual_ms)
+    tx, stream, _ = drive(monkeypatch, timing, Kind.NORMAL, geometry_n=816)
+    keyed = next(e for e in tx.p4_probe.link_events if e['event'] == 'Keyed')
+    assert keyed['scheduled_s'] == pytest.approx((stream.outputs[0][1]+stream._lat)/FS)
+    assert keyed['scheduled_s'] == pytest.approx(keyed['nominal_s']
+        + (816-336-timing.p4_answer_residual_samples)/FS)

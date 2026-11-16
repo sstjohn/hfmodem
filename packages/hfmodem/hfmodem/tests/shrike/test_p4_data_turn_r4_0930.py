@@ -21,7 +21,7 @@ CYCLE, T = 60000, 44160
 
 @pytest.mark.parametrize('retry', ['silence', 'deferred'])
 def test_unaccepted_c0_stays_identical_after_long_ladder_restart(retry):
-    m, a = machine(data='body', ladder='long')
+    m, a = machine(data='long')
     a.on_host_data(b';FW: W9SSJ\r[Pat-1.0.0-B2FHM$]\r;' + b'proposal'*10)
     m._begin_data_turn(0, State.ISS_DATA_ACK)
     original = m.keyed()
@@ -42,12 +42,15 @@ def test_unaccepted_c0_stays_identical_after_long_ladder_restart(retry):
     assert (p.kind, p.status, p.payload) == (Kind.BODY, 0, original.payload)
     m.observe(word('X27', p.stream_sample+T, responds_to=p.stream_sample))
     p = m.keyed()
-    assert (p.kind, p.status, len(p.payload)) == (Kind.NORMAL, 1, 40)
-
+    assert p.value == 13
+    for ack in ('X27', 'U27'):
+        m.observe(word(ack, p.stream_sample+T, responds_to=p.stream_sample))
+        p = m.keyed()
+    assert (p.kind, p.status, len(p.payload)) == (Kind.LONG, 0x61, 69)
 
 
 def test_late_weak_counter_zero_ack_retries_on_future_raster():
-    m, a = machine(data='body', ladder='none', prekey_lead=2131/FS)
+    m, a = machine(data='body',  prekey_lead=2131/FS)
     a.on_host_data(b'packet')
     m._data(0, State.ISS_DATA_ACK)
     m.keyed()
@@ -67,7 +70,7 @@ def test_late_weak_counter_zero_ack_retries_on_future_raster():
     assert a._buffer_raw == 0 and m.counter == 1
 
 def word_yield():
-    m, a = machine(data='body', ladder='none', role='irs')
+    m, a = machine(data='body',  role='irs')
     a.on_host_data(b';FW: W9SSJ\r' + b'proposal'*10)
     m._body(0, 0x40, State.IRS_BREAKIN)
     m.keyed()
@@ -121,6 +124,8 @@ def test_word_yield_refusal_budget_excludes_unconfirmed_answers(invalid):
     assert not m._data_refusals
 
 
+# The live link bounds receive work by the wall clock, so a loaded host changes what it decides.
+@pytest.mark.realtime
 def test_0210_full_stream_driver_stops_at_word_yield_retry_divergence(monkeypatch):
     root = Path(__file__).resolve().parents[5]
     capture = root/'captures/onair-0930-0210'
@@ -147,6 +152,7 @@ def test_0210_full_stream_driver_stops_at_word_yield_retry_divergence(monkeypatc
         return p
     monkeypatch.setattr(P4Turn, 'keyed', track)
     def drive(tx, stream, raster):
+        tx.p4_link_options.p4_normal_ack = 'parity'
         take = stream.take_until
         queued = False
         def feed(end):

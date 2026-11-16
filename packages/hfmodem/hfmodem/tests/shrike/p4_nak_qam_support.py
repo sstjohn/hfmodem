@@ -17,13 +17,13 @@ def neutral_keys(*,refused=None):
     def keyed(self,*args,**kwargs):
         neutral=self._next is not None and not self._next.current_slot_accepted
         if neutral:
-            names=('ack_word','acked_counter','_last_ack','_last_body_ack',
-                   '_held_answer','_packet_ack')
+            names=('_ack_chain','acked_counter','_last_ack','_last_body_ack',
+                   '_held_answer','_ack_chain')
             history=tuple(getattr(self,n) for n in names)
             permission=(self.counter,self.grants,self.breakins,self.first_body,
                         self._receive_epoch,self._peer_generation,self._receipt,
                         self._negotiation,self._peer_word,self._peer_word_at)
-            bounds=(self._irs_silent_until,self._irs_silent_done,self._hold_until,
+            bounds=(self._hold_until,
                     self.session_end,self.session_wall_end)
             a=self.outbox.arq
             silent=a._silent_cycles
@@ -37,33 +37,33 @@ def neutral_keys(*,refused=None):
             assert (self.counter,self.grants,self.breakins,self.first_body,
                     self._receive_epoch,self._peer_generation,self._receipt,
                     self._negotiation,self._peer_word,self._peer_word_at)==permission
-            assert (self._irs_silent_until,self._irs_silent_done,self._hold_until,
+            assert (self._hold_until,
                     self.session_end,self.session_wall_end)==bounds
             assert a._silent_cycles==silent
             assert (self.outbox.inflight,bytes(a._outbuf),a._buffer_raw,a._inflight)==outgoing
             records.append(dict(at=sent.stream_sample,word=sent.word,
                                 purpose=sent.purpose,kind=sent.kind,state=sent.state))
         return sent
-    def refusal(self,reason):
+    def refusal(self,reason,now=None):
         proposal=self._next
         if proposal is None or proposal.current_slot_accepted:
-            return original_refused(self,reason)
-        names=('ack_word','acked_counter','_last_ack','_last_body_ack',
-               '_held_answer','_packet_ack','counter',
+            return original_refused(self,reason,now=now)
+        names=('_ack_chain','acked_counter','_last_ack','_last_body_ack',
+               '_held_answer','_ack_chain','counter',
                'grants','breakins','first_body','_receive_epoch','_peer_generation',
                '_receipt','_negotiation','_peer_word','_peer_word_at')
         history=tuple(getattr(self,n) for n in names)
-        bounds=(self._irs_silent_until,self._irs_silent_done,self._hold_until,
+        bounds=(self._hold_until,
                 self.session_end,self.session_wall_end)
         arq=self.outbox.arq
         silent=arq._silent_cycles
         outgoing=(self.outbox.inflight,bytes(arq._outbuf),arq._buffer_raw,arq._inflight)
         last=self.last
-        result=original_refused(self,reason)
+        result=original_refused(self,reason,now=now)
         assert proposal.kind==Kind.WORD and proposal.payload==b''
         assert not proposal.current_slot_accepted
         assert tuple(getattr(self,n) for n in names)==history
-        assert (self._irs_silent_until,self._irs_silent_done,self._hold_until,
+        assert (self._hold_until,
                 self.session_end,self.session_wall_end)==bounds
         assert arq._silent_cycles==silent
         assert (self.outbox.inflight,bytes(arq._outbuf),arq._buffer_raw,arq._inflight)==outgoing

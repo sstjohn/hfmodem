@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hfmodem.shrike import arq, onair, placement, rxfront
+from hfmodem.shrike import arq, onair, rxfront
 
 FIXTURE = Path(__file__).with_name('fixtures') / 'p3-first-changeover-1107'
 if not (FIXTURE / 'metadata.json').is_file():
@@ -22,11 +22,13 @@ if not (FIXTURE / 'metadata.json').is_file():
 ROWS = json.loads((FIXTURE / 'metadata.json').read_text())
 
 
+@pytest.mark.parametrize('policy', ['cs1', 'cs4', 'cs5', 'cs5-every'])
 @pytest.mark.parametrize('row', ROWS, ids=lambda r: r['file'])
-def test_first_changeover_body_is_acknowledged_in_its_first_slot(tmp_path, monkeypatch, row):
-    from hfmodem.tests.shrike.test_cs6_stalls import _buffered_listen
-    from hfmodem.tests.shrike.test_p3_first_changeover_ack import arm
+def test_first_changeover_body_is_acknowledged_in_its_first_slot(tmp_path, monkeypatch, row, policy):
+    from hfmodem.tests.shrike.p3_cycle_support import _buffered_listen
+    from hfmodem.tests.shrike.p3_changeover_support import arm
     s, tx, live, g, seg = arm(tmp_path, row, fixtures=FIXTURE)
+    s.host.p3_changeover_answer = policy
     delivered = []
     s.host.deliver = delivered.append
     seg = onair._receive_changeover(live, g, tx, s.host, s.rx, 0, seg, 0, np.zeros(0), 0,
@@ -34,12 +36,15 @@ def test_first_changeover_body_is_acknowledged_in_its_first_slot(tmp_path, monke
     assert seg.size == s.rx.cs_at + s.rx.CHANGEOVER_READ_N
     assert [ev.packet[2] for ev in s.packets] == [row['payload'].encode()]
     assert b''.join(delivered) == row['payload'].encode()
-    assert tx._pending_p3_cs == arq.CS_ACK
+    expected = {'cs1': arq.CS_ACK, 'cs4': arq.CS_SPEED_UP,
+                'cs5': arq.CS_NAK, 'cs5-every': arq.CS_NAK}[policy]
+    assert tx._pending_p3_cs == expected
     monkeypatch.setattr(onair, '_listen_until_answer', _buffered_listen)
-    slot, _, _ = onair._regrid(live, g, tx, s.host, s.rx, 0, seg, 0, 1920)
+    slot, _, _, _ = onair._regrid(live, g, tx, s.host, s.rx, 0, seg, 0, 1920)
     s.host.tick()
     tx.emit_pending_cs()
     assert not tx.refused and tx.slots_used == [slot] == [0]
+    assert tx._p3_emitted_cs == expected
     assert tx.tx_audio_start + row['origin'] == row['first_ack_audio']
 
 
@@ -86,14 +91,16 @@ class _ArmedCapture:
         return at, self.samples
 
 
+@pytest.mark.parametrize('policy', ['cs1', 'cs4', 'cs5', 'cs5-every'])
 @pytest.mark.parametrize('overrun', [0, 4800])
 @pytest.mark.parametrize('row', ROWS, ids=lambda r: r['file'])
-def test_the_first_answer_is_armed_before_the_body_decode(tmp_path, monkeypatch, row, overrun):
+def test_the_first_answer_is_armed_before_the_body_decode(tmp_path, monkeypatch, row, overrun, policy):
     """A body decode that runs long cannot hand the first answer's slot on:
     the reply is armed once the turn makes us the IRS, ahead of the decode."""
-    from hfmodem.tests.shrike.test_cs6_stalls import _buffered_listen
-    from hfmodem.tests.shrike.test_p3_first_changeover_ack import Capture, arm
+    from hfmodem.tests.shrike.p3_cycle_support import _buffered_listen
+    from hfmodem.tests.shrike.p3_changeover_support import Capture, arm
     s, tx, live, g, seg = arm(tmp_path, row, fixtures=FIXTURE)
+    s.host.p3_changeover_answer = policy
     live.__class__ = type('Armed', (_ArmedCapture, Capture), {})
     decode = rxfront._cs_event
 
@@ -107,9 +114,11 @@ def test_the_first_answer_is_armed_before_the_body_decode(tmp_path, monkeypatch,
     armed = tx._p3_armed
     assert armed is not None and armed.slot == 0
     monkeypatch.setattr(onair, '_listen_until_answer', _buffered_listen)
-    slot, _, _ = onair._regrid(live, g, tx, s.host, s.rx, 0, seg, 0, 1920)
+    slot, _, _, _ = onair._regrid(live, g, tx, s.host, s.rx, 0, seg, 0, 1920)
     s.host.tick()
     tx.emit_pending_cs()
     assert tx.slots_used[:1] == [0] and len(live.emissions) == 1
     assert live.emissions[0][0] + row['origin'] == row['first_ack_audio']
-    assert tx._p3_emitted_cs == (arq.CS_ACK if not overrun else armed.cs)
+    expected = {'cs1': arq.CS_ACK, 'cs4': arq.CS_SPEED_UP,
+                'cs5': arq.CS_NAK, 'cs5-every': arq.CS_NAK}[policy]
+    assert tx._p3_emitted_cs == (expected if not overrun else armed.cs)

@@ -16,35 +16,27 @@ import pytest
 
 from hfmodem.shrike import arq, onair
 from hfmodem.shrike.p3trial import ReplyClock, CYCLE
-from hfmodem.tests.shrike.test_p3_timing_trial import setup, receive
-from hfmodem.tests.shrike.test_tx_latency_correction import _Stream, BLK, LAT, SETTLE_N
+from hfmodem.tests.shrike.tx_latency_support import _Stream, BLK, LAT, SETTLE_N
+from hfmodem.tests.shrike.p3_reply_support import (
+    FORM,
+    WIDTH,
+    arm_reply,
+    emit_reply,
+    frame,
+    mail_link,
+    owe,
+    receive,
+    receive_packet,
+    receiving,
+    setup,
+    top_of_cycle,
+)
 
 FS = onair.FS
-WIDTH = 39120
 #: Our control's pulse centre past its audio start (`[ack] P3 pulse centers`),
 #: so a reply's audio starts this far past the answered packet's phase reference.
 LEAD = 852
 REPLY_N = round(onair.P3_ANSWER_S * FS) - LEAD
-FORM = (False, 1)
-
-
-def mail_link(tmp_path, frames=4):
-    s, tx, live, grid = setup(tmp_path, 'B', delay=234)
-    entry = tx.timing_trial.entry_phase
-    tx.timing_trial = None
-    tx.reply_clock = ReplyClock(entry_phase=entry)
-    receive(s, tx, live, grid, entry + 44400)
-    origin = grid._p3_peer[0]
-    for index in range(2, 2 + frames):
-        grid.cycles = index
-        frame(grid, origin + (index - 1) * CYCLE, index)
-        tx.aim(grid, index)
-        onair._p3_place_reply(grid, tx, index)
-    return s, tx, live, grid, origin, index
-
-
-def frame(grid, at, index):
-    grid.note_p3_packet(at, WIDTH, CYCLE, swapped=None, identity=(*FORM, index % 4, b'test'))
 
 
 def test_the_reply_sits_on_the_answer_slot_and_follows_the_peer_both_ways(tmp_path):
@@ -110,8 +102,8 @@ def test_the_changeover_answer_keys_on_its_instant_whether_or_not_the_body_decod
     """VE3KPG's recorded reversal: with room for the body's decode the ACK keys
     on the instant placed before it; without, the decode is declined and the
     repeat request keys on that same instant instead of the slot going."""
-    from hfmodem.tests.shrike.test_cs6_stalls import _buffered_listen
-    from hfmodem.tests.shrike.test_p3_first_changeover_ack import ROWS, arm
+    from hfmodem.tests.shrike.p3_cycle_support import _buffered_listen
+    from hfmodem.tests.shrike.p3_changeover_support import ROWS, arm
     row = ROWS[2]
     s, tx, live, g, seg = arm(tmp_path, row)
     delivered = []
@@ -122,7 +114,7 @@ def test_the_changeover_answer_keys_on_its_instant_whether_or_not_the_body_decod
                                     np.zeros(0), 0, 1920)
     assert (b''.join(delivered) == b'***') == decoded
     monkeypatch.setattr(onair, '_listen_until_answer', _buffered_listen)
-    slot, _, _ = onair._regrid(live, g, tx, s.host, s.rx, 0, seg, 0, 1920)
+    slot, _, _, _ = onair._regrid(live, g, tx, s.host, s.rx, 0, seg, 0, 1920)
     assert slot == 0
     s.host.tick()
     tx.emit_pending_cs()
@@ -132,8 +124,7 @@ def test_the_changeover_answer_keys_on_its_instant_whether_or_not_the_body_decod
 
 
 def test_a_settle_longer_than_the_aim_takes_the_reply_later(tmp_path):
-    """Review of 1e285fcab: at an 80 ms settle the aim put the PTT edge 10.5 ms
-    inside the packet the reply answers."""
+    """An 80 ms settle must not put PTT inside the packet being answered."""
     s, tx, live, grid, origin, index = mail_link(tmp_path)
     tx.settle = .080
     slot = index + 1
@@ -145,8 +136,7 @@ def test_a_settle_longer_than_the_aim_takes_the_reply_later(tmp_path):
 
 
 def test_cs5_is_rendered_with_the_acknowledgements(tmp_path):
-    """The same review: this cycle's failed read can carry the error ladder to
-    CS5 after the words were rendered."""
+    """A failed read can reach CS5 after the words were rendered."""
     s, tx, live, grid, origin, index = mail_link(tmp_path)
     tx.p3_follow_offset = 'all'
     tx.sessrx.p3_receive_offset_hz = -8.9
@@ -253,21 +243,9 @@ def test_a_withdrawal_once_keyed_leaves_the_burst_to_go_out():
 
 # -- the reply: the decode chooses the word, never the instant ---------------
 
-def top_of_cycle(tx, live, grid, slot):
-    """What the hold loop does before the window: place the comb, arm."""
-    tx.aim(grid, slot)
-    slot = onair._p3_place_reply(grid, tx, slot)
-    live.now = live.pos = grid.boundary(slot) - CYCLE // 2
-    tx.arm_p3_reply()
-    return slot
-
 
 def decided_against(tx):
     return arq.CS_REQUEST if tx._p3_armed.cs == arq.CS_ACK else arq.CS_ACK
-
-
-def owe(s, tx, cs):
-    tx._pending_p3_cs, tx._pending_p3_cs_owner = cs, s.host.arq.p3_tx_owner
 
 
 def test_the_default_answer_is_in_the_stream_before_the_window(tmp_path):
@@ -311,6 +289,127 @@ def test_a_decode_past_the_dac_notice_keys_the_armed_word_on_its_instant(
     assert tx._pending_p3_cs == decided
 
 
+def test_late_speed_up_twice_keeps_unread_counter_and_retries_climb(tmp_path):
+    s, tx, live, grid = receiving(tmp_path)
+    a = s.host.arq
+    a.cfg.speed_up = 'auto'
+    a.cfg.p3_speed_up_after = 1
+    assert arm_reply(tx, live, grid, 2) == arq.CS_ACK
+    receive_packet(s, 1)
+    assert tx._pending_p3_cs == arq.CS_SPEED_UP and a._clean_run == 0
+    assert emit_reply(tx, live, late=True) == arq.CS_ACK
+    # The late read gets its own ACK before that keyed word can be held.
+    assert arm_reply(tx, live, grid, 3) == arq.CS_REQUEST
+    assert emit_reply(tx, live, late=True) == arq.CS_REQUEST
+    held = arm_reply(tx, live, grid, 4)
+    assert emit_reply(tx, live) == held == arq.CS_REQUEST
+    assert a.rx_seq == 1 and tx.slots_used[-3:] == [2, 3, 4]
+    arm_reply(tx, live, grid, 5)
+    receive_packet(s, 2)
+    assert tx._pending_p3_cs == arq.CS_SPEED_UP and a._clean_run == 0
+    assert emit_reply(tx, live) == arq.CS_SPEED_UP
+
+
+def test_late_cycle_command_twice_keeps_unread_counter_and_request(tmp_path):
+    s, tx, live, grid = receiving(tmp_path)
+    a = s.host.arq
+    a.cfg.long_cycle = True
+    assert arm_reply(tx, live, grid, 2) == arq.CS_ACK
+    receive_packet(s, 1, cycle_long=False, wants_long=True)
+    assert tx._pending_p3_cs == arq.CS_CYCLE_TOG and a._cycle_request is True
+    assert emit_reply(tx, live, late=True) == arq.CS_ACK
+    # The late read gets its own ACK before that keyed word can be held.
+    assert arm_reply(tx, live, grid, 3) == arq.CS_REQUEST
+    assert emit_reply(tx, live, late=True) == arq.CS_REQUEST
+    held = arm_reply(tx, live, grid, 4)
+    assert emit_reply(tx, live) == held == arq.CS_REQUEST
+    assert a.rx_seq == 1 and a._cycle_request is True
+    assert not a.cycle_command_emitted and not a.cycle_long
+    arm_reply(tx, live, grid, 5)
+    receive_packet(s, 2, cycle_long=False, wants_long=True)
+    assert tx._pending_p3_cs == arq.CS_CYCLE_TOG
+    assert emit_reply(tx, live) == arq.CS_CYCLE_TOG
+    assert a._cycle_request is True and a.cycle_command_emitted
+
+
+def test_reconciled_late_cycle_command_keeps_next_unread_counter(tmp_path):
+    s, tx, live, grid = receiving(tmp_path)
+    a = s.host.arq
+    a.cfg.long_cycle = True
+    grid.cycles = 2
+    tx.aim(grid, 2)
+    live.now = live.pos = tx.boundary - CYCLE // 2
+    receive_packet(s, 1, cycle_long=True)
+    assert tx._pending_p3_cs == arq.CS_CYCLE_TOG and a._cycle_request is False
+    phase = grid.boundary(2) - round(onair.P3_COMB_LONG_REPLY_S * FS)
+    tx.reconcile_p3_cycle(phase, True)
+    assert tx._p3_armed.cs == arq.CS_REQUEST
+    assert emit_reply(tx, live, late=True) == arq.CS_REQUEST
+    slot = grid.next_slot(tx.slot)
+    # The unkeyed CS6 cannot replace the keyed ACK.
+    held = arm_reply(tx, live, grid, slot)
+    assert emit_reply(tx, live) == held == arq.CS_REQUEST
+    assert a.rx_seq == 1 and a._cycle_request is False
+    assert not a.cycle_command_emitted and a.cycle_long
+
+
+def test_refused_repeat_gear_after_earlier_ack_preserves_unread_counter(
+        tmp_path, monkeypatch):
+    s, tx, live, grid = receiving(tmp_path)
+    a = s.host.arq
+    a.cfg.repeat_gear = 3
+    a.cfg.speed_up = 'auto'
+    a.cfg.p3_speed_up_after = 1000
+    reported = []
+    notify = s.host.on_cs_emitted
+
+    def record(emitted):
+        reported.append(emitted)
+        notify(emitted)
+
+    monkeypatch.setattr(s.host, 'on_cs_emitted', record)
+    for slot in (2, 3):
+        arm_reply(tx, live, grid, slot)
+        receive_packet(s, 1)
+        assert emit_reply(tx, live) == arq.CS_REQUEST
+    assert a._repeat_run == 2
+
+    assert arm_reply(tx, live, grid, 4) == arq.CS_REQUEST
+    receive_packet(s, 1)
+    assert tx._pending_p3_cs == arq.CS_REQUEST
+    tx.cancel_pending_cs()
+    live.now = live.pos = tx.boundary - round(tx.settle * FS) + 1
+    tx.emit_pending_cs()
+    assert tx._p3_armed is None and live.armed_at is None
+    assert tx.slots_used[-1] == 4 and live.emissions[-1][0] == tx.boundary
+    assert reported == [arq.CS_REQUEST] * 3 and a._repeat_run == 3
+
+    arm_reply(tx, live, grid, 5)
+    live.now = live.pos = tx.boundary - 5000
+    receive_packet(s, 1)
+    assert tx._pending_p3_cs == arq.CS_SPEED_UP
+    assert a.rx_seq == 1 and a._expected_seq == 2
+    keyed, slots = len(live.emissions), list(tx.slots_used)
+    retained = s.host.sent_total, s.host.rcvd_total, a.rx_progress
+    tx.listening = True
+    try:
+        tx.emit_pending_cs()
+    finally:
+        tx.listening = False
+    assert tx.refused and len(live.emissions) == keyed and tx.slots_used == slots
+    assert reported == [arq.CS_REQUEST] * 3
+    assert tx._p3_armed is None and live.armed_at is None
+    # A refusal cannot prove the peer has not advanced on an earlier ACK.
+    assert tx._pending_p3_cs == arq.CS_REQUEST
+    assert arm_reply(tx, live, grid, 6) == arq.CS_REQUEST
+    assert emit_reply(tx, live) == arq.CS_REQUEST
+    assert reported == [arq.CS_REQUEST] * 4
+    assert len(live.emissions) == keyed + 1 and tx.slots_used == slots + [6]
+    assert a.rx_seq == 1 and a._expected_seq == 2
+    assert a._repeat_run == 3
+    assert (s.host.sent_total, s.host.rcvd_total, a.rx_progress) == retained
+
+
 def test_an_answer_nothing_commits_is_withdrawn_before_its_ptt(tmp_path):
     s, tx, live, grid, origin, index = mail_link(tmp_path)
     slot = top_of_cycle(tx, live, grid, index + 1)
@@ -339,7 +438,7 @@ def test_the_grid_never_hands_back_an_armed_slot(tmp_path):
     s, tx, live, grid, origin, index = mail_link(tmp_path)
     slot = top_of_cycle(tx, live, grid, index + 1)
     live.now = live.pos = grid.boundary(slot) - live.key_notice + 900
-    kept, _, _ = onair._regrid(live, grid, tx, s.host, s.rx, slot,
+    kept, _, _, _ = onair._regrid(live, grid, tx, s.host, s.rx, slot,
                                np.zeros(0, np.float32), live.pos, round(tx.settle * FS))
     assert kept == slot and live.armed_at == grid.boundary(slot)
 
@@ -352,6 +451,7 @@ def test_a_hold_places_a_comb_no_clock_has_placed(tmp_path):
     entry = tx.timing_trial.entry_phase
     tx.timing_trial = None
     tx.reply_clock = ReplyClock(entry_phase=entry)
+    tx.p3_control_instant = 'peer'
     receive(s, tx, live, grid, entry + 44400)
     origin = grid._p3_peer[0]
     tx.aim(grid, 2)
@@ -382,15 +482,13 @@ def test_a_long_reply_sits_on_the_long_answer_slot(tmp_path):
         assert grid.boundary(slot) + LEAD == start + k * LONG_CYCLE + round(3.40225 * FS)
 
 
-def test_the_cs6_window_arms_the_long_reply_slot_it_walks_to(tmp_path, monkeypatch):
-    """The first long reply after our CS6 keyed 2.1 ms late in the WS8EOC
-    replay: the probing cycle arms nothing at its top, the length being open."""
-    from hfmodem.tests.shrike.test_p3_cs6_pending_reads_0923 import _walks
+def test_the_cs6_window_arms_each_owed_long_boundary(tmp_path, monkeypatch):
+    from hfmodem.tests.shrike.p3_cycle_support import _walks
     armed = []
     monkeypatch.setattr(onair.RadioTx, "arm_p3_reply",
                         lambda self, **kw: armed.append((self.slot, kw)))
     s, tx, g, walks = _walks(tmp_path, monkeypatch)
-    assert armed == [(end, {"probing": True}) for _, end, _ in walks]
+    assert armed == [(3, {}), (6, {}), (9, {}), (12, {})]
 
 
 def test_a_cycle_after_six_unsupported_windows_still_arms_its_answer(tmp_path):
@@ -498,10 +596,12 @@ def test_the_ptt_clears_the_packet_as_read_and_not_only_its_raster(tmp_path):
     assert live.armed_at - edge >= copy + WIDTH
 
 
-def test_a_packet_read_late_after_arming_never_has_the_ptt_inside_it(tmp_path):
+def test_a_packet_read_late_after_arming_warns_and_keys_its_owed_reply(tmp_path, capsys):
     """A recheck of 93a10bf23: armed on the raster, then this cycle's packet
     read 15 ms late; the final guard asked about the settle alone, and a 20 ms
-    transmit correction stood the PTT 5 ms inside the packet."""
+    transmit correction stood the PTT 5 ms inside the packet. Only the settle
+    overlaps a packet already read, so the owed ACK keys; a refusal needs our
+    audio over the decoded packet, as in the WS8EOC 09-20 ISS pin."""
     s, tx, live, grid, origin, index = mail_link(tmp_path)
     live.tx_latency_n = 960
     slot = top_of_cycle(tx, live, grid, index + 1)
@@ -510,10 +610,17 @@ def test_a_packet_read_late_after_arming_never_has_the_ptt_inside_it(tmp_path):
     frame(grid, phase, index + 1)
     owe(s, tx, tx._p3_armed.cs)
     live.now = live.pos = grid.boundary(slot) - 5000
+    aimed = grid.boundary(slot)
+    audio_n = tx._p3_armed.audio.size
     tx.emit_pending_cs()
     edge = round(tx.settle * FS) + live.tx_latency_n - getattr(live, 'geometry_n', 0)
-    assert tx.refused or tx.tx_audio_start - edge >= phase + WIDTH
-
+    assert not tx.refused and tx.tx_audio_start == grid.boundary(slot)
+    assert tx.tx_audio_start - edge < phase + WIDTH <= tx.tx_audio_start
+    assert grid.key_refusal(aimed - edge, edge + audio_n,
+                            audio_at=aimed).kind == 'projected'
+    assert grid._p3_reply_phase_invalid
+    said = capsys.readouterr().out
+    assert 'P3 ACK GUARD -- KEYING CS1 ACK seq=0 ANYWAY' in said
 
 def test_a_commit_racing_the_keyer_never_moves_the_audio_into_the_settle():
     """A recheck of 93a10bf23: a commit read `keying` unset, the keyer then
@@ -590,3 +697,120 @@ def test_a_late_qrt_ack_still_goes_out_before_the_link_closes(tmp_path):
     live.now = live.pos = grid.boundary(slot) - live.key_notice + 552
     tx.emit_pending_cs()
     assert a._rx_close_pending and tx._pending_p3_cs == decided
+
+
+@pytest.mark.parametrize('refusal', ['fresh', 'generic', 'control', 'key'])
+def test_linked_p3_owed_cs1_keys_despite_projected_overlap(tmp_path, monkeypatch, capsys, refusal):
+    from hfmodem.core.tx_events import read_line
+
+    s, tx, live, grid, origin, index = mail_link(tmp_path)
+    tx.aim(grid, index + 1)
+    onair._p3_place_reply(grid, tx, index + 1)
+    at, slot = grid.boundary(tx.slot), tx.slot
+    live.now = live.pos = at - CYCLE // 2
+    if refusal == 'control':
+        monkeypatch.setattr(grid, 'p3_control_refusal', lambda slot: 'test clock overlap')
+    else:
+        monkeypatch.setattr(grid, 'key_refusal', lambda *args, **kw:
+                            onair._KeyRefusal('test air overlap', 'projected'))
+    if refusal != 'control':
+        grid.cycles = grid._p3_peer[3] + (2 if refusal == 'generic' else 1)
+    capsys.readouterr()
+    if refusal in ('control', 'key'):
+        tx.arm_p3_reply()
+        assert tx._p3_armed is not None and live.armed_at == at
+    owe(s, tx, arq.CS_ACK)
+    live.now = live.pos = at - 5000
+    tx.emit_pending_cs()
+    said = capsys.readouterr().out
+    events = [row for line in said.splitlines() if (row := read_line(line))
+              and row['event'] == 'completed']
+    assert any(row['outcome'] == 'sent' and row['slot'] == slot
+               and row['audio_start_sample'] == at for row in events)
+    diagnostic = {'fresh': 'P3 ACK GUARD -- KEYING', 'generic': 'ACK GUARD -- KEYING',
+                  'control': 'P3 REPLY CLOCK -- KEYING', 'key': 'P3 ACK GUARD -- KEYING'}
+    assert diagnostic[refusal] in said and 'ANYWAY' in said
+    assert ('test clock overlap' if refusal == 'control' else 'test air overlap') in said
+    assert tx.guard_drops == 0 and not tx.refused
+    if refusal == 'fresh':
+        assert grid._p3_reply_phase_invalid
+
+
+@pytest.mark.parametrize('committed', [False, True])
+def test_pending_short_cycle_keeps_a_committed_interior_reply(
+        tmp_path, monkeypatch, capsys, committed):
+    from hfmodem.tests.shrike.p3_cycle_support import scene, grant
+
+    s, tx, grid, live = scene(tmp_path, monkeypatch, old_long=True)
+    grant(s, tx, grid, live, True)
+    tx.aim(grid, 1)
+    tx.arm_p3_reply()
+    armed, burst = tx._p3_armed, live._armed
+    submitted = len(live.submitted)
+    if committed:
+        live.spend(grid.boundary(1) - 1000 - live.now)
+        assert burst.keying and not live.disarm()
+    capsys.readouterr()
+    slot, _, _, _ = onair._p3_transition_window(
+        live, grid, tx, s.host, s.rx, 1, live.audio[:0], live.pos, 1920)
+    if committed:
+        assert slot == tx.slot == 1
+        assert tx._p3_armed is armed and live._armed is burst
+        assert len(live.submitted) == submitted
+        assert not burst.stop.is_set()
+    else:
+        assert slot == tx.slot == tx._p3_armed.slot == 3
+        assert burst.stop.is_set() and not burst.keying
+        assert 'for slot 1 withdrawn before its PTT' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('state', ['withdrawable', 'missing', 'disconnected'])
+def test_long_header_withdrawal_uses_the_reply_lifecycle(
+        tmp_path, monkeypatch, capsys, state):
+    s, tx, live, grid = receiving(tmp_path)
+    arm_reply(tx, live, grid, 2)
+    emitted = len(live.emissions)
+    if state == 'missing':
+        live._armed = None
+        monkeypatch.setattr(live, 'disarm', lambda: pytest.fail('no armed burst'))
+    elif state == 'disconnected':
+        live.now = live.pos = grid.boundary(2) - 1000
+        s.host.arq.state = arq.State.DISCONNECTED
+    capsys.readouterr()
+    assert onair._p3_reply_after_long(tx, 2, 3) == 3
+    assert tx._p3_armed is None and live.armed_at is None
+    assert len(live.emissions) == emitted
+    if state == 'withdrawable':
+        assert 'for slot 2 withdrawn before its PTT' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('state', ['absent', 'missing', 'withdrawable', 'committed', 'disconnected'])
+def test_reply_withdrawal_reports_whether_the_slot_is_free(tmp_path, state):
+    s, tx, live, grid = receiving(tmp_path)
+    if state != 'absent':
+        arm_reply(tx, live, grid, 2)
+    armed = tx._p3_armed
+    if state == 'missing':
+        live._armed = None
+    elif state in ('committed', 'disconnected'):
+        live.now = live.pos = grid.boundary(2) - 1000      # its PTT is up
+    if state == 'disconnected':
+        s.host.arq.state = arq.State.DISCONNECTED
+    emitted = len(live.emissions)
+    assert tx.withdraw_p3_reply() is (state != 'committed')
+    assert tx._p3_armed is (armed if state == 'committed' else None)
+    # Only a committed answer on a live link is left to air.
+    assert (live.armed_at is not None) is (state == 'committed')
+    assert len(live.emissions) == emitted
+
+
+def test_observed_peer_overlap_cannot_arm_an_owed_control(tmp_path):
+    s, tx, live, grid, origin, index = mail_link(tmp_path)
+    tx.aim(grid, index + 1)
+    onair._p3_place_reply(grid, tx, index + 1)
+    live.now = live.pos = tx.boundary - CYCLE // 2
+    grid.note_peer_codeword(tx.boundary - SETTLE_N, onair.P3_CS_N,
+                            'REQ', 'WS8EOC', protocol=onair.Protocol.PACTOR3)
+    tx.arm_p3_reply()
+    assert tx._p3_armed is None
+    assert live.armed_at is None

@@ -80,7 +80,8 @@ SPEED_CONTROLS = [
 
 
 def recording():
-    m, arq = machine(role='irs', data='body', ladder='none', normal_ack='parity',
+    m, arq = machine(role='irs', data='body',  normal_ack='parity',
+                     long_ack='counter-even-t27',
                      prekey_lead=.025)
     events = []
     m.adapter.host = SimpleNamespace(deliver=lambda data: events.append(('data', data)),

@@ -24,7 +24,7 @@ def chirp(at, status, data):
 
 
 def test_recorded_chirp_counter_words_ignore_protocol_history():
-    m, _ = machine(role='irs', data='body', ladder='none', prekey_lead=.025)
+    m, _ = machine(role='irs', data='body',  prekey_lead=.025)
     m.first_body = False
     delivered = []
     m.adapter.host = SimpleNamespace(deliver=delivered.append, supervisor=lambda *a: None)

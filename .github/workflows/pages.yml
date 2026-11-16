@@ -68,3 +68,6 @@ jobs:
     steps:
       - id: deploy
         uses: actions/deploy-pages@v4
+        with:
+          # About 3000 files take GitHub 9-10 minutes to sync, at the action's 10-minute default.
+          timeout: 1800000

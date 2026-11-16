@@ -5,6 +5,7 @@ version = 1
 
 [operators]
 paths = [
+  "tools/logbook_view/chat_mock.mjs",
   "tools/consolelib/txcal.py",
   "tools/consolelib/varac.py",
   "tools/consolelib/voice.py",

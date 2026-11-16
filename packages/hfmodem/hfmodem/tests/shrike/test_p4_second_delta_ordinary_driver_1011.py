@@ -26,7 +26,7 @@ def test_c4_real_driver_source_and_hold_unread(variant):
     tx=Tx(live)
     tx.settle=.025
     tx.p4_probe.emissions,tx.p4_probe.peer_breakin=[],True
-    tx.p4_link_options.p4_ladder,tx.p4_link_options.p4_data='none','body'
+    tx.p4_link_options.p4_data='body'
     tx.p4_link_options.p4_link_timeout=len(audio)/FS
     rx=tx.sessrx.p4
     rx.clock=Clock(Expect.PACKET,onset,.330,3.75,0.)

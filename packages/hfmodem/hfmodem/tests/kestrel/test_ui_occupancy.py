@@ -63,7 +63,7 @@ def receiver(request, monkeypatch, tools):
             receive_boundary=(0, 0), disabled=set(),
             claim_contact=lambda protocol, token, **kw: token or object(),
             release_contact=lambda *args: None))
-        def emit(samples, bandwidth, *, on_ptt, responding, marks):
+        def emit(samples, bandwidth, *, on_ptt, responding, marks, authority, fence):
             on_ptt(True)
             for k in range(len(marks[0])):
                 marks[1](k)

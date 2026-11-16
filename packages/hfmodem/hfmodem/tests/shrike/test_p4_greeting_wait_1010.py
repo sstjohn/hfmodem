@@ -12,9 +12,10 @@ from hfmodem.tests.evidence import WORKING, require_input
 from hfmodem.tests.shrike.test_p4turn import FS, machine, word
 from hfmodem.tests.shrike.test_p4_greeting_resegment_1010 import packet, FULL
 from hfmodem.tests.shrike.test_p3_presence_progress_1003 import modem
+from hfmodem.shrike import p4frame
 from hfmodem.shrike.onair import _p4_mail_progress, _MasterGrid, _keyable_slot
 from hfmodem.shrike.p3progress import MailProgress
-from hfmodem.shrike.p4observation import Kind, Registered
+from hfmodem.shrike.p4observation import Kind, Observation, Registered, RegisteredObservation
 from hfmodem.shrike.p4turn import Proposal, State, counter_ack
 from hfmodem.winlink import B2FSession, MailClient
 from hfmodem.winlink.message import compose
@@ -27,7 +28,7 @@ V3 = 'pactor-p4-bench-ve3kpg-40-force-20261010T230003Z-p4-mail--9e5567a3-e18f-46
 
 
 def waiting(clock, **kwargs):
-    m, a = machine(role='irs', data='body', ladder='none', normal_ack='parity',
+    m, a = machine(role='irs', data='body',  normal_ack='parity',
                    prekey_lead=.025, hold_cycles=16, wall_clock=lambda: clock[0],
                    session_end=round(600*FS), managed_application=True, **kwargs)
     return m, a
@@ -101,7 +102,7 @@ def ws8(clock):
     m, a = waiting(clock)
     source(m, W8, [164])
     assert m._held_answer is not None
-    history = m._packet_ack, dict(m._packet_words)
+    history = m._ack_chain, m._ack_chain
     at = seed(m, 992221, 21.601, 22., 1112221)
     assert (m._held_answer, m._last_ack, m._last_body_ack, m.acked_counter) == (None,)*4
     assert m._handoff_ticket == m._receive_boundary == at
@@ -110,7 +111,7 @@ def ws8(clock):
         refusal(m, seconds)
         idle(m, at+i*CYCLE)
     assert m._handoff_ticket == m._receive_boundary == at
-    assert (m._packet_ack, m._packet_words) == history
+    assert (m._ack_chain, m._ack_chain) == history
     return m, a, at
 
 
@@ -407,7 +408,7 @@ def test_p4_settlement_arms_the_post_send_deadline():
     assert progress.check() == (170., False, None)
 
 
-@pytest.mark.parametrize('ownership', ['pending', 'selected', 'deferred'])
+@pytest.mark.parametrize('ownership', ['pending', 'selected'])
 @pytest.mark.parametrize('failure', [False, True])
 def test_final_fq_answer_survives_success_only(ownership, failure):
     clock = [10.]
@@ -422,7 +423,7 @@ def test_final_fq_answer_survives_success_only(ownership, failure):
     reg = packet(Kind.NORMAL, 10., 1, b'FQ\r', width=40)
     onset = reg.observation.stream_sample
     due = onset+round(m.t[Kind.NORMAL]*FS)
-    now = due if ownership == 'deferred' else onset
+    now = onset
     m.observe(reg, now=now)
     assert client.done and not client.session.failure and delivered == [b'FQ\r']
     assert not a._buffer_raw and not m.outbox.inflight
@@ -447,7 +448,7 @@ def test_final_fq_answer_survives_success_only(ownership, failure):
     assert m.pending == pending and m._deferred is deferred
     assert m._accepted_proposal is context and m._next is next_answer
     assert m._receive_epoch == epoch and m._held_answer.answer is held
-    key_at = due+(CYCLE if ownership == 'deferred' else 0)
+    key_at = due
     answer = m.decide(key_at-m.lead)
     assert (answer.kind, answer.word, answer.state, answer.stream_sample) == (
         Kind.WORD, held.word, State.IRS_ANSWER, key_at)
@@ -458,7 +459,7 @@ def test_final_fq_answer_survives_success_only(ownership, failure):
     assert m.keyed().stream_sample == key_at
     assert a.tx_acked_bytes == 0
     # A CRC-valid repeat still answers normally without delivering FQ twice.
-    repeat_at = onset+(2*CYCLE if ownership == 'deferred' else CYCLE)
+    repeat_at = onset+CYCLE
     m.observe(packet(Kind.NORMAL, repeat_at/FS, 1, b'FQ\r', width=40), now=repeat_at)
     repeat_due = repeat_at+round(m.t[Kind.NORMAL]*FS)
     repeat_answer = m.decide(repeat_due-m.lead)
@@ -483,6 +484,48 @@ def test_final_fq_answer_survives_success_only(ownership, failure):
     else:
         assert m.decide(m.close_context.end) is None
     assert m.state == State.DOWN and m.reason == 'close deadline'
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_final_fq_deferred_answer_redecides_to_repeat_request(failure):
+    m, a = waiting([10.])
+    client = MailClient(B2FSession('W9SSJ', target='WS8EOC'), a.on_host_data)
+    client.session._state = _THEIR_TURN
+    delivered = []
+
+    def deliver(data):
+        delivered.append(data)
+        client.on_link_data(data)
+
+    m.adapter.host = SimpleNamespace(deliver=deliver, supervisor=lambda *args: None)
+    reg = packet(Kind.NORMAL, 10., 1, b'FQ\r', width=40)
+    due = reg.observation.stream_sample+round(m.t[Kind.NORMAL]*FS)
+    m.observe(reg, now=due)
+    assert client.done and not client.session.failure and delivered == [b'FQ\r']
+    assert not a._buffer_raw and not m.outbox.inflight
+    deferred, held, epoch = m._deferred, m._held_answer.answer, m._receive_epoch
+    assert deferred is not None
+    if failure:
+        client.session._fail('terminal receive failure')
+    assert _p4_mail_progress(client, m, due, drained=True)
+    assert m.app_done and delivered == [b'FQ\r']
+    if failure:
+        assert m._closing_failure and not m.pending and m._deferred is None
+        assert m._accepted_proposal is None and not m.can_key(held)
+        assert m.decide(due).state == State.IRS_BREAKIN
+    else:
+        assert not m._closing_failure and not client.session.failure
+        assert m._deferred is deferred and m._held_answer.answer is held
+        assert m._receive_epoch == epoch
+        key_at = due+CYCLE
+        answer = m.decide(key_at-m.lead)
+        assert (answer.kind, answer.word, answer.state, answer.stream_sample) == (
+            Kind.WORD, 'V27', State.IRS_ANSWER, key_at)
+        assert answer.ack_identity == (
+            reg.observation.frame.status.byte, reg.observation.frame.data)
+        assert answer.purpose is None
+        assert m.can_key(answer) and m.keyed().stream_sample == key_at
+        assert a.tx_acked_bytes == 0
 
 
 @pytest.mark.parametrize('miss', ['decision', 'refusal', 'deferred-expired'])
@@ -552,7 +595,7 @@ def test_final_fq_preserves_breakin_and_hard_bounds(ceiling):
 
 @pytest.mark.parametrize('replacement', ['equal', 'retimed'])
 def test_nonmail_captured_proposal_admission_survives_replacement(replacement):
-    m, a = machine(role='irs', data='body', ladder='none', prekey_lead=.025)
+    m, a = machine(role='irs', data='body',  prekey_lead=.025)
     reg = packet(Kind.LONG, 10., 1, b'peer source', width=69)
     m.observe(reg, now=10*FS)
     due = 10*FS+round(m.t[Kind.LONG]*FS)
@@ -586,17 +629,25 @@ def test_nonmail_captured_proposal_admission_survives_replacement(replacement):
 
 
 def test_nonmail_identity_scope_preserves_sf8_admission():
-    m, _ = machine(role='irs', prekey_lead=.025)
+    m, a = machine(role='irs', prekey_lead=.025)
     eligible = [True]
     m.sf8_eligible = lambda obs: eligible[0]
-    reg = packet(Kind.NORMAL, 10., 1, b'peer source', width=40)
-    reg = replace(reg, observation=replace(reg.observation, sf8=True))
+    wire = p4frame.encode_field(b'peer source'.ljust(141, b'\x1e'), p4frame.Status.from_byte(1))
+    frame = p4frame.decode_field(wire, data_bytes=141)
+    reg = RegisteredObservation(Observation(
+        Kind.LONG, FS, 0, 10*FS, 10*FS, 3.280, 0., .9,
+        frame=frame, placed=True, extent_s=3.280, sf8=True,
+        speedlevel='SL4-long', form='robust-long/SL4'), Registered.NEW)
+    a.p4_sf8_eligible = m.sf8_eligible
+    assert a.on_rx_p4(reg).observation.frame == frame
     m.observe(reg, now=10*FS)
-    answer = m.decide(10*FS+round(m.t[Kind.NORMAL]*FS)-m.lead)
+    answer = m.decide(10*FS+round(m.t[Kind.LONG]*FS)-m.lead)
     assert m.can_key(answer)
     m._next = replace(answer)
     eligible[0] = False
     assert not m.can_key(answer) and not m.can_key(m._next)
+    refused = a.on_rx_p4(reg).observation
+    assert refused.frame is None and refused.provisional
 
 
 @pytest.mark.parametrize('captured_state', [State.ISS_HOLD, State.ISS_HANDBACK])
@@ -755,7 +806,7 @@ def test_reoffer_never_precedes_actual_offer_plus_twenty_seconds(offset):
 
 
 def test_generic_hold_readout_only_describes_its_live_interval():
-    m, a = machine(data='body', ladder='none', hold_cycles=16)
+    m, a = machine(data='body',  hold_cycles=16)
     m._data(10*FS)
     m.keyed()
     start, end = m._hold_started, m._hold_until
@@ -792,7 +843,7 @@ def test_generic_hold_readout_only_describes_its_live_interval():
 @pytest.mark.parametrize('managed', [False, True])
 @pytest.mark.parametrize('counted', [False, True], ids=['reset', 'counted'])
 def test_acquisition_preserves_nonmail_hold_until_payload_key(managed, counted):
-    m, a = machine(data='body', ladder='none', hold_cycles=16,
+    m, a = machine(data='body',  hold_cycles=16,
                    normal_ack='parity', managed_application=managed)
     m._data(10*FS)
     m.keyed()
@@ -846,7 +897,7 @@ def test_acquisition_preserves_nonmail_hold_until_payload_key(managed, counted):
 @pytest.mark.parametrize('state', [State.ISS_HOLD, State.ISS_GRANT, State.ISS_HANDBACK])
 @pytest.mark.parametrize('payload_pending', [False, True])
 def test_nonmail_finite_hold_keeps_its_existing_close_predicates(state, payload_pending):
-    m, a = machine(data='body', ladder='none', hold_cycles=16)
+    m, a = machine(data='body',  hold_cycles=16)
     m._data(10*FS)
     m.keyed()
     origin, deadline = m._hold_started, m._hold_until
@@ -876,7 +927,7 @@ def test_nonmail_finite_hold_keeps_its_existing_close_predicates(state, payload_
 
 @pytest.mark.parametrize('managed', [False, True])
 def test_reset_ladder_acquisition_keeps_managed_cleanup_and_nonmail_hold(managed):
-    m, a = machine(data='body', ladder='long', hold_cycles=16,
+    m, a = machine(data='chirp',  hold_cycles=16,
                    managed_application=managed)
     m._data(10*FS)
     m.keyed()

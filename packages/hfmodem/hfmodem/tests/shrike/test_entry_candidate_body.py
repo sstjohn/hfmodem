@@ -65,7 +65,7 @@ def test_first_recorded_body_is_delivered_before_next_entry(tmp_path,overrun):
         # The real arm missed slot17. The other case is the important control:
         # preserving the body must not depend on an accidental decoder overrun.
         live.spend(round(.08*FS))
-    slot,whole,origin = onair._regrid(live,grid,tx,session.host,session.rx,
+    slot,whole,origin, _ = onair._regrid(live,grid,tx,session.host,session.rx,
                                      17,seg,first,1920)
     assert session.host.arq.role == arq.IRS
     assert not session.host.arq.entry_pending
@@ -90,7 +90,7 @@ def test_first_recorded_body_is_delivered_before_next_entry(tmp_path,overrun):
 def test_wrong_body_expires_and_the_same_head_cannot_extend_hold(tmp_path):
     session,tx,live,grid,seg,first = scene(tmp_path,wrong_body=True)
     receiver=session.rx
-    slot,whole,origin=onair._regrid(live,grid,tx,session.host,receiver,17,seg,first,1920)
+    slot,whole,origin, _ = onair._regrid(live,grid,tx,session.host,receiver,17,seg,first,1920)
     assert session.host.arq.role == arq.ISS
     assert session.host.arq.entry_pending
     assert not session.packets
@@ -99,7 +99,7 @@ def test_wrong_body_expires_and_the_same_head_cannot_extend_hold(tmp_path):
     position=live.pos
     receiver.new_cycle()
     assert receiver.control_signal(seg,first,1013225) is None
-    _,_,_=onair._regrid(live,grid,tx,session.host,receiver,slot,whole,origin,1920)
+    _,_,_, _ = onair._regrid(live,grid,tx,session.host,receiver,slot,whole,origin,1920)
     assert live.pos == position
     assert not session.packets
 
@@ -157,7 +157,7 @@ def test_later_distinct_head_gets_its_own_bounded_body_read(tmp_path):
 @pytest.mark.parametrize("cs5", [False, True])
 def test_first_recorded_candidate_emits_one_correctly_ordered_ack(tmp_path,monkeypatch,cs5):
     session,tx,live,grid,seg,first=scene(tmp_path)
-    session.host.p3_changeover_cs5=cs5
+    session.host.p3_changeover_answer="cs5-every" if cs5 else "cs1"
     control=arq.CS_NAK if cs5 else arq.CS_ACK
     tx.live,tx.sessrx=live,session.rx
     tx.transmit,tx.rig=True,_Rig()  # Simulated rig + sample-clock duplex only.
@@ -176,7 +176,7 @@ def test_first_recorded_candidate_emits_one_correctly_ordered_ack(tmp_path,monke
         return transmit(samples,**kwargs)
 
     monkeypatch.setattr(live,"transmit",record)
-    slot,_,_=onair._regrid(live,grid,tx,session.host,session.rx,17,seg,first,1920)
+    slot,_,_, _ = onair._regrid(live,grid,tx,session.host,session.rx,17,seg,first,1920)
     assert not live.emissions
     assert [e.packet[2] for e in session.packets] == [b"RMS"]
     assert session.packets[0].carrier_swapped is False
@@ -192,7 +192,7 @@ def test_first_recorded_candidate_emits_one_correctly_ordered_ack(tmp_path,monke
     # Pin the existing target phase against the recorded head, including the
     # decoder's neighboring valid alignments. The CS5 pilot changes no timing;
     # this is not evidence of the stock peer's receive-window tolerance.
-    assert abs(phase-(1008780+round(onair.P3_REPLY_S*FS))) <= round(.005*FS)
+    assert abs(phase-(1008780+round(onair.P3_COMB_REPLY_S*FS))) <= round(.005*FS)
     assert live.keyed_at > 1008780+round(.810*FS)
     # Read back the actual submitted PCM against both physical-order controls.
     # This exercises RadioTx's render, trim, admission and duplex enqueue.

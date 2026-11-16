@@ -33,6 +33,7 @@ TX_LATENCY_N = 336
 
 class _Times:
     def __init__(self, adc, dac):
+        self.currentTime = adc
         self.inputBufferAdcTime, self.outputBufferDacTime = adc, dac
 
 

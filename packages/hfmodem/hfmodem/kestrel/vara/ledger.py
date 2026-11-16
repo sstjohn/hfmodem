@@ -8,6 +8,18 @@ negotiation changes representations, never admission or delivery totals.
 """
 from collections import deque
 from dataclasses import dataclass
+from uuid import uuid4
+
+
+@dataclass(frozen=True, slots=True)
+class PayloadEvidence:
+    epoch: str
+    sequence: int
+    accepted: int
+    acknowledged: tuple[tuple[int, int], ...]
+    discarded: tuple[tuple[int, int], ...]
+    retired: bool
+    complete: bool
 
 
 @dataclass
@@ -16,6 +28,7 @@ class _Span:
     original: bytes
     atomic: bool
     settled: int = 0
+    start: int = 0
 
 
 class PayloadLedger:
@@ -28,6 +41,26 @@ class PayloadLedger:
         self.wire_pending = self.wire_confirmed = 0
         self.last_unconfirmed = b''
         self.retired = False
+        self.epoch = str(uuid4())
+        self.sequence = 0
+        self._acknowledged, self._discarded = [], []
+        self._complete = True
+        self._represented = 0
+
+    def evidence(self):
+        return PayloadEvidence(self.epoch, self.sequence, self.accepted,
+                               tuple(self._acknowledged), tuple(self._discarded),
+                               self.retired, self._complete)
+
+    def _record(self, ranges, start, end):
+        if start == end:
+            return
+        if ranges and ranges[-1][1] == start:
+            ranges[-1] = (ranges[-1][0], end)
+        elif len(ranges) < 4096:
+            ranges.append((start, end))
+        else:
+            self._complete = False
 
     @property
     def pending(self):
@@ -46,10 +79,13 @@ class PayloadLedger:
             return
         if not atomic and len(wire) != len(original):
             raise ValueError('plain payload representation has different length')
-        self.spans.append(_Span(len(wire), bytes(original), atomic))
+        start = self.accepted if accept else self._represented
+        self.spans.append(_Span(len(wire), bytes(original), atomic, start=start))
+        self._represented = start + len(original)
         self.wire_pending += len(wire)
         if accept:
             self.accepted += len(original)
+            self.sequence += 1
 
     def settle(self, n):
         if not 0 <= n <= self.wire_pending:
@@ -62,18 +98,23 @@ class PayloadLedger:
             take = min(n, span.remaining)
             if not span.atomic:
                 out += span.original[:take]
+                self._record(self._acknowledged, span.start, span.start + take)
+                span.start += take
                 span.original = span.original[take:]
             span.remaining -= take
             span.settled += take
             n -= take
             if not span.remaining:
+                self._record(self._acknowledged, span.start, span.start + len(span.original))
                 out += self.spans.popleft().original
         self.confirmed += len(out)
+        self.sequence += 1
         return bytes(out)
 
     def reframe(self):
         if self.wire_confirmed or self.confirmed or self.retired:
             raise ValueError('cannot reframe after settlement or retirement')
+        self._represented = self.spans[0].start if self.spans else self.accepted
         self.spans.clear()
         self.wire_pending = 0
 
@@ -97,17 +138,21 @@ class PayloadLedger:
         if not wire or not pending.startswith(original):
             raise ValueError('TEXT over does not represent the unconfirmed prefix')
         remainder = pending[len(original):]
+        start = self.spans[0].start
         self.spans.clear()
-        self.spans.append(_Span(len(wire), original, True))
+        self.spans.append(_Span(len(wire), original, True, start=start))
         if remainder:
-            self.spans.append(_Span(len(remainder), remainder, False))
+            self.spans.append(_Span(len(remainder), remainder, False, start=start + len(original)))
         self.wire_pending = len(wire) + len(remainder)
 
     def clear(self):
         """Discard unsent originals at the host's request; the contact goes on."""
         self.discarded += self.pending
+        for span in self.spans:
+            self._record(self._discarded, span.start, span.start + len(span.original))
         self.spans.clear()
         self.wire_pending = 0
+        self.sequence += 1
 
     def retire(self):
         original = self.unconfirmed

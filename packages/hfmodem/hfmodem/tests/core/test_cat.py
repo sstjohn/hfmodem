@@ -1143,6 +1143,18 @@ def test_rigctld_raw_is_exactly_one_reply(monkeypatch, payload):
             driver.read('FA;', 'FA')
 
 
+def test_x6100_power_is_scaled_to_its_ten_watts():
+    driver = RigctldCat(profile='x6100')
+    sent = []
+    driver.command = sent.append
+    driver.set_power(5)
+    assert sent == ['L RFPOWER 0.5']
+    for watts in (0.5, 11, float('nan'), True):
+        with pytest.raises(RigError, match='outside rig range'):
+            driver.set_power(watts)
+    assert sent == ['L RFPOWER 0.5']
+
+
 def test_generic_power_needs_explicit_scaling():
     driver = RigctldCat(profile='generic')
     with pytest.raises(RigError, match='power scaling unknown'):

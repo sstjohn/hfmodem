@@ -14,12 +14,18 @@ class ContactOwner:
     def receive_boundary(self):
         return self.arbiter.receive_boundary if self.arbiter is not None else (0, 0)
 
-    def admit(self, *, receive_epoch=None):
+    @property
+    def token(self):
+        with self._lock:
+            return self._token
+
+    def admit(self, *, receive_epoch=None, authority=None, fence=None):
         if self.arbiter is None:
             return False
         with self._lock:
+            binding = {} if authority is None and fence is None else dict(authority=authority, fence=fence)
             token = self.arbiter.claim_contact(self.protocol, self._token,
-                                               receive_epoch=receive_epoch)
+                                               receive_epoch=receive_epoch, **binding)
             if token is None:
                 return False
             self._token = token

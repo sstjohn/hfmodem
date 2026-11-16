@@ -88,7 +88,7 @@ def test_a_sub_symbol_overrun_is_the_emission_paths_to_key(tmp_path, capsys, ms,
     at_key = late + (live._blk if lands else 0)
     assert at_key <= round(onair.KEY_CLAMP_TOL_S * FS)
     owing(live, tx)
-    got, _, _ = onair._regrid(live, g, tx, s.host, s.rx, slot,
+    got, _, _, _ = onair._regrid(live, g, tx, s.host, s.rx, slot,
                               np.zeros(0, np.float32), live.pos, 1920)
     out = capsys.readouterr().out
     assert got == slot and f"{at_key / FS * 1e3:+.1f} ms" in out
@@ -123,7 +123,7 @@ def test_an_overrun_the_next_block_carries_past_the_tolerance_is_handed_back(
     assert late <= round(onair.KEY_CLAMP_TOL_S * FS) < late + live._blk
     owing(live, tx)
     costs = charged(live, s.rx, 'control_signal_in', 'deep_scan')
-    got, _, _ = onair._regrid(live, g, tx, s.host, s.rx, slot,
+    got, _, _, _ = onair._regrid(live, g, tx, s.host, s.rx, slot,
                               np.zeros(0, np.float32), live.pos, 1920)
     out = capsys.readouterr().out
     assert got == slot + 3 and onair.SLOT_GONE in out and onair.SLOT_KEPT not in out
@@ -314,7 +314,7 @@ def test_a_recovered_long_slot_costs_one_cycle(tmp_path, arm, n, slot, late_ms,
     live.pos = seg_end
     live.now = max(seg_end, key + round(late_ms / 1e3 * FS) - live.key_notice)
     costs = charged(live, s.rx, 'control_signal_in', 'deep_scan', 'flush')
-    got, _, _ = onair._regrid(live, g, tx, s.host, s.rx, slot,
+    got, _, _, _ = onair._regrid(live, g, tx, s.host, s.rx, slot,
                               live.audio[origin:seg_end].copy(), origin, 1920)
     assert got == slot + 3, costs
     assert not live.clamp_late(tx.key_instant(g, got)), costs

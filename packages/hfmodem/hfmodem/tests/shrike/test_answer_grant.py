@@ -246,7 +246,11 @@ class _Keys:
     def send_p1_cs(self, index):
         self.p1.append(index)
 
-    def send_cs(self, index):
+    def p3_slot_keyed(self) -> bool | None:
+        return None
+
+    def send_cs(self, index, *, p1_codeword=False, unread=False, maxdown=False,
+                packet_phase=None, cycle_long=None):
         self.p3.append(index)
 
     def send_p1_packet(self, *a, **kw):

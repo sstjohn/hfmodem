@@ -117,7 +117,7 @@ def test_acquired_offset_reads_following_data(offset):
 def test_acquisition_state_does_not_outlive_the_link():
     sess = _Session(entry_pending=True)
     sess.rx.p3_receive_offset_hz = 50
-    sess.rx._p3_head_candidate = (1, 0, 50)
+    sess.rx._p3_head_candidate = (1, 0, 50, arq.CS_BREAKIN)
     sess.rx._p3_changeover_pending = True
     sess.host.arq.state = arq.State.DISCONNECTED
     sess.rx.new_cycle()

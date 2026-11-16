@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Charged real-reader and actual-key controls, without radio or decoder patches."""
+from hashlib import sha256
 from unittest.mock import patch
 import numpy as np
 import pytest
-from hfmodem.shrike import onair, p4chirp, p4longtx, p4turn, p4receiver, p4robusttx, p4waveforms
+from hfmodem.shrike import (onair, p4chirp, p4longdecode, p4longnative, p4longtx, p4turn, p4receiver,
+                            p4robusttx, p4waveforms)
 from hfmodem.shrike.p4observation import Kind
 from hfmodem.shrike.p4receiver import Clock, Expect
 from hfmodem.tests.evidence import CAPTURES, require_input
@@ -14,6 +16,14 @@ from hfmodem.tests.shrike.test_p4_part_a_1011 import AT, KEY, CYCLE, packet
 
 CORPUS = CAPTURES
 GRID = onair._MasterGrid(0, 60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800)
+LONG42_ONSETS = (8568325, 8748327, 8928325, 9108324, 9288324)
+LONG42_SHA256 = '412153b93609307dee339415db04279f3579a6aeb1d5f42cb36eebd7da76bc50'
+
+
+def assert_long42_identity(row):
+    assert row['status'] == 0x42
+    data = bytes.fromhex(row['data'])
+    assert len(data) == 40 and sha256(data).hexdigest() == LONG42_SHA256
 
 
 class ChargedStream(AbsoluteStream):
@@ -47,14 +57,22 @@ def input_for(branch):
         source = onair.session.load_wav(str(path), FS)
         at = 8748670
         return source[at-24000:at+168000], at, -.19, str(path)
-    wave = (p4chirp.entry_packet(b'hello\r', 0x61) if branch == 'placed'
-            else p4longtx.long_packet(b'hello\r', 0x61))
+    wave = (p4longtx.long_packet(b'hello\r', 0x61) if branch == 'normal'
+            else p4chirp.entry_packet(b'hello\r', 0x61))
+    if branch == 'head':
+        # Design 9/193/194: clean SL5 now has its own exact normal classifier.
+        # Keep this branch an unread wideband chirp head, using a real chirp
+        # obscured by independently seeded interference, rather than relying
+        # on the old SL5 placement's accidental chirp classification.
+        interference = 32*float(np.std(wave))
+        wave = wave + np.random.default_rng(1011011).normal(0., interference, len(wave))
+        wave /= np.max(abs(wave))
     audio = np.zeros(192000, np.float32)
     audio[24000:24000+len(wave)] = wave
     return audio, onset, 0., 'synthetic '+branch+' waveform, real decode'
 
 
-@pytest.mark.parametrize('branch,cost', [('sf8', .040), ('head', .025), ('other', .030), ('placed', .020)])
+@pytest.mark.parametrize('branch,cost', [('sf8', .040), ('head', .025), ('normal', .025), ('other', .030), ('placed', .020)])
 @pytest.mark.parametrize('coincident', [False, True])
 def test_f2_real_primary_retains_parent_budget(branch, cost, coincident, monkeypatch):
     audio, onset, cfo, source = input_for(branch)
@@ -63,7 +81,7 @@ def test_f2_real_primary_retains_parent_budget(branch, cost, coincident, monkeyp
     tx.settle = .025
     tx.p4_probe.emissions = []
     tx.p4_probe.peer_breakin = True
-    tx.p4_link_options.p4_ladder, tx.p4_link_options.p4_data = 'none', 'body'
+    tx.p4_link_options.p4_data = 'body'
     tx.p4_link_options.p4_link_timeout = len(audio)/FS
     rx = tx.sessrx.p4
     rx.clock = Clock(Expect.PACKET, onset, .330, 3.75, cfo)
@@ -94,7 +112,7 @@ def test_f2_real_primary_retains_parent_budget(branch, cost, coincident, monkeyp
         kw['role'] = 'irs'
         m = cls(*a, **kw)
         m.first_body = False
-        seed_onset = onset+(1250 if branch == 'head' else 0)-CYCLE
+        seed_onset = onset+(1250 if branch in ('head', 'normal') else 0)-CYCLE
         m.observe(packet(seed_onset, Kind.LONG, 0x62), now=seed_onset+158400)
         m.decide(seed_onset+163200-m.lead)
         m.keyed()
@@ -139,15 +157,23 @@ def test_f2_real_primary_retains_parent_budget(branch, cost, coincident, monkeyp
     base = onair.time.monotonic()
     mono = lambda: base+(live.sample_now()-live.origin)/FS
     monkeypatch.setattr(onair.time, 'monotonic', mono)
+    # Declared callback work owns all planning clocks; Python
+    # reference CPU time is measured separately by actual-clock evidence.
+    monkeypatch.setattr(onair.time, 'perf_counter', mono)
     monkeypatch.setattr(p4receiver, 'monotonic', mono)
-    with patch.object(p4turn, 'P4Turn', factory), patch.object(onair, '_p4_link_waveforms', render), \
+    # Rust uses a real OS clock; the reference backend shares
+    # this deterministic charged clock. Native real-clock coverage is separate.
+    with patch.object(p4longnative, 'backend', None), \
+         patch.object(p4longdecode, '_python_step_seconds', lambda *args: 0.), \
+         patch.object(p4longdecode, '_python_check_seconds', lambda _: 0.), \
+         patch.object(p4turn, 'P4Turn', factory), patch.object(onair, '_p4_link_waveforms', render), \
          patch.object(p4waveforms, 'prepare', cache_prepare):
         onair._run_p4_link(tx, live, GRID)
     full = [r for r in reads if r[0] in ('read_window', 'read_chirp') and r[4] >= onset+157000]
     print(dict(branch=branch, coincident=coincident, source=source, reads=reads,
                preparations=preparations, admissions=admissions, keys=keys, charges=live.charges))
     assert full
-    expected = {'sf8': 157440, 'head': 160560, 'other': 159840,
+    expected = {'sf8': 157440, 'head': 160560, 'normal': 158400, 'other': 159840,
                 'placed': round(p4chirp.PACKET_S*FS)}[branch]
     # Refined heads can legitimately move the primary onset; report the actual endpoint.
     head = next((r.observation.stream_sample for r in rx.registrations
@@ -179,7 +205,7 @@ def test_f3_driver_never_keys_captured_canceled_request(boundary, managed):
     tx.settle = .025
     tx.p4_probe.emissions, tx.p4_probe.peer_breakin = [], True
     args = tx.p4_link_options
-    args.p4_ladder, args.p4_data, args.p4_link_timeout = 'none', 'body', (stop-start)/FS
+    args.p4_data, args.p4_link_timeout = 'body', (stop - start) / FS
     tx.p4_link_host.arq.on_host_data(b'TEST\r')
     rx = tx.sessrx.p4
     rx.clock = Clock(Expect.PACKET, AT, .330, 3.75, -.19)
@@ -231,7 +257,7 @@ def test_f2_independent_c_watch_real_recovery(dispatch, cost, monkeypatch):
     tx.settle = .025
     tx.p4_probe.emissions, tx.p4_probe.peer_breakin = [], True
     args = tx.p4_link_options
-    args.p4_ladder, args.p4_data, args.p4_link_timeout = 'none', 'body', 31
+    args.p4_data, args.p4_link_timeout = 'body', 31
     tx.p4_link_host.arq.on_host_data(b'TEST\r')
     rx = tx.sessrx.p4
     rx.clock = Clock(Expect.PACKET, AT, .330, 3.75, -.19)
@@ -303,8 +329,12 @@ def test_f2_independent_c_watch_real_recovery(dispatch, cost, monkeypatch):
     base = onair.time.monotonic()
     mono = lambda: base+(live.sample_now()-live.origin)/FS
     monkeypatch.setattr(onair.time, 'monotonic', mono)
+    monkeypatch.setattr(onair.time, 'perf_counter', mono)
     monkeypatch.setattr(p4receiver, 'monotonic', mono)
-    with patch.object(p4turn, 'P4Turn', factory), patch.object(onair, '_p4_link_waveforms', render), \
+    with patch.object(p4longnative, 'backend', None), \
+         patch.object(p4longdecode, '_python_step_seconds', lambda *args: 0.), \
+         patch.object(p4longdecode, '_python_check_seconds', lambda _: 0.), \
+         patch.object(p4turn, 'P4Turn', factory), patch.object(onair, '_p4_link_waveforms', render), \
          patch.object(p4waveforms, 'prepare', cache_prepare):
         onair._run_p4_link(tx, live, GRID)
     print(dict(source=str(path), interval=[8016000,9504000], dispatch=dispatch, cost=cost,
@@ -313,18 +343,29 @@ def test_f2_independent_c_watch_real_recovery(dispatch, cost, monkeypatch):
     if not dispatch:
         assert not longs, 'dispatch-disabled fixture must lose the claimed independent recovery'
         return
-    assert [r['onset_sample'] for r in longs] == pytest.approx([8748327,8928325,9108324], abs=48)
+    # Design 9/148/194: exact C2 correction and full-body repeat agreement
+    # recover the two formerly unread outer copies as well. Pin the expanded
+    # ledger and identity; every original positive remains mandatory.
+    assert [r['onset_sample'] for r in longs] == pytest.approx(LONG42_ONSETS, abs=48)
+    for row in longs:
+        assert_long42_identity(row)
     first = longs[0]['onset_sample']
     recovered = [row for row in feeds if row[0] == first and row[1] is not None]
     assert recovered and recovered[0][2] == p4turn.State.IRS_BREAKIN and recovered[0][3] == p4turn.State.IRS_ANSWER
     assert [(r['onset_sample'], r['peer_watch_generation']) for r in tx.p4_probe.heard
             if r.get('peer_watch_generation') is not None] == [
                 (r[0], r[1]) for r in feeds if r[1] is not None]
-    assert any(owner is not None and abs(at-8748670) <= 1680 and end >= at+161040
+    # Design 126/133: unresolved SF16's complete support is captured at .330,
+    # after prefix preparation. A .355 wait would spend the 40 ms case past
+    # its enqueue limit despite a frame whose complete support was available.
+    assert any(owner is not None and abs(at-first) <= 1680 and end == at+159840
+               for name, at, owner, begin, end, start, now, results in supports)
+    assert any(name in ('prepare_sf8', 'prepare_long') and owner is not None
+               and abs(at-first) <= 1680 and end < at+159840
                for name, at, owner, begin, end, start, now, results in supports)
     answers = [row for row in keys if row[4] == first]
     assert answers and answers[0][1] == first+(163200 if cost < .020 else 343200)
-    assert all(row[2] == 'T27' and row[3] == p4turn.State.IRS_ANSWER for row in answers)
+    assert all(row[2] == 'X27' and row[3] == p4turn.State.IRS_ANSWER for row in answers)
     assert not any(row[3] == p4turn.State.IRS_BREAKIN for row in keys if row[1] > recovered[0][4])
     assert tx.p4_link_host.arq.tx_acked_bytes == 0 and not machines[0].outbox.inflight
     assert bytes(tx.p4_link_host.arq._outbuf) == b'TEST\r'
@@ -342,7 +383,7 @@ def test_f3_application_expiry_at_final_key_with_separate_clocks(advance):
     tx = Tx(live)
     tx.settle = .025
     tx.p4_probe.emissions, tx.p4_probe.peer_breakin = [], True
-    tx.p4_link_options.p4_ladder, tx.p4_link_options.p4_data = 'none', 'body'
+    tx.p4_link_options.p4_data = 'body'
     tx.p4_link_options.p4_link_timeout = (stop-start)/FS
     tx.p4_link_host.arq.on_host_data(b'TEST\r')
     rx = tx.sessrx.p4

@@ -19,7 +19,7 @@ FIELD = bytes.fromhex('524d53205472696d6f646520312e342e342e30205765')
 STARTS = (1008626, 1188605, 1368728, 1548763, 1728553)
 
 
-def setup_link(ladder='chirp', data='chirp'):
+def setup_link(data='chirp'):
     audio = session.load_wav(str(require_input(ARM / 'stream.flac')), FS)
     stream = Stream(audio)
     stream.pos = 759164
@@ -30,14 +30,12 @@ def setup_link(ladder='chirp', data='chirp'):
     probe = json.loads((ARM / 'p4-probe.json').read_text())
     tx.p4_probe.emissions = probe['emissions'][:2]
     args = tx.p4_link_options
-    args.p4_ladder = ladder
     args.p4_data = data
     args.p4_hold_cycles = 16
     args.p4_normal_ack = 'parity'
     args.p4_breakin = 'body'
     args.p4_answer_offset = .92
-    args.p4_chirp_ack = 'alternate'
-    args.p4_irs_silent_cycles = 0
+    args.p4_chirp_ack = 'toggle'
     args.mail_wait_greeting = True
     return stream, tx, rx
 
@@ -88,9 +86,9 @@ def test_x27_v5_path_receives_and_answers_all_five_chirps(monkeypatch):
     assert rx.clock.cycle_s == 3.75
     request, *emissions = tx.p4_probe.emissions[2:]
     # R2 §4 revokes the opening response lease on BODY takeover, so the
-    # greeting's unread first copy draws the repeat request V27, not an ack;
+    # greeting's unread first copy draws U27 under parity (AT: Unread slots);
     # the greeting repeat and the subsequent short controls get their answers.
-    assert request['word'] == 'V27' and abs(request['audio_start'] - 812590) <= 5
+    assert request['word'] == 'U27' and abs(request['audio_start'] - 812590) <= 5
     assert len(emissions) == 8 and [row['word'] for row in emissions] == ['X27'] * 8
     # B: the greeting repeat matches the deferred answer, which keys on the
     # first copy's raster (768430+.920 s+1.25 s), not the repeat's 5 samples earlier.
@@ -101,19 +99,19 @@ def test_x27_v5_path_receives_and_answers_all_five_chirps(monkeypatch):
     assert delivered == [b'RMS Trimode 1.4.4.0 Welcome to ', FIELD]
 
 
-@pytest.mark.parametrize('ladder,data,reused,prearmed,armed', [
-    ('chirp', 'none', True, False, True),
-    ('long', 'chirp', True, False, True),
-    ('chirp', 'none', False, False, True),
-    ('long', 'chirp', False, False, True),
-    ('long', 'body', True, False, True),
-    ('none', 'body', True, False, True),
-    ('none', 'body', False, False, True),
-    ('long', 'body', True, True, True),
+@pytest.mark.parametrize('data,reused,prearmed,armed', [
+    ('none', True, False, True),
+    ('chirp', True, False, True),
+    ('none', False, False, True),
+    ('chirp', False, False, True),
+    ('long', True, False, True),
+    ('body', True, False, True),
+    ('body', False, False, True),
+    ('long', True, True, True),
 ])
-def test_link_options_arm_reused_and_fallback_receiver(monkeypatch, ladder, data, reused,
+def test_link_options_arm_reused_and_fallback_receiver(monkeypatch, data, reused,
                                                         prearmed, armed):
-    stream, tx, rx = setup_link(ladder, data)
+    stream, tx, rx = setup_link(data)
     rx.chirp = prearmed
     if not reused:
         tx.sessrx = None
