@@ -9,7 +9,7 @@ import pytest
 from hfmodem.shrike import session
 from hfmodem.shrike.p4receiver import Emission, Kind, P4Receiver, Registered, Role
 from hfmodem.shrike.p4turn import State
-from hfmodem.tests.evidence import RECORD, require_input
+from hfmodem.tests.evidence import OPERATOR_DATA, require_input
 from hfmodem.tests.shrike.test_p4_chirp_changeover_1010 import chirp
 from hfmodem.tests.shrike.test_p4_turn_recognition_0929 import idle_long
 from hfmodem.tests.shrike.test_p4turn import FS, machine, word
@@ -21,7 +21,7 @@ PAYLOAD = b'K4MSU regression\r'
 
 @pytest.fixture(scope='module')
 def recording():
-    root = RECORD / 'operator-data' / 'captures' / CAPTURE
+    root = OPERATOR_DATA / 'captures' / CAPTURE
     for name, digest in (
         ('p4-probe.json', '5fc280ece955e2f71dbc5ab22a3b005fe5d14e8f866318887d74b40d1bb5f353'),
         ('stream.flac', '4f401e7be0e22af36444b50a4744afcdc71967cae171bdb3738388ee87b23ee7'),

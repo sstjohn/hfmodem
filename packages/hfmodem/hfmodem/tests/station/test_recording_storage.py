@@ -20,7 +20,7 @@ from hfmodem.tests.station.recording_support import (
 DiskUsage = namedtuple('DiskUsage', 'total used free')
 
 
-def test_push_only_writes_first_origin_marker_and_has_a_two_second_queue(sessions, monkeypatch):
+def test_push_opens_nothing_and_has_a_two_second_queue(sessions, monkeypatch):
     reports = []
     rec, root = sessions('everything', report=reports.append)
     lane = rec.stream('rx', rate=RATE, clock='card')
@@ -36,11 +36,10 @@ def test_push_only_writes_first_origin_marker_and_has_a_two_second_queue(session
     assert entered.wait(TIMEOUT)
     opening = Path.open
     callback_thread = threading.get_ident()
-    markers = []
+    opened = []
     def guarded(path, *args, **kwargs):
         if threading.get_ident() == callback_thread:
-            assert path.suffix == '.lane', 'unexpected file I/O in Lane.push'
-            markers.append(path)
+            opened.append(path)
         return opening(path, *args, **kwargs)
     try:
         with monkeypatch.context() as patch:
@@ -50,11 +49,11 @@ def test_push_only_writes_first_origin_marker_and_has_a_two_second_queue(session
             tx.push(0, pcm(0, 8))
         assert lane.position == 32
         assert tx.position == 8
-        assert len(markers) == 1
-        assert markers[0].name.endswith('-o' + '0' * 20 + '.lane')
+        assert not opened
     finally:
         release.set()
     flush(rec)
+    assert tx.family.with_name(tx.family.stem + '-o' + '0' * 20 + '.lane').is_file()
     rec.begin('c1', {'card': 32})
     rec.end('c1', {'card': 32})
     push(rec, lane, 32, 72)

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from hfmodem.core import claim, native, winclaim, winproc
+from hfmodem.tests import hermetic
 from .fakeyaesu import SerialFakeYaesu
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows native launch protocol")
@@ -708,6 +709,7 @@ def dummy_rigctld_argv():
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
+    hermetic.guard.own_port(port)
     return [executable, "-P", "NONE", "-m", "1", "--set-conf=ptt_type=None",
             "-T", "127.0.0.1", "-t", str(port)]
 
@@ -766,6 +768,7 @@ def rig_command(executable, *, daemon=False):
         with socket.socket() as port:
             port.bind(("127.0.0.1", 0))
             number = port.getsockname()[1]
+        hermetic.guard.own_port(number)
         argv += ["-T", "127.0.0.1", "-t", str(number)]
     return argv
 

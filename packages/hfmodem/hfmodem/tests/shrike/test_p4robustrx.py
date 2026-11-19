@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 
 from hfmodem.shrike import p4coding, p4decode, p4oracle, p4robustrx, session
+from hfmodem.tests.evidence import CAPTURES
 
 FX = Path(__file__).parent/'fixtures/p4-long-0929/symbols.npz'
-ROOT = Path(__file__).resolve().parents[5]
 SID = b'[BPQ-6.0.25.1-B2FWIHJM$]\r\rde N9VC>\r'+b'\x1e'*5
 BANNER = b'RMS Trimode 1.4.4.0\r\nW9SSJ has 109 daily minutes remaining with VE3KP'
 
@@ -85,7 +85,7 @@ def test_random_coherent_quaternary_fields_do_not_pass_crc():
 
 @pytest.mark.parametrize('at,offset',[(2688057,21),(2868057,22)])
 def test_causal_0121_audio_reaches_decoder_before_long_deadline(at,offset):
-    path = ROOT/'captures/onair-0929-0121/stream.flac'
+    path = CAPTURES/'onair-0929-0121/stream.flac'
     if not path.exists():
         pytest.skip('local VE3KPG0121 recording absent')
     audio = session.load_wav(str(path),48000)

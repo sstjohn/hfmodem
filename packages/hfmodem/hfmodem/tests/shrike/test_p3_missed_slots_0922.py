@@ -343,7 +343,8 @@ def test_the_long_cycle_answer_is_a_selection_not_a_render(tmp_path, word, monke
     a._start_next_packet()
     assert tx.slots_used == [slot] and not tx.refused
     first = a._inflight
-    assert len(tx._p3_rendered) == 3 and len(tx._p3_shifted) == 3
+    # This packet, its repeat, the next at this level and the next a level up.
+    assert len(tx._p3_rendered) == 4 and len(tx._p3_shifted) == 4
     # Renders in front of the key are the ones on the critical path; the
     # candidates rendered behind the carrier that follows are not.
     render, keyed = placement.link_packet, []

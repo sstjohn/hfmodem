@@ -19,6 +19,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 import wave
 from pathlib import Path
@@ -633,7 +634,12 @@ def test_fractional_start_at_44100_reconstructs_the_same_segment_names(tmp_path,
     from hfhost.recordings import indexed
     capture = ci.allocate({'capture': tmp_path / 'capture'}, {'modem': 'capture'}) if owned else None
     calls = []
+    caller, real = threading.get_ident(), time.time
+    # time.time is process-wide; another thread in this worker must neither be
+    # counted nor be handed the fake clock.
     def now():
+        if threading.get_ident() != caller:
+            return real()
         calls.append(None)
         return 41.8
     monkeypatch.setattr(wav.time, 'time', now)

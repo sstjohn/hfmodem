@@ -29,12 +29,12 @@ Run:  .venv/bin/python -m pytest packages/hfmodem/hfmodem/tests/shrike/test_p3rx
 
 from __future__ import annotations
 
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import modem, p3frame, p3rx, placement, rx, rxfront, session, spec
+from hfmodem.tests import evidence
 from hfmodem.tests.kestrel import corpora
 
 FS = 48000
@@ -441,7 +441,7 @@ def test_a_variable_header_says_back_what_it_was_built_from(sl: int) -> None:
 # The confirmation rule: an accept that cannot survive moving the clock
 # ---------------------------------------------------------------------------
 
-ARCHIVE = Path(__file__).resolve().parents[5] / "working" / "pactor"
+ARCHIVE = evidence.WORKING / "pactor"
 KE5YTA = ARCHIVE / "captures/offair_KE5YTA_p3.wav"
 """16 s of a live PACTOR-3 QSO off 7101.5 kHz, and the only real case-0 header we
 hold. Scanned at eighth-symbol resolution its 12,208 positions yield two CRC

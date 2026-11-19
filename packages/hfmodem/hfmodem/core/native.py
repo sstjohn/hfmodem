@@ -6,6 +6,7 @@ from __future__ import annotations
 import array
 import ctypes
 from dataclasses import dataclass, field, replace
+import errno
 import json
 import math
 import os
@@ -607,6 +608,104 @@ def _observe_posix(child, config, interrupted):
         time.sleep(min(POLL_S, max(0, deadline - time.monotonic())))
 
 
+def _wait_for_exit(*pids, ready=lambda: None):
+    if hasattr(select, "kqueue"):
+        queue = select.kqueue()
+        try:
+            queue.control([select.kevent(pid, filter=select.KQ_FILTER_PROC,
+                           flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                           fflags=select.KQ_NOTE_EXIT) for pid in pids], 0, 0)
+            ready()
+            queue.control(None, 1, None)
+        except ProcessLookupError:
+            return
+        finally:
+            queue.close()
+    else:
+        descriptors = []
+        try:
+            for pid in pids:
+                descriptors.append(os.pidfd_open(pid))
+            ready()
+            select.select(descriptors, [], [])
+        except ProcessLookupError:
+            return
+        finally:
+            for fd in descriptors:
+                os.close(fd)
+
+
+def _owner_identity():
+    owner = os.environ.get("HFMODEM_OWNER_PID")
+    if owner is None:
+        return None
+    started = os.environ.get("HFMODEM_OWNER_STARTED")
+    if not started:
+        raise NativeSpawnError("HFMODEM_OWNER_PID requires HFMODEM_OWNER_STARTED")
+    try:
+        pid = int(owner)
+        if pid <= 0:
+            raise ValueError
+    except ValueError as exc:
+        raise NativeSpawnError("invalid HFMODEM_OWNER_PID") from exc
+    return pid, started
+
+
+def _close_fds_except(kept):
+    directories = ("/proc/self/fd", "/dev/fd") if sys.platform == "linux" else (
+        "/dev/fd", "/proc/self/fd")
+    for directory in directories:
+        try:
+            descriptors = os.listdir(directory)
+        except OSError:
+            continue
+        for name in descriptors:
+            fd = int(name)
+            if fd >= 3 and fd != kept:
+                try:
+                    os.close(fd)
+                except OSError as exc:
+                    if exc.errno != errno.EBADF:
+                        raise
+        return
+    os.closerange(3, kept)
+    os.closerange(kept + 1, os.sysconf("SC_OPEN_MAX"))
+
+
+def _owner_watchdog(child, owner, started):
+    reader, writer = os.pipe()
+    try:
+        watcher = os.fork()
+        if watcher == 0:
+            try:
+                os.close(reader)
+                for sig in signal.valid_signals() - {signal.SIGKILL, signal.SIGSTOP}:
+                    signal.signal(sig, signal.SIG_DFL)
+                # A lost supervisor must still reach child teardown.
+                signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+                # Retain only readiness; inherited pipes and claims would keep the launch alive.
+                _close_fds_except(writer)
+                def ready():
+                    if claim.process_started(owner) != started:
+                        raise NativeSpawnError("owner identity changed")
+                    os.write(writer, b"1")
+                    os.close(writer)
+                _wait_for_exit(owner, child.pid, ready=ready)
+            finally:
+                try:
+                    _end(NativeChild(child.pid, child.started, None, None, None))
+                finally:
+                    os._exit(0)
+        os.close(writer)
+        writer = None
+        if not select.select([reader], [], [], OPEN_TIMEOUT_S)[0] or os.read(reader, 1) != b"1":
+            raise NativeSpawnError("owner watchdog failed to register", child)
+    finally:
+        os.close(reader)
+        if writer is not None:
+            os.close(writer)
+
+
 def _supervise(config):
     if os.name == "nt":
         return _supervise_windows(config)
@@ -616,6 +715,7 @@ def _supervise(config):
     admission = child = record = None
     completed = False
     try:
+        owner = _owner_identity()
         admission = claim.inherited(config["claim"], launch=True)
         started = claim.process_started(os.getpid())
         directory = claim.claim_path().with_name("rig.claim.native.d")
@@ -640,6 +740,8 @@ def _supervise(config):
             raise NativeSpawnError("native supervisor interrupted")
         if not child.alive():
             raise NativeSpawnError("native child exited before acknowledgement", child)
+        if owner is not None:
+            _owner_watchdog(child, *owner)
         fcntl.flock(admission.fd, fcntl.LOCK_UN)
         completed = True
         record.unlink(missing_ok=True)
@@ -996,6 +1098,7 @@ def _spawn_native(argv, *, claim_fd, cleanup_fd=None, long_lived=False, device=N
         return _spawn_windows(argv, claim_fd=claim_fd, cleanup_fd=cleanup_fd,
                               long_lived=long_lived, device=device,
                               streams=streams, own_session=own_session)
+    _owner_identity()
     argv = [os.fspath(arg) for arg in argv]
     if not argv:
         raise ValueError("empty native command")

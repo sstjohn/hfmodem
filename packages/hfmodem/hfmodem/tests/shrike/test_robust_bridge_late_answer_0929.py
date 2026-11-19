@@ -49,7 +49,8 @@ def test_an_answer_read_before_an_overrun_keeps_its_own_slot(tmp_path, monkeypat
     _answer_in_the_final_listen(tmp_path, hushed=4, held=range(8, 12))
     jumped = _overrun_three_slots(monkeypatch)
     keyed = _keyed(monkeypatch)
-    log = _air(tmp_path, '--after-robust', 'p2', '--robust-p2-max', '4', '--retries', '3')
+    log = _air(tmp_path, '--after-robust', 'p2', '--robust-p2-max', '4', '--retries', '3',
+               '--robust-p2-opening', 'none')
     assert 'FINAL CALL LISTEN' in log, log
     assert 'robust answer: 3 (095AC5) inverted' in log, log
     assert jumped == [5], log

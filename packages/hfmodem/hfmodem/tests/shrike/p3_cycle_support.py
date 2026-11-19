@@ -177,11 +177,17 @@ class NativeCycleClock(_Bench):
         self._finish_burst()
 
 
+# The answer these scenes were written against; test_p3_unread_after_cs6_1117
+# runs them again under the default.
+UNREAD_AFTER_CS6 = 'parity'
+
+
 def scene(tmp_path, monkeypatch, *, old_long=False, allow_long=True):
     s = _Session(role=arq.IRS)
     a = s.host.arq
     a.cfg.speed_up = 'hold'
     a.cfg.long_cycle = allow_long
+    a.cfg.p3_unread_after_cs6 = UNREAD_AFTER_CS6
     a._cycle_long = old_long
     a.speed_level = 2
     g = onair._MasterGrid(600000, 60000, 8880, packet_n=38880,

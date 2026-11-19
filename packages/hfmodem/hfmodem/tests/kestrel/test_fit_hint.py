@@ -682,14 +682,27 @@ def test_u4_equal_payload_new_window_occurrences(level, stray, quiet_answers):
     the NAKed level is the retry since 15d6f5d39."""
     hs, io = station(level=level)
     outcomes = []
-    for letter in b'ABACDE':
+
+    def read(letter, duplicate):
+        if duplicate:
+            hs._reanswer_over()
+        lv = level if hs._rx_resend is None else stray
+        hs._level_read = phy.LevelRead(lv, (bytes([letter]) * cap('2300', lv) + b'\x99',), 40.0, 1)
+        outcomes.append(hs._answer_data_over([]))
+        hs._level_read = None
+
+    for letter in b'ABA':
         for duplicate in (False, True):
-            if duplicate:
-                hs._reanswer_over()
-            lv = level if hs._rx_resend is None else stray
-            hs._level_read = phy.LevelRead(lv, (bytes([letter]) * cap('2300', lv) + b'\x99',), 40.0, 1)
-            outcomes.append(hs._answer_data_over([]))
-            hs._level_read = None
+            read(letter, duplicate)
+    read(ord('C'), False)
+    hs._reanswer_over()
+    assert hs._rx_resend is not None
+    if stray > 4:
+        assert stray not in hs._read_levels() and stray not in hs._rx_retry_rates
+    read(ord('C'), False)
+    for letter in b'DE':
+        for duplicate in (False, True):
+            read(letter, duplicate)
     assert outcomes == [True] * 7 + [False] * 5
     assert len(io.host) == 6
     assert b''.join(io.host) == b''.join(bytes([c]) * cap('2300', level) for c in b'AABBAA')
@@ -796,6 +809,7 @@ def test_u4_idle_completed_single_retransmission_counts_once(bw, streamed, idle,
         hs._reanswer_over()
         assert (hs._holds_epoch, hs._holds_any) == (6, 6)
     # Level 10 was the NAKed over's and is a retry since 15d6f5d39; 8 nobody asked for.
+    assert 8 not in hs._read_levels() and 8 not in hs._rx_retry_rates
     hs._level_read = phy.LevelRead(8, (b'F' * cap(bw, 8) + b'\x99',), 40.0, 1)
     assert not hs._answer_data_over([])
     hs._level_read = None

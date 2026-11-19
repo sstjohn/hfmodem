@@ -465,7 +465,7 @@ def test_clear_non_data_head_with_contested_tail_never_commits(monkeypatch, rout
     elif rejected == 'connect':
         head.is_connect = True
     elif rejected == 'rate':
-        hs._rx_resend, hs._expect_level = (4, ()), 4
+        hs._rx_resend, hs._expect_level = (4, (), None), 4
     result = RX500.DecodeResult([head, tail], [f for f in (head, tail) if not f.is_connect])
     contest(hs, tail.observation)
     events = trace_window(monkeypatch, hs)

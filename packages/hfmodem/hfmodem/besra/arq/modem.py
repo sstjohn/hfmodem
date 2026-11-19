@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 
 
 from hfmodem.core.recording import contact_established, contact_ended
+from hfmodem.core.waits import join
 
 
 class _ObserverAdapter:
@@ -169,8 +170,7 @@ class BesraModem(ModemCore):
             self._session = None
         pump = self._pump
         if pump is not None and pump is not threading.current_thread():
-            pump.join(30)
-            if pump.is_alive():
+            if not join(pump, time.monotonic() + 30):
                 raise RuntimeError('ARDOP core pump did not retire')
             self._pump = None
 

@@ -15,6 +15,7 @@ import threading
 import time
 
 from hfmodem.core.operations import LeaseTimeout
+from hfmodem.core.waits import join
 
 
 @dataclass
@@ -295,8 +296,8 @@ def stop_all(served: dict[str, Served], timeout=5.0) -> None:
         pending.append((name, thread, deadline, result))
     failures = []
     for name, thread, deadline, result in pending:
-        thread.join(max(0, deadline - time.monotonic()))
-        if thread.is_alive() or not result or result[0] is not True:
+        joined = join(thread, deadline)
+        if not joined or not result or result[0] is not True:
             failures.append(name)
     if failures:
         raise LeaseTimeout(", ".join(failures))

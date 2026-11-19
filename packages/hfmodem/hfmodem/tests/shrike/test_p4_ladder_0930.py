@@ -10,12 +10,12 @@ from hfmodem.shrike.p4turn import State
 from hfmodem.shrike.p4observation import Registered
 from hfmodem.shrike.p4receiver import P4Receiver, Emission, Role, Kind
 from hfmodem.tests.shrike.test_p4turn import machine, word, FS
+from hfmodem.tests.evidence import CAPTURES
 
 LADDER = Path(__file__).parent/'fixtures/p4_ladder_0930.json'
 if not (LADDER).exists():
     pytest.skip('p4_ladder_0930.json is not in this tree', allow_module_level=True)
 SEQUENCES = json.loads(LADDER.read_text())
-ROOT = Path(__file__).resolve().parents[5]
 
 
 def opening(at=0):
@@ -183,7 +183,7 @@ def test_1158_bare_ladder_words_are_named_before_the_key_decision(name):
     from hfmodem.shrike import session
     seq = SEQUENCES['0929-1158']
     h = next(h for h in seq['words'] if h['word'] == name and h['provisional'])
-    p = ROOT/'captures/onair-0929-1158/stream.flac'
+    p = CAPTURES/'onair-0929-1158/stream.flac'
     if not p.exists():
         pytest.skip('local 1158 recording absent')
     origin = h['onset_sample']-2400
@@ -202,7 +202,7 @@ def test_1158_driver_keys_on_the_recorded_1250ms_raster():
     from hfmodem.shrike import onair, session
     from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
     seq = SEQUENCES['0929-1158']
-    p = ROOT/'captures/onair-0929-1158/stream.flac'
+    p = CAPTURES/'onair-0929-1158/stream.flac'
     if not p.exists():
         pytest.skip('local 1158 recording absent')
     stream = Stream(session.load_wav(str(p), FS)[:seq['words'][-1]['capture_end_sample']])
@@ -226,7 +226,7 @@ def test_1158_driver_keys_on_the_recorded_1250ms_raster():
 @pytest.mark.parametrize('elapsed', [.215, .275, .299, .335])
 def test_2031_audio_word_is_unnamed_until_300ms(elapsed):
     from hfmodem.shrike import session
-    p = ROOT/'captures/onair-0929-2031/stream.flac'
+    p = CAPTURES/'onair-0929-2031/stream.flac'
     if not p.exists():
         pytest.skip('local 2031 recording absent')
     onset = 827825
@@ -248,7 +248,7 @@ def test_2031_audio_word_is_unnamed_until_300ms(elapsed):
 def test_2031_driver_reads_full_y27_before_keying_again():
     from hfmodem.shrike import onair, session
     from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
-    p = ROOT/'captures/onair-0929-2031/stream.flac'
+    p = CAPTURES/'onair-0929-2031/stream.flac'
     if not p.exists():
         pytest.skip('local 2031 recording absent')
     stream = Stream(session.load_wav(str(p), FS)[:round(19.*FS)])

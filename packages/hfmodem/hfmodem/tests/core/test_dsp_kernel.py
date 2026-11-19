@@ -8,8 +8,14 @@ from threading import Barrier
 import numpy as np
 import pytest
 
-native = pytest.importorskip('hfmodem.core._dsp')
+from hfmodem.tests import native as native_helpers
+
 _fma = np.frompyfunc(math.fma, 3, 1)
+
+
+@pytest.fixture
+def native():
+    return native_helpers.dsp()
 
 
 def reference(spectra, picks, shifts, tones, weight, fused):
@@ -62,7 +68,7 @@ def inputs(width, scale=1, seed=123):
 @pytest.mark.parametrize('width', [1, 2, 7, 160, 4800])
 @pytest.mark.parametrize('scale', [0, 1e-310, 1, 1e154])
 @pytest.mark.parametrize('fused', [False, True])
-def test_exact_rounding(width, scale, fused):
+def test_exact_rounding(native, width, scale, fused):
     args = inputs(width, scale)
     expected = reference(*args, fused)
     out = np.full(expected.shape, complex(42, -13))
@@ -73,7 +79,7 @@ def test_exact_rounding(width, scale, fused):
 
 
 @pytest.mark.parametrize('fused', [False, True])
-def test_numpy_expression_when_products_are_exact(fused):
+def test_numpy_expression_when_products_are_exact(native, fused):
     args = inputs(7)
     spectra, picks, shifts, tones, weight = args
     # Powers of two make this comparison independent of NumPy's contraction.
@@ -94,7 +100,7 @@ def test_numpy_expression_when_products_are_exact(fused):
 
 @pytest.mark.parametrize('target', ['spectrum', 'weight', 'out'])
 @pytest.mark.parametrize('defect', ['dtype', 'format', 'big_endian', 'strided', 'unaligned', 'rank'])
-def test_invalid_buffers_leave_output_untouched(target, defect):
+def test_invalid_buffers_leave_output_untouched(native, target, defect):
     spectra, picks, shifts, tones, weight = inputs(7)
     out = np.full((2, 6, 7), complex(42, -13))
     original = {'spectrum': spectra[1], 'weight': weight, 'out': out}[target]
@@ -129,7 +135,7 @@ def test_invalid_buffers_leave_output_untouched(target, defect):
     'spectrum_length', 'weight_rows', 'zero_width', 'out_shape', 'pick',
     'negative_pick', 'huge_pick', 'mismatch', 'fractional_shift', 'fractional_pick',
 ])
-def test_invalid_arguments_leave_output_untouched(defect):
+def test_invalid_arguments_leave_output_untouched(native, defect):
     width = 7
     spectra, picks, shifts, tones, weight = inputs(width)
     out = np.full((2, 6, width), complex(42, -13))
@@ -164,7 +170,7 @@ def test_invalid_arguments_leave_output_untouched(defect):
 
 
 @pytest.mark.parametrize('fused', [False, True])
-def test_four_concurrent_calls(fused):
+def test_four_concurrent_calls(native, fused):
     args = inputs(160)
     expected = reference(*args, fused)
     barrier = Barrier(4)
@@ -183,14 +189,14 @@ def test_four_concurrent_calls(fused):
 
 
 @pytest.mark.parametrize('n_ch,n_off', [(0, 3), (2, 0), (0, 0)])
-def test_empty_grid(n_ch, n_off):
+def test_empty_grid(native, n_ch, n_off):
     out = np.empty((n_ch, n_off, 1), dtype=np.complex128)
     native.fold_grid([np.ones(10, dtype=np.complex128)], [0] * n_off,
                      [0] * n_off, [0] * n_ch, np.ones((10, 1), dtype=np.complex128),
                      out, False)
 
 
-def test_integer_sequences_and_buffer_protocol():
+def test_integer_sequences_and_buffer_protocol(native):
     spectra, picks, shifts, tones, weight = inputs(7)
     shifts = [-71, 0, 69, 73, 2, -2]
     expected = reference(spectra, picks, shifts, tones, weight, False)
@@ -201,7 +207,7 @@ def test_integer_sequences_and_buffer_protocol():
     assert_bits(out, expected)
 
 
-def test_fusion_changes_rounding():
+def test_fusion_changes_rounding(native):
     args = inputs(7)
     unfused = reference(*args, False)
     fused = reference(*args, True)
@@ -213,9 +219,7 @@ def test_fusion_changes_rounding():
 
 
 @pytest.fixture
-def frontend():
-    if not hasattr(native, 'sliding_magnitudes'):
-        pytest.skip('front-end extension not built')
+def frontend(native):
     return native
 
 

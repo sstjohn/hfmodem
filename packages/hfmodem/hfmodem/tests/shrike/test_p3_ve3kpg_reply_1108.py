@@ -10,7 +10,7 @@ from hfmodem.tests import evidence
 from hfmodem.tests.shrike.onair_support import _CallbackBench, _Session
 
 
-CAPTURE = (evidence.RECORD / 'operator-data' / 'captures'
+CAPTURE = (evidence.OPERATOR_DATA / 'captures'
            / 'onair-20261108T193952651697Z-622cfc95-4b75-43ac-999d-2e339a321c45'
            / 'stream.wav')
 ENTRY_STATUS = 0x1a

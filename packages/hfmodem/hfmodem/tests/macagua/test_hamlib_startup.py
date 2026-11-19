@@ -132,6 +132,7 @@ def hamlib(tmp_path, monkeypatch, request):
     with socket.socket() as listener:
         listener.bind(('127.0.0.1', 0))
         port = listener.getsockname()[1]
+    hermetic.guard.own_port(port)
     monkeypatch.setattr(Cat, "command", command)
     radio = Ftdx10()
     with (tmp_path / 'rigctld.log').open('w') as log:

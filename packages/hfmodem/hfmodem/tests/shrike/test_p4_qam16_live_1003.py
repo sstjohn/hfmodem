@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import wave
-from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 
@@ -16,16 +15,16 @@ from hfmodem.core.wav import read
 from hfmodem.shrike import p4decode, p4frame, p4rx, p4short, p4shortlevels
 from hfmodem.shrike.p4receiver import Clock, Expect, P4Receiver
 from hfmodem.tests.shrike.test_p4turn import machine
+from hfmodem.tests.evidence import CAPTURES
 
 
-ROOT = Path(__file__).resolve().parents[5]
 FS = 48000
 DIGEST = 'ae9ea9706f28fbffffa0d9d3e75c4299d17c5c54a02bf3d15ffbd0fda5a51c81'
 
 
 @pytest.fixture(scope='module')
 def recording():
-    capture = ROOT / 'captures/onair-1002-2037'
+    capture = CAPTURES / 'onair-1002-2037'
     if not (capture / 'stream.flac').exists():
         pytest.skip('local recording absent')
     probe = json.loads((capture / 'p4-probe.json').read_text())
@@ -361,7 +360,7 @@ def test_recorded_qam_wrong_placement_and_noise_rejected(recording, control):
 @pytest.mark.parametrize('name,seconds,center', [('kiwi', 1433., 2410.),
                                                ('monitor', 342.298, 5496.)])
 def test_unrelated_active_recording_crops_rejected(name, seconds, center):
-    path = ROOT/'captures/p4-qam16-negatives'/(name+'.wav')
+    path = CAPTURES/'p4-qam16-negatives'/(name+'.wav')
     if not path.exists():
         pytest.skip('local unrelated recording absent')
     with wave.open(str(path)) as stream:
@@ -384,7 +383,7 @@ def test_unrelated_active_recording_crops_rejected(name, seconds, center):
 @pytest.mark.parametrize('arm,at,status', [('onair-1002-1013', 2148674, 0x61),
                                          ('onair-1002-1049', 2088660, 1)])
 def test_recorded_lower_mode_unchanged(arm, at, status):
-    capture = ROOT/'captures'/arm
+    capture = CAPTURES / arm
     if not (capture/'stream.flac').exists():
         pytest.skip('local recording absent')
     probe = json.loads((capture/'p4-probe.json').read_text())

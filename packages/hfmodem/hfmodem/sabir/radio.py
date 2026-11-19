@@ -65,6 +65,7 @@ from hfmodem.core.occupied import FILTER_HZ
 from hfmodem.core.ptt import LineKeyer
 from hfmodem.core.regulatory import Control, Emission, NotPermitted, Profile
 from hfmodem.core.rigs import RIGS, mode_passband
+from hfmodem.core.waits import sleep_until
 from hfmodem.sabir.phy.rate import FS
 
 #: hamlib's "NET rigctl": a rigctld client. On a shared station the serial port
@@ -347,7 +348,7 @@ def transmit(rig: Rig, audio: np.ndarray, emission: Emission, *, device=None,
     done = threading.Event()
 
     def watchdog() -> None:
-        if not done.wait(bound):
+        if not sleep_until(done.is_set, time.monotonic() + bound):
             rig.unkey(f"watchdog: keyed past {bound:.1f} s")
             rig.retire()
 

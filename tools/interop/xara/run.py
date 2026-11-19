@@ -513,6 +513,9 @@ class Kestrel:
             def burst_start(self):
                 return owner.rx.burst_start
             @property
+            def burst_backlog(self):
+                return owner.rx.burst_backlog
+            @property
             def receive_context(self):
                 return getattr(owner.rx, 'receive_context', None)
             @receive_context.setter

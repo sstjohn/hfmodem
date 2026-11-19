@@ -56,6 +56,7 @@ from ..core.occupied import FILTER_HZ
 from ..core.ptt import LineKeyer
 from ..core.resample import from_card, to_card
 from ..core.rigs import RIGS
+from ..core.waits import sleep_until
 
 FS_RADIO = rates.CARD_RATE_HZ               # sound-card rate
 
@@ -409,7 +410,7 @@ def tune_atu(rig: Rig, out_device=None, *, seconds: float = 4.0, freq_hz: float 
     stop = threading.Event()
 
     def watchdog():
-        if not stop.wait(max_key_s):
+        if not sleep_until(stop.is_set, time.monotonic() + max_key_s):
             rig.unkey("tune watchdog")           # independent, kill-proof
             log.error("tune watchdog fired at %ss — force unkey", max_key_s)
     threading.Thread(target=watchdog, daemon=True).start()
@@ -694,7 +695,7 @@ class RadioLink:
         stop = threading.Event()
 
         def watchdog():
-            if not stop.wait(self.max_key_s):
+            if not sleep_until(stop.is_set, time.monotonic() + self.max_key_s):
                 try:
                     if self.rig:
                         self.rig.unkey(f"watchdog: keyed past {self.max_key_s}s")

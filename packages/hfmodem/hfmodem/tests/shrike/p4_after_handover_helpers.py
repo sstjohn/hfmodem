@@ -7,7 +7,7 @@ import runpy
 import sys
 from unittest.mock import patch
 
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.shrike import onair
 from hfmodem.tests.shrike.test_p4_link_0927 import FS
 
@@ -15,11 +15,11 @@ ROOT = Path(__file__).resolve().parents[5]
 
 
 def probe(arm):
-    return json.loads(require_input(ROOT / f'captures/onair-0930-{arm}/p4-probe.json').read_text())
+    return json.loads(require_input(CAPTURES / f'onair-0930-{arm}/p4-probe.json').read_text())
 
 
 def replay(arm, *, ladder='chirp', end=180., queue_at=None):
-    require_input(ROOT / f'captures/onair-0930-{arm}/stream.flac')
+    require_input(CAPTURES / f'onair-0930-{arm}/stream.flac')
     require_input(ROOT / 'working/p4-plan-0930/stall-bisect/drive.py')
     recorded = probe(arm)
     opening = recorded['emissions'][0]
@@ -49,7 +49,7 @@ def replay(arm, *, ladder='chirp', end=180., queue_at=None):
         run(tx, stream, raster)
         results.append(tx)
 
-    argv = ['drive.py', str(ROOT/f'captures/onair-0930-{arm}/stream.flac'),
+    argv = ['drive.py', str(CAPTURES/f'onair-0930-{arm}/stream.flac'),
             str(opening['audio_start'] % 60000), str(opening['audio_start']), '1',
             str(opening['audio_end']/FS), str(end)]
     with patch.object(onair, '_run_p4_link', drive), patch.object(sys, 'argv', argv):

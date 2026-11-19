@@ -9,6 +9,7 @@ import pytest
 from hfmodem.brubru import frame
 from hfmodem.core.fec import ConvCode, _trellis, viterbi_decode
 from hfmodem.shrike import coding, pactor2, placement
+from hfmodem.tests.timing import within
 
 
 def _reference_viterbi_decode(soft: np.ndarray, code: ConvCode, terminated: bool = True,
@@ -116,4 +117,4 @@ def test_viterbi_batches_branch_metrics(long_cycle):
     new, reference = map(min, times)
     print(f'viterbi ({long_cycle=}): new={new:.6f}s reference={reference:.6f}s ratio={new / reference:.4f}')
     # Measured 0.44 on macOS and 0.61-0.65 on the Windows build.
-    assert new <= reference * 0.8
+    within(new, f'the batched decode against 0.8 of the reference {reference:.4g} s', at_most=reference * 0.8)

@@ -12,6 +12,7 @@ import pytest
 
 from hfmodem.kestrel.coding import turbo
 from hfmodem.kestrel.rx import tablegen
+from hfmodem.tests.timing import within
 
 
 def _encode(info, perm, coded):
@@ -72,4 +73,4 @@ def test_l16_frame_decodes_inside_the_turnaround():
         bits = _decode(Lc, N, perm, coded)
         best = min(best, time.perf_counter() - t)
     assert np.array_equal(bits, info)
-    assert best < 0.5, f"L16 decode took {best:.3f} s with the full 8-iteration schedule"
+    within(best, "L16 decode with the full 8-iteration schedule", at_most=0.5)

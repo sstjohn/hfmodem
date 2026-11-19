@@ -57,6 +57,8 @@ post-handover overs, byte-exact, in every fetch of 2026-09-03/04.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -327,11 +329,13 @@ def test_the_turn_is_not_taken_anywhere_inside_the_peers_delivery(setting):
 
 
 @pytest.mark.parametrize("setting", VA.OVER_CONTINUE_ANSWERS)
-def test_the_ask_goes_out_in_the_peers_own_cadence(setting):
+def test_the_ask_goes_out_in_the_peers_own_cadence(setting, monkeypatch):
     """Where the deferred ask ends up: the peer's idle burst opens the only gap
     wide enough for a 1.37 s frame. Until 2026-09-29 the acknowledgement went
     again first; a VARA HF caller asks at the first idle instead and never re-keys
     it."""
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(VA, "time", SimpleNamespace(monotonic=lambda: 1000.0))
     io = _HostIO(b"a reply the host queued early")
     hs, _ = _connected(io=io, over_continue=setting)
     _answer(hs, io, b"the whole greeting")

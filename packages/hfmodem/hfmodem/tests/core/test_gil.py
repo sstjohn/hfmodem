@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 from hfmodem.core import gil
+from hfmodem.tests.timing import within
 
 BLOCK_S = 128 / 48000
 BURST_S = 1.5
@@ -83,9 +84,8 @@ def _worst_wait(breathing: bool) -> float:
 @pytest.mark.realtime
 def test_a_waiting_thread_is_starved_by_a_decode_shaped_load():
     worst = _worst_wait(breathing=False)
-    assert worst > 0.025, (
-        f"the load meant to starve a waiter let it in within {worst * 1e3:.1f} ms; "
-        "either CPython's handover changed or the numpy call stopped releasing")
+    within(worst, "the load meant to starve a waiter let it in; either CPython's handover "
+           "changed or the numpy call stopped releasing", at_least=0.025)
 
 
 @pytest.mark.realtime
@@ -122,7 +122,8 @@ def test_a_loop_with_no_python_frame_lets_the_waiter_in_within_the_short_interva
         stop.set()
         th.join(timeout=2.0)
     # 6.9 ms here against the default 5 ms interval, 1.9 ms against 1 ms.
-    assert lags and max(lags) < 0.005, f"the waiter was kept out {max(lags) * 1e3:.1f} ms"
+    assert lags, "the waiter never ran at all"
+    within(max(lags), "the longest the waiter was kept out", at_most=0.005)
 
 
 def test_the_window_holds_the_short_switch_interval_and_gives_it_back():

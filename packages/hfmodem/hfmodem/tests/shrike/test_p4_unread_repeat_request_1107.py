@@ -9,7 +9,7 @@ three reply slots (18.18, 23.17, 24.42 s) went out with no key.
 from dataclasses import replace
 import json
 
-from hfmodem.tests.evidence import RECORD, require_input
+from hfmodem.tests.evidence import OPERATOR_DATA, require_input
 
 import pytest
 
@@ -185,7 +185,7 @@ def test_a_held_u27_still_answers_an_unread_chirp():
 
 @pytest.mark.parametrize('first,expected', [('x27', 'V27'), ('v27', 'X27')])
 def test_opening_unread_uses_opposite_chain_start_word(first, expected):
-    probe = RECORD / 'operator-data/captures/onair-20261107T152917427998Z-64c4fbe2-3ac9-4306-899e-2b68aca47cf6/p4-probe.json'
+    probe = OPERATOR_DATA / 'captures/onair-20261107T152917427998Z-64c4fbe2-3ac9-4306-899e-2b68aca47cf6/p4-probe.json'
     require_input(probe)
     recorded = json.loads(probe.read_text())
     emission = recorded['emissions'][0]

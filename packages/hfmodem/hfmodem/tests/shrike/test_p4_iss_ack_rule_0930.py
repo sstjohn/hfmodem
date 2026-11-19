@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """ISS-ACK-RULE: 0117/0127 repeated X27, 0058 seed, and counted packet form."""
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -16,6 +15,7 @@ from hfmodem.tests.shrike.test_p4_data_turn_0930 import CYCLE, T, receive, sendi
 from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
 from hfmodem.tests.shrike.test_p4_breakin_v27_0929 import GRID
 from hfmodem.tests.shrike import p4_stock_peer as stock
+from hfmodem.tests.evidence import CAPTURES
 
 
 def test_iss_word_parity_property():
@@ -111,8 +111,7 @@ def test_body_then_normals_wrap_counter_and_restart_next_turn():
 
 @pytest.mark.parametrize('arm', ['0117', '0127'])
 def test_recorded_x27_repeat_through_real_iss_data_driver(monkeypatch, arm):
-    root = Path(__file__).resolve().parents[5]
-    capture = root/f'captures/onair-0930-{arm}'
+    capture = CAPTURES/f'onair-0930-{arm}'
     if not (capture/'stream.flac').exists():
         pytest.skip(f'local {arm} recording absent')
     probe = json.loads((capture/'p4-probe.json').read_text())
@@ -183,7 +182,7 @@ def test_recorded_x27_repeat_through_real_iss_data_driver(monkeypatch, arm):
 
 @pytest.mark.parametrize('arm,counter,index,reply', [('0058', 0, 0, 'V27'), ('0117', 2, 2, 'Z27')])
 def test_recorded_refusals_end_data_loop_without_settlement(monkeypatch, arm, counter, index, reply):
-    capture = Path(__file__).resolve().parents[5]/f'captures/onair-0930-{arm}'
+    capture = CAPTURES/f'onair-0930-{arm}'
     if not (capture/'stream.flac').exists():
         pytest.skip(f'local {arm} recording absent')
     probe = json.loads((capture/'p4-probe.json').read_text())

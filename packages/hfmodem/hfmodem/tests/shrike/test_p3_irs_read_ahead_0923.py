@@ -9,16 +9,16 @@ takes both from the slices `_listen_until_answer` hands it; the pre-key path
 then finds them done and decodes exactly what it decoded before.
 """
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import arq, onair, p3acquire, rxfront
 from hfmodem.tests.shrike.test_entry_answer import _Session
+from hfmodem.tests.evidence import CAPTURES
 
 FS = 48000
-ARM = Path(__file__).parents[5] / 'captures' / 'onair-0923-1321'
+ARM = CAPTURES / 'onair-0923-1321'
 recorded = pytest.mark.skipif(not ARM.is_dir(), reason='needs captures/onair-0923-1321')
 
 

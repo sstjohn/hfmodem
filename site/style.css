@@ -147,6 +147,7 @@ h1 {
   letter-spacing:-.05em;
   font-weight:500;
   margin-bottom:34px;
+  text-wrap:balance;
 }
 .intro {
   display:flex;
@@ -159,6 +160,10 @@ h1 {
   line-height:1.5;
   max-width:610px;
   margin:0;
+}
+.hero h1 span {
+  color:var(--accent);
+  white-space:nowrap;
 }
 .action {
   font:12px var(--mono);
@@ -192,6 +197,12 @@ h1 {
 }
 .spectrum-scroll {
   overflow-x:auto;
+  /* Edge shades appear only while part of the chart is scrolled out of view. */
+  background:
+    linear-gradient(to right, var(--panel) 30%, transparent) left / 32px 100% no-repeat local,
+    linear-gradient(to left, var(--panel) 30%, transparent) right / 32px 100% no-repeat local,
+    linear-gradient(to right, color-mix(in srgb, var(--ink) 12%, transparent), transparent) left / 12px 100% no-repeat scroll,
+    linear-gradient(to left, color-mix(in srgb, var(--ink) 12%, transparent), transparent) right / 12px 100% no-repeat scroll;
 }
 .cycle svg {
   display:block;

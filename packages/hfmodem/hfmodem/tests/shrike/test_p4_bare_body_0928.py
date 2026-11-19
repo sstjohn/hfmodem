@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
 import json
-from pathlib import Path
 
 from hfmodem.tests.shrike import p4_stock_peer as stock
 
@@ -14,13 +13,13 @@ from hfmodem.shrike.p4receiver import Clock, Emission, Expect, Kind, P4Receiver,
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Tx
 from hfmodem.tests.shrike.test_ws8eoc_p4_silent_0927 import Live, grid
 from hfmodem.tests.shrike.test_p4turn import machine
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 GREETING = b'RMS Trimode 1.4.4.0\r\nW9SSJ has '
 
 
 def recorded(arm='2232'):
-    path = ROOT / ('captures/onair-0928-'+arm)
+    path = CAPTURES / ('onair-0928-'+arm)
     if not (path / 'stream.flac').exists():
         pytest.skip('local VE3KPG September 28 capture absent')
     return onair.session.load_wav(str(path / 'stream.flac'), FS), json.loads((path / 'p4-probe.json').read_text())
@@ -79,7 +78,7 @@ def test_recorded_fragment_is_never_bare_with_full_history():
 
 
 def test_recorded_bare_y27_keeps_its_closed_extent_above_the_tail_noise():
-    path = ROOT / 'captures/onair-0927-1744/stream.flac'
+    path = CAPTURES / 'onair-0927-1744/stream.flac'
     if not path.exists():
         pytest.skip('local September 27 1744 capture absent')
     audio = onair.session.load_wav(str(path), FS)

@@ -34,7 +34,10 @@ Catches:
 - Windows pyserial Serial.open and kernel32 CreateFileW/CreateFileA through
   patched ctypes.WinDLL, windll and cached hfmodem APIs check COM ownership,
   including attribute and indexed function lookup.
-- Audited socket connections to 4532, 8300, 8301 and 8515 reject non-loopback
+- Binding or connecting to 4532, the operator's station port, is always refused,
+  and native Hamlib launches require ports registered by the test with own_port().
+  Endpoints must be loopback; rigctld must specify its listen address.
+- Audited socket connections to 8300, 8301 and 8515 reject non-loopback
   hosts and foreign loopback listeners. Matching live test endpoint manifests
   authorize access; successful guarded binds track socket lifetime, and an
   owned rigctld registers its endpoint for its own lifetime (POSIX: the exec
@@ -88,6 +91,7 @@ _tty0tty = {}
 _devices = {}
 _admitted = []
 _ports = []
+_owned_ports = set()
 _socket_ports = {}
 DEVICE_KEYS = ("CAT_PORT", "PTT_PORT")
 _pty_fds = {}
@@ -237,7 +241,7 @@ def _save_devices():
             fcntl.flock(fd, fcntl.LOCK_EX)
             _locks[path] = fd
         _write_manifest(path, dict(pid=os.getpid(), started=_owner_started, devices=_devices,
-                                   admitted=_admitted, ports=_ports))
+                                   admitted=_admitted, ports=_ports, owned_ports=sorted(_owned_ports)))
 
 
 def _write_manifest(path, owner):
@@ -291,6 +295,15 @@ def own_com(port, target):
         raise ValueError(f'{port} is not a COM port')
     with _device_lock:
         _devices[com[1].upper()] = target
+        _save_devices()
+
+
+def own_port(port):
+    """Register a TCP port reserved by this test's fixture, including for children."""
+    if type(port) is not int or not 1 <= port <= 65535 or port == RIGCTLD:
+        raise ValueError('own_port requires a non-station TCP port')
+    with _device_lock:
+        _owned_ports.add(port)
         _save_devices()
 
 
@@ -442,6 +455,9 @@ def _shell_syntax_check(program, words, environment):
 def check_command(argv, executable=None, cwd=None, environment=None):
     words = _command_words(argv)
     program = _program(executable, words)
+    if program in ('rigctl', 'rigctld'):
+        if _hamlib_endpoints(words, environment, daemon=program == 'rigctld', cwd=cwd) is None:
+            return
     native = program in ('rigctl', 'rigctld', 'ffmpeg')
     python = program.startswith(('python', 'pypy'))
     syntax = _shell_syntax_check(program, words, environment)
@@ -637,18 +653,24 @@ RIGCTLD_LONG = {
     'port': 't', 'set-conf': 'C', 'list': 'l', 'show-conf': 'L', 'dump-caps': 'u', 'vfo': 'o',
     'verbose': 'v', 'help': 'h', 'version': 'V', 'twiddle_timeout': 'W', 'twiddle_rit': 'w',
     'uplink': 'x', 'debug-time-stamps': 'Z', 'password': 'A', 'rigctld-idle': 'R', 'bind-all': 'b'}
-# Help, version, list, dump-caps and show-conf print and exit; -b binds every interface.
-RIGCTLD_NOT_OWNED = set('hVluLb')
+RIGCTL_SHORT = 'm:r:p:d:P:D:s:c:t:lC:LuonvhVYZ!#iI'
+RIGCTL_LONG = {name: letter for name, letter in RIGCTLD_LONG.items()
+               if name in ('model', 'rig-file', 'ptt-file', 'dcd-file', 'ptt-type',
+                           'dcd-type', 'serial-speed', 'civaddr', 'list', 'set-conf',
+                           'show-conf', 'dump-caps', 'vfo', 'debug-time-stamps',
+                           'verbose', 'help', 'version')}
+RIGCTL_LONG.update({'send-cmd-term': 't', 'no-restore-ai': 'n', 'ignore-err': 'Y',
+                    'read-history': 'i', 'save-history': 'I', 'cookie': '!', 'skip-init': '#'})
 
 
-def _rigctld_options(words, environment=None):
-    """The options rigctld reads from argv, in order; None for any form it would not accept."""
+def _rigctld_options(words, environment=None, *, short=RIGCTLD_SHORT, long=RIGCTLD_LONG, stop=False):
+    """Hamlib getopt_long options in order; None for a form the tool rejects."""
     env = os.environ if environment is None else environment
     # getopt_long permutes operands past options unless POSIXLY_CORRECT is set.
-    posix = any((os.fsdecode(key).upper() if os.name == 'nt' else os.fsdecode(key)) == 'POSIXLY_CORRECT'
+    posix = stop or any((os.fsdecode(key).upper() if os.name == 'nt' else os.fsdecode(key)) == 'POSIXLY_CORRECT'
                 for key in env)
-    takes = {letter: RIGCTLD_SHORT[at + 1:at + 2] == ':'
-             for at, letter in enumerate(RIGCTLD_SHORT) if letter != ':'}
+    takes = {letter: short[at + 1:at + 2] == ':'
+             for at, letter in enumerate(short) if letter != ':'}
     options, index = [], 1
     while index < len(words):
         word = words[index]
@@ -657,10 +679,10 @@ def _rigctld_options(words, environment=None):
             break
         if word.startswith('--'):
             name, equals, value = word[2:].partition('=')
-            names = [name] if name in RIGCTLD_LONG else [n for n in RIGCTLD_LONG if n.startswith(name)]
+            names = [name] if name in long else [n for n in long if n.startswith(name)]
             if len(names) != 1:
                 return None
-            letter = RIGCTLD_LONG[names[0]]
+            letter = long[names[0]]
             if takes[letter] and not equals:
                 if index == len(words):
                     return None
@@ -686,22 +708,103 @@ def _rigctld_options(words, environment=None):
     return options
 
 
+def _require_owned_port(host, port):
+    if not re.fullmatch(r'[0-9]+', port) or not 1 <= int(port) <= 65535:
+        trip(f'Hamlib endpoint refused: unresolved TCP port {port!r}')
+    port = int(port)
+    if port == RIGCTLD:
+        trip("Hamlib on 4532 refused: the operator's station port")
+    if host not in LOOPBACK:
+        trip(f'Hamlib endpoint refused: non-loopback address {host!r}')
+    if port not in _owned_ports and not any(port in owner.get('owned_ports', ()) for owner in _manifests()):
+        trip(f'Hamlib endpoint refused: TCP port {port} is not owned by this test')
+    return port
+
+
+def _hamlib_device(endpoint, cwd, *, network=False):
+    # Hamlib truncates pathnames to HAMLIB_FILPATHLEN - 1 bytes.
+    if len(os.fsencode(endpoint)) > 511:
+        trip('Hamlib endpoint refused: pathname would be truncated')
+    # Hamlib's parse_hoststr treats bare hostnames as network addresses too.
+    check_serial(endpoint, cwd)
+    device = ('/' in endpoint
+              or re.fullmatch(r'(?:\\\\[.?]\\)?COM[0-9]+:?', endpoint, re.I))
+    if device and not network:
+        return
+    match = re.fullmatch(r'(127\.0\.0\.1|localhost|\[::1\]|::1):([0-9]{1,5})', endpoint)
+    if not match:
+        trip(f'Hamlib endpoint refused: unresolved network endpoint {endpoint!r}')
+    _require_owned_port(match[1].strip('[]'), match[2])
+
+
+def _hamlib_endpoints(words, environment=None, *, daemon=False, cwd=None):
+    options = (_rigctld_options(words, environment) if daemon else
+               _rigctld_options(words, environment, short=RIGCTL_SHORT, long=RIGCTL_LONG, stop=True))
+    if options is None:
+        trip('Hamlib options refused: cannot fully resolve argv')
+    values = dict(options)
+    if any(letter in 'hVl' for letter, _ in options):
+        return None
+    conf = {}
+    for letter, value in options:
+        if letter != 'C':
+            continue
+        for assignment in value.split(','):
+            match = re.fullmatch(r'([a-z_]{1,99})=([^\s,=]{1,99})', assignment)
+            if not match or match[1] not in ('rig_pathname', 'ptt_type', 'poll_interval', 'cache_timeout'):
+                trip(f'Hamlib config refused: {assignment!r}')
+            conf[match[1]] = match[2]
+    model = values.get('m', '1')
+    # Other backends can rewrite endpoints or open additional sockets.
+    if not re.fullmatch(r'[+]?[0-9]+', model) or int(model) not in (1, 2, 1036, 1042, 3087, 3088):
+        trip(f'Hamlib model refused: {model!r}')
+    if daemon:
+        if 'u' in values or ('L' in values and 'r' not in values and int(model) != 2):
+            return None
+    elif 'u' in values and int(model) == 2:
+        # rigctl reinitializes NETRIGCTL for -u, discarding even an owned -r.
+        trip('Hamlib options refused: network dump-caps discards the rig endpoint')
+    # Both tools apply all -C assignments first, then the final -r, even if
+    # -r appeared earlier in argv (Hamlib tests/rigctl.c and rigctld.c).
+    endpoint = values.get('r', conf.get('rig_pathname'))
+    if endpoint is not None:
+        _hamlib_device(endpoint, cwd, network=int(model) == 2)
+    elif int(model) != 1:
+        trip('Hamlib endpoint refused: model requires an explicit rig endpoint')
+    for letter in ('p', 'd'):
+        if letter in values:
+            _hamlib_device(values[letter], cwd)
+    if daemon:
+        if 'T' not in values:
+            trip('Hamlib endpoint refused: rigctld requires an explicit loopback listen address')
+        port = _require_owned_port(values['T'], values.get('t', str(RIGCTLD)))
+        if 'b' in values:
+            trip('Hamlib endpoint refused: bind-all')
+        return port
+    return True
+
+
+def _rigctld_port(words, environment=None, *, cwd=None):
+    return _hamlib_endpoints(words, environment, daemon=True, cwd=cwd)
+
+
 def _owned_rigctld(executable, argv, environment=None):
     """The endpoint a launch serves when it is this test's own rigctld."""
     words = _command_words(argv)
-    options = _rigctld_options(words, environment) if _program(executable, words) == 'rigctld' else None
-    if options is None or any(letter in RIGCTLD_NOT_OWNED for letter, _ in options):
+    if _program(executable, words) != 'rigctld':
         return None
-    # Like rigctld, the last value given wins.
+    port = _rigctld_port(words, environment)
+    options = _rigctld_options(words, environment)
+    if port is None:
+        return None
     values = dict(options)
-    if values.get('t', str(RIGCTLD)) != str(RIGCTLD):
-        return None
     try:
-        address = ipaddress.ip_address(values.get('T', '127.0.0.1'))
+        host = values['T']
+        address = ipaddress.ip_address('127.0.0.1' if host == 'localhost' else host)
     except ValueError:
         return None
     family = socket.AF_INET if address.version == 4 else socket.AF_INET6
-    return [socket.SOCK_STREAM, family, str(address), RIGCTLD, False]
+    return [socket.SOCK_STREAM, family, str(address), port, False]
 
 
 def _created(pid, handle, endpoint):
@@ -828,8 +931,12 @@ def guard(event, args):
     elif event == 'os.system':
         if not _admitted_system(args[0]):
             trip('opaque native launch refused: os.system')
+    elif event == "socket.bind" and isinstance(args[1], tuple) and args[1][1:2] == (RIGCTLD,):
+        trip("bind to 4532 refused: the operator's station port")
     elif event == "socket.connect" and isinstance(args[1], tuple) and args[1][1:2] and args[1][1] in PORTS:
         host, port = args[1][:2]
+        if port == RIGCTLD:
+            trip("connected to 4532 refused: the operator's station port")
         if getattr(_probing, 'active', False):
             return
         if host not in LOOPBACK or not _served(args[0], args[1]) and _listened(host, port):
@@ -888,6 +995,8 @@ def install_serial_guards(patch=setattr):
     socket_bind, socket_close, socket_detach = socket.socket.bind, socket.socket.close, socket.socket.detach
     def bind_socket(self, address):
         with _device_lock:
+            if armed:
+                guard('socket.bind', (self, address))
             result = socket_bind(self, address)
             if armed:
                 bound = self.getsockname()
@@ -1004,6 +1113,7 @@ def disarm():
     _devices.clear()
     _admitted.clear()
     _ports.clear()
+    _owned_ports.clear()
     _socket_ports.clear()
     _pty_fds.clear()
     _owner_started = None

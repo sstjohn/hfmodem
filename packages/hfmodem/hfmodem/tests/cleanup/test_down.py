@@ -198,7 +198,11 @@ def test_cat_worker_uses_only_its_proof_evidence(monkeypatch, tmp_path):
     assert walked == []
 
 
-def test_settings_resolve_station_profile_and_environment(tmp_path, monkeypatch):
+@pytest.mark.parametrize('station_port,override,expected', [
+    (14533, None, 14533), (14533, '14599', 14599), (None, None, 4532),
+    (None, '14599', 14599),
+])
+def test_settings_resolve_station_profile_and_environment(tmp_path, monkeypatch, station_port, override, expected):
     path = tmp_path / 'station.toml'
     path.write_text('''schema = 1
 [station]
@@ -212,17 +216,23 @@ transmit = false
 model = "ft891"
 cat = "rigctld"
 host = "127.0.0.1"
-port = 14532
 [rig.profiles.ft891]
 cat_port = "COM41"
 ptt_port = "COM42"
 ''')
+    if station_port is not None:
+        path.write_text(path.read_text().replace('[rig]\n', f'[rig]\nport = {station_port}\n'))
+    monkeypatch.delenv('RIGCTLD_PORT', raising=False)
+    if override is not None:
+        monkeypatch.setenv('RIGCTLD_PORT', override)
     for key in ('HFMODEM_RIG', 'CAT_PORT', 'PTT_PORT'):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv('HFMODEM_STATION', str(path))
     settings = down.Settings.load()
     assert settings.path == path
-    assert (settings.station_port, settings.backend, settings.host, settings.port) == (18737, 'rigctld', '127.0.0.1', 14532)
+    assert (settings.station_port, settings.backend, settings.host, settings.port) == (18737, 'rigctld', '127.0.0.1', expected)
+    from hfmodem.core import down_posix
+    assert down_posix.load_settings(path)[0].port == expected
     assert settings.devices == {'COM42'} and settings.cat_port == 'COM41'
     monkeypatch.setenv('PTT_PORT', 'COM43')
     assert down.Settings.load(path).ptt_port == 'COM43'
@@ -960,3 +970,65 @@ def test_cat_proof_retries_a_busy_radio_within_its_bound(answers, error, queries
         fake.close()
     assert time.monotonic() - started < 2.5
     assert fake.log.count('FA;') == queries
+
+
+@pytest.mark.parametrize('platform', ['posix', 'windows'])
+def test_env_only_cleanup_listener_and_cat_proof_port(tmp_path, monkeypatch, platform):
+    from hfmodem.core import down_posix
+    path = tmp_path / 'station.toml'
+    path.write_text('''schema=1
+[station]
+mycall="N0CALL"
+control="local"
+regulatory="unregulated"
+because="offline cleanup endpoints"
+[rig]
+model="ft891"
+cat="rigctld"
+''')
+    monkeypatch.setenv('RIGCTLD_PORT', '14599')
+    for key in ('HFMODEM_RIG', 'CAT_PORT', 'PTT_PORT'):
+        monkeypatch.delenv(key, raising=False)
+    if platform == 'posix':
+        settings, audio = down_posix.load_settings(path)
+        backend = down_posix.Posix(settings, audio, None)
+        monkeypatch.setattr(backend, 'table', lambda deadline: {})
+        module = down_posix
+    else:
+        settings = down.Settings.load(path)
+        backend = down.Windows(settings, None)
+        backend.gate_fd = None
+        monkeypatch.setattr(backend, 'refresh', lambda: None)
+        monkeypatch.setattr(backend, 'live_launches', lambda deadline: ([], []))
+        monkeypatch.setattr(backend, 'station', lambda deadline: (set(), False))
+        monkeypatch.setattr(backend.wp, 'using', lambda path: [])
+        module = down
+    monkeypatch.setattr(claim, 'verify_cleanup', lambda fd: None)
+    monkeypatch.setattr(claim, 'claim_path', lambda: tmp_path / 'claim')
+    monkeypatch.setattr(claim, 'mutex_path', lambda: tmp_path / 'mutex')
+    monkeypatch.setattr(claim, 'audio_nodes', lambda *a: ())
+    class Probed(Exception):
+        pass
+    def listener(port, *host):
+        assert port == 14599
+        assert not host or host == ('127.0.0.1',)
+        raise Probed
+    monkeypatch.setattr(module, 'listeners', listener)
+    with pytest.raises(Probed):
+        backend.inventory(down.time.monotonic() + 5)
+    class Connection:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def sendall(self, payload):
+            assert payload == b'f\n'
+        def settimeout(self, timeout):
+            pass
+        def recv(self, size):
+            return b'7105000\n'
+    def connect(endpoint, **kw):
+        assert endpoint == ('127.0.0.1', 14599)
+        return Connection()
+    monkeypatch.setattr(down.socket, 'create_connection', connect)
+    assert settings.cat_proof() == 'ok'

@@ -114,6 +114,8 @@ def test_malformed_short_is_a_hole_and_never_emits(monkeypatch, role):
 
 
 def test_located_unread_bw500_after_commit_keeps_retry_new(monkeypatch):
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(A, 'time', SimpleNamespace(monotonic=lambda: 100.0))
     hs, io = station(role='initiator', high=False, bw='500')
     body = b'A' * 43 + b'\x99'
     assert receive(monkeypatch, hs, body)
@@ -366,6 +368,8 @@ def test_responder_reads_caller_eight_symbol_phase_at_l7_up(monkeypatch, phase, 
 @pytest.mark.parametrize('group', ['short', 'long'])
 @pytest.mark.parametrize('phase', [0, 1])
 def test_responder_passes_caller_tone_query_phase(monkeypatch, group, phase):
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(A, 'time', SimpleNamespace(monotonic=lambda: 100.0))
     hs, io = station()
     receive(monkeypatch, hs, full(b'first'))
     receive(monkeypatch, hs, full(b'second'))

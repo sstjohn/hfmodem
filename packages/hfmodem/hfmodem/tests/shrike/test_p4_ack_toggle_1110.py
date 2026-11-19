@@ -12,7 +12,7 @@ import pytest
 from hfmodem.shrike import p4frame
 from hfmodem.shrike.p4receiver import Kind, Registered, RegisteredObservation
 from hfmodem.shrike.p4turn import State
-from hfmodem.tests.evidence import RECORD, require_input
+from hfmodem.tests.evidence import OPERATOR_DATA, RECORD, require_input
 from hfmodem.tests.shrike.test_p4turn import FS, ack_frame, body, machine, propose_ack, word
 
 
@@ -36,9 +36,10 @@ ARMS = [
 
 
 def registrations(path, end):
-    probe = RECORD / path / 'p4-probe.json'
-    if not probe.is_file() and path.startswith('operator-data/'):
-        probe = RECORD / path.removeprefix('operator-data/') / 'p4-probe.json'
+    stem = path.removeprefix('operator-data/')
+    probe = OPERATOR_DATA / stem / 'p4-probe.json'
+    if stem == path or not probe.is_file():
+        probe = RECORD / stem / 'p4-probe.json'
     require_input(probe)
     copies = {}
     for row in json.loads(probe.read_text())['heard']:

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hfmodem.core import claim, ptt
+from hfmodem.core import claim, ptt, waits
 from hfmodem.core.rigs import RIGS
 from hfmodem.shrike import beacon, onair, ota, spec
 
@@ -409,6 +409,9 @@ def watchdogs(monkeypatch):
 
     monkeypatch.setattr(threading, "Thread", Thread)
     monkeypatch.setattr(threading, "Event", Event)
+    # The bound runs out the moment a watchdog is called, as `Event.wait` does above.
+    monkeypatch.setattr(waits, "sleep_until", lambda done, deadline: done())
+    monkeypatch.setattr(ota, "sleep_until", waits.sleep_until)
     return callbacks
 
 

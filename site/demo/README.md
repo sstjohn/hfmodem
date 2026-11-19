@@ -17,7 +17,7 @@ the same experimental prerelease warning and project links as other pages.
 Only reviewed shell assets and the public logbook adapter belong here. No
 historical station snapshot, private transcripts, legacy replay assets or
 additional recording copies are included. The logbook presents the six
-approved public VARA, PACTOR-3 and ARDOP send/receive examples and links to their
+approved public PACTOR-3, VARA and ARDOP send/receive examples and links to their
 existing inspectors. The VARA send demonstrates L9; the retained receive is
 L4. ARDOP audio is from remote witnesses. Keep the public evidence limitations
 and shared data-loss disclosure visible.
@@ -44,7 +44,7 @@ const rows = await loadPublicQsos();
 ```
 
 The adapter reads the existing public `../examples/logbook/entries.json` and
-its six approved manifests. It requires exactly VARA send/receive, PACTOR-3
+its six approved manifests. It requires exactly PACTOR-3 send/receive, VARA
 send/receive and ARDOP send/receive, with their reviewed peers and roles.
 It does not import a historical station snapshot. No recordings, event maps,
 transcripts, credentials or station coordinates are copied into this room.

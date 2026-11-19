@@ -3,7 +3,6 @@
 """A real WS8EOC CS2 retains its unacknowledged CS3's emitted pulse raster."""
 from dataclasses import replace
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,9 +11,10 @@ from scipy.io import wavfile
 from hfmodem.shrike import arq, onair, p3acquire, p3rx, spec
 from hfmodem.tests.shrike.onair_support import _Session as _Session
 from hfmodem.tests.shrike.p3_reply_support import duplex as duplex, pending
+from hfmodem.tests.evidence import CAPTURES
 
 FS, CYCLE = 48000, 60000
-CAP = Path(__file__).resolve().parents[5]/'captures/onair-0919-2342'
+CAP = CAPTURES/'onair-0919-2342'
 
 
 def test_recorded_cs2_repeats_same_field_after_old_irs_geometry_is_cleared(tmp_path):

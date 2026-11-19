@@ -11,7 +11,7 @@ from hfmodem.core import wav
 
 from hfmodem.shrike import (p4coding, p4frame, p4long, p4longtx, p4normal, p4rx,
                             p4short, p4shorttx, placement, tablegen)
-from hfmodem.tests.evidence import RECORD, require_input
+from hfmodem.tests.evidence import OPERATOR_DATA, require_input
 
 TRAINING_START = 2880
 SILENCE = 4800
@@ -180,7 +180,7 @@ def test_header_is_not_the_short_packets(recordings):
 
 
 def test_transmitted_header_and_body_match_stock_reference():
-    capture = RECORD / ('operator-data/captures/'
+    capture = OPERATOR_DATA / ('captures/'
         'onair-20261027T063407663476Z-3435ae7d-f8b1-4b34-b8ea-b1b8e916e6f1/stream.flac')
     at, fs = 2628637, 48000
     audio = wav.read(str(require_input(capture)), fs,

@@ -27,6 +27,7 @@ rigctld on an ephemeral loopback port.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -789,6 +790,7 @@ class Queued:
 onair._WRITER = Queued()
 atexit.register(onair._drain_at_exit)
 onair._unkey_on_signal()
+print(f"signalled at {time.monotonic()!r}", flush=True)
 signal.raise_signal(signal.SIGINT)
 """
 
@@ -797,13 +799,15 @@ signal.raise_signal(signal.SIGINT)
 def test_the_exit_time_drain_stays_under_the_armed_deadman(tmp_path):
     env = dict(os.environ, HFMODEM_STATE_DIR=str(tmp_path / "state"),
                HFMODEM_COEXIST_HARNESS="1")
-    began = time.monotonic()
     done = subprocess.run([sys.executable, "-c", _ATEXIT_STORE], capture_output=True,
                           text=True, env=env, timeout=_DIE_S)
+    ended = time.monotonic()
     said = done.stdout + done.stderr
     assert "store finished" not in said and done.returncode == 1, (
         f"the exit-time store outlived the deadman ({done.returncode}):\n{said}")
-    assert time.monotonic() - began < 4, said
+    # Timed from the signal: interpreter start and the onair import are not the deadman's.
+    signalled = float(re.search(r"signalled at (\S+)", done.stdout).group(1))
+    assert ended - signalled < 4, said
 
 
 def test_the_deadman_fires_before_the_launcher_reaches_for_sigkill():

@@ -6,7 +6,6 @@
 import json
 import hashlib
 from dataclasses import replace
-from pathlib import Path
 
 import pytest
 
@@ -16,12 +15,12 @@ from hfmodem.shrike.p4receiver import (
 )
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Stream, Tx
 from hfmodem.tests.shrike.p4_declared_clock_1111 import declared_time
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 
 
 def recording(arm):
-    path = ROOT / f'captures/onair-0929-{arm}'
+    path = CAPTURES / f'onair-0929-{arm}'
     if not (path / 'stream.flac').exists():
         pytest.skip(f'local {arm} recording absent')
     return (onair.session.load_wav(str(path / 'stream.flac'), FS),

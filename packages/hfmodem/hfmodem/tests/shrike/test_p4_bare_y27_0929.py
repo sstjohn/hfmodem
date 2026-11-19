@@ -6,7 +6,6 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
-from pathlib import Path
 import sys
 
 import numpy as np
@@ -24,9 +23,9 @@ from hfmodem.tests.shrike.test_p4turn import body, machine, word
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Stream, Tx
 from hfmodem.tests.shrike.test_p4_normal_short_0928 import decide, normal
 from hfmodem.winlink import B2FSession, MailClient, compose
+from hfmodem.tests.evidence import CAPTURES, RECORD
 
-ROOT = Path(__file__).resolve().parents[5]
-K0003 = ROOT/'working/p4-oracle/kiwi/20260924/7101500/seg-0003.wav'
+K0003 = RECORD/'working/p4-oracle/kiwi/20260924/7101500/seg-0003.wav'
 K0003_RATE, K0003_SHIFT_HZ = 11998.90779, 910.
 SID = b'[Pat-1.0.0-B2FHM$]\r;FW: W9SSJ\r;PR: 12345678\r'
 IDLE = b''
@@ -196,7 +195,7 @@ class Replay:
     """A recorded WS8EOC arm through the link driver and a B2F client."""
 
     def __init__(self, name, monkeypatch, *, breakin='y27'):
-        path = ROOT/f'captures/onair-0929-{name}'
+        path = CAPTURES/f'onair-0929-{name}'
         if not (path/'stream.flac').exists():
             pytest.skip(f'local September 29 {name} capture absent')
         recorded = json.loads((path/'p4-probe.json').read_text())['emissions']

@@ -16,6 +16,7 @@ from hfmodem.shrike.p4receiver import (
     Registered,
     Expect,
 )
+from hfmodem.tests.evidence import CAPTURES
 
 FS = 48000
 
@@ -230,12 +231,9 @@ def test_recorded_chirp_reader_is_opt_in_on_a_yielded_long_slot(enabled):
 
 def test_local_1228_replay_names_each_captured_answer_in_cycle():
     import json
-    from pathlib import Path
     from hfmodem.shrike import onair
 
-    root = Path(__file__).resolve().parents[5] / "captures/onair-0926-1228"
-    if not (root / "stream.flac").exists():
-        root = Path(__file__).resolve().parents[5].parents[2] / "captures/onair-0926-1228"
+    root = CAPTURES / "onair-0926-1228"
     if not (root / "stream.flac").exists():
         pytest.skip("local onair-0926-1228 stream.flac recording is absent")
     meta = json.loads((root / "p4-probe.json").read_text())

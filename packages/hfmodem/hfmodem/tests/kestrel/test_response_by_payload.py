@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 
 from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.timing import within
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
 from hfmodem.kestrel.vara.vara_arq import (
@@ -309,4 +310,4 @@ def test_the_fallback_stays_inside_the_per_burst_budget():
     t0 = time.perf_counter()
     hs.on_rx_audio(blob)
     dt = time.perf_counter() - t0
-    assert dt < 1.0, f"a 9 s burst cost {dt:.2f} s of the turnaround"
+    within(dt, "the turnaround a 9 s burst cost", at_most=1.0)

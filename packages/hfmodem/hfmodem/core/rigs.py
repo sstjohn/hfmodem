@@ -523,9 +523,9 @@ def flight_defaults(args):
 
 
 if __name__ == "__main__":
+    from . import config, hamlib
     path = os.environ.get("HFMODEM_STATION")
     if path:
-        from . import config
         station_cfg = config.load(path)
         name, profile = station_cfg.selected_rig, station_cfg.resolved_profile
     else:
@@ -541,3 +541,4 @@ if __name__ == "__main__":
     print(station_cfg.audio.input if path else profile.get("audio_device", ""))
     print(*ports, sep="\n")
     print(station_cfg.audio.output if path else profile.get("audio_device", ""))
+    print(hamlib.rigctld_port(rig=station_cfg.rig if path else None))

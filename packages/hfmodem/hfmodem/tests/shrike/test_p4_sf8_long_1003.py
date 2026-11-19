@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 from hashlib import sha256
-from pathlib import Path
 import subprocess
 from time import perf_counter
 
@@ -9,9 +8,9 @@ import numpy as np
 import pytest
 
 from hfmodem.shrike import p4frame, p4robustrx, p4rx, p4sf8rx, session
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
-STREAM = ROOT/'captures/onair-1002-2154/stream.flac'
+STREAM = CAPTURES/'onair-1002-2154/stream.flac'
 WAV_SHA = '6ad2b2cb24ca129a822ccf7cdb0f39e8ef7d088184daf582b20edf01d9e4374b'
 DATA_SHA = 'e8acf31f32a128b6d89a3bb2780cf3fa513014358934a4ba3f8966a922704a92'
 

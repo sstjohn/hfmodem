@@ -117,10 +117,15 @@ TOLERANCE = [
     (bw, start, kind, keyed, expected, next_level)
     for bw, start, kind, levels, expected, next_level in TOLERANCE for keyed in levels
 ])
-def test_tolerance_reads_only_its_own_level(bw, start, kind, keyed, expected, next_level):
+def test_tolerance_receive_side(bw, start, kind, keyed, expected, next_level):
     hs, io = receiver(bw, start)
     rx_nak(hs, kind)
-    assert hs._read_levels() == ((expected,) if expected > 4 else ())
+    candidates = {
+        ('500', 9): (9,), ('500', 6): (6,), ('500', 1): (),
+        ('2300', 13): (13, 12),
+        ('2300', 6): (6,),
+    }
+    assert hs._read_levels() == candidates[bw, expected]
     body = phy.vara_body(b'pin', hs.caller, level=4,
                          body_len=phy.body_size(bw, phy.level_key(bw, keyed)))
     if keyed > 4:
@@ -130,8 +135,10 @@ def test_tolerance_reads_only_its_own_level(bw, start, kind, keyed, expected, ne
     else:
         audio = VA.OF.data_over_tx(body, bw=bw, level=phy.level_key(bw, keyed))
         got = hs._peer_data_over(np.concatenate([np.zeros(4800), audio, np.zeros(4800)]))
-    assert bool(got) == (keyed == expected), io.msgs
-    if keyed != expected:
+    accepted = (keyed == expected if bw == '500'
+                else keyed in candidates[bw, expected] or keyed <= 4)
+    assert bool(got) == accepted, io.msgs
+    if not accepted:
         assert rx_nak(hs, 'M') == next_level
 
 
@@ -188,7 +195,7 @@ def test_refused_receiver_nak_and_silence_do_not_spend_a_step(bw, start, expecte
 
 
 @pytest.mark.parametrize('bw,start,expected,next_first', [
-    ('500', 13, 9, 7), ('2300', 16, 13, 10), ('2750', 17, 14, 11)])
+    ('500', 13, 9, 7), ('2300', 16, 13, 12), ('2750', 17, 14, 13)])
 def test_continue_starts_a_new_chain(bw, start, expected, next_first, render):
     hs, _ = sender(bw, start)
     assert tx_nak(hs, 'N') == expected
@@ -209,11 +216,12 @@ def test_missing_short_final_resends_at_the_same_ladder(bw, start, expected, ren
     assert phy.vara_payload(body, caller=hs.caller, body_len=len(body)) == b'last bytes'
 
 
-@pytest.mark.parametrize('bw,start,wrong', [('500', 13, 10), ('2300', 16, 12), ('2750', 17, 15)])
+@pytest.mark.parametrize('bw,start,wrong', [('500', 13, 10), ('2300', 16, 14), ('2750', 17, 15)])
 def test_expected_reader_ignores_an_off_level_decode(bw, start, wrong, monkeypatch):
     hs, io = receiver(bw, start)
     rx_nak(hs, 'N')
     expected, keyed = hs._expect_level, len(io.sent)
+    assert wrong not in hs._read_levels() and wrong not in hs._rx_retry_rates
     asked = []
 
     def decode(samples, bw, level, *args, **kwargs):

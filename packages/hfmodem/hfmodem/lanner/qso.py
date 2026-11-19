@@ -29,6 +29,7 @@ import numpy as np
 
 from hfmodem.core import posix, tx_events
 from hfmodem.core.audio import CARD_RATE_HZ, BurstInvalidated, StreamLane
+from hfmodem.core.waits import join, wait_until
 from hfmodem.lanner import fsk, ita2, rtty
 
 FS = CARD_RATE_HZ
@@ -129,14 +130,14 @@ class _Writer:
 
     def flush(self, timeout=None) -> bool:
         done = threading.Event()
-        return self.put(done.set, force=True) and done.wait(timeout)
+        return self.put(done.set, force=True) and (
+            done.wait() if timeout is None else wait_until(done.wait, time.monotonic() + timeout))
 
     def close(self, timeout) -> bool:
         if not self.closed:
             self._jobs.put(None)
         self.closed = True
-        self._thread.join(timeout)
-        return not self._thread.is_alive()
+        return join(self._thread, time.monotonic() + timeout)
 
 
 class _Contacts:
@@ -210,7 +211,7 @@ class _Contacts:
         the set-aside write failed or the disk outlasted `timeout`."""
         self._running = False
         self._wake.set()
-        self._thread.join(timeout)
+        join(self._thread, time.monotonic() + timeout)
         left = [record for _, record in list(self._held)]
         return left, ('' if self._thread.is_alive() else self._kept or '')
 
@@ -374,7 +375,7 @@ class Session:
         ready = threading.Event()
         if not self._recording_closed:
             self.recording.after_pending(ready.set)
-            if not ready.wait(10 if timeout is None else timeout):
+            if not wait_until(ready.wait, time.monotonic() + (10 if timeout is None else timeout)):
                 return False
         return all([self._contacts.flush(timeout), self._disk.flush(timeout),
                     self._pipe.flush(timeout)])
@@ -1056,7 +1057,9 @@ def parser():
     return ap
 
 
-def rigctld_dial(admit=lambda: True, *, port=4532):
+def rigctld_dial(admit=lambda: True, *, port=None):
+    from hfmodem.core.hamlib import rigctld_port
+    port = rigctld_port() if port is None else port
     try:
         with socket.create_connection(('127.0.0.1', port), timeout=0.5) as cat:
             if not admit():

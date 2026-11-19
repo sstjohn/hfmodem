@@ -10,6 +10,7 @@ separately; a station outside that measurement keys the link's eight-pair NAK.
 import numpy as np
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 from .test_compression import commit_bodies
 
 from hfmodem.kestrel.arq import phy
@@ -90,7 +91,9 @@ def test_initial_unread_over_keys_nothing_even_with_data_retries_disabled():
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_fresh_peer_idle_draws_called_keyed_generated_request(stream):
+def test_fresh_peer_idle_draws_called_keyed_generated_request(stream, monkeypatch):
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(VA, "time", SimpleNamespace(monotonic=lambda: 1000.0))
     hs, io = waiting()
     hs._undecoded_over()
     cue = np.concatenate((np.zeros(MK.FS // 2), idle(), np.zeros(MK.FS // 2)))
@@ -115,7 +118,9 @@ def test_foreign_peer_idle_does_not_solicit_our_recovery():
     assert hs._owed_block
 
 
-def test_raw_idle_without_complete_tail_and_guard_keys_nothing_yet():
+def test_raw_idle_without_complete_tail_and_guard_keys_nothing_yet(monkeypatch):
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(VA, "time", SimpleNamespace(monotonic=lambda: 1000.0))
     hs, io = waiting()
     hs._undecoded_over()
     tone = MK.synth_burst(hs.called, VF.for_bw(VF.SESSION_RESPONDER_IDLE, "2750"))
@@ -258,13 +263,15 @@ def test_partial_window_recovery_delivers_only_missing_suffix_once():
     assert b"".join(io.delivered) == (b"A" * 89 + b"B" * 89) * 2 + b"A" * 89 + b"C" * 89
 
 
-def test_explicit_unread_second_frame_cancels_held_positive_ack_of_prefix():
+def test_explicit_unread_second_frame_cancels_held_positive_ack_of_prefix(monkeypatch):
     """Peer idle cannot turn a known unread suffix into an accepted window.
 
     The first frame was already delivered while the peer was still keying.
     A CRC failure in its second frame makes the held positive answer unsafe;
     that prefix must survive recovery without reaching the host twice.
     """
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(VA, "time", SimpleNamespace(monotonic=lambda: 1000.0))
     hs, io = waiting()
     a, b = (phy.vara_body(x * 89, "W9SSJ", tail=0x81) for x in (b"A", b"B"))
     hs._deliver([a], hold=True)

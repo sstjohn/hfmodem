@@ -33,11 +33,11 @@ This display range does not assert the radio’s filter width. Packet timing and
 the dBFS scale stay fixed when zooming.
 
 
-The station service includes the logbook and VARA, PACTOR and ARDOP replay inspector
+The station service includes the logbook and PACTOR, VARA and ARDOP replay inspector
 on its configured port (8737 by default). The desk itself opens no radio devices.
 
 The default data root is `HFMODEM_DATA_DIR` (or `operator-data` in the checkout).
-Visit http://127.0.0.1:8737, expand a VARA, PACTOR or ARDOP QSO, and click **Inspect rehear**.
+Visit http://127.0.0.1:8737, expand a PACTOR, VARA or ARDOP QSO, and click **Inspect rehear**.
 
 Offline exports need neither a radio nor a running station:
 
@@ -59,7 +59,7 @@ Saving runs behind pending PCM on the recorder thread, away from modem and audio
 callbacks. Original session recordings and journals remain intact. A failed
 cutout is recorded in provenance and does not discard the contact or stop capture.
 Both console and station logbooks read these arms, export VARA HF ADIF, and use
-the ordinary VARA/PACTOR/ARDOP rehear and inspector paths. Incoming contacts carry
+the ordinary PACTOR/VARA/ARDOP rehear and inspector paths. Incoming contacts carry
 the local protocol role so TX/RX labels remain correct.
 
 Backfill older VarAC sessions once with:

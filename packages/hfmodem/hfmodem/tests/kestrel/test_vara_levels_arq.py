@@ -180,7 +180,7 @@ def test_multiwrite_close_selection_keeps_the_raw_named_level(ceilings, overs):
     hs._retry_data_over()
     hs._took_responder_nak()
     assert hs._tx_pending[2] == 13
-    assert hs._tx_resend == (15, (True,))
+    assert hs._tx_resend[:2] == (15, (True,))
     payload = phy.vara_payload(hs._tx_pending[0], caller=hs.caller,
                               body_len=len(hs._tx_pending[0]))
     assert payload + b''.join(hs._txq) == bytes(526)
@@ -206,7 +206,7 @@ def test_a_close_ack_confirms_a_jumped_level(bw, ceilings, overs):
     ceilings(tx=13)
     hs, _ = sending(bw, bytes(90))
     assert delivered(hs, 7) == 7
-    assert hs._tx_resend == (7, ())
+    assert hs._tx_resend[:2] == (7, ())
     hs._took_control_burst()
     assert hs._tx_pending is None
     assert hs._tx_requested == 7
@@ -255,7 +255,7 @@ def test_a_refused_nak_retry_preserves_the_unconfirmed_jump(ceilings, overs):
     assert hs._tx_pending == pending and hs._tx_resend == chain
     io.tx_went_out = lambda: True
     assert _nak(hs) == 6
-    assert hs._tx_resend == (7, (False,))
+    assert hs._tx_resend[:2] == (7, (False,))
 
 
 def test_a_naked_over_a_single_step_reached_falls_one(ceilings, overs):
@@ -1611,7 +1611,7 @@ def _over_idle(hs, clock):
     return hs.io.sent[sent:]
 
 
-def test_a_greeting_resent_above_the_ladder_is_ignored(clock):
+def test_a_greeting_resent_above_the_ladder_is_refused(clock):
     hs, io = _released_greeting()
     _hear(hs, _fsk_qrm(1))
     assert _nak_keyed(hs, io) and hs._expect_level == 5

@@ -159,6 +159,16 @@ class Candidate:
     """The coarse hypothesis at which the control and extent were qualified."""
 
 
+REACH_S = .22
+"""Audio a search hypothesis needs behind its start: the word's 21 symbols
+and one more."""
+WORD_REACH_S = .21
+"""The word's 21 symbols and nothing behind them. WS8EOC 2026-11-16 22:28Z
+answered our changeover TX[57] with a CS1 that started 6720 samples into a
+16844-sample read window and ended 44 samples before its close: complete, and
+out of `REACH_S`'s reach by 436."""
+
+
 def changeover(audio: np.ndarray, *, offsets=OFFSETS_HZ,
                can_decode=None) -> Candidate | None:
     """Search complete CS3 heads only; report body CRC when enough audio exists.
@@ -173,7 +183,8 @@ def changeover(audio: np.ndarray, *, offsets=OFFSETS_HZ,
 
 def control_signal(audio: np.ndarray, *, offsets=CONTROL_OFFSETS_HZ,
                    preferred_hz: float | None = None,
-                   preferred_at: int | None = None) -> Candidate | None:
+                   preferred_at: int | None = None,
+                   reach_s: float = REACH_S) -> Candidate | None:
     """Acquire any P3 answer during entry, including a bare acknowledgement.
 
     VE3KPG and KB5LZK on 2026-09-10 answered entry with CS1, not a
@@ -183,7 +194,8 @@ def control_signal(audio: np.ndarray, *, offsets=CONTROL_OFFSETS_HZ,
     cannot lower the coherent, adjacent-alignment or whole-burst requirements.
     """
     return _acquire(audio, offsets, range(len(rx._CS_TABLE)),
-                    preferred_hz=preferred_hz, preferred_at=preferred_at)
+                    preferred_hz=preferred_hz, preferred_at=preferred_at,
+                    reach_s=reach_s)
 
 
 AIM_BITS = 12
@@ -562,7 +574,7 @@ def _inside_burst(shifted: np.ndarray, at: int) -> bool:
 def _acquire(audio: np.ndarray, offsets, codes, *,
              preferred_hz: float | None = None,
              preferred_at: int | None = None,
-             can_decode=None) -> Candidate | None:
+             can_decode=None, reach_s: float = REACH_S) -> Candidate | None:
     if can_decode is None:
         can_decode = lambda: True
     if len(audio) < round(.23*FS) or not np.any(audio):
@@ -570,7 +582,7 @@ def _acquire(audio: np.ndarray, offsets, codes, *,
     # A caller passing a long recording must slice it into receive windows.
     if len(audio) > 4*FS:
         return None
-    found = _search(audio, offsets, codes, 21, round(.22*SEARCH_FS))
+    found = _search(audio, offsets, codes, 21, round(reach_s*SEARCH_FS))
     if found is None:
         return None
     starts, accepted, cis, qualities, diffs, trial_signs = (

@@ -11,6 +11,7 @@ import numpy as np
 
 from hfmodem.core import gil
 from hfmodem.core.recording import inherit_boundaries
+from hfmodem.core.waits import join, wait_until
 
 from .audio_runtime import AudioHostRuntime
 from .ui_channel import UIChannel
@@ -25,6 +26,10 @@ CHUNK = 4800
 # earliest measured peer answer. This station seam still needs physical timing
 # qualification; it does not infer the hardware's mute recovery from software.
 ECHO_GUARD = 4800
+# A receive backlog past this is logged, and again when it clears. Only the lag
+# past it ages VARA's frames: the freshness limits were proven with a healthy
+# host's lag inside them.
+LAG_NOTICE = RATE // 10
 
 
 class StationTransport(VaraIO):
@@ -58,6 +63,8 @@ class StationTransport(VaraIO):
         self._kiss_keyed = self._physical_keyed = False
         self._freshness = (0, 0)
         self._seen_flush = 0
+        self._lagging = False
+        self.burst_backlog = 0
         self.messages = deque(maxlen=128)
 
     def diagnostic(self, kind, *, authority=None, **fields):
@@ -100,6 +107,7 @@ class StationTransport(VaraIO):
         self._segment_start = None
         self._rx_end = floor
         self.burst_start = None
+        self.burst_backlog = 0
         self.input_clock = max(self.input_clock, floor)
         context = getattr(self, "receive_context", None)
         if context is not None:
@@ -277,8 +285,32 @@ class StationTransport(VaraIO):
         self.messages.append(message)
         log.debug('%s', message)
 
+    def delivery_lag(self, end):
+        """How many samples capture has run past ``end``: the queueing between
+        the card and the handshake, including the converter's input latency."""
+        now = end if self._rx_end is None else max(end, self._rx_end)
+        audio = self.link.station.audio
+        # A replay counts what it pumped rather than time, and a WASAPI anchor
+        # only estimates capture time; neither may age a frame.
+        limitation = getattr(audio, 'timestamp_limitation', 'replay')
+        if limitation is None:
+            now = max(now, audio.sample_now())
+        return max(0, int(now) - end)
+
+    def _backlog(self, end):
+        lag = self.delivery_lag(end)
+        return lag, max(0, lag - LAG_NOTICE)
+
+    def _note_lag(self, lag):
+        lagging = lag > LAG_NOTICE
+        if lagging != self._lagging:
+            self._lagging = lagging
+            self.log(f"receive backlog {lag / RATE:.3f} s" if lagging
+                     else f"receive backlog cleared, {lag / RATE:.3f} s")
+
     def next_rx_burst(self, timeout, hs=None):
         self.burst_start = None
+        self.burst_backlog = 0
         self._receive_frontier(hs)
         fed = 0
         deadline = time.monotonic()+timeout
@@ -290,6 +322,9 @@ class StationTransport(VaraIO):
                 raise ConnectionAbortedError('VARA station capture discontinuity/overflow')
             if self._bursts:
                 self.burst_start, burst = self._bursts.popleft()
+                # The stream's backlog at handover, not the bracket's: the
+                # hangover behind every bracket is in the limits as proven.
+                self.burst_backlog = self._backlog(self._rx_end)[1]
                 self._receive_frontier(hs)
                 return burst
             left = deadline-time.monotonic()
@@ -328,7 +363,9 @@ class StationTransport(VaraIO):
                 self._segmenter.capture_start = self._segment_start
                 context.feed(samples, at, sink=self.cq_sink)
             if hasattr(hs, 'rx_gap'):
-                hs.on_rx_stream(samples, sample_start=at)
+                lag, backlog = self._backlog(at + len(samples))
+                self._note_lag(lag)
+                hs.on_rx_stream(samples, sample_start=at, backlog=backlog)
             else:
                 hs.on_rx_stream(samples)
             if generation != self._rx_generation:
@@ -374,7 +411,7 @@ class StationVaraRuntime:
             self._calls.put_nowait(call)
         except queue.Full as error:
             raise TimeoutError('VARA owner retune queue is full') from error
-        if not call['done'].wait(timeout):
+        if not wait_until(call['done'].wait, time.monotonic() + timeout):
             # The callback owns this lock through completion. A running CAT
             # operation cannot be reported as cancelled while it still moves.
             if call['lock'].acquire(blocking=False):
@@ -491,8 +528,7 @@ class StationVaraRuntime:
     def stop(self):
         self.transport.stop.set()
         if self._thread is not None:
-            self._thread.join(30)
-            if self._thread.is_alive():
+            if not join(self._thread, time.monotonic() + 30):
                 raise RuntimeError('VARA station owner still emitting/retiring')
         else:
             self._retire()

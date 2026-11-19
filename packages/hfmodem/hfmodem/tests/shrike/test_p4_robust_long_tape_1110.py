@@ -9,7 +9,6 @@ from hashlib import sha256
 import json
 from io import BytesIO
 from math import gcd
-from pathlib import Path
 import subprocess
 import shutil
 import wave
@@ -21,9 +20,9 @@ from scipy.signal import fftconvolve, resample_poly
 
 from hfmodem.shrike import (p4coding, p4frame, p4oracle, p4robustlongtx as tx,
     p4robustrx, p4robusttx, p4rx, p4sf8rx, p4sig)
+from hfmodem.tests.evidence import OPERATOR_DATA, RECORD
 from .test_p4robustlongtx import quarter_turns, recover_audio_body
 
-ROOT = Path(__file__).resolve().parents[5]
 # Between prototype random/no-interleave maximum .242 and true minimum .712.
 BODY_MIN = .50
 CONTROL_MAX = .30  # Above the prototype's .242 maximum unrelated-body control.
@@ -137,7 +136,7 @@ CASES = [{'path': 'captures/onair-0929-0121/stream.flac',
   'cfo': 0.69,
   'station': 'VE3KPG',
   'header_gate': True},
- {'path': 'operator-data/captures/onair-20261027T064359603967Z-732431ae-9d5f-4908-b964-efb24ed92a98/stream.flac',
+ {'path': OPERATOR_DATA/'captures/onair-20261027T064359603967Z-732431ae-9d5f-4908-b964-efb24ed92a98/stream.flac',
   'sha256': '7ae4edaacd229a4fa7a6759d6add3e0042d5bb0cd26f664c95e34bfd1a4332b0',
   'onset': 3948607,
   'level': 4,
@@ -148,7 +147,7 @@ CASES = [{'path': 'captures/onair-0929-0121/stream.flac',
   'cfo': 4.952527899547475,
   'station': 'K4SPB',
   'header_gate': True},
- {'path': 'operator-data/captures/onair-20261102T052617935711Z-3ac21505-0157-4f8c-a9cf-53d23a48a95b/stream.flac',
+ {'path': OPERATOR_DATA/'captures/onair-20261102T052617935711Z-3ac21505-0157-4f8c-a9cf-53d23a48a95b/stream.flac',
   'sha256': 'c3cca4848106dcf21650d337d66800d6929c37cdd28cf41d0d72c9ba1bc6ac34',
   'onset': 2868405,
   'level': 2,
@@ -159,7 +158,7 @@ CASES = [{'path': 'captures/onair-0929-0121/stream.flac',
   'cfo': -2.2648775395228293,
   'station': 'K9KDJ',
   'header_gate': True},
- {'path': 'operator-data/captures/onair-20261102T052617935711Z-3ac21505-0157-4f8c-a9cf-53d23a48a95b/stream.flac',
+ {'path': OPERATOR_DATA/'captures/onair-20261102T052617935711Z-3ac21505-0157-4f8c-a9cf-53d23a48a95b/stream.flac',
   'sha256': 'c3cca4848106dcf21650d337d66800d6929c37cdd28cf41d0d72c9ba1bc6ac34',
   'onset': 3048405,
   'level': 2,
@@ -170,7 +169,7 @@ CASES = [{'path': 'captures/onair-0929-0121/stream.flac',
   'cfo': -2.2648775395228293,
   'station': 'K9KDJ',
   'header_gate': True},
- {'path': 'operator-data/captures/onair-20261102T052617935711Z-3ac21505-0157-4f8c-a9cf-53d23a48a95b/stream.flac',
+ {'path': OPERATOR_DATA/'captures/onair-20261102T052617935711Z-3ac21505-0157-4f8c-a9cf-53d23a48a95b/stream.flac',
   'sha256': 'c3cca4848106dcf21650d337d66800d6929c37cdd28cf41d0d72c9ba1bc6ac34',
   'onset': 3588405,
   'level': 2,
@@ -188,7 +187,7 @@ CHANNEL_ERROR_CASE = CASES.pop()
 
 @lru_cache(None)
 def checked_path(relative, expected):
-    path = ROOT/relative
+    path = RECORD/relative
     if not path.is_file():
         pytest.skip(f'required stock robust LONG recording absent: {relative}')
     h = sha256()

@@ -12,6 +12,7 @@ import pytest
 
 from hfmodem.shrike import onair, p4probe, p4robusttx, p4turn, pactor1
 from hfmodem.tests.shrike.test_p1_robust_0926 import FS, PACKET_N, SLOT_N
+from hfmodem.tests.evidence import CAPTURES
 
 FX = Path(__file__).parent / 'fixtures/p4-breakin'
 
@@ -128,7 +129,7 @@ def test_peer_breakin_reaches_link_before_a_p1_key(tmp_path, monkeypatch, route,
 
 def test_local_0927_breakin_leaves_the_p1_hold(monkeypatch):
     from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
-    recording = Path(__file__).resolve().parents[5] / 'captures/onair-0927-1003/stream.flac'
+    recording = CAPTURES / 'onair-0927-1003/stream.flac'
     if not recording.exists():
         pytest.skip('local September 27 flight capture absent')
     audio = onair.session.load_wav(str(recording), FS)

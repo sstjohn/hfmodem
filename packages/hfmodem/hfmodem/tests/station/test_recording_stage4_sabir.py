@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Sabir retains acquired sense and submitted output rather than rendered drafts."""
 import sys
+import time
 from types import SimpleNamespace as NS
 
 import numpy as np
@@ -24,7 +25,7 @@ def sabir(stage4, monkeypatch):
     monkeypatch.setattr(onair, 'arming_refusal', lambda *a: None)
     monkeypatch.setattr(onair, '_install_signals', lambda *a: None)
     monkeypatch.setattr(claim, 'received', lambda **k: NS(claim=None, opened=lambda: None, failed=lambda: None))
-    monkeypatch.setattr(radio, 'time', NS(sleep=lambda *a: None))
+    monkeypatch.setattr(radio, 'time', NS(sleep=lambda *a: None, monotonic=time.monotonic))
     burst = onair.Burst(np.array([0., 1., -.5, .25] * 60, np.float32), 'synthetic beacon', 500, 2500)
     monkeypatch.setattr(onair, '_burst', lambda args: burst)
     state = NS(writes=[], attempts=0, fault=None, busy=False, key=True, fail_write=None,

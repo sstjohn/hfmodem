@@ -30,7 +30,7 @@ from typing import NamedTuple
 
 from hfhost.config import ConfigError, build_section, choice
 
-from hfmodem.core import band, identification, levels
+from hfmodem.core import band, hamlib, identification, levels
 from hfmodem.core.config_validation import PROTOCOL_VALIDATORS, check_linking_protection, check_station_rig
 from hfmodem.core.regulatory import Control, Profile, profile
 from hfmodem.winlink.session import CLIENT_SID
@@ -112,7 +112,7 @@ class Rig:
     dial_max_age_s: float = 30.0
     max_watts: float | None = None
     host: str = "127.0.0.1"
-    port: int = 4532
+    port: int = hamlib.RIGCTLD_PORT
     mode: str = "PKTUSB"
     #: The CHANNEL CENTRE, as a gateway list publishes it. The dial is derived.
     centre_hz: int = 0
@@ -261,7 +261,7 @@ class Models:
 
 @dataclass(frozen=True, slots=True)
 class Voice:
-    # Models are local paths; setup fetches weights separately from the package.
+    # Speech models are local paths; language_model is a path or endpoint model ID.
     worker_python: str = ""
     recognition_model: str = ""
     synthesis_model: str = ""
@@ -269,6 +269,12 @@ class Voice:
     synthesis_voice: str = "am_michael"
     synthesis_speaker: int = 5
     language_model: str = ""
+    language_backend: str = "local"
+    language_base_url: str = "https://api.openai.com/v1"
+    language_api_key_env: str = "OPENAI_API_KEY"
+    language_timeout_s: float = 30.0
+    language_max_tokens: int = 2048
+    language_token_parameter: str = "max_completion_tokens"
     llama_server: str = "llama-server"
     drive: float = 0.6
     compression: str = "soft"
@@ -281,6 +287,35 @@ class Voice:
     voice_agc: int = 2
     id_mode: str = "voice"
     exchange: tuple[str, ...] = ("report", "location")
+
+    def __post_init__(self):
+        choice(self.language_backend, ('local', 'openai'), '[voice]', 'language_backend')
+        choice(self.language_token_parameter, ('max_completion_tokens', 'max_tokens'),
+               '[voice]', 'language_token_parameter')
+        if (isinstance(self.language_timeout_s, bool) or
+                not isinstance(self.language_timeout_s, (int, float)) or
+                not math.isfinite(self.language_timeout_s) or self.language_timeout_s <= 0):
+            raise ConfigError('[voice] language_timeout_s must be finite and positive')
+        if type(self.language_max_tokens) is not int or self.language_max_tokens <= 0:
+            raise ConfigError('[voice] language_max_tokens must be a positive integer')
+        for name in ('language_model', 'language_base_url', 'language_api_key_env'):
+            value = getattr(self, name)
+            if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
+                raise ConfigError(f'[voice] {name} must be a string without control characters')
+        if self.language_backend == 'openai':
+            from urllib.parse import urlsplit
+            try:
+                url = urlsplit(self.language_base_url)
+                valid = (url.scheme in ('http', 'https') and url.hostname and
+                         url.username is None and url.password is None and not url.query and not url.fragment and
+                         not any(c.isspace() for c in self.language_base_url) and
+                         (url.port is None or url.port > 0))
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ConfigError('[voice] language_base_url must be an HTTP(S) API base URL without credentials, query or fragment')
+            if not self.language_model.strip():
+                raise ConfigError('[voice] language_model must name an endpoint model')
 
 
 @dataclass(frozen=True, slots=True)
@@ -730,6 +765,7 @@ def parse(raw: dict, *, rig_name=None, environ=None) -> StationConfig:
             raise ConfigError("[rig]: filter_hz is [lo, hi] in whole Hz, lo below hi")
         rig_raw["filter_hz"] = tuple(lo_hi)
     rig = build_section(Rig, rig_raw, "[rig]", ptt=ptt)
+    rig = replace(rig, port=hamlib.rigctld_port(rig=rig, environ=environ))
     audio_raw = dict(body.get("audio", {}))
     known_chains = {r.get("audio_chain") for r in RIGS.values()} - {None}
     chains = _optional_tables(audio_raw.pop("chains", {}), known_chains, "[audio.chains]")

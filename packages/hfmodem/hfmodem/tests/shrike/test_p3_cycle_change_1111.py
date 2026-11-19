@@ -346,9 +346,9 @@ def test_collection_is_capped_at_ccol_independently_of_decision(
 ])
 def test_recorded_cs6_walk_preserves_long_control_boundaries(
         tmp_path, monkeypatch, capsys, capture, anchor, costs):
-    cap = evidence.RECORD / 'operator-data' / 'captures' / capture
+    cap = evidence.OPERATOR_DATA / 'captures' / capture
     identity = json.loads(evidence.require_input(cap / 'capture-identity.json').read_text())
-    log = evidence.require_input(evidence.RECORD / 'operator-data' / 'working'
+    log = evidence.require_input(evidence.OPERATOR_DATA / 'working'
                                  / capture / identity['transcript']['path']).read_text()
     assert re.findall(r'SLOT (\d+) IS GONE', log) == ['30', '33', '36']
     assert 'REGRID GAVE UP' in log

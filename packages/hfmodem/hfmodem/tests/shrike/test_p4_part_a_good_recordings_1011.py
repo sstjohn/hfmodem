@@ -6,13 +6,13 @@ import json
 import numpy as np
 from scipy.io import wavfile
 from scipy.signal import resample_poly, hilbert
-from hfmodem.tests.evidence import WORKING, CAPTURES, require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.shrike.p4receiver import P4Receiver, Clock, Expect, Emission, Role
 from hfmodem.shrike.p4observation import Kind, Registered, RegisteredObservation
 from hfmodem.shrike.p4turn import State, Proposal
 from hfmodem.tests.shrike.test_p4_part_a_1011 import setup
 from hfmodem.tests.shrike.test_p4turn import FS, word
-from hfmodem.tests.shrike.test_p4_bare_y27_0929 import K0003, ROOT as K0003_ROOT
+from hfmodem.tests.shrike.test_p4_bare_y27_0929 import K0003
 
 
 def synthetic_payload_ack(m, a, p):
@@ -25,7 +25,7 @@ def synthetic_payload_ack(m, a, p):
 
 
 def test_real_kiwi_long_y27_checked_body_payload_and_synthetic_ack():
-    path = require_input(WORKING / K0003.relative_to(K0003_ROOT / 'working'))
+    path = require_input(K0003)
     assert hashlib.sha256(path.read_bytes()).hexdigest() == '35070a38bfd877ee7fb7a91007809fb894b2a65b17405f1b1553ea4ea83fd4d4'
     _, pcm = wavfile.read(path, mmap=True)
     base, end, rate = 1529.406, 1537.2, 11998.90779

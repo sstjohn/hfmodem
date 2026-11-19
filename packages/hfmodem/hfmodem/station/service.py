@@ -22,6 +22,7 @@ import uuid
 
 from hfmodem.core import claim
 from hfmodem.core.operations import LeaseTimeout
+from hfmodem.core.waits import Timer, join
 from . import wire
 from .chat_transport import Events, MiB, TerminalResults, TokenBucket, encode_event
 from .sessions import Refused
@@ -280,7 +281,7 @@ class Service:
                         pass
                     sock.close()
 
-                timer = threading.Timer(max(0, 2 - (time.monotonic() - started)), interrupt)
+                timer = Timer(max(0, 2 - (time.monotonic() - started)), interrupt)
                 timer.daemon = True
                 timer.start()
                 connection.request('GET', wire.STATE)
@@ -503,8 +504,7 @@ class Service:
                 self._http.server_close()
             for thread in (self._worker, self._http_thread):
                 if thread is not None:
-                    thread.join(timeout)
-                    if thread.is_alive():
+                    if not join(thread, time.monotonic() + timeout):
                         raise LeaseTimeout(thread.name)
         except BaseException:
             if chat_failure is None:

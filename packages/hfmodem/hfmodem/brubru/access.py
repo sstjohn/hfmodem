@@ -12,10 +12,12 @@ from __future__ import annotations
 from collections import deque
 import random
 import threading
+import time
 
 import numpy as np
 
 from hfmodem.core.rates import CARD_RATE_HZ as RATE
+from hfmodem.core.waits import wait_until
 
 
 class Access:
@@ -151,7 +153,7 @@ class Access:
 
     def eligible(self, fault_serial=None, *, fresh_after=None, transmitting=False):
         """A short, nonblocking callback, also used after arbiter contention."""
-        if not self._lock.acquire(timeout=0.02):
+        if not wait_until(lambda r: self._lock.acquire(True, r), time.monotonic() + 0.02):
             return False
         try:
             if fresh_after is not None:

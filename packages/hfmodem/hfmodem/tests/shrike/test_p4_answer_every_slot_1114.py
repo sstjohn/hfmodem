@@ -10,7 +10,7 @@ import pytest
 
 from hfmodem.shrike.p4receiver import Kind, Registered, RegisteredObservation
 from hfmodem.shrike.p4turn import State
-from hfmodem.tests.evidence import RECORD, require_input
+from hfmodem.tests.evidence import OPERATOR_DATA, require_input
 from hfmodem.tests.shrike.test_p4_ack_toggle_1110 import registered
 from hfmodem.tests.shrike.test_p4_arm_replay_1112 import CAPTURES, replay
 from hfmodem.tests.shrike.test_p4_v53_hold_1107 import copy, irs, words
@@ -60,7 +60,7 @@ def test_irs_answer_tape_keys_both_live_unread_slots():
 
 @pytest.mark.parametrize('next_slot', ['gap', 'normal-unread', 'y27-unread'])
 def test_unread_opening_breakin_keeps_answering_until_a_body_is_read(next_slot):
-    capture = RECORD / 'operator-data/captures' / CAPTURES['ws8eoc-1114-breakin']
+    capture = OPERATOR_DATA / 'captures' / CAPTURES['ws8eoc-1114-breakin']
     tape = json.loads(require_input(capture / 'p4-probe.json').read_text())
     row = next(h for h in tape['heard'] if h['kind'] == 'word' and h['word'] == 'Y27'
                and not h['provisional'])
@@ -89,7 +89,7 @@ def test_unread_opening_breakin_keeps_answering_until_a_body_is_read(next_slot):
 
 
 def test_irs_answer_recorded_head_only_slots_repeat_the_held_answer():
-    capture = RECORD / 'operator-data/captures' / CAPTURES['ws8eoc-1114-hold']
+    capture = OPERATOR_DATA / 'captures' / CAPTURES['ws8eoc-1114-hold']
     tape = json.loads(require_input(capture / 'p4-probe.json').read_text())
     held = next(h for h in tape['heard'] if h['kind'] == 'body'
                 and h['onset_sample'] == 1308483)

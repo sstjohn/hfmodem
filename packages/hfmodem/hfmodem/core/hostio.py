@@ -12,6 +12,8 @@ import socket
 import threading
 import time
 
+from .waits import join, wait_until
+
 MAX_LINE = 4096
 MAX_PENDING = 64
 MAX_OUTPUT = 256 * 1024
@@ -75,7 +77,7 @@ def join_threads(threads, deadline):
     current = threading.current_thread()
     for thread in threads:
         if thread is not current:
-            thread.join(max(0.0, deadline - time.monotonic()))
+            join(thread, deadline)
     return all(not thread.is_alive() for thread in threads)
 
 
@@ -125,8 +127,7 @@ class Connection:
         deadline = time.monotonic()+timeout if deadline is None else deadline
         for worker in (self._writer, self._delivery_thread, self._opening_thread):
             if worker is not None and worker is not threading.current_thread():
-                worker.join(max(0., deadline-time.monotonic()))
-                if worker.is_alive():
+                if not join(worker, deadline):
                     raise RuntimeError('host socket worker did not retire')
 
     def _read_opening(self):
@@ -238,7 +239,7 @@ class Connection:
     def _sendall(self, data, *, draining):
         data = memoryview(bytes(data))
         deadline = time.monotonic() + STALL_S
-        if not self._send_lock.acquire(timeout=STALL_S):
+        if not wait_until(lambda r: self._send_lock.acquire(True, r), deadline):
             self.cancel()
             return
         stalled = False
@@ -376,7 +377,7 @@ def posted(post, fn, timeout=5.0, *, request=None):
                         if state == "pending":
                             state = "cancelled"
                             raise ConnectionAbortedError("host connection closed; command cancelled")
-    elif not done.wait(timeout):
+    elif not wait_until(done.wait, time.monotonic() + timeout):
         with lock:
             if state == "pending":
                 state = "cancelled"

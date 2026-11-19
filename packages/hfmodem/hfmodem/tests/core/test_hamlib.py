@@ -8,7 +8,28 @@ from types import SimpleNamespace
 
 import pytest
 
+from hfmodem.tests import hermetic
 from hfmodem.core import hamlib
+
+
+@pytest.mark.parametrize('bind', [None, '', '127.0.0.1'])
+def test_rigctld_bind_comes_only_from_environment(monkeypatch, bind):
+    monkeypatch.delenv('RIGCTLD_BIND', raising=False)
+    if bind is not None:
+        monkeypatch.setenv('RIGCTLD_BIND', bind)
+    expected = bind or None
+    assert hamlib.rigctld_bind() == expected
+    assert hamlib.rigctld_bind({}) is None
+    assert hamlib.rigctld_bind({'RIGCTLD_BIND': bind or ''}) == expected
+
+
+@pytest.mark.parametrize('bind', ['::1', '0.0.0.0', 'localhost'])
+def test_rigctld_bind_refuses_other_addresses(monkeypatch, bind):
+    monkeypatch.setenv('RIGCTLD_BIND', bind)
+    with pytest.raises(ValueError, match=r'RIGCTLD_BIND.*127\.0\.0\.1'):
+        hamlib.rigctld_bind()
+    with pytest.raises(ValueError, match=r'RIGCTLD_BIND.*127\.0\.0\.1'):
+        hamlib.rigctld_bind({'RIGCTLD_BIND': bind})
 
 
 @pytest.fixture
@@ -160,6 +181,7 @@ def test_real_dummy_rigctld():
     with socket.socket() as reservation:
         reservation.bind(('127.0.0.1', 0))
         port = reservation.getsockname()[1]
+    hermetic.guard.own_port(port)
     proc = hamlib.spawn_rigctld(['-m', '1', '-t', str(port), '-T', '127.0.0.1'],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:

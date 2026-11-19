@@ -93,7 +93,7 @@ def test_recovery_finishes_the_qsy_delivery_without_duplicate_bytes(clock):
     peer._link_high_speed = True
     peer._start_compression('OFF')
     peer._expect_level = 2
-    peer._rx_resend, peer._rx_failed = (3, (False,)), True
+    peer._rx_resend, peer._rx_failed = (3, (False,), None), True
     peer._answer_owed, peer._owed_block = A._OWED_OVER, True
     sent_at = len(tx.sent)
     feed(sender, clock, reply())

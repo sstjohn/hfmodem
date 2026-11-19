@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from scipy.signal import hilbert
 
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.core import wav
 from hfmodem.shrike import onair, p4chirp, p4chirprx, p4oracle, p4robusttx, p4words
 from hfmodem.shrike.p4receiver import P4Receiver
@@ -129,7 +129,7 @@ def test_chirp_counter_payload_repeat_and_slot_are_independent():
 
 
 def test_2213_scripted_continuation_uses_only_unacked_bytes():
-    audio = wav.read(require_input(ROOT/'captures/onair-0930-2213/stream.flac'), FS)
+    audio = wav.read(require_input(CAPTURES/'onair-0930-2213/stream.flac'), FS)
     # The measured 1 Hz is X27's carrier; word_at takes the body reference.
     ack = p4oracle.word_at(audio, FS, 0, 32.194,
                            cfo_hz=1.-p4words.CARRIER_HZ['X27'])
@@ -193,7 +193,7 @@ def test_o0802_render_matches_crc_marker_lanes_and_word_timing(slot, marker, upp
 
 @pytest.mark.parametrize('at,repeat,upper', [(39.750, False, False), (43.502, True, True), (54.750, True, False)])
 def test_2206_marker_is_repeat_flag_not_lane_order(at, repeat, upper):
-    path = ROOT/'captures/onair-0930-2206/stream.flac'
+    path = CAPTURES/'onair-0930-2206/stream.flac'
     require_input(path)
     audio = wav.read(path, FS)
     h = p4chirprx.acquire_header(audio, nominal_sample=round(at*FS), frequency_offset=.44)
@@ -225,7 +225,7 @@ def witness_words(capture):
 
 
 def replay(monkeypatch, arm, *, witness=False):
-    capture = ROOT/f'captures/onair-0930-{arm}'
+    capture = CAPTURES/f'onair-0930-{arm}'
     require_input(capture/'stream.flac')
     require_input(capture/'p4-probe.json')
     require_input(ROOT/'working/p4-plan-0930/stall-bisect/drive.py')
@@ -321,7 +321,7 @@ def test_2153_witness_u27_admits_crc_valid_data_in_driver(monkeypatch):
 
     # The fixed tape cannot answer our earlier changed emission. Independently
     # pin its witness U27 with a scripted final-v53 prefix on the same clock.
-    at, full, early = witness_words(ROOT/'captures/onair-0930-2153')[-1]
+    at, full, early = witness_words(CAPTURES/'onair-0930-2153')[-1]
     from hfmodem.shrike.p4observation import Registered, RegisteredObservation
     m, a = machine(data='chirp')
     a.on_host_data(MAIL)

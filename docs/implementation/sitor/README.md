@@ -32,9 +32,8 @@ corresponds to a 516.3 kHz USB dial.
 ## Scope and evidence
 
 The library includes waveform generation for RTTY and collective SITOR-B.
-This does not turn a passive monitor into a transmitter. SITOR-A ARQ,
-selective Mode-B addressing and a two-way console terminal are outside these
-entry points. NAVTEX parsing does not certify a bulletin's operational accuracy.
+The monitors only receive; `console rtty qso` is the two-way RTTY
+terminal. SITOR-A ARQ and selective Mode-B addressing are not provided. NAVTEX parsing does not certify a bulletin's operational accuracy.
 
 `tests/lanner/` covers the character tables, modulation/demodulation, stream
 boundaries, tone/sample offsets, noise, time diversity and bulletin assembly.

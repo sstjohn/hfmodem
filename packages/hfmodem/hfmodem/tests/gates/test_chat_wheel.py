@@ -42,6 +42,9 @@ def test_installed_chat_wheel_without_textual(tmp_path):
     path = os.pathsep.join(d for d in os.environ.get('PATH', '').split(os.pathsep)
                            if not shutil.which('cargo', path=d))
     env = dict(os.environ, PATH=path, PIP_NO_INDEX='1', PIP_DISABLE_PIP_VERSION_CHECK='1')
+    # A native run's HFMODEM_NATIVE=1 would pull in setuptools-rust, which the base
+    # interpreter need not have.
+    env.pop('HFMODEM_NATIVE', None)
     # setuptools-rust, loaded by every setuptools build, probes for a Rust toolchain.
     hermetic.guard.admit(['rustc'], env)
     result = subprocess.run([sys._base_executable, '-m', 'pip', 'wheel', '--no-index',

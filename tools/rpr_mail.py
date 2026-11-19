@@ -13,6 +13,7 @@ import sys
 import tomllib
 
 from hfmodem.core.pipeio import Reader
+from hfmodem.core.hamlib import rigctld_port
 
 
 def toml_value(value):
@@ -61,7 +62,7 @@ def free_port():
         return sock.getsockname()[1]
 
 
-def derive_station(source, centre, directory):
+def derive_station(source, centre, directory, *, port=None):
     body = tomllib.loads(Path(source).read_text(encoding='utf-8'))
     station = body.setdefault('station', {})
     station['port'] = free_port()
@@ -70,7 +71,8 @@ def derive_station(source, centre, directory):
     for field, variable in (('mycall', 'MYCALL'), ('idcall', 'IDCALL')):
         if variable in os.environ:
             station[field] = os.environ[variable]
-    body.setdefault('rig', {}).update(centre_hz=centre, cat='rigctld', host='127.0.0.1', port=4532)
+    body.setdefault('rig', {}).update(centre_hz=centre, cat='rigctld', host='127.0.0.1',
+                                      port=rigctld_port(source) if port is None else port)
     audio = body.setdefault('audio', {})
     audio['capture_dir'] = str(directory)
     for chain in audio.get('chains', {}).values():
@@ -86,11 +88,11 @@ def derive_station(source, centre, directory):
     return body
 
 
-def prepare(source, centre, directory, *, send=None, to='', subject=''):
+def prepare(source, centre, directory, *, port=None, send=None, to='', subject=''):
     from hfmodem.core import config
     from hfmodem.winlink import load_outbound
     directory = Path(directory).resolve()
-    body = derive_station(source, centre, directory)
+    body = derive_station(source, centre, directory, port=port)
     for path in send or []:
         load_outbound(path, body['station']['mycall'], to=to, subject=subject)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -223,6 +225,7 @@ def main():
     prep.add_argument('source', type=Path)
     prep.add_argument('centre', type=int)
     prep.add_argument('directory', type=Path)
+    prep.add_argument('--rigctld-port', type=int)
     mail_flags(prep)
     run = sub.add_parser('run')
     run.add_argument('path', type=Path)
@@ -234,7 +237,7 @@ def main():
     bound.add_argument('--cwid-optional', action='store_true')
     args = parser.parse_args()
     if args.action == 'prepare':
-        prepare(args.source, args.centre, args.directory, send=args.mail_send,
+        prepare(args.source, args.centre, args.directory, port=args.rigctld_port, send=args.mail_send,
                 to=args.mail_to, subject=args.mail_subject)
     elif args.action == 'stop-bound':
         print(stop_bound(args.path, cwid_optional=args.cwid_optional))

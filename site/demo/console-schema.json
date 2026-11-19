@@ -2688,7 +2688,7 @@
           "nargs": null,
           "type": "str",
           "action": "_StoreAction",
-          "default": "parity",
+          "default": "inverted",
           "const": null,
           "choices": [
             "parity",
@@ -2708,7 +2708,7 @@
           "nargs": null,
           "type": "str",
           "action": "_StoreAction",
-          "default": "none",
+          "default": "k9",
           "const": null,
           "choices": [
             "none",
@@ -4798,7 +4798,7 @@
           "nargs": null,
           "type": "str",
           "action": "_StoreAction",
-          "default": "parity",
+          "default": "inverted",
           "const": null,
           "choices": [
             "parity",
@@ -4818,7 +4818,7 @@
           "nargs": null,
           "type": "str",
           "action": "_StoreAction",
-          "default": "none",
+          "default": "k9",
           "const": null,
           "choices": [
             "none",

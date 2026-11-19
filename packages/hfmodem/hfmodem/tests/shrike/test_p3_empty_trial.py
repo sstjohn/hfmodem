@@ -77,7 +77,7 @@ def test_refused_deferred_trial_does_not_spend_maxtry():
 
 def test_onair_1002_2057_controls_end_the_sl3_loop():
     meta = json.loads((FIXTURE / 'controls.json').read_text())
-    path = evidence.TREE / 'captures' / meta['recording']
+    path = evidence.CAPTURES / meta['recording']
     if not path.is_file():
         path = evidence.CAPTURES / meta['recording']
     if not path.is_file():

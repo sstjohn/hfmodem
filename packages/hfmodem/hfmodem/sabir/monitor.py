@@ -33,6 +33,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
@@ -40,6 +41,7 @@ import numpy as np
 
 from hfmodem.core import claim
 from hfmodem.core.native import NativeSpawnError, spawn_native
+from hfmodem.core.waits import join
 from hfmodem.sabir import offair
 from hfmodem.sabir.arq import wire
 from hfmodem.sabir.arq.fsm import ArqConfig
@@ -374,8 +376,7 @@ def device_chunks(device: str) -> Iterator[np.ndarray]:
                     yield chunk
             finally:
                 _stop_capture(proc)
-                reader.join(timeout=2)
-                if reader.is_alive():
+                if not join(reader, time.monotonic() + 2):
                     raise claim.ClaimError("capture diagnostic reader did not stop")
                 for stream in (proc.stdin, proc.stdout, proc.stderr):
                     stream.close()

@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from hfmodem.core import gil
 from hfmodem.core.identification import CallIdentity
 from hfmodem.core.operations import LeaseTimeout
+from hfmodem.core.waits import join, wait_until
 
 from .arq import State, CONTYPE_ACCEPTS, parse_connect_arg
 from .station_io import StationInput
@@ -106,7 +107,7 @@ class StationPtcRuntime:
         if self._thread is None:
             self.start()
         self._serve.set()
-        if not self._ready.wait(5):
+        if not wait_until(self._ready.wait, time.monotonic() + 5):
             self.stop()
             raise TimeoutError('PTC station endpoint startup timed out')
         if self.failure is not None:
@@ -153,8 +154,7 @@ class StationPtcRuntime:
                 self._port.cancel()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(5)
-            if thread.is_alive():
+            if not join(thread, time.monotonic() + 5):
                 raise LeaseTimeout('PTC owner did not retire; station containment required')
 
     def _other_active(self):

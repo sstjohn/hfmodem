@@ -12,7 +12,8 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import count
 from time import monotonic
-from .p4observation import Kind, Registered, RegisteredObservation, RESPONSE_S, WORD_HORIZON_S
+from .p4observation import (Kind, PEER_WORD_CFO_HZ, Registered, RegisteredObservation,
+                            RESPONSE_S, WORD_HORIZON_S)
 from .p4frame import Status
 from .p4host import P4LateFrame, P4StreamFailure, observed_extension, source_payload
 from .p4credit import ReceiptContext, SourceReceipt
@@ -224,6 +225,7 @@ class P4Turn:
         v53_hold=24,
         y27_first_body="c0",
         turn_entry="current",
+        ack_flip=0,
         peer_ack=None,
         train_policy="repeat",
         wall_clock=monotonic,
@@ -257,6 +259,10 @@ class P4Turn:
             raise ValueError('unknown P4 turn entry')
         self.turn_entry = turn_entry
         self._turn_body = self._turn_values = None
+        if ack_flip < 0:
+            raise ValueError('P4 ack flip count must be nonnegative')
+        self.ack_flip = ack_flip
+        self._ack_streak = None
         if v53_hold < 0:
             raise ValueError('P4 v53 hold bound must be nonnegative')
         if train_policy not in ("repeat", "passive"):
@@ -379,7 +385,11 @@ class P4Turn:
         self.acked_counter = None
         self.link_events = []
         self._opening = False
+        # Set by the radio while a robust-answered gateway still repeats its entry.
+        self.call_held = False
         self._opening_unread_head = None
+        self._opening_breakin_head = None
+        self._opening_v27 = None
         self._opening_wait = False
         self._opening_end = None
         self._opening_wall_end = None
@@ -517,6 +527,8 @@ class P4Turn:
                 words.update(self.ladder_admit)
             if self._opening:
                 words.update(('T27', 'W27', 'X27'))
+            if self._repeating_opening_breakin():
+                words.add('V27')
             if self.ladder[self.index] in (49, 53) or self._sl5_turn():
                 words.update(('X27', 'V27', 'T27', 'U27'))
         elif (self.state in (State.ISS_DATA, State.ISS_DATA_ACK)
@@ -621,7 +633,12 @@ class P4Turn:
         self._blocked_redue = False
         due = now if exact else (max(now + self.lead, self.next_raster(now))
                                  if self.last else now + self.lead)
-        if not exact and self._peer_holds_turn(now):
+        granted = self._emissions.get(ctx.grant_at)
+        # VE3KPG 1116 76.614: after our V27 grant the peer keyed its empty 0x40
+        # and went on keying every 1.25 s through our 0x20 body and v37s. A
+        # word grant hands over the turn, so the close asks for it back.
+        word_grant = exact and granted is not None and granted.kind == Kind.WORD
+        if word_grant or not exact and self._peer_holds_turn(now):
             # K4MSU 05:05Z 88.781: a 0x20 keyed into the peer's own ISS slots.
             # The close asks for the turn first, and keys 0x20 once granted.
             self._closing_failure = self._close_resumed_in_peer_turn = True
@@ -1015,7 +1032,19 @@ class P4Turn:
         return (self._data_packet is not None
                 and (obs.word == self._expected_data_ack()
                      or self._data_packet.kind == Kind.LONG
-                     and obs.word == "U27" and self.iss_u27 == "ack"))
+                     and obs.word == "U27" and self.iss_u27 == "ack"
+                     or self._turn_body_v27(obs)))
+
+    def _turn_body_v27(self, obs):
+        """k0003 1460.934-1464.696: N9VC answered KY2D's first body of a turn
+        with V27 and KY2D went on 13, 60 and its long. Ours drew V27 in every
+        slot (WS8EOC and VE3KPG 11-16, K4MSU 11-14 and 11-17), so under the
+        ladder entry V27 acks it. The long then runs straight on at c1: KY2D's
+        1464.696 counter is unread (U0 sec. 1), and its one decoded turn long,
+        1491.503 after body and v61, is c1 (INFERRED)."""
+        return (self.turn_entry == 'ladder' and obs.word == 'V27' and not obs.weak
+                and self.data_kind == Kind.LONG and self._first_data
+                and self._data_packet.kind == Kind.BODY)
 
     def _expected_data_ack(self, *, idle=False):
         packet = self.last if idle else self._data_packet
@@ -1810,6 +1839,10 @@ class P4Turn:
                     and obs.extent_s is not None
                     and abs(obs.stream_sample - self._opening_unread_head) < self.fs//10):
                 self._opening_unread_head = None
+            if (self._opening_breakin_head is not None and obs.word == 'Y27'
+                    and obs.extent_s is not None
+                    and abs(obs.stream_sample - self._opening_breakin_head) < self.fs//10):
+                self._opening_breakin_head = None
             if (
                 obs.stream_sample in self.pending
                 and obs.stream_sample not in self._decided
@@ -1924,6 +1957,8 @@ class P4Turn:
             if reg.replaced and reg.replaced.word == "Y27":
                 self._blocked_redue = False
             return
+        if self._repeating_opening_breakin() and self._opening_turn(reg, now):
+            return
         if obs.unexpected and reg.outcome != Registered.EXPIRED:
             self.weak_ack = None
             return
@@ -1955,7 +1990,7 @@ class P4Turn:
             if obs.frame is None:
                 return
             if obs.kind == Kind.BODY and not obs.provisional and not obs.weak:
-                self._opening_unread_head = None
+                self._opening_unread_head = self._opening_breakin_head = None
             if obs.kind == Kind.LONG and self.sf8_eligible is not None and not self.sf8_eligible(obs):
                 return
             if (self.close_context is not None and self.state in (State.ISS_CLOSE, State.IRS_ANSWER)
@@ -2159,7 +2194,9 @@ class P4Turn:
         if obs.word == "Y27":
             if self.state == State.ISS_CLOSE and not close_request:
                 return
-            self._blocked_redue = True
+            # As IRS a weak head cannot hold its slot for a body (K4MSU 1116 41.006
+            # keyed nothing); the slot's silence answer repeats the held one.
+            self._blocked_redue = not (obs.weak and self.state == State.IRS_ANSWER)
             if obs.stream_sample not in self._decided:
                 pending = self.pending.setdefault(
                     obs.stream_sample, {"accepted": False, "text": False}
@@ -2474,11 +2511,20 @@ class P4Turn:
         obs = reg.observation
         return (obs.kind == Kind.WORD and obs.word == "V27" and not obs.provisional and not obs.weak
                 and self._requesting() and reg.responds_to == self.last.stream_sample
+                and self._on_peer_carrier(obs)
                 and (not self._long_peer_open() or not obs.unexpected
                      and reg.outcome in (Registered.NEW, Registered.CONFIRMED,
                                          Registered.ENRICHED, Registered.EXTENDED)
                      and (obs.extent_s is not None and obs.extent_s >= .240
                           or obs.extent_s is None and obs.word_span_supported)))
+
+    def _on_peer_carrier(self, obs):
+        """K4MSU 1116 170.352: a V27 113 Hz off the peer's chirps took the turn."""
+        packet = next((r.observation for r in reversed(self.events)
+                       if r.observation.kind not in (Kind.WORD, Kind.SHORT)
+                       and not r.observation.provisional), None)
+        return (packet is None or abs(obs.cfo_hz - p4words.CARRIER_HZ['V27'] - packet.cfo_hz)
+                <= PEER_WORD_CFO_HZ)
 
     def _take_breakin_turn(self, reg, now):
         self.link_events.append(dict(event='turn', at=reg.observation.stream_sample,
@@ -2728,6 +2774,50 @@ class P4Turn:
                 and self._opening_unread_head is not None
                 and self.last is not None and self.last.purpose == 'repeat-request')
 
+    def _repeating_opening_breakin(self):
+        """Our repeat word stands for an opening break-in whose form is still unknown."""
+        return (self.state == State.ISS_LADDER and self._opening and self.first_body
+                and self.normal_ack in ('toggle', 'x27')
+                and self._opening_breakin_head is not None
+                and self.last is not None and self.last.kind == Kind.WORD
+                and self.last.purpose == 'repeat-request')
+
+    def _opening_turn(self, reg, now):
+        """KO4HJO 1117 30.358-46.609: the gateway left its unread greeting and
+        keyed V27 on our repeat word's raster every cycle. A run of two hands
+        us the turn, as a peer V27 after our answer word does."""
+        obs = reg.observation
+        if (not self._bare_word(obs) or obs.word != 'V27' or obs.provisional or obs.weak
+                or reg.outcome in (Registered.EXPIRED, Registered.DUPLICATE)
+                or not any(e.kind == Kind.WORD and e.purpose == 'repeat-request'
+                           and self._in_answer_slot(obs.stream_sample, e, repeated=True)
+                           for e in self._emissions.values())):
+            return False
+        prior = self._opening_v27
+        if prior is not None and abs(obs.stream_sample - prior) < self.fs//10:
+            return True
+        self._opening_v27 = obs.stream_sample
+        cycle = round(1.25*self.fs)
+        if prior is None or abs(obs.stream_sample - prior - cycle) > round(.035*self.fs):
+            return True
+        self._opening = False
+        self.ladder = self._payload_ladder
+        self.index = 0
+        self.link_events.append(dict(event='turn', at=obs.stream_sample, word=obs.word,
+                                     responds_to=reg.responds_to))
+        due = self._turn_raster(now)
+        if not self.sends_data:
+            self._advance(due)
+        elif self._bytes_waiting():
+            self._begin_data_turn(due, word_yield=True)
+        elif self._closing_failure or self.app_done or self._handback_attempted:
+            # A failing or finished session closes; one hand-back per turn.
+            self._data(due)
+        else:
+            self._body(due, 0x40, State.ISS_HANDBACK)
+            self._hold_until = due + round(4*1.25*self.fs)
+        return True
+
     def _answer_unresolved(self, due, incoming, now, head=None):
         if (self._next is not None and self._next.current_slot_accepted
                 or self._past(now, due) or self._long_owns_answer(due)):
@@ -2760,6 +2850,7 @@ class P4Turn:
                               if e.kind == Kind.SHORT)
             self._opening_unread_head = (head.stream_sample
                 if first_stage and head.extent_s is None else None)
+            self._opening_breakin_head = head.stream_sample if head.extent_s is None else None
             word = (('X27' if self.first_ack == 'V27' else 'V27') if self.normal_ack == 'toggle'
                     else 'V27' if self.normal_ack == 'x27' else 'U27')
             self._next = Proposal(Kind.WORD, due, word=word, state=None,
@@ -3173,6 +3264,15 @@ class P4Turn:
         if (self._ack_chain is not None and self._ack_epoch == self._receive_epoch
                 and counter == self._ack_chain[0]):
             word = self._ack_chain[1]
+            streak = self._ack_streak
+            if (self.ack_flip and streak is not None
+                    and streak[:2] == ((status.byte, obs.frame.data), word)
+                    and streak[2] >= self.ack_flip):
+                # WS8EOC 11-16 22:08Z held c3 under V27 x41 and K4MSU 22:11Z
+                # c0 under X27 x10; the partner word moved the same gateway.
+                partner = (self._ack_partner(obs.kind, self._packet_form(obs))
+                           if word == 'X27' else 'X27')
+                return partner, f'flip after {streak[2]} repeats under {word}'
             return word, f'repeat keeps {word}'
         if self._chain_starts(self._packet_form(obs)):
             return self.first_ack, 'chain start'
@@ -3442,6 +3542,11 @@ class P4Turn:
                   and proposal.receive_epoch == self._receive_epoch
                   and proposal.word in ('X27', 'V27', 'T27', 'U27')):
                 self._ack_chain = proposal.ack_identity[0] & 3, proposal.word
+                streak = self._ack_streak
+                self._ack_streak = (
+                    (proposal.ack_identity, proposal.word, streak[2] + 1)
+                    if streak is not None and streak[:2] == (proposal.ack_identity, proposal.word)
+                    else (proposal.ack_identity, proposal.word, 0))
                 self._ack_form = answer[4]
                 self._ack_epoch = proposal.receive_epoch
                 self._ack_boundary = False
@@ -3647,12 +3752,18 @@ class P4Turn:
             elif self.state != State.ISS_GRANT:
                 self.link_down("retry budget exhausted")
             return
+        # A gateway still in its call phase has read none of our shorts. Stock
+        # leaves it on v6/A (KF7RSF 10-01); there is no packet for B to repeat.
+        held = self._opening and self.call_held and 6 in self.ladder
+        if held:
+            self.index = self.ladder.index(6)
         self._next = replace(
             self.last,
             value=self.ladder[self.index] if self._opening else self.last.value,
             index=self.index if self._opening else self.last.index,
             stream_sample=at,
             header=(
+                "A" if held else
                 "B"
                 if self.last.kind == Kind.SHORT and self.last.value != 37
                 or self.last.kind == Kind.NORMAL
@@ -3744,6 +3855,10 @@ class P4Turn:
                 self._next = self._held_proposal(due)
                 if self._unread_opening_breakin():
                     self._next = replace(self._next, state=None)
+        elif self._repeating_opening_breakin():
+            # KO4HJO 1117 26.931: one repeat word, then sixteen silent slots.
+            self._next = replace(self.last, repeat=True, stream_sample=(
+                answer_due if answer_due is not None else self.next_raster(at)))
         elif self.state not in (State.ISS_HOLD, State.IRS_YIELD, State.DOWN):
             self._repeat(at)
         if expired is not None and self._next is not None:

@@ -40,6 +40,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from hfmodem.core import band, claim, hamlib
 from hfmodem.core.audio import timestamp_limitation
+from hfmodem.core.hamlib import rigctld_port
 from hfmodem.core.native import NativeChild, spawn_native
 from hfmodem.core.rigs import RIGS
 
@@ -77,7 +78,6 @@ SLIP_S = 1.0
 # baud unless --rig-baud overrides.
 RIG_MODELS = {"g90": 3088, "x6100": RIGS["x6100"]["model"], "ft891": 1036}
 RIG_BAUD = {"x6100": RIGS["x6100"]["baud"]}
-RIGCTLD = ("127.0.0.1", 4532)
 MIN_PASSBAND = 2700
 
 DEVICE_HELP = "capture input: a name as `devices` prints it, or its index there"
@@ -457,21 +457,24 @@ def cmd_check(args: argparse.Namespace) -> None:
 
 
 def start_rigctld(model: int, device: str, baud: int | None = None, *, claim_fd, log, children) -> NativeChild:
+    endpoint = ('127.0.0.1', rigctld_port())
     try:
         exe = hamlib.rigctld_path()
     except FileNotFoundError:
         die("rigctld not found — install hamlib, export HAMLIB_BIN=<bin dir of "
             "your build>, or start it yourself and pass --rigctld host:port")
-    cmd = [exe, "-m", str(model), "-r", device, "-t", str(RIGCTLD[1]),
+    cmd = [exe, "-m", str(model), "-r", device, "-t", str(endpoint[1]),
            "--set-conf=ptt_type=None"]
     if baud:
         cmd += ["-s", str(baud)]
+    if bind := hamlib.rigctld_bind():
+        cmd += ['-T', bind]
     proc = spawn_native(cmd, claim_fd=claim_fd, long_lived=True, device=device)
     children.append((proc, drain_native(proc, log)))
     for _ in range(20):
         time.sleep(0.25)
         try:
-            with socket.create_connection(RIGCTLD, timeout=1):
+            with socket.create_connection(endpoint, timeout=1):
                 return proc
         except OSError:
             continue
@@ -827,7 +830,7 @@ def _record(args, descriptor, children, log, cleanup):
 
         if args.rigctld:
             host, _, port = args.rigctld.partition(":")
-            hostport = f"{host}:{int(port or RIGCTLD[1])}"
+            hostport = f"{host}:{int(port) if port else rigctld_port()}"
         else:
             name = args.rig_model.lower()
             model = RIG_MODELS.get(name, args.rig_model)
@@ -836,7 +839,7 @@ def _record(args, descriptor, children, log, cleanup):
             baud = args.rig_baud or RIG_BAUD.get(name)
             start_rigctld(int(model), args.rig_device, baud, claim_fd=descriptor,
                         log=log, children=children)
-            hostport = f"{RIGCTLD[0]}:{RIGCTLD[1]}"
+            hostport = f"127.0.0.1:{rigctld_port()}"
         rig = Rig(hostport, armed=False, log=print)
         cleanup.callback(rig.shutdown)
         if args.set_freq:

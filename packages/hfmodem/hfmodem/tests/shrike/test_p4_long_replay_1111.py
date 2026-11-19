@@ -23,9 +23,10 @@ from scipy.io import wavfile
 from scipy.signal import hilbert, resample_poly
 
 from hfmodem.core import wav
-from hfmodem.shrike import compress, onair, p4frame, p4host, p4longnative, p4turn
+from hfmodem.shrike import compress, onair, p4frame, p4host, p4turn
 from hfmodem.shrike.p4budget import LongDeadline
 from hfmodem.shrike.p4receiver import Clock, Expect, Kind, P4Receiver, Registered
+from hfmodem.tests import native as native_helpers
 from hfmodem.tests.evidence import RECORD, require_input
 from hfmodem.tests.shrike.test_p4_bare_y27_0929 import K0003
 from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
@@ -208,8 +209,7 @@ def test_recorded_long_identities_through_real_receiver(tape):
 @pytest.mark.wall_clock
 @pytest.mark.parametrize('tape', TAPES)
 def test_warm_recorded_final_callback_publication_budget(tape):
-    if p4longnative.backend is None:
-        pytest.skip('pure-Python LONG decode measured over the publication budget; the native backend meets it')
+    native_helpers.p4long()
     # Warm imports/native tables and the actual frontend with this same tape.
     # A fresh replay still supplies a full causal prefix for every measured row.
     replay_tape(tape)

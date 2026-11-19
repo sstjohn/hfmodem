@@ -30,7 +30,8 @@ import subprocess
 
 import pytest
 
-from hfmodem.tests.hermetic import captures_untouched, station_kept_out  # noqa: F401  (autouse fixtures)
+from hfmodem.tests.hermetic import captures_untouched, rigctld_owner, station_kept_out  # noqa: F401  (autouse fixtures)
+from hfmodem.tests.clock_steps import backward_step, forward_step  # noqa: F401
 
 _GATES = {
     "corpus": ("HFMODEM_CORPUS", "the off-air corpus"),

@@ -55,6 +55,10 @@ WORKING = RECORD / "working"
 LOGS = RECORD / "logs"
 CAPTURES = RECORD / "captures"
 
+#: Registered capture roots are named by their real path, so a symlinked
+#: ``operator-data`` is read through what it points at.
+OPERATOR_DATA = (RECORD / "operator-data").resolve()
+
 #: The shared off-air corpus, which is kept beside a checkout rather than in one.
 #: One name across the tree; the per-modem names still work, because scripts and
 #: notes use them.

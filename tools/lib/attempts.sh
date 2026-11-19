@@ -263,7 +263,7 @@ vara_try() {
   claim_run timeout -k 5 300 "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_connect.py" \
       --gateway "$call" --mycall "$MYCALL" --bw 2300 \
       --tx-device "$AUDIO_OUT" --rx-device "$AUDIO_IN" \
-      --rigctld 127.0.0.1:4532 --freq "$(printf '%d.%03d' "$(((centre - 1500) / 1000))" "$(((centre - 1500) % 1000))")" \
+      --rigctld "127.0.0.1:$RIGCTLD_PORT" --freq "$(printf '%d.%03d' "$(((centre - 1500) / 1000))" "$(((centre - 1500) % 1000))")" \
       --arm --expect-model "$RIG_EXPECT_MODEL" --ptt-device "$PTT_PORT" --line-ptt \
       --tx-tail 0.05 --cr-interval 8.0 \
       --timeout 95 --record "$tag" "$@" \
@@ -310,7 +310,7 @@ ardop_try() {
   # One process owns the radio AND the B2F session: no host client, and the
   # whole exchange is bounded by --mail-timeout inside and `timeout` outside.
   claim_run timeout -k 5 420 "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.besra.host.run_server \
-      --radio ft891 --rigctld 127.0.0.1:4532 \
+      --radio ft891 --rigctld "127.0.0.1:$RIGCTLD_PORT" \
       --audio-in "$AUDIO_IN" --audio-out "$AUDIO_OUT" \
       --channel "$centre" --bandwidth "$bw" \
       --ptt-device "$PTT_PORT" --line-ptt \

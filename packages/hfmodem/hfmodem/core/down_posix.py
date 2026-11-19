@@ -12,7 +12,7 @@ import sys
 import time
 import tomllib
 
-from . import claim, posix
+from . import claim, hamlib, posix
 from .down import Inventory, Refusal, Settings
 from .native import NativeChild, REAP_GRACE_S
 from .rigs import CAT_BACKENDS, resolve_profile, refuse_device_in_test, profile_cat
@@ -34,7 +34,8 @@ def load_settings(path=None):
     refuse_device_in_test(*ports)
     backend = CAT_BACKENDS[rig.get('cat', profile_cat(name))]
     settings = Settings(Path(path) if path else None, body.get('station', {}).get('port', 8737),
-                        backend, rig.get('host', '127.0.0.1'), rig.get('port', 4532), *ports, profile)
+                        backend, rig.get('host', '127.0.0.1'),
+                        hamlib.rigctld_port(path, rig=cfg.rig if cfg else None), *ports, profile)
     audio = (cfg.audio.input, cfg.audio.output) if cfg else (profile.get('audio_device', ''),) * 2
     return settings, audio
 
@@ -261,8 +262,8 @@ class Posix:
             print(f'delegated rigctld pid {pid} on {settings.host}:{settings.port}', flush=True)
         stations = {pid for pid, row in rows.items() if station(row[2])} | listeners(settings.station_port)
         protected = {pid for pid in rows if any(within(pid, s, rows) for s in stations)}
-        device_rows = claim.openers(nodes, deadline=deadline) if nodes else []
-        audio_rows = claim.openers(audio, deadline=deadline) if audio else []
+        device_rows = claim.settled_openers(nodes, deadline=deadline) if nodes else []
+        audio_rows = claim.settled_openers(audio, deadline=deadline) if audio else []
         device_rows += [r for r in audio_rows if Path(r.command).name not in
                         {'pipewire', 'pulseaudio', 'coreaudiod', 'wireplumber', 'jackd'}]
         device_pids = {r.pid for r in device_rows} - delegates

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 from dataclasses import dataclass
 import json
 import os
@@ -25,6 +26,7 @@ MAX_NONCE = 2**40
 ADMISSION_TIMEOUT = 30.0
 _LINE_LIMIT = 16384
 _adopted = None
+_reserved = None
 
 
 class ClaimError(RuntimeError):
@@ -75,6 +77,62 @@ def bootstrap():
         finally:
             _close(fd)
     return claim_path(), mutex_path()
+
+
+def _inode(fd):
+    try:
+        info = os.fstat(fd)
+    except OSError as exc:
+        if exc.errno != errno.EBADF:
+            raise
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _is_claim(identity):
+    try:
+        info = os.stat(claim_path())
+    except (FileNotFoundError, ClaimError):
+        return False
+    return identity == (info.st_dev, info.st_ino)
+
+
+def reserve():
+    """Hold descriptor 9 on the null device from process start, so no file opened
+    later lands where a POSIX claim goes. An inherited claim keeps 9; anything else
+    inherited there has no writer in this process and is replaced."""
+    global _reserved
+    if os.name == "nt" or _reserved is not None:
+        return
+    held = _inode(9)
+    if held is not None and _is_claim(held):
+        return
+    fd = os.open(os.devnull, os.O_RDONLY | os.O_CLOEXEC)
+    if fd != 9:
+        os.dup2(fd, 9, inheritable=False)
+        os.close(fd)
+    _reserved = _inode(9)
+
+
+def vacate():
+    """Descriptor 9's reservation or claim, set aside for a claim to take its place;
+    None when 9 is free. Any other file there was opened by this process after
+    start, and whatever writes to it by number would write into the claim."""
+    if os.name == "nt":
+        return None
+    held = _inode(9)
+    if held is None:
+        return None
+    if held != _reserved and not _is_claim(held):
+        raise ClaimError("descriptor 9 is open on another file; a claim placed there "
+                         "would take that file's writes")
+    return fcntl.fcntl(9, fcntl.F_DUPFD_CLOEXEC, 10)
+
+
+def restore(saved):
+    if saved is not None:
+        os.dup2(saved, 9, inheritable=False)
+        os.close(saved)
 
 
 def _fd(value):
@@ -421,7 +479,8 @@ def openers(paths, *, lsof=None, fdinfo=None, started=None, platform=None, deadl
                     offset = fdinfo_offset(fdinfo(row.pid, row.fd))
                 except (FileNotFoundError, ProcessLookupError):
                     if not _exited(row.pid):
-                        raise
+                        # A live opener closed the descriptor after lsof listed it.
+                        raise DiscoveryChanged("openers changed during discovery; retry")
                     dropped = True
                     continue
             after = identity(row.pid)
@@ -439,27 +498,31 @@ def openers(paths, *, lsof=None, fdinfo=None, started=None, platform=None, deadl
     return result
 
 
+def settled_openers(paths, *, attempts=10, deadline=None, **discovery):
+    for attempt in range(attempts):
+        _discovery_timeout(20, deadline)
+        try:
+            rows = openers(paths, deadline=deadline, **discovery)
+            _discovery_timeout(20, deadline)
+            return rows
+        except DiscoveryChanged:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(_discovery_timeout(0.05, deadline))
+
+
 def holders(descriptor, *, cleanup=False, attempts=10, deadline=None, **discovery):
     fd = _fd(descriptor)
     path = mutex_path() if cleanup else claim_path()
     _check_inode(fd, path)
     published = holder(fd, cleanup=cleanup)
-    for attempt in range(attempts):
-        _discovery_timeout(20, deadline)
-        try:
-            rows = openers([path], deadline=deadline, **discovery)
-            _discovery_timeout(20, deadline)
-            break
-        except DiscoveryChanged:
-            if attempt + 1 == attempts:
-                raise
-            time.sleep(_discovery_timeout(0.05, deadline))
+    rows = settled_openers([path], attempts=attempts, deadline=deadline, **discovery)
     return [row for row in rows if row.offset == published.nonce]
 
 
 def _mutex_busy(fd, **discovery):
     try:
-        rows = openers([mutex_path()], **discovery)
+        rows = settled_openers([mutex_path()], **discovery)
         try:
             nonce = holder(fd, cleanup=True).nonce
         except ClaimError:
@@ -804,7 +867,7 @@ def check_devices(devices=None, *, sounddevice=None, platform=None, **discovery)
         if os.name == "nt":
             verdicts.append(DeviceVerdict(label, "exclusive" if nodes else "clear", nodes))
             continue
-        rows = openers(nodes, platform=platform, **discovery) if nodes else []
+        rows = settled_openers(nodes, platform=platform, **discovery) if nodes else []
         if rows:
             raise ClaimBusy(f"{label} held by pid " + ", ".join(str(r.pid) for r in rows))
         verdicts.append(DeviceVerdict(label, "clear", nodes))
@@ -814,7 +877,7 @@ def check_devices(devices=None, *, sounddevice=None, platform=None, **discovery)
             nodes = audio_nodes(endpoint, direction, sounddevice=sounddevice, platform=platform)
         except Exception:
             nodes = ()
-        rows = openers(nodes, platform=platform, **discovery) if nodes else []
+        rows = settled_openers(nodes, platform=platform, **discovery) if nodes else []
         servers = {"pipewire", "pulseaudio", "coreaudiod", "wireplumber", "jackd"}
         direct = [r for r in rows if Path(r.command).name not in servers]
         if direct:

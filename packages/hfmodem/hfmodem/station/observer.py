@@ -12,6 +12,7 @@ import threading
 import time
 
 from hfmodem.core.operations import LeaseTimeout
+from hfmodem.core.waits import join
 
 
 @dataclass(frozen=True)
@@ -99,7 +100,7 @@ class BoundedObserver:
         current = threading.current_thread()
         for thread in (self._writer, self._watchdog):
             if thread is not current:
-                thread.join(max(0, deadline - time.monotonic()))
+                join(thread, deadline)
         alive = [thread.name for thread in (self._writer, self._watchdog)
                  if thread is not current and thread.is_alive()]
         if alive:

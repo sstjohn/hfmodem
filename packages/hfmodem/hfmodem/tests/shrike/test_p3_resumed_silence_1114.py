@@ -55,7 +55,7 @@ def test_a_peer_heard_again_lifts_the_budget():
 
 
 def test_the_resumed_silence_flag():
-    assert onair.build_parser().parse_args([]).p3_resumed_silence == "budget"
+    assert onair.build_parser().parse_args([]).p3_resumed_silence == "unread"
     assert onair.build_parser().parse_args(
         ["--p3-resumed-silence", "lifetime"]).p3_resumed_silence == "lifetime"
     with pytest.raises(ValueError):
@@ -66,7 +66,9 @@ def test_a_changeover_never_answered_keeps_the_lifetime():
     # The peer never took the receiving role, so it may still be the ISS
     # keying packets we cannot read: WS8EOC 2026-09-13 21:43 CDT
     # (captures/onair-0913-2143) went on keying packets for twelve cycles.
+    # The old bound; `test_p3_both_irs_1116` pins what replaced it.
     a, io = taken()
+    a.cfg.p3_handback_silence = "lifetime"
     for _ in range(a.cfg.p3_breakin_tries):
         opportunity(a)
     assert a.role == arq.IRS and not a._resumed_unread

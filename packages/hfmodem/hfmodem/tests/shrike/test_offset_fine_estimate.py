@@ -34,6 +34,7 @@ from hfmodem.shrike import arq, onair, p3acquire, placement
 from hfmodem.tests.evidence import SWEEP_FLOOR
 from hfmodem.tests.shrike import test_control_offset_follow as follow
 from hfmodem.tests.shrike import test_p3_reply_placement as reply
+from hfmodem.tests.timing import within
 
 FS = onair.FS
 FIXTURES = Path(__file__).with_name("fixtures")
@@ -212,7 +213,7 @@ def test_an_awkward_window_length_is_what_the_pad_is_for():
 
     padded, bare = timed(lambda: p3acquire.compensate(audio, -25.0)), \
         timed(lambda: bare_compensate(audio, -25.0))
-    assert padded * 1.5 < bare, (padded, bare)
+    within(padded * 1.5, f'half again the padded compensate, against the bare {bare:.4g} s', at_most=bare)
 
 
 @pytest.mark.realtime
@@ -231,7 +232,7 @@ def test_the_refinement_is_not_a_cost_the_cycle_can_feel():
         without = timed(lambda: p3acquire.changeover(audio))
     finally:
         p3acquire._refined = bare
-    assert with_it - without < 1e-3, (with_it, without)
+    within(with_it - without, 'the refinement in a changeover', at_most=1e-3)
 
 
 def _elapsed(call) -> float:

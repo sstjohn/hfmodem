@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-"""One locally owned llama.cpp host. No cloud endpoints or model downloads."""
+"""QSO language inference through an owned llama.cpp host or an opted-in API."""
 import json
+import os
 import re
 from pathlib import Path
 import shutil
@@ -10,8 +11,8 @@ import socket
 import subprocess
 import threading
 import time
-from urllib.error import URLError
-from urllib.request import Request, ProxyHandler, build_opener
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
 from .simulation import asks_question
 
 FIELDS = ('to', 'de', 'report', 'name', 'qth', 'free', 'end')
@@ -38,6 +39,14 @@ def stop_process(process):
 
 
 class Language:
+    completion_path = '/v1/chat/completions'
+
+    @classmethod
+    def from_settings(cls, settings, directory):
+        if settings.language_backend == 'openai':
+            return OpenAILanguage(settings)
+        return cls(settings.language_model, settings.llama_server, directory)
+
     def __init__(self, model, executable, directory):
         self.model = str(Path(model).expanduser().resolve())
         if not Path(self.model).is_file():
@@ -84,18 +93,26 @@ class Language:
         messages.extend(dict(role='assistant' if entry['role'] == 'station' else 'user', content=entry['text'])
                         for entry in list(history)[-8:])
         messages.append(dict(role='user', content=content))
+        payload = self.completion_payload(messages, schema, sampling)
+        with self.lock:
+            result = self.request(self.completion_path, payload)
+        try:
+            choice = result['choices'][0]
+            if choice.get('finish_reason') == 'length':
+                raise RuntimeError('model output truncated; edit or request a fill')
+            if choice.get('finish_reason') == 'content_filter' or choice['message'].get('refusal'):
+                raise RuntimeError('model declined the request; edit or redraft')
+            return json.loads(choice['message']['content'])
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError):
+            raise RuntimeError('model returned an invalid JSON reply; edit or redraft') from None
+
+    def completion_payload(self, messages, schema, sampling):
         options = dict(temperature=0, max_tokens=400)
         if sampling is not None:
             options.update(sampling)
-        with self.lock:
-            result = self.request('/v1/chat/completions', dict(model='local',
-                messages=messages,
-                **options, chat_template_kwargs=dict(enable_thinking=False),
-                response_format=dict(type='json_object', schema=schema)))
-        choice = result['choices'][0]
-        if choice.get('finish_reason') == 'length':
-            raise RuntimeError('local model output truncated; edit or request a fill')
-        return json.loads(choice['message']['content'])
+        return dict(model='local', messages=messages, **options,
+                    chat_template_kwargs=dict(enable_thinking=False),
+                    response_format=dict(type='json_object', schema=schema))
 
     def extract(self, text, own_call, candidates=()):
         schema = dict(OVER_SCHEMA, properties=dict(OVER_SCHEMA['properties']))
@@ -201,3 +218,95 @@ class Language:
     def close(self):
         stop_process(self.process)
         self.log.close()
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # Never forward the bearer credential to a redirected endpoint.
+        return None
+
+
+def _validate_reply(value, schema):
+    """Validate the object/string schema subset used by QSO extraction and replies.
+
+    JSON mode guarantees syntax, not station facts, types or allowed callsigns.
+    Keep those checks local even when the server has no structured-output support.
+    """
+    if schema['type'] == 'object':
+        if not isinstance(value, dict):
+            raise ValueError('expected object')
+        properties = schema['properties']
+        if (not set(schema.get('required', ())) <= value.keys() or
+                (schema.get('additionalProperties') is False and value.keys() - properties.keys())):
+            raise ValueError('invalid fields')
+        for key, item in value.items():
+            if key in properties:
+                _validate_reply(item, properties[key])
+    elif schema['type'] == 'string':
+        if not isinstance(value, str):
+            raise ValueError('expected string')
+    else:
+        raise ValueError('unsupported reply schema')
+    if 'enum' in schema and value not in schema['enum']:
+        raise ValueError('invalid value')
+
+
+class OpenAILanguage(Language):
+    """Chat Completions JSON mode; no local host, model downloads or API retries."""
+    completion_path = '/chat/completions'
+    process = None
+
+    def __init__(self, settings):
+        self.model = settings.language_model
+        self.url = settings.language_base_url.rstrip('/')
+        self.timeout = settings.language_timeout_s
+        self.max_tokens = settings.language_max_tokens
+        self.token_parameter = settings.language_token_parameter
+        self.api_key = os.environ.get(settings.language_api_key_env, '').strip()
+        if settings.language_api_key_env and not self.api_key:
+            raise ValueError(f'Set {settings.language_api_key_env} for the language endpoint, '
+                             'or set language_api_key_env="" for an unauthenticated server')
+        self.lock = threading.Lock()
+        self.http = build_opener(_NoRedirect())
+
+    def request(self, path, data=None, timeout=None):
+        if path != self.completion_path:
+            raise ValueError('This feature requires the local llama.cpp tokenizer')
+        headers = {'Content-Type': 'application/json'}
+        if self.api_key:
+            headers['Authorization'] = 'Bearer ' + self.api_key
+        req = Request(self.url + path, data=json.dumps(data).encode(), headers=headers)
+        try:
+            with self.http.open(req, timeout=self.timeout if timeout is None else timeout) as response:
+                return json.load(response)
+        except HTTPError as exc:
+            status = exc.code
+            exc.close()
+            # Provider bodies may echo credentials or prompts; do not log them.
+            raise RuntimeError(f'Language endpoint HTTP {status}; check credentials, model, '
+                               'quota and endpoint settings') from None
+        except (URLError, TimeoutError, OSError):
+            raise RuntimeError('Language endpoint unavailable or timed out; edit or redraft') from None
+        except ValueError:
+            raise RuntimeError('Language endpoint returned invalid JSON; edit or redraft') from None
+
+    def completion_payload(self, messages, schema, sampling):
+        messages[0]['content'] += '\nReturn only a JSON object matching this schema: ' + json.dumps(schema)
+        options = {self.token_parameter: self.max_tokens}
+        if sampling:
+            options.update(sampling)
+            if 'max_tokens' in sampling and self.token_parameter != 'max_tokens':
+                options[self.token_parameter] = options.pop('max_tokens')
+        return dict(model=self.model, messages=messages, **options,
+                    response_format=dict(type='json_object'))
+
+    def complete(self, instruction, content, schema, history=(), sampling=None):
+        result = super().complete(instruction, content, schema, history, sampling)
+        try:
+            _validate_reply(result, schema)
+        except ValueError:
+            raise RuntimeError('model reply did not match the required fields; edit or redraft') from None
+        return result
+
+    def close(self):
+        pass

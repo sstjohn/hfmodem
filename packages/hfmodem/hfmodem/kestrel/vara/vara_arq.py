@@ -1102,12 +1102,44 @@ _RESEND_LADDERS = {
 }
 
 
-def _resend_level(bw: str, start: int, failures: tuple[bool, ...]) -> int:
-    """Host level after each NAK; True denotes missing DATA."""
+_PASSED_OVER = {"2300": frozenset({7, 8, 11, 14}),
+                "2750": frozenset({7, 8, 9, 12, 15})}
+
+
+def _fall(bw: str, level: int, run: int, missing: bool, steep: bool = False) -> int:
+    """One wideband fall, passing over records the peer does not land on.
+    ``steep`` is the 4.9.1 build's reported fall of 4 after a climb of 12 or
+    more (16 to 12 at BW2300, one unverified on-air report); the bench's 4.9.0
+    falls 3 there."""
+    fall = 4 if steep and run >= 12 else 3 if run >= 6 else 2 if run >= 4 or missing else 1
+    to = max(level - fall, 1)
+    if to > 1 and to in _PASSED_OVER[bw]:
+        to -= 1
+    return to
+
+
+def _climbed(climb: tuple[int, int | None], level: int) -> tuple[int, int]:
+    """The upward steps since the last fall, and the latest host level."""
+    run, last = climb
+    return (run + level - last if last is not None and level >= last else 0, level)
+
+
+def _resend_level(bw: str, start: int, failures: tuple[bool, ...],
+                  run: int | None = None, steep: bool = False) -> int:
+    """Host level after each NAK; True denotes missing DATA. ``run`` is a wideband
+    high speed capable sender's climb run at the chain's first NAK, as our sender
+    keys it or as our receiver tracks the peer's. Above level 4 its falls follow
+    it rather than the table, whose rows there were only partly captured
+    (2026-10-20 ladders). BW500, a speed limited link (None) and any fall
+    from 4 or under keep the table."""
     level = min(max(start, 1), max(_RESEND_LADDERS[bw]))
     for step, missing in enumerate(failures):
-        column = (0 if step == 0 else 1) if missing else 2 + min(step, 2)
-        level = _RESEND_LADDERS[bw][level][column]
+        if run is None or bw == "500" or level <= 4:
+            column = (0 if step == 0 else 1) if missing else 2 + min(step, 2)
+            level = _RESEND_LADDERS[bw][level][column]
+        else:
+            level = _fall(bw, level, run if step == 0 else 0, missing,
+                          steep=steep if step == 0 else False)
     return level
 
 
@@ -2400,6 +2432,9 @@ class VaraStationHandshake:
         self._data_nak_wait_samples = 0
         self._unkeyed_at = 0.0
         self._heard = 0
+        #: Seconds past a healthy host's delivery lag that the newest streamed
+        #: audio, and the audio in hand now, had waited  [see _fresh_age].
+        self._stream_backlog = self._backlog = 0.0
         self._ack_from = 0              # ``_heard`` when our last link-setup went out
         #: Which request goes out on a re-key: "full" is our 41-symbol one,
         #: "rekey32" the 32-symbol form a VARA HF caller re-keys  [VF.connect_request_retry].
@@ -2515,7 +2550,12 @@ class VaraStationHandshake:
         self._confirm_at = 0.0
         self._lv_prompt = False     # ... keyed within the lead of our last sample
         self._level_read: _phy.LevelRead | None = None
-        self._rx_resend: tuple[int, tuple[bool, ...]] | None = None
+        self._rx_resend: tuple[int, tuple[bool, ...], int | None] | None = None
+        # (climb run, last over's level), started at 4: every bench link began its
+        # data there, so a link put straight at a level falls as if it climbed to it.
+        self._rx_climb: tuple[int, int | None] = (0, 4)
+        self._rx_hold: tuple[int, int | None] | None = None
+        self._peer_steep: bool | None = None
         self._rx_retry_rates: set[int] = set()
         self._delivery_read = False   # an over of the peer's current delivery was read
         self._rx_failed = False     # the peer's last over was not read
@@ -2524,7 +2564,8 @@ class VaraStationHandshake:
         # the pinned captures hold.
         self._lead: VB6Rnd | None = None
         self._tx_requested: int | None = None
-        self._tx_resend: tuple[int, tuple[bool, ...]] | None = None
+        self._tx_resend: tuple[int, tuple[bool, ...], int | None] | None = None
+        self._tx_climb = (0, 4)
         self._rec500 = _phy.base_level(bw)   # the record the link is held at
         self._close_low = 4         # the lowest host level a close of the peer's named
         self._expect_500 = 0        # the host level the peer's next over is due at
@@ -2675,7 +2716,7 @@ class VaraStationHandshake:
         # [see _peer_responder_idle]. The figure is what says the peer's listening
         # gap is still open, which is the only instant a re-acknowledgement is
         # worth keying into  [see _reack].
-        self._idle_held = 0.0
+        self._idle_held = self._idle_age = 0.0
         self._idle_end = 0.0
         self._idle_kind = VF.SESSION_RESPONDER_IDLE
         # What the peer still owes us for the answer we keyed at its last over,
@@ -2705,6 +2746,7 @@ class VaraStationHandshake:
         self._holds_envelope = "inconclusive"
         # The unmasked field still selects the limited BW500 answer symbols.
         self._decoded_frame_end = self._frame_audio_at = self._rx_audio_at = None
+        self._stream_backlog = self._backlog = 0.0
         self._query_start = None
         self._rx_key_sent = False
         self._rx_key_active = False
@@ -2748,6 +2790,13 @@ class VaraStationHandshake:
         self._idle_pair_seen = False
         self._held_idle_early = False
         self._idle_complete_exact = False
+        # (age in s, input sample its last symbol ended on) of a frame the last
+        # full-payload fit found only past the listening gap, the end None when
+        # the gap had closed before it could search; and that end for the last
+        # one logged as such.
+        self._idle_missed = self._query_missed = None
+        self._idle_end_at = 0
+        self._stale_logged_end = -np.inf
         # This tick was asked for by the peer's poll rather than by our own
         # clock  [see _took_poll, idle_keepalive].
         self._answering_poll = False
@@ -2808,7 +2857,10 @@ class VaraStationHandshake:
         elapsed = max(0.0, time.monotonic() - self._progress_at)
         pending = self.payload_ledger.pending
         retry = self._rx_resend is not None
-        waiting = (f'waiting for a valid retry at level {self._expect_level} or a recognizable peer poll'
+        candidates = self._read_levels() or (self._expect_level,)
+        levels = ', '.join(map(str, candidates))
+        noun = 'level' if len(candidates) == 1 else 'levels'
+        waiting = (f'waiting for a valid retry at {noun} {levels} or a recognizable peer poll'
                    if retry else 'waiting for protocol progress from the peer')
         if state == 'requested':
             text = (f'Recovery: {peer}: retry request transmitted; {waiting}. '
@@ -3348,7 +3400,9 @@ class VaraStationHandshake:
         # Queued playback cannot receive its answer before the rendered end,
         # for the original keying just as for a successful retry.
         self._short_nak_unkeyed_at = playback_end
-        self._tx_resend = (self._tx_requested or _phy.host_level(self.bw, level), ())
+        asked = self._tx_requested or _phy.host_level(self.bw, level)
+        self._tx_climb = _climbed(self._tx_climb, asked)
+        self._tx_resend = (asked, (), self._tx_climb[0])
         self._tx_pair = None if first is None else (self._tx_pending, first)
         # A new, successfully keyed frame owns a new recovery opportunity.
         # Repeated queries and refused transmissions never renew this budget.
@@ -3633,7 +3687,9 @@ class VaraStationHandshake:
         a BW500 turnaround is measured against it."""
         if self.bw != "500" or not self._unkeyed_at:
             return 0.0
-        return max(0.0, time.monotonic() - self._unkeyed_at - self._heard / MK.FS)
+        # The backlog is already in the fresh age it is added to.
+        return max(0.0, time.monotonic() - self._unkeyed_at - self._heard / MK.FS
+                   - self._stream_backlog)
 
     def _peer_polled(self) -> None:
         """A peer that heard our last NAK resends at once; one polling again
@@ -3647,10 +3703,37 @@ class VaraStationHandshake:
         return (time.monotonic() - self._unkeyed_at - self._heard / MK.FS
                 > _STREAM_STALL_S)
 
-    def _idle_fresh(self, limit: float = _GRANT_FRESH_S) -> bool:
-        """The peer's idle was named early enough, in wall time, that a rung
-        keyed now still fits its listening gap."""
-        return self._idle_held + self._stream_trail() <= limit
+    def _idle_fresh(self, limit: float) -> bool:
+        return (self._idle_missed is None
+                and self._idle_age + self._stream_trail() <= limit)
+
+    def _idle_stale(self, limit: float) -> bool:
+        """True, and said in the log, when a rung keyed now would miss the
+        listening gap behind the peer's idle."""
+        if self._idle_fresh(limit):
+            return False
+        age = self._idle_age + self._stream_trail()
+        self._log_stale(self._idle_kind.name, self.called,
+                        *(self._idle_missed or (age, self._idle_end_at)))
+        return True
+
+    def _log_stale(self, name: str, peer: str, age: float, end: int) -> None:
+        # Without this a transcript shows the frame named and nothing after it,
+        # which reads as an answer that went out (3.9x slower host, 2026-11-17).
+        # The frame stays in the buffer and later scans name it again, older;
+        # it is told apart by input sample, since a host that slow falls behind
+        # the wall clock.
+        if abs(end - self._stale_logged_end) < MK.HOP:
+            return
+        self._stale_logged_end = end
+        self.io.log(f"rx {name} — {peer} named {age:+.3f} s from its last symbol, "
+                    "past its listening gap — nothing keyed")
+
+    def _answerable_query_fit(self, x, kind, want, track=None):
+        at = self._complete_query_fit(x, kind, want, track)
+        if self._query_missed is not None and self._query_missed[1] is not None:
+            self._log_stale(kind.name, self.caller, *self._query_missed)
+        return at
 
     def _scans_answers(self) -> bool:
         return (self._stream_owns_answer and self.bw in _RX2300.BASE_LEVELS
@@ -4224,7 +4307,7 @@ class VaraStationHandshake:
             if wake:
                 self._wake_answer_scan(int(np.ceil(_ANSWER_HELD_S * MK.FS - held)))
             return False
-        return bool(clear[-1] and held <= _GRANT_FRESH_S * MK.FS)
+        return bool(clear[-1] and self._fresh_held(held) <= _GRANT_FRESH_S * MK.FS)
 
     def _peer_setup_turn_idle(self, samples) -> bool:
         return (self.connect_setup_pending and self.chat and self.bw == "500"
@@ -4250,7 +4333,8 @@ class VaraStationHandshake:
                                                          self._peer_shift):
             at = self._soft_read(power, poll)
         if (at is None or at < 0 or not _ANSWER_HELD_S * MK.FS
-                <= len(samples) - at - _POLL_MIN <= _GRANT_FRESH_S * MK.FS):
+                <= len(samples) - at - _POLL_MIN
+                or self._fresh_held(len(samples) - at - _POLL_MIN) > _GRANT_FRESH_S * MK.FS):
             return False
         # Its last pair stands and the channel behind it is quiet: the frame
         # has ended, and keying behind it does not key over the peer.
@@ -4386,7 +4470,7 @@ class VaraStationHandshake:
                     self._intermediate_query_samples - held <= 4.5 * MK.FS):
                 self._matched_intermediate_answer = (self._tx_pending, kind)
                 return True
-            if fits and clear[-1] and 0 <= held <= _GRANT_FRESH_S * MK.FS:
+            if fits and clear[-1] and 0 <= held and self._fresh_held(held) <= _GRANT_FRESH_S * MK.FS:
                 self._matched_intermediate_answer = (self._tx_pending, kind)
                 return True
         return False
@@ -4505,7 +4589,7 @@ class VaraStationHandshake:
                 held = len(samples) - at - 8 * MK.HOP
                 if 0 <= held < .06 * MK.FS:
                     self._data_nak_wait_samples = int(np.ceil(.06 * MK.FS - held))
-                elif .06 * MK.FS <= held <= _GRANT_FRESH_S * MK.FS:
+                elif .06 * MK.FS <= held and self._fresh_held(held) <= _GRANT_FRESH_S * MK.FS:
                     self._matched_data_nak = (self._tx_pending, self._pending_answer_at,
                                               "session-data-pair-nak")
                     return True
@@ -4538,7 +4622,7 @@ class VaraStationHandshake:
                 # guard rather than on the half-second stride, which can read
                 # a direct NAK only after the query deadline has keyed over it.
                 self._data_nak_wait_samples = int(np.ceil(.06 * MK.FS - held))
-            elif tail and held <= _GRANT_FRESH_S * MK.FS:
+            elif tail and self._fresh_held(held) <= _GRANT_FRESH_S * MK.FS:
                 self._matched_data_nak = (self._tx_pending, self._pending_answer_at, kind)
                 return True
         return False
@@ -4546,8 +4630,11 @@ class VaraStationHandshake:
     def _data_nak_level(self, missing: bool = False) -> int:
         level = self._tx_pending[2]
         if self._link_high_speed:
-            start, failures = self._tx_resend or (_phy.host_level(self.bw, level), ())
-            host = _resend_level(self.bw, start, failures + (missing,))
+            start, failures, run = self._tx_resend or (
+                _phy.host_level(self.bw, level), (), self._tx_climb[0])
+            failures += (missing,)
+            host = _resend_level(self.bw, start, failures, run,
+                                 steep=bool(self._peer_steep))
             return _phy.level_key(self.bw, min(host, _phy.TX_CEILING[self.bw]))
         return 0 if self.bw == "500" else _phy.lower_level(self.bw, level)
 
@@ -4699,9 +4786,13 @@ class VaraStationHandshake:
                 if self.bw == "500" or self._link_high_speed:
                     self._rec500 = level
                 if self._link_high_speed:
-                    start, failures = self._tx_resend or (_phy.host_level(self.bw, level), ())
-                    self._tx_resend = (start, failures + (nak_step != 1,))
-                    self._tx_requested = _resend_level(self.bw, *self._tx_resend)
+                    start, failures, run = self._tx_resend or (
+                        _phy.host_level(self.bw, level), (), self._tx_climb[0])
+                    self._tx_resend = (start, failures + (nak_step != 1,), run)
+                    self._tx_requested = _resend_level(
+                        self.bw, *self._tx_resend,
+                        steep=bool(self._peer_steep))
+                    self._tx_climb = (0, self._tx_requested)
                 self.io.log(f"NAK recovery repacketized at record {level}: "
                             f"{len(body) - 1} bytes pending, remaining bytes queued")
             self._tx_retries += 1
@@ -4776,7 +4867,7 @@ class VaraStationHandshake:
         held = len(samples) - at - span + getattr(self, '_callback_lag', 0)
         if held < 0:
             self._wake_answer_scan(int(np.ceil(-held)))
-        age = self._query_age(len(samples) - at - span)
+        age = self._fresh_age(len(samples) - at - span)
         if held >= 0 and age > _GRANT_FRESH_S:
             self.io.log('query listening gap has gone — waiting for a fresh query')
         return at if held >= 0 and age <= _GRANT_FRESH_S else None
@@ -4934,6 +5025,7 @@ class VaraStationHandshake:
                 self._over_answer = self._held_answer = None
                 self._owed_block = self._peer_delivery_open = self._rx_failed = False
                 self._rx_resend = None
+                self._reset_resend_models()
                 self._rx_retry_rates.clear()
                 self._nak_unkeyed_at = None
         self._state = state
@@ -5597,7 +5689,8 @@ class VaraStationHandshake:
         if held < 0:
             self._wake_answer_scan(-held)
             return False
-        return held + getattr(self, '_callback_lag', 0) <= _GRANT_FRESH_S * MK.FS
+        return (self._fresh_held(held + getattr(self, '_callback_lag', 0))
+                <= _GRANT_FRESH_S * MK.FS)
 
     def _peer_idle_hand_back(self, samples, track=None, *, fresh: bool = True) -> bool:
         """The answerer handing back an empty turn behind our frame 1 at its last
@@ -5628,7 +5721,8 @@ class VaraStationHandshake:
         if held < 0:
             self._wake_answer_scan(int(np.ceil(-held)))
             return False
-        return not fresh or held + getattr(self, '_callback_lag', 0) <= _GRANT_FRESH_S * MK.FS
+        return not fresh or (self._fresh_held(held + getattr(self, '_callback_lag', 0))
+                             <= _GRANT_FRESH_S * MK.FS)
 
     def _hold_handed_back_turn(self) -> None:
         """Hold the empty turn the answerer handed back: our frame 1 was the
@@ -5666,7 +5760,7 @@ class VaraStationHandshake:
         if matched:
             held = len(x) - at - _span(kind)
             if held >= 0:
-                return held <= _GRANT_FRESH_S * MK.FS
+                return self._fresh_held(held) <= _GRANT_FRESH_S * MK.FS
             self._wake_answer_scan(int(np.ceil(-held)))
         power = self._cached_power(x, self._band, self._grid)
         if isinstance(power, ControlView):
@@ -5708,7 +5802,7 @@ class VaraStationHandshake:
             if held < 0:
                 self._wake_answer_scan(int(np.ceil(-held)))
                 return False
-            return held <= _GRANT_FRESH_S * MK.FS
+            return self._fresh_held(held) <= _GRANT_FRESH_S * MK.FS
         return matched
 
     def _peer_responder_idle(self, samples, track: tuple | None = None) -> bool:
@@ -5762,6 +5856,8 @@ class VaraStationHandshake:
             if matched:
                 self._idle_kind = kind
                 self._idle_held = self._query_age(len(x) - at - _span(kind))
+                self._idle_age = self._idle_held + self._backlog
+                self._idle_end_at = self._input_clock - (len(x) - at - _span(kind))
                 self._idle_end = self._query_audio_at() - (len(x) - at - _span(kind)
                                  + getattr(self, '_callback_lag', 0)) / MK.FS
                 # The ordinary idle reader accepts a partial payload and
@@ -5771,11 +5867,16 @@ class VaraStationHandshake:
                 want = np.asarray(VF.handshake_tones(self.called, native))
                 fit = self._complete_query_fit(x, native, want, track)
                 self._idle_complete_exact = fit is not None
+                self._idle_missed = self._query_missed
+                if self._idle_missed is not None and self._idle_missed[1] is None:
+                    self._idle_missed = (self._fresh_age(len(x) - at - _span(kind)),
+                                         self._idle_end_at)
                 if fit is not None:
                     exact_at = fit
                     held = self._query_age(len(x) - exact_at - _span(native))
                     self._peer_polled()
                     self._idle_held = held
+                    self._idle_age = held + self._backlog
                     self._idle_end = self._query_audio_at() - (len(x) - exact_at - _span(native)
                                      + getattr(self, '_callback_lag', 0)) / MK.FS
                 return True
@@ -5879,7 +5980,7 @@ class VaraStationHandshake:
         return (self._answer_owed == _OWED_RELEASE
                 and len(samples) >= _SESSION_NEED
                 and self._peer_drained(samples, track)
-                and self._grant_held <= _GRANT_FRESH_S)
+                and self._grant_held + self._backlog <= _GRANT_FRESH_S)
 
     def _peer_responder_release(self, samples, track: tuple | None = None) -> bool:
         """True when this audio is the peer handing the turn over
@@ -6271,7 +6372,8 @@ class VaraStationHandshake:
                 + getattr(self, '_callback_lag', 0))
         behind = len(buf) - at
         query_reply = at >= 0 and self._final_query_samples >= behind
-        if solicited and query_reply and 0 <= held <= _STREAM_BLOCK:
+        fresh = self._fresh_held(held)
+        if solicited and query_reply and 0 <= held and fresh <= _STREAM_BLOCK:
             self._reset_connect_ask_search()
             self._hold_final_request(held, buf, VF.SESSION_TURN_REQUEST_RESPONDER, at)
             return self.service_final_request()
@@ -6284,7 +6386,14 @@ class VaraStationHandshake:
             self._connect_ask_due = len(self._connect_ask_buf) + min(
                 _TURNAROUND_STEP, int(np.ceil(guard - held)))
             return False
-        if held > tail:
+        # Only the solicited window is an answer window; the unsolicited one
+        # keeps a link-up request for its evidence, so it stays on the samples.
+        if (fresh if solicited else held) > tail:
+            if held <= tail:
+                self._log_stale(VF.SESSION_TURN_REQUEST_RESPONDER.name, self.called,
+                                fresh / MK.FS,
+                                self._input_clock - (len(buf) - at
+                                                     - _span(VF.SESSION_TURN_REQUEST_RESPONDER)))
             return False
         # Consuming the complete request drops its whole match plateau, even
         # when pending DATA prevents us from transmitting. The stream owns the
@@ -6314,7 +6423,7 @@ class VaraStationHandshake:
                             kind: VF.BurstKind, at: int) -> None:
         """Keep the validated emission until its age, independently of RX callbacks."""
         sample_deadline = self._heard + max(0, _FINAL_REQUEST_HELD_S * MK.FS - held)
-        sample_until = self._heard + _GRANT_FRESH_S * MK.FS - held
+        sample_until = self._heard + _GRANT_FRESH_S * MK.FS - self._fresh_held(held)
         # The hard fit names the first point on a symbol-match plateau. Power
         # centers that same emission for a deadline independent of callback size.
         tones = self._burst_tones(self.caller, kind)
@@ -6328,7 +6437,8 @@ class VaraStationHandshake:
         self._held_final_request = (
             self._tx_pending, query_at,
             now + max(0.0, _FINAL_REQUEST_HELD_S - held / MK.FS),
-            min(query_at + _FINAL_QUERY_REPLY_S, now + _GRANT_FRESH_S - held / MK.FS),
+            min(query_at + _FINAL_QUERY_REPLY_S,
+                now + _GRANT_FRESH_S - self._fresh_held(held) / MK.FS),
             sample_deadline, sample_until)
         self.io.log(f'rx solicited final turn-request ({held / MK.FS:.3f} s '
                     'past its last symbol) — handover at its request deadline')
@@ -6515,7 +6625,7 @@ class VaraStationHandshake:
             if at is None:
                 return False
         self._nak_held = (len(x) - at - _span(kind)) / MK.FS
-        if self._nak_held > _GRANT_FRESH_S:
+        if (stale := self._nak_held + self._backlog) > _GRANT_FRESH_S:
             # Say so. A NAK the scan reached too late is the peer asking and
             # being answered with nothing, and a transcript that prints only the
             # asks it acted on reads that as a peer which never spoke  [see
@@ -6523,7 +6633,7 @@ class VaraStationHandshake:
             if not self._stale_nak_logged:
                 self._stale_nak_logged = True
                 self.io.log(f"{kind.name} from {self.called} named "
-                            f"{self._nak_held:.2f} s behind the newest audio — "
+                            f"{stale:.2f} s behind the newest audio — "
                             "the peer's listening gap has gone, so the over it "
                             "asks for is not keyed on it")
             return False
@@ -6780,7 +6890,8 @@ class VaraStationHandshake:
             kind = replace(VF.SESSION_INTERMEDIATE_QUERY_ANSWER, preadv=1 + 62 * frame)
             _heard, at, matched = self._peer_frame(x, VF.for_bw(kind, self.bw),
                                                    self.called, track)
-            if matched and 0 <= len(x) - at - _span(kind) <= _GRANT_FRESH_S * MK.FS:
+            if (matched and 0 <= (held := len(x) - at - _span(kind))
+                    and self._fresh_held(held) <= _GRANT_FRESH_S * MK.FS):
                 self._continue_frame = (self._tx_pending, frame)
                 return True
         return False
@@ -7580,17 +7691,33 @@ class VaraStationHandshake:
         return ((trailing + getattr(self, '_callback_lag', 0)) / MK.FS
                 + (0 if self._rx_audio_at is None else time.monotonic() - self._rx_audio_at))
 
+    def _fresh_age(self, trailing: int) -> float:
+        """The age a freshness limit is held to. The limits were proven on
+        healthy hosts with their own delivery lag inside them, so only the
+        backlog past that counts against them; leads and wakes keep the
+        stream age."""
+        return self._query_age(trailing) + self._backlog
+
+    def _fresh_held(self, held: int) -> float:
+        """Held samples as a freshness limit sees them  [see _fresh_age]."""
+        return held + self._backlog * MK.FS
+
     def _complete_query_fit(self, x, kind, want, track=None):
         """All clear payload symbols agree at one complete, fresh alignment."""
         if track is None:
             track = self._cached_control(x, band=self._band, bin_offset=self._grid)
+        self._query_missed = None
         bins, clear, _ = track
         if not len(bins):
             return None
         end = len(x) - _span(kind)
-        first = end - round((_GRANT_FRESH_S - self._query_age(0)) * MK.FS)
+        first = end - round((_GRANT_FRESH_S - self._fresh_age(0)) * MK.FS)
         starts = np.arange(-(-first // _ACK_GRID) * _ACK_GRID, end + 1, _ACK_GRID)
         if not len(starts):
+            # The gap closed before this search could start: whatever is in the
+            # buffer is past it, though only a caller that named a frame knows
+            # one is there.
+            self._query_missed = self._fresh_age(0), None
             return None
         indices = np.rint((starts[:, None] + np.arange(1, len(want)) * MK.HOP
                            + MK._WOFF) / _ACK_GRID).astype(np.int64)
@@ -7610,8 +7737,12 @@ class VaraStationHandshake:
             row = at + width // 2
             if best is None or score > best[0]:
                 best = score, int(starts[row])
-        return (None if best is None or self._query_age(len(x) - best[1] - _span(kind)) > _GRANT_FRESH_S
-                else best[1])
+        if best is None:
+            return None
+        if (age := self._fresh_age(len(x) - best[1] - _span(kind))) > _GRANT_FRESH_S:
+            self._query_missed = age, self._input_clock - (len(x) - best[1] - _span(kind))
+            return None
+        return best[1]
 
     def _peer_phase(self) -> int:
         return self._rx_window.alt
@@ -7880,6 +8011,7 @@ class VaraStationHandshake:
         level the peer's next one is then due at  [see _irs_frame]. ``closing``
         is the over that ends the delivery, which our close answers by naming
         that level  [see _close_byte]."""
+        self._note_recovery()
         level, quality = self._rx_read
         if self.bw == "500" and level <= 4 and quality is not None:
             # Read on the P0 host scale; the index-law rule is on the channel's.
@@ -7893,6 +8025,19 @@ class VaraStationHandshake:
                 frame = 0
             elif hint in (3, 4, 5):
                 frame = _STEP_FRAME[min(_LEVEL_STEP[frame], hint - 2)]
+        if self._rx_hold is not None:
+            failed, mark = self._rx_hold
+            if mark is None:
+                mark = self._peer_over
+                self._rx_hold = (failed, mark)
+            since = self._peer_over - mark
+            if since >= 4:
+                self._rx_hold = None
+            elif level > 4 and _LEVEL_STEP[frame] > 0:
+                step = 1 if since == 0 else _LEVEL_STEP[frame]
+                if level + step == failed:
+                    step -= 1
+                frame = _STEP_FRAME[step]
         if closing and (quality is None or frame != 5):
             # A VARA HF close names the level it heard; ours names one lower only
             # on a measured weak read, and never climbs on one.
@@ -8364,9 +8509,9 @@ class VaraStationHandshake:
             # prove the direct NAK was unheard: retain the rate reached if it
             # heard both replies, for complete CRC-clean base DATA only.
             # KL7QR 2026-10-25 sent L3 after 6,N,M while we predicted 6,M,M=L1.
-            start, failures = self._rx_resend
-            self._rx_retry_rates.add(_resend_level(self.bw, start, failures + (True,)))
-            self._rx_resend = start, failures[:-1]
+            start, failures, run = self._rx_resend
+            self._rx_retry_rates.add(_resend_level(self.bw, start, failures + (True,), run))
+            self._rx_resend = start, failures[:-1], run
             self._advance_resend(missing=True)
         self._nak_unkeyed_at, self._nak_unheard = time.monotonic(), False
         self._lv_armed = bool(self._read_levels())
@@ -8621,12 +8766,11 @@ class VaraStationHandshake:
                 < self._expected_window_samples() / MK.FS)
 
     def _expected_window_samples(self) -> int:
-        # The base stream owns the longer index doubles. Only reserve their
-        # duration here when that row and frame count are actually expected,
-        # rather than extending every cadence and retaining unrelated audio.
+        # A lower retry can outlast the predicted row; retain its whole burst.
         return max(_EXPECT_WINDOW[self.bw],
-                   _phy.burst_samples(self.bw, self._expect_level,
-                                      self._receive_frame_count(self._expect_level))
+                   max(_phy.burst_samples(self.bw, level,
+                                          self._receive_frame_count(level))
+                       for level in (self._expect_level, *self._read_levels()))
                    + _EXPECT_LEAD + _EXPECT_SLACK)
 
     def _reack_release(self) -> bool:
@@ -9213,6 +9357,7 @@ class VaraStationHandshake:
         self._link_high_speed = False
         self._lead = None
         self._tx_requested, self._tx_resend, self._rx_resend = None, None, None
+        self._reset_resend_models()
         self._delivery_read = False
         self._expect_500 = 0
         self._next_500 = 4
@@ -10153,10 +10298,14 @@ class VaraStationHandshake:
                 and bool(self.called)
                 and (self.turn == _TURN_PEER or self.turn == _TURN_ASKED and owed))
 
-    def on_rx_stream(self, samples, *, sample_start=None, flush: bool = False) -> None:
+    def on_rx_stream(self, samples, *, sample_start=None, flush: bool = False,
+                     backlog: int = 0) -> None:
+        """``backlog`` is how many samples past a healthy host's delivery lag
+        capture had run beyond the end of ``samples``."""
         previous_at = self._rx_audio_at
         if previous_at is None:
             self._rx_audio_at = time.monotonic()
+            self._stream_backlog = self._backlog = backlog / MK.FS
         try:
             with self._mfsk_scan():
                 self._on_rx_stream(samples, sample_start=sample_start, flush=flush)
@@ -10999,8 +11148,8 @@ class VaraStationHandshake:
         return unread
 
     def _read_expected_level(self, samples) -> bool:
-        """The peer's next over on a high speed capable link, read at the level our
-        answer asked for it at, above 4. True when it was taken.
+        """The peer's next over on a high speed capable link, read above 4 at our
+        requested level first, then at lower retry levels. True when it was taken.
 
         Found by decoding, not by reference columns, which the tone and OFDM
         rows do not have; the decoder places the burst itself, and finds one
@@ -11088,11 +11237,18 @@ class VaraStationHandshake:
         levels = ((self._lv_pending.level,) if self._lv_pending is not None
                   and self._lv_possible_nonqam(self._lv_pending.level) else self._read_levels())
         for level in levels:
-            if (read := _phy.decode_level(buf, self.bw, level, fresh, under,
-                                          self._peer_hz, context=self.capture_context(self._lv_start),
-                                          receive_observations=self.receive_context is not None,
-                                          **ownership)) is not None:
+            got = _phy.decode_level(buf, self.bw, level, fresh, under,
+                                    self._peer_hz, context=self.capture_context(self._lv_start),
+                                    receive_observations=self.receive_context is not None,
+                                    **ownership)
+            if got is None:
+                continue
+            if got.frames and not got.lost:
+                read = got
                 break
+            # A tone-family candidate can report a lost burst on an OFDM over;
+            # a later candidate may still read that over clean.
+            read = read or got
         return self._take_expected_read(read, buf, now, ended, whole, heard,
                                         onset, window, incomplete_end)
 
@@ -11246,7 +11402,24 @@ class VaraStationHandshake:
         return not later and (edge or floor)
 
     def _read_levels(self) -> tuple[int, ...]:
-        return (self._expect_level,) if self._expect_level > 4 else ()
+        """Where the peer's next over is decoded above 4: our prediction, then,
+        in a wideband recovery, where each known sender's ladder stands at this
+        point. The 4.9.0 bench ladder (xara keys the same) and the reported
+        4.9.1 one; a sender that keys neither is not searched for."""
+        levels = (self._expect_level,)
+        if self._rx_resend is not None and self.bw != "500" and self._link_high_speed:
+            levels += tuple(_resend_level(self.bw, *self._rx_resend, steep=steep)
+                            for steep in (False, True))
+        return tuple(level for level in dict.fromkeys(levels) if level > 4)
+
+    def _lower_retry(self, level: int) -> bool:
+        """On a wideband high speed link whose first failure was above 4,
+        admit a clean lower retry above 4 only at a current candidate, or at
+        any level 1-4 below that first failure."""
+        return (self.bw != "500" and self._link_high_speed
+                and self._rx_resend is not None and self._rx_resend[0] > 4
+                and 1 <= level < self._rx_resend[0]
+                and (level <= 4 or level in self._read_levels()))
 
     def _resend_matches(self, level: int) -> bool:
         # The initial caller-side greeting may ignore the setup's predicted
@@ -11256,15 +11429,17 @@ class VaraStationHandshake:
                 or level == self._expect_level)
 
     def _read_matches(self, read: _phy.LevelRead) -> bool:
-        """:meth:`_resend_matches`, or a retry at a level this recovery asked
-        for whose every located frame read clean. A sender that missed our NAK
-        keys the level it was keying: VA2OPS, 2026-11-08, sent its level-6
-        over again behind our NAK of it, predicting 5, read clean on the tone
-        family's other row. A level nobody asked for is still refused, as a
-        VARA HF receiver refuses it (2026-10-20 ladders)."""
+        """:meth:`_resend_matches`, or a complete clean retry at an earlier
+        candidate or a level admitted by :meth:`_lower_retry`. A sender that
+        missed our NAK keys the level it was keying: VA2OPS, 2026-11-08, sent its
+        level-6 over again behind our NAK of it, predicting 5, read clean on the
+        tone family's other row. A VARA HF receiver refuses every off-level
+        resend (2026-10-20 ladders); above 4 we read only where a known sender
+        keys."""
+        clean = bool(read.frames) and not read.lost
         return (self._resend_matches(read.level)
-                or read.level in self._rx_retry_rates
-                and bool(read.frames) and len(read.frames) == read.located)
+                or (read.level in self._rx_retry_rates or self._lower_retry(read.level))
+                and clean)
 
     def _previous_base_retry_rate(self, level: int) -> bool:
         """A peer may miss a NAK and retain an earlier requested retry rate.
@@ -11281,7 +11456,7 @@ class VaraStationHandshake:
             return False
         if self._expect_level > 4:
             return True
-        start, failures = self._rx_resend
+        start, failures = self._rx_resend[:2]
         return (level in self._rx_retry_rates
                 or any(level == _resend_level(self.bw, start, failures[:n])
                        for n in range(len(failures))))
@@ -11289,12 +11464,18 @@ class VaraStationHandshake:
     def _advance_resend(self, *, missing: bool) -> None:
         if self._rx_resend is None:
             self._rx_retry_rates = set()
+            run = (_climbed(self._rx_climb, self._expect_level)[0]
+                   if self._link_high_speed and self.bw != "500" else None)
+            self._rx_resend = (self._expect_level, (), run)
+            self._rx_climb = (0, None)
         # A query can replace an unheard direct-NAK step in _rx_resend.
-        # Preserve the rates we actually requested before that replacement.
+        # Preserve both known ladders in case the peer missed our NAK.
+        self._rx_retry_rates.update(self._read_levels())
         self._rx_retry_rates.add(self._expect_level)
-        start, failures = self._rx_resend or (self._expect_level, ())
-        self._rx_resend = (start, failures + (missing,))
-        self._expect_level = _resend_level(self.bw, *self._rx_resend)
+        start, failures, run = self._rx_resend
+        self._rx_resend = (start, failures + (missing,), run)
+        self._expect_level = _resend_level(self.bw, *self._rx_resend,
+                                          steep=bool(self._peer_steep))
         self._rx_retry_rates.add(self._expect_level)
         self._rx_failed, self._lv_prompt = True, True
         self._lv_quiet = None
@@ -11592,7 +11773,7 @@ class VaraStationHandshake:
         self.io.log(f"rx {self._idle_kind.name} — {self.called} is still "
                     f"transmitting, named {self._idle_held:+.3f} s from its "
                     "last symbol (not progress)")
-        return (self._idle_fresh() and self._a_gap()
+        return (not self._idle_stale(_GRANT_FRESH_S) and self._a_gap()
                 and self._reack(recognized=True))
 
     def _stream_grant(self, samples) -> bool:
@@ -11672,8 +11853,8 @@ class VaraStationHandshake:
             self._grant_due = len(self._grant_buf) + wait
             return False
         self._reset_grant_search()
-        if self._grant_held > _GRANT_FRESH_S:
-            self.io.log(f"{granted} named {self._grant_held:.2f} s behind the "
+        if (stale := self._grant_held + self._backlog) > _GRANT_FRESH_S:
+            self.io.log(f"{granted} named {stale:.2f} s behind the "
                         "newest audio in the buffer — the peer has keyed since, "
                         "so the turn is not taken on it")
             return False
@@ -11911,7 +12092,7 @@ class VaraStationHandshake:
         if (self.role == 'responder' and self._ask_owed and self._txq
                 and self._answer_owed == _OWED_RELEASE
                 and self._over_answer == ('control', 0)):
-            remaining = max(0.0, _IDLE_ANSWER_S - query_held)
+            remaining = max(0.0, _IDLE_ANSWER_S - query_held - self._backlog)
             self._query_ask_until = (time.monotonic() + remaining,
                                      self._heard + remaining * MK.FS)
 
@@ -12161,8 +12342,9 @@ class VaraStationHandshake:
                 self._answer_responder_control(VF.SESSION_TURN_REQUEST)
                 return True
             if (self._complete_responder_pair(buf, VF.over_poll(self.called, self.bw)[0], track, power)
-                    and 0 <= self._query_age(len(buf) - self._responder_pair_at
-                    - ((VF.OVER_CONTINUE_NSYM - 1) * MK.HOP + MK.STRIDE)) <= _GRANT_FRESH_S):
+                    and 0 <= self._query_age(trail := len(buf) - self._responder_pair_at
+                    - ((VF.OVER_CONTINUE_NSYM - 1) * MK.HOP + MK.STRIDE))
+                    and self._fresh_age(trail) <= _GRANT_FRESH_S):
                 query_start = (self._query_audio_at() - (len(buf) - self._responder_pair_at
                                + getattr(self, '_callback_lag', 0)) / MK.FS)
                 self._reset_answer_search()
@@ -12207,7 +12389,7 @@ class VaraStationHandshake:
             if not allowed:
                 continue
             is_query = kind in (*VF.SESSION_ANSWER_QUERIES_SHORT, *VF.SESSION_INTERMEDIATE_ANSWER_QUERIES)
-            fit = (self._complete_query_fit(buf, kind, expected, track) if is_query
+            fit = (self._answerable_query_fit(buf, kind, expected, track) if is_query
                    else _payload_fit(buf, kind, expected, track, self._band))
             if (fit is None and kind is VF.SESSION_INTERMEDIATE_ANSWER_QUERIES[0]
                     and self.bw == '500' and self._setup_query_pending()):
@@ -12215,7 +12397,7 @@ class VaraStationHandshake:
                 # short FFT window, hiding half of an otherwise complete query.
                 filtered = oaconvolve(buf, _setup_query_filter(), mode='same')
                 narrow_track = _top3_track(filtered, band=self._band, bin_offset=self._grid)
-                fit = self._complete_query_fit(filtered, kind, expected, narrow_track)
+                fit = self._answerable_query_fit(filtered, kind, expected, narrow_track)
                 if fit is not None and not 400 <= fit <= len(buf) - _span(kind) - 400:
                     fit = None
             if fit is None:
@@ -12237,7 +12419,7 @@ class VaraStationHandshake:
                     continue
                 if held < 0:
                     return False
-                if held > _GRANT_FRESH_S * MK.FS:
+                if self._fresh_held(held) > _GRANT_FRESH_S * MK.FS:
                     continue
                 self._reset_answer_search()
                 self._hold_final_request(held, buf, kind, at)
@@ -12766,12 +12948,20 @@ class VaraStationHandshake:
                 # names it whole, where taking it here would leave the gap it
                 # opens unmeasurable until the peer keys another 3.4 s later.
                 return False
+            limit = (_IDLE_ANSWER_S if self.bw == "500" and self.role == "initiator"
+                     else _GRANT_FRESH_S)
             if not self._idle_complete_exact:
                 if self._idle_held < _ANSWER_HELD_S:
                     self._wake_answer_scan(int(np.ceil((_ANSWER_HELD_S - self._idle_held) * MK.FS)))
                     return False
                 if self._held_answer is not None:
                     self._wake_answer_scan(_TURNAROUND_STEP // 2)
+                    return False
+                if self._idle_fresh(limit):
+                    # The hold counts decode lag, so a slow scan reaches it
+                    # before the last symbols are in and the fit cannot be
+                    # exact yet; dropping the frame then misses the slot.
+                    self._wake_answer_scan(MK.HOP // 2)
                     return False
             self._handover_unheard = False
             if (self.bw == "500" and self.role == "initiator"
@@ -12789,18 +12979,18 @@ class VaraStationHandshake:
             # with no route out. The budget counts turnarounds this build read an
             # ANSWER in  [see _MAX_WITHOUT_PROGRESS].
             self._reset_answer_search(_SESSION_NEED)
-            self.io.log(f"rx {self._idle_kind.name} — {self.called} is still "
-                        f"transmitting, named {self._idle_held:+.3f} s from its "
-                        "last symbol (not progress)")
             # WHAT THE FIGURE BUYS is the one instant a rung is worth keying. The
             # frame opens the peer's own 1.7-1.9 s listening gap, and the audio
             # held past its last symbol is how much of that gap has already gone;
             # a scan that arrives a block or more late is naming a burst the peer
             # has keyed past  [see _reack, _GRANT_FRESH_S].
-            limit = (_IDLE_ANSWER_S if self.bw == "500" and self.role == "initiator"
-                     else _GRANT_FRESH_S)
-            if not (self._idle_fresh(limit) and self._a_gap()):
-                return False       # stale, or a window of the peer's is still open
+            self.io.log(f"rx {self._idle_kind.name} — {self.called} is still "
+                        f"transmitting, named {self._idle_held:+.3f} s from its "
+                        "last symbol (not progress)")
+            if self._idle_stale(limit):
+                return False
+            if not self._a_gap():
+                return False       # a window of the peer's is still open
             self._consume_located_unread()
             if self._owes_turn():
                 return self._ask_in_gap()
@@ -13187,7 +13377,8 @@ class VaraStationHandshake:
         lv, hits, of, mag = alignment
         level = _phy.host_level(self.bw, lv)
         matches = self._resend_matches(level)
-        if not matches and not self._previous_base_retry_rate(level):
+        lower = not matches and self._lower_retry(level)
+        if not matches and not lower and not self._previous_base_retry_rate(level):
             return []
         rec = "" if lv == base else f" at record {lv}"
         if mag is None:
@@ -13202,6 +13393,8 @@ class VaraStationHandshake:
         fr = _RX2300.frame_at(mag, lv)
         reads = self._window_reads(x, (lv, hits, of, mag, fr,
                                      getattr(alignment, 'sample_start', None)))
+        if lower and not all(item[3] is not None and item[3].crc_ok for item in reads):
+            return []
         observations = tuple(LocatedFrame(i,
             frame.origin if frame is not None and frame.origin is not None else
             (self._decode_context or self.capture_context()).origin(
@@ -13292,11 +13485,40 @@ class VaraStationHandshake:
                 + [(lv, hits, of, fr, offset + start, offset + end)]
                 + trailing)
 
+    def _reset_resend_models(self) -> None:
+        """A new link: both climb runs from level 4, where every bench link
+        began, no hold, and nothing learned of the peer's ladder."""
+        self._tx_climb = self._rx_climb = (0, 4)
+        self._rx_hold = None
+        self._peer_steep = None
+
+    def _note_recovery(self) -> None:
+        """A wideband chain recovered: hold its first failed level, and learn
+        which fall model the peer sends by."""
+        if self._rx_resend is not None and self.bw != "500" and self._link_high_speed:
+            self._rx_hold = (self._rx_resend[0], None)
+            start, failures, run = self._rx_resend
+            if self._rx_read[0] != self._expect_level:
+                self.io.log(f"retry admitted at level {self._rx_read[0]}; "
+                            f"our prediction was {self._expect_level}")
+            if (self._peer_steep is None and len(failures) == 1
+                    and run is not None and run >= 12):
+                normal = _resend_level(self.bw, start, failures, run)
+                steep = _resend_level(self.bw, start, failures, run, steep=True)
+                if normal != steep and self._rx_read[0] in (normal, steep):
+                    # The first unambiguous fall decides once per link: 4.9.0
+                    # never shows the steep fall as a sender, and the sender's
+                    # model is assumed to match its receiver's expectation.
+                    self._peer_steep = self._rx_read[0] == steep
+                    model = "steep" if self._peer_steep else "bench (4.9.0)"
+                    self.io.log(f"peer retry model learned: {model}, from level {start}")
+
     def _note_close_level(self, bodies: list[bytes]) -> None:
         """The level the peer's close names for our next delivery, which is the
         one level it will read it at: 1 to 4 on a speed limited link, up to what we key
         on a high speed capable one  [see arq.phy.TX_CEILING]."""
         if bodies:
+            self._note_recovery()
             if self._rx_resend is not None:
                 self._recovery_report('received')
             self._rx_resend, self._rx_failed = None, False
@@ -13825,6 +14047,7 @@ class VaraStationHandshake:
                 peer_keying=hold or getattr(self.io, 'receiving', False),
                 envelope=self._holds_envelope))
             return True
+        self._rx_climb = _climbed(self._rx_climb, self._rx_read[0])
         self._acked_at = None
         if self._rx_read[1] is not None:
             self._report_snr(_phy.host_sn(self.bw, *self._rx_read))
@@ -13960,9 +14183,17 @@ class VaraStationHandshake:
         if self._rx_window.W is None:
             self._held_answer = None
 
-    def on_rx_audio(self, samples: np.ndarray, *, sample_start=None) -> None:
-        """Read one received burst, then key anything its turnaround owes."""
+    def on_rx_audio(self, samples: np.ndarray, *, sample_start=None,
+                    backlog: int = 0) -> None:
+        """Read one received burst, then key anything its turnaround owes.
+
+        ``backlog`` is the stream's, as for :meth:`on_rx_stream`, when the
+        bracket is handed over."""
         previous_at, self._rx_audio_at = self._rx_audio_at, time.monotonic()
+        previous_backlog, self._backlog = self._backlog, backlog / MK.FS
+        # A bracket is a burst of its own and does not move the input clock
+        # that tells stream rereads of one frame apart  [see _log_stale].
+        self._stale_logged_end = -np.inf
         previous_context = self._decode_context
         self._decode_context = self.capture_context(sample_start)
         try:
@@ -13972,6 +14203,7 @@ class VaraStationHandshake:
                 self._ask_if_owed()
         finally:
             self._rx_audio_at = previous_at
+            self._backlog = previous_backlog
             self._decode_context = previous_context
 
     def _read_burst(self, samples: np.ndarray) -> None:
@@ -14009,7 +14241,7 @@ class VaraStationHandshake:
                           VF.SESSION_INTERMEDIATE_ANSWER_QUERIES):
                 for phase, kind in enumerate(group):
                     want = np.asarray(self._burst_tones(self.called, kind), np.int32)
-                    at = self._complete_query_fit(samples, kind, want)
+                    at = self._answerable_query_fit(samples, kind, want)
                     if at is not None:
                         self._query_start = self._query_audio_at() - (
                             len(samples) - at + getattr(self, '_callback_lag', 0)) / MK.FS
@@ -14215,6 +14447,9 @@ class VaraStationHandshake:
             self._handover_unheard = False
             self.io.log(f"rx {self._idle_kind.name} — {self.called} is still "
                         "transmitting (not progress)")
+            if self._idle_missed is not None:
+                self._log_stale(self._idle_kind.name, self.called, *self._idle_missed)
+                return
             if not self._a_gap():
                 return
             if not self._owes_turn():

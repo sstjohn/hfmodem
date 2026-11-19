@@ -2,23 +2,21 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
 import json
-from pathlib import Path
 
 import pytest
 
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.shrike.p4observation import RESPONSE_S, RegisteredObservation
 from hfmodem.shrike.p4receiver import P4Receiver, Emission, Role, Kind, Observation, Registered
 from hfmodem.tests.shrike.test_p4turn import machine
 from hfmodem.tests.shrike.test_p4_normal_short_0928 import normal, FS
 from hfmodem.tests.shrike.test_p4_mail_0927 import options
 
-ROOT = Path(__file__).resolve().parents[5]
 LEAD = 2132
 
 
 def recorded_answers(arm):
-    path = ROOT/f'captures/onair-0929-{arm}/p4-probe.json'
+    path = CAPTURES/f'onair-0929-{arm}/p4-probe.json'
     require_input(path)
     decision, answers = None, []
     for event in json.loads(path.read_text())['link_events']:
@@ -88,7 +86,7 @@ def test_1235_body_to_normal_keeps_peer_raster_in_driver(monkeypatch, offset):
     from hfmodem.shrike import onair, p4turn
     from hfmodem.shrike.p4receiver import Clock, Expect
     from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
-    path = ROOT/'captures/onair-0929-1235/stream.flac'
+    path = CAPTURES/'onair-0929-1235/stream.flac'
     require_input(path)
     audio = onair.session.load_wav(str(path), FS)
     first = 1367728

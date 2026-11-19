@@ -3,7 +3,6 @@
 """Captured cold WS8EOC entry must establish a CRC clock before a mail ACK."""
 import hashlib
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,9 +12,9 @@ from hfmodem.shrike import arq, onair, spec
 from hfmodem.shrike.p3trial import ReplyClock
 from hfmodem.tests.shrike.test_entry_answer import _Session
 from hfmodem.tests.shrike.test_grid import _Bench, _Rig
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
-CAP = ROOT / 'captures/onair-0919-2323'
+CAP = CAPTURES / 'onair-0919-2323'
 ENTRY, ORIGIN, FIRST_HEAD = 1204493, 1244305, 1248745
 
 

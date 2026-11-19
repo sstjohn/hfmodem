@@ -9,6 +9,7 @@ import threading
 import time
 
 from hfmodem.core.hostio import Connection, listen
+from hfmodem.core.waits import join
 
 
 class AgwServer:
@@ -80,8 +81,7 @@ class AgwServer:
             self._client.close(discard=True)
         for worker in (self._thread, self._worker):
             if worker is not None:
-                worker.join(3)
-                if worker.is_alive():
+                if not join(worker, time.monotonic() + 3):
                     raise RuntimeError('AGWPE endpoint did not retire')
         self.runtime.stop()
         return True
@@ -187,8 +187,7 @@ class TrackerServer:
     def stop(self, timeout=5.0):
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(3)
-            if self._thread.is_alive():
+            if not join(self._thread, time.monotonic() + 3):
                 raise RuntimeError('Tracker endpoint did not retire')
         self.runtime.stop()
         if (self._alias is not None and self._alias.is_symlink()

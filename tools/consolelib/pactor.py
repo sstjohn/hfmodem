@@ -93,6 +93,8 @@ P4_ARMS = {
     'y27-c1': ('does K4MSU take the first body after a bare Y27 as c1?', {'--p4-y27-first-body': 'c1'}),
     'turn-ladder': ('does the stock robust-short ladder after our hand-back body move the turn?',
                     {'--p4-turn-entry': 'ladder'}),
+    'stock-turn': ('do the stock turn ladder after our first body and a partner word after two held '
+                   'repeats move WS8EOC and K4MSU?', {'--p4-turn-entry': 'ladder', '--p4-ack-flip': '2'}),
 }
 
 
@@ -304,10 +306,10 @@ def arguments(air):
     robust.add_argument('--robust-p2-max', type=int, default=10,
                         help='the most PACTOR-2 bridge cycles to key before giving up (default %(default)s)')
     robust.add_argument('--robust-p2-marker-flag', choices=('parity', 'inverted'),
-                        default='parity',
+                        default='inverted',
                         help="bit 0 of the bridge's P2 marker: the counter's parity, or its complement "
                              "(keys k=2 as K4MCK's did); default %(default)s")
-    robust.add_argument('--robust-p2-opening', choices=('none', 'k9'), default='none',
+    robust.add_argument('--robust-p2-opening', choices=('none', 'k9'), default='k9',
                         help="k9 keys K4MCK's counter-0 k=9 frame first, counted as one of --robust-p2-max's "
                              "slots (default %(default)s)")
     robust.add_argument('--robust-p3-without-grant', type=int, metavar='K',
@@ -699,7 +701,7 @@ def flags(peer, level, args, directory, send):
             words += ['--p4-arm', arm_name]
             long_defaults = {'--p4-long-level': '3', '--p4-ladder-admit': 'u27,x27',
                              '--p4-spug': 'queued', '--p4-iss-u27': 'repeat'}
-            for flag in ('--p4-y27-first-body', '--p4-turn-entry'):
+            for flag in ('--p4-y27-first-body', '--p4-turn-entry', '--p4-ack-flip'):
                 if getattr(args, flag[2:].replace('-', '_'), None):
                     long_defaults[flag] = getattr(args, flag[2:].replace('-', '_'))
             for flag, value in (long_defaults | arm_overrides).items():
@@ -733,10 +735,8 @@ def flags(peer, level, args, directory, send):
             forced = getattr(args, 'robust_p3_without_grant', None)
             if forced is not None:
                 words += ['--robust-p3-without-grant', str(max(1, forced))]
-            if getattr(args, 'robust_p2_marker_flag', 'parity') != 'parity':
-                words += ['--robust-p2-marker-flag', args.robust_p2_marker_flag]
-            if getattr(args, 'robust_p2_opening', 'none') != 'none':
-                words += ['--robust-p2-opening', args.robust_p2_opening]
+            words += ['--robust-p2-marker-flag', getattr(args, 'robust_p2_marker_flag', 'inverted'),
+                      '--robust-p2-opening', getattr(args, 'robust_p2_opening', 'k9')]
         if fallback is not None:
             if fallback < 1:
                 raise ValueError('--connect-fallback-after counts unanswered calls')
@@ -939,10 +939,8 @@ def flags(peer, level, args, directory, send):
                                robust_p2_max=max(1, getattr(args, 'robust_p2_max', 10)))
             if getattr(args, 'robust_p3_without_grant', None) is not None:
                 adjustments['robust_p3_forced'] = max(1, args.robust_p3_without_grant)
-            if getattr(args, 'robust_p2_marker_flag', 'parity') != 'parity':
-                adjustments['robust_p2_marker_flag'] = args.robust_p2_marker_flag
-            if getattr(args, 'robust_p2_opening', 'none') != 'none':
-                adjustments['robust_p2_opening'] = args.robust_p2_opening
+            adjustments.update(robust_p2_marker_flag=getattr(args, 'robust_p2_marker_flag', 'inverted'),
+                               robust_p2_opening=getattr(args, 'robust_p2_opening', 'k9'))
         if fallback is not None:
             adjustments['connect_fallback_after'] = fallback
     if after_connect != 'arq' and not (after_connect == 'p1-robust' and p4_link):

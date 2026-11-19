@@ -4,7 +4,6 @@
 import csv
 import hashlib
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -12,9 +11,9 @@ from scipy.io import wavfile
 
 from hfmodem.shrike import arq, onair, p3rx, placement, rxfront
 from hfmodem.tests.shrike.test_entry_answer import _Session
+from hfmodem.tests.evidence import CAPTURES, WORKING
 
-ROOT = Path(__file__).resolve().parents[5]
-AUDIT = ROOT / 'working/pactor3-pattern-2029-0919'
+AUDIT = WORKING / 'pactor3-pattern-2029-0919'
 
 
 def receiver(phase, level=None):
@@ -35,7 +34,7 @@ def forbid(*args, **kwargs):
 
 @pytest.mark.parametrize('level', [None, 1])
 def test_first_trim_reaches_its_own_ack_with_only_narrow_budget(monkeypatch, level):
-    path = ROOT / 'captures/onair-0919-2005/hold_06.wav'
+    path = CAPTURES / 'onair-0919-2005/hold_06.wav'
     if not path.exists():
         pytest.skip('saved WS8EOC first Trim window is unavailable')
     fs, raw = wavfile.read(path)
@@ -75,7 +74,7 @@ def test_six_omitted_copies_decode_without_wideband_or_alignment_ladders(monkeyp
 
 
 def test_recorded_turn_answers_every_counter_advance_in_its_current_cycle(monkeypatch):
-    path = ROOT / 'captures/onair-0919-2029/stream.wav'
+    path = CAPTURES / 'onair-0919-2029/stream.wav'
     if not path.exists():
         pytest.skip('saved complete WS8EOC turn is unavailable')
     fs, raw = wavfile.read(path)

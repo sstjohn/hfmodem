@@ -116,7 +116,8 @@ def settings(args):
         overrides['phonetics'] = args.phonetics
     if args.models:
         data = json.loads(Path(args.models).read_text())
-        overrides['language_model'] = data['language']['path']
+        if cfg.voice.language_backend == 'local':
+            overrides['language_model'] = data['language']['path']
         if args.waveform == 'voice':
             overrides.update(synthesis_model=data['synthesis']['path'],
                              recognition_model=data['recognition']['path'])
@@ -245,6 +246,8 @@ def run(argv):
             result = replay(args.decode_run, read_key(args.key_file) if args.key_file else None)
             print(json.dumps(result, indent=2))
             return 0 if result['status'] == 'crc_pass' else 1
+        if cfg.voice.language_backend != 'local':
+            raise ValueError('The channel experiment requires language_backend="local"')
         payload = args.payload.encode('utf-8') if args.payload is not None else Path(args.payload_file).read_bytes()
         pack(payload)  # Validate before opening a model or creating a session.
         options = Options(codebook=args.codebook, symbol_bits=args.symbol_bits, bias=args.bias,
@@ -336,7 +339,8 @@ def run(argv):
         print(json.dumps(plan, indent=2))
         return 0
     if not cfg.voice.language_model or (args.waveform == 'voice' and (not cfg.voice.recognition_model or not cfg.voice.synthesis_model)):
-        raise ValueError('Voice models are unset. Pass --models MANIFEST and --worker-python PYTHON, or set [voice] paths.')
+        raise ValueError('Contact models are unset. Configure [voice] language_model and, for voice, '
+                         'local speech models via --models MANIFEST or [voice] paths.')
     if not replay and args.action != 'levels':
         if not test and not plan['input']:
             raise ValueError('Name the station receive device with [audio] input or --input.')
@@ -359,7 +363,7 @@ def run(argv):
                 held.enter_context(collector_claim(cfg, descriptor))
             held.enter_context(unkey_on_signal(lambda: session.rig))
             held.callback(session.close)
-            print(f'Loading local {args.waveform} contact stack…', flush=True)
+            print(f'Loading {args.waveform} contact stack ({cfg.voice.language_backend} language)…', flush=True)
             session.start_models()
             plan['model_hashes'] = model_hashes(cfg.voice, args.waveform)
             record.write_text(json.dumps(plan, indent=2) + '\n')

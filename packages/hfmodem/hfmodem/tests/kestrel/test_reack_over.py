@@ -189,6 +189,62 @@ def test_an_idle_named_late_is_not_a_gap_to_key_into():
     assert hs._positive_reacks == 0
 
 
+@pytest.mark.parametrize("route", ["bracket", "stream"])
+@pytest.mark.parametrize("processing", [0.0, 0.6])
+def test_an_idle_that_goes_stale_while_it_is_fitted_says_nothing_was_keyed(
+        monkeypatch, route, processing):
+    """A host 3.9x slower spent the peer's whole listening gap fitting the idle's
+    payload; nothing went out, and the log named the idle as an answered one."""
+    hs, io = _mid_delivery()
+    base = VA.time.monotonic
+    cost = [0.0]
+    monkeypatch.setattr(VA.time, "monotonic", lambda: base() + cost[0])
+    fit = hs._complete_query_fit
+
+    def slow_fit(*args, **kwargs):
+        cost[0] += processing
+        return fit(*args, **kwargs)
+
+    monkeypatch.setattr(hs, "_complete_query_fit", slow_fit)
+    before = len(io.sent)
+    if route == "bracket":
+        hs.on_rx_audio(idle())
+    else:
+        stream(hs, idle())
+    stale = [m for m in io.msgs if "nothing keyed" in m]
+    if processing > VA._GRANT_FRESH_S:
+        assert len(io.sent) == before and hs._positive_reacks == 0, io.msgs
+        assert len(stale) == 1 and "session-responder-over-idle" in stale[0], io.msgs
+        # The idle is still the peer transmitting; the stale line says why that
+        # drew nothing.
+        last = io.msgs.index(stale[0])
+        assert not any("still transmitting" in m for m in io.msgs[last:]), io.msgs
+    else:
+        assert keyed(io) == hs._reack_frame and not stale, io.msgs
+
+
+@pytest.mark.parametrize("route", ["bracket", "stream"])
+def test_each_stale_idle_is_said_once(monkeypatch, route):
+    """Three idles, each fitted past its gap, are three frames missed: the
+    once-per-frame guard must not fold distinct bursts into one."""
+    hs, io = _mid_delivery()
+    base = VA.time.monotonic
+    cost = [0.0]
+    monkeypatch.setattr(VA.time, "monotonic", lambda: base() + cost[0])
+    fit = hs._complete_query_fit
+
+    def slow_fit(*args, **kwargs):
+        cost[0] += 0.6
+        return fit(*args, **kwargs)
+
+    monkeypatch.setattr(hs, "_complete_query_fit", slow_fit)
+    before = len(io.sent)
+    for _ in range(3):
+        hs.on_rx_audio(idle()) if route == "bracket" else stream(hs, idle())
+    assert len(io.sent) == before, io.msgs
+    assert len([m for m in io.msgs if "nothing keyed" in m]) == 3, io.msgs
+
+
 def test_an_over_that_decodes_ends_the_ladder():
     """The peer sending on is the acknowledgement having landed: a sender that was
     not acknowledged repeats instead."""

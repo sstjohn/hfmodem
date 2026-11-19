@@ -21,12 +21,20 @@ from hfmodem.tests.core.fakeyaesu import FakeYaesu, PtySerial
 PTY = pytest.mark.posix_only("the fake Yaesu is a pty, and Windows has none")
 
 
+def open_unhurried(driver):
+    # The real open deadline is the open_drain tests' to assert; elsewhere it is
+    # only a hang bound, and exchanges after the open keep their real one.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(module, 'EXCHANGE_S', 30.0)
+        driver.open()
+
+
 @contextmanager
 def yaesu(model='ft891', **kwargs):
     fake = FakeYaesu(model, **kwargs)
     driver = YaesuCat(fake.port, model, serial_factory=PtySerial)
     try:
-        driver.open()
+        open_unhurried(driver)
         yield driver, fake
     finally:
         driver.close()
@@ -76,7 +84,7 @@ def test_open_discards_queued_stale_replies():
     stale = b'ID0650;?;FA007105000;ID0650;partial'
     try:
         os.write(fake.master, stale)
-        driver.open()
+        open_unhurried(driver)
         assert driver.discarded_open_bytes == len(stale)
         assert driver.identify() == 'Yaesu FT-891'
         assert driver.freq() == 7100000
@@ -92,7 +100,7 @@ def test_a_readable_wrong_radio_is_a_mismatch_not_an_unreadable_one():
     fake = FakeYaesu('ftdx10')
     driver = YaesuCat(fake.port, 'ft891', serial_factory=PtySerial)
     try:
-        driver.open()
+        open_unhurried(driver)
         with pytest.raises(IdentityMismatch):
             driver.identify()
     finally:
@@ -245,6 +253,31 @@ def test_ft891_mode_filters_and_setters_without_vfo_select():
 
 
 @PTY
+@pytest.mark.parametrize('stepped_from', ['open', 'exchange'])
+def test_a_wall_clock_step_mid_wait_is_not_the_deadline(monkeypatch, stepped_from):
+    """CPython built without sem_clockwait parks a timed wait on the wall clock, and
+    a forward step (NTP, resume) ends it early. Every timed wait here ends within
+    5 ms; open, a setter with its readback delay, and queries keep their deadlines."""
+    park = threading.Event.wait
+
+    def stepped(self, timeout=None):
+        return park(self, None if timeout is None else min(timeout, 0.005))
+
+    if stepped_from == 'open':
+        monkeypatch.setattr(threading.Event, 'wait', stepped)
+    with yaesu() as (driver, fake):
+        monkeypatch.setattr(threading.Event, 'wait', stepped)
+        written, write = {}, driver._write
+        monkeypatch.setattr(driver, '_write', lambda command, deadline: (
+            written.setdefault(command, time.monotonic()), write(command, deadline))[1])
+        assert driver.set_mode('PKTLSB', 2400)
+        assert written['NA0;'] - written['NA00;'] >= driver.profile['setter_readback_delay_s'] > 0
+        assert driver.mode().mode == 'PKTLSB'
+        driver.set_freq(7102500)
+        assert driver.freq() == 7102500
+
+
+@PTY
 def test_a_sent_query_the_caller_outlasts_reports_its_reply_timed_out(monkeypatch):
     """The caller's backstop and the worker's reply wait share one deadline. Once
     the query is on the wire, either one expiring is the same reply timeout."""
@@ -383,7 +416,7 @@ def test_setter_readback_gap(model, monkeypatch):
         readback = fake.log.index('FA;')
         gap = fake.receive_times[readback] - fake.receive_times[setter]
         if model == 'ft891':
-            assert waits == [0.05]
+            assert waits == [pytest.approx(0.05, abs=1e-3)]
             assert gap >= 0.04
         else:
             assert waits == []
@@ -613,7 +646,7 @@ def test_serial_configuration_and_single_thread(monkeypatch, model, stopbits):
     monkeypatch.setattr(serialline.os, 'read', spy_read)
     monkeypatch.setattr(serialline.fcntl, 'ioctl', spy_ioctl)
     try:
-        driver.open()
+        open_unhurried(driver)
         threads = [background(driver.freq) for _ in range(4)]
         for thread, result in threads:
             join(thread)
@@ -633,7 +666,7 @@ def test_open_without_factory_uses_pyserial(model):
     fake = FakeYaesu(model)
     driver = YaesuCat(fake.port, model)
     try:
-        driver.open()
+        open_unhurried(driver)
         assert driver.identify() == RIGS[model]['name']
         assert fake.log[:2] == ['AI0;', 'ID;']
         assert driver._serial.rts is False and driver._serial.dtr is False
@@ -748,7 +781,7 @@ def test_serial_exclusive_ioctl_failure_does_not_return_open(monkeypatch):
     monkeypatch.setattr(serialline.fcntl, 'ioctl', refuse)
     try:
         with pytest.raises(RigError, match='exclusive ioctl refused'):
-            driver.open()
+            open_unhurried(driver)
         join(driver._thread)
         assert len(opened) == 1 and opened[0].fd is None
         assert driver.poisoned and not fake.log

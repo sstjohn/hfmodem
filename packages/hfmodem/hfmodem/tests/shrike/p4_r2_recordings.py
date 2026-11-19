@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from hfmodem.shrike import session
+from hfmodem.tests.evidence import CAPTURES, WORKING
 
 FS = 48000
 MANIFEST = {'1001-1029': {'log': 'pactor-p4-bench-ws8eoc-40-force-20261001T152923Z-p4-mail.log',
@@ -77,12 +78,10 @@ class Recording:
 @lru_cache(maxsize=3)
 def recording(arm):
     pin = MANIFEST[arm]
-    roots = Path(__file__).resolve().parents
-    root = next((p for p in roots if (p/'captures'/f'onair-{arm}'/'stream.flac').exists()), None)
-    if root is None:
+    capture = CAPTURES/f'onair-{arm}'
+    if not (capture/'stream.flac').exists():
         pytest.skip(f'local recorded control {arm} absent')
-    capture = root/'captures'/f'onair-{arm}'
-    log_path = root/'working'/f'onair-{arm}'/pin['log']
+    log_path = WORKING/f'onair-{arm}'/pin['log']
     for name, digest in pin['hashes'].items():
         path = log_path if name == pin['log'] else capture/name
         assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, str(path)

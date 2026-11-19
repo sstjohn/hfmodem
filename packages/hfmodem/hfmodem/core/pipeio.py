@@ -10,6 +10,8 @@ import select
 import threading
 import time
 
+from .waits import join
+
 
 class Reader:
     def __init__(self, stream=None, *, bounded=None, lines=False, encoding=None, errors=None):
@@ -86,8 +88,7 @@ class Reader:
 
     def close(self):
         self.stop.set()
-        self.thread.join(1.5)
-        if self.thread.is_alive():
+        if not join(self.thread, time.monotonic() + 1.5):
             return False
         if self.bounded is not None:
             return self.bounded.close()

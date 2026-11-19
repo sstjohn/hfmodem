@@ -10,8 +10,8 @@ import {signalDescription, listenSources} from '../js/examples/link-state.js';
 const indexUrl = new URL('../examples/logbook/entries.json', import.meta.url);
 const entries = JSON.parse(readFileSync(indexUrl));
 const expected = [
-  ['vara-send', 'NS0A', 'Send'], ['vara-receive', 'N5TW', 'Receive'],
   ['pactor3-send', 'VE1YZ', 'Send'], ['pactor3-receive', 'WS8EOC', 'Receive'],
+  ['vara-send', 'NS0A', 'Send'], ['vara-receive', 'N5TW', 'Receive'],
   ['ardop-send', 'WW2MI', 'Send'], ['ardop-receive', 'W6IDS', 'Receive'],
 ];
 const manifestUrl = route => new URL(`../examples/${route}/manifest.json`, import.meta.url);

@@ -334,7 +334,9 @@ def test_launcher_aged_identity_completes_before_pending_rpr_burst(
 
 @pytest.mark.parametrize('limiter', [False, True])
 @pytest.mark.parametrize('key_delay', [0, 0.05])
-def test_ptt_to_first_card_sample_includes_keying_delay(limiter, key_delay):
+def test_ptt_to_first_card_sample_includes_keying_delay(limiter, key_delay, monkeypatch):
+    # This card steps only when the test thread does, so its callback age is scheduling, not a stall.
+    monkeypatch.setattr('hfmodem.core.audio.CALLBACK_JITTER_ALLOWANCE_S', 30.0)
     audio = Audio()
     rig = Rig(audio, key_delay=key_delay)
     arbiter = TxArbiter(audio, rig)

@@ -21,8 +21,6 @@ from hfmodem.station import client as station_client
 
 from . import logbook, operator, roster, station
 
-fcntl = posix.module("fcntl")
-
 ADMISSION_TIMEOUT_S = 30.0
 _local = threading.local()
 _descriptor_lock = threading.RLock()
@@ -166,13 +164,7 @@ def lease(mode, *, env=None):
         devices = hardware.Devices(cat_port=selection.CAT_PORT or None,
             ptt_port=selection.PTT_PORT or None, capture=selection.AUDIO_IN,
             playback=selection.AUDIO_OUT, cat=CAT_BACKENDS[cfg.rig.cat] if cfg else 'serial')
-        saved = None
-        if os.name != 'nt':
-            try:
-                saved = fcntl.fcntl(9, fcntl.F_DUPFD_CLOEXEC, 10)
-            except OSError as error:
-                if error.errno != 9:
-                    raise
+        saved = hardware.vacate()
         acquired = None
         old = os.environ.get('RIG_CLAIMED')
         try:
@@ -212,9 +204,7 @@ def lease(mode, *, env=None):
                         os.environ.pop('RIG_CLAIMED', None)
                     else:
                         os.environ['RIG_CLAIMED'] = old
-                    if saved is not None:
-                        os.dup2(saved, 9, inheritable=False)
-                        os.close(saved)
+                    hardware.restore(saved)
 
 
 def remember(process, *, entry=None):

@@ -7,15 +7,14 @@ Quiet-machine variant: HFMODEM_REALTIME=1 pytest -m realtime <this module>.
 import os
 from functools import lru_cache
 from types import SimpleNamespace
-from pathlib import Path
 
 import pytest
 
 from hfmodem.shrike import session
 from hfmodem.shrike.p4receiver import P4Receiver, Clock, Expect, Kind, Registered
 from hfmodem.tests.shrike.test_p4turn import machine
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 FS = 48000
 PINS = [
     ('2320', 'witness', 25.935, -1.6, 1, 0xd97b, 128),
@@ -30,7 +29,7 @@ PINS = [
 
 @lru_cache(None)
 def audio(arm, source):
-    path = ROOT / 'captures' / f'onair-0929-{arm}' / (source + ('.flac' if source == 'stream' else '.wav'))
+    path = CAPTURES / f'onair-0929-{arm}' / (source + ('.flac' if source == 'stream' else '.wav'))
     if not path.exists():
         pytest.skip(f'local recording absent: {path}')
     return session.load_wav(str(path), FS)

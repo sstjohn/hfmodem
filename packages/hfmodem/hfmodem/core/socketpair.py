@@ -11,6 +11,8 @@ import socket
 import threading
 import time
 
+from .waits import join
+
 
 def hang_up(sock):
     try:
@@ -52,8 +54,7 @@ class SocketPairAcceptor:
             hang_up(listener)
         for th in (self._thread, self._worker):
             if th is not None and th is not threading.current_thread():
-                th.join(timeout=max(0., deadline-time.monotonic()))
-                if th.is_alive():
+                if not join(th, deadline):
                     raise RuntimeError('legacy socket pair worker did not retire')
         return True
 

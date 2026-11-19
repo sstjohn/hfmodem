@@ -13,6 +13,7 @@ from hfmodem.tests.shrike.test_p3level_session import _Seam
 from hfmodem.tests.shrike.test_p3_input_loss import corroborated
 from hfmodem.tests.shrike.test_v27_arq_emission_opportunity import linked, packet
 from hfmodem.winlink import B2FSession, MailClient, compose
+from hfmodem.tests.evidence import CAPTURES
 
 
 @pytest.mark.parametrize('payload', [b'', b'FS Y\r'])
@@ -236,7 +237,7 @@ def test_crc_free_receive_budget_is_finite_despite_weak_evidence(evidence, ticks
 def test_recorded_template_and_broadband_qrm_cannot_extend_unbounded_hold(kind):
     fixture = json.loads((Path(__file__).parent / 'fixtures' /
                           'p3-giveup-1002.json').read_text())
-    cap = Path(__file__).resolve().parents[5] / 'captures' / fixture['arm']
+    cap = CAPTURES / fixture['arm']
     if not (cap / 'stream.flac').is_file():
         pytest.skip(f'local recording unavailable: {cap}')
     audio = rxfront.load_wav(str(cap / 'stream.flac'))
@@ -328,7 +329,7 @@ class ReplaySeam(_Seam):
 def _k9kdj_recorded_recovery(capsys, expected_hold, *, tmp_path=None):
     fixture = json.loads((Path(__file__).parent / 'fixtures' /
                           'p3-giveup-1002.json').read_text())
-    cap = Path(__file__).resolve().parents[5] / 'captures' / fixture['arm']
+    cap = CAPTURES / fixture['arm']
     if not (cap / 'stream.flac').is_file():
         pytest.skip(f'local recording unavailable: {cap}')
     assert hashlib.sha256((cap / 'stream.flac').read_bytes()).hexdigest() == fixture['stream_sha256']

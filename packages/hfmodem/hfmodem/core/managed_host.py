@@ -23,6 +23,7 @@ import time
 
 from .hostio import listen
 from .socketpair import hang_up
+from .waits import join
 
 # Version, deployment secret, role, supervisor lease, attachment. Role zero
 # holds the lease and sends one zero heartbeat byte; one/two carry command/data,
@@ -187,7 +188,7 @@ class ManagedHost:
                         hang_up(stream)
                 worker = lease.worker
             if worker is not None:
-                worker.join(self.join_timeout)
+                join(worker, time.monotonic() + self.join_timeout)
             with self._lock:
                 if worker is not None and worker.is_alive():
                     self.failure = 'managed attachment did not retire'
@@ -266,12 +267,10 @@ class ManagedHost:
                 hang_up(conn)
             workers = tuple(self._workers)
         if self._thread is not None:
-            self._thread.join(3)
-            if self._thread.is_alive():
+            if not join(self._thread, time.monotonic() + 3):
                 raise RuntimeError('managed endpoint acceptor did not retire')
         for worker in workers:
-            worker.join(self.join_timeout + 1)
-            if worker.is_alive():
+            if not join(worker, time.monotonic() + self.join_timeout + 1):
                 raise RuntimeError('managed endpoint worker did not retire')
         if self._owner_started:
             self.stop_owner()

@@ -15,6 +15,7 @@ import time
 import numpy as np
 
 from hfmodem.core.rates import CARD_RATE_HZ
+from hfmodem.core.waits import join, result
 
 
 @dataclass(frozen=True)
@@ -57,8 +58,7 @@ class CaptureStartupCleanup:
             self._future = self._worker.submit(self._finish)
             self._worker.shutdown(wait=False)
         for worker in tuple(self._worker._threads):
-            worker.join(max(0, end - time.monotonic()))
-            if worker.is_alive():
+            if not join(worker, end):
                 raise RuntimeError('chat capture startup cleanup still pending')
         self._future.result()
 
@@ -230,7 +230,7 @@ class ChatCapture:
             future = self.drain()
             if future is not None:
                 try:
-                    future.result(timeout=max(0, end - time.monotonic()))
+                    result(future, end)
                 except FutureTimeout as error:
                     raise RuntimeError('chat capture flush still pending') from error
             with self._lock:
@@ -311,8 +311,7 @@ class ChatCapture:
             self._finalizer = self._worker.submit(self._finalize)
             self._worker.shutdown(wait=False)
         for worker in tuple(self._worker._threads):
-            worker.join(max(0, end - time.monotonic()))
-            if worker.is_alive():
+            if not join(worker, end):
                 raise RuntimeError('chat capture worker retirement still pending')
         try:
             self._check_saves()

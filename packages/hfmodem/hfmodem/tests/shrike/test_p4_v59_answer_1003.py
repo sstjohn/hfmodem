@@ -331,7 +331,9 @@ def test_1123_default_serialization_and_emissions_match_prechange_flight(recorde
     # D S2.3's opening requests are pinned separately from the post-opening trace.
     unread = [e for e in prechange if e['event'] == 'Decision' and e['scheduled_at'] in opening]
     assert [(e['reason'], e['proposed_at']) for e in unread] == [('body unread at decision', None)]*3
-    assert digest([e for e in prechange if e not in unread]) == nak['decisions_and_keys_sha256_1107']
+    # 1117: a placed normal's decision no longer waits on a whole-window read
+    # and a decoded normal's carries no robust packet_read; keys and emissions are unchanged.
+    assert digest([e for e in prechange if e not in unread]) == nak['decisions_and_keys_sha256_1117']
     assert nak['baseline_heard_sha256'] == baseline['heard_sha256']
     heard = support.protocol_heard(recorded_default['heard'])
     assert digest(heard) == nak['heard_sha256']

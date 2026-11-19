@@ -22,6 +22,7 @@ import tempfile
 import time
 
 from hfmodem.core import claim as hardware, down, ftdx10, hamlib, posix
+from hfmodem.core.hamlib import rigctld_port
 from hfmodem.core.band import AMATEUR_HF_BANDS
 from hfmodem.core.native import KILL_WAIT_S, OPEN_TIMEOUT_S, REAP_GRACE_S, spawn_native
 from hfmodem.core.recording import control_launch
@@ -436,6 +437,10 @@ class Launcher:
         self.destination = None
 
     @property
+    def rigctld_port(self):
+        return rigctld_port(rig=self.cfg.rig if self.cfg else None)
+
+    @property
     def cat_backend(self):
         return CAT_BACKENDS[self.cfg.rig.cat if self.cfg else self.profile.get('cat', 'rigctld')]
 
@@ -478,15 +483,8 @@ class Launcher:
     def lease(self, verb):
         # The console's lease offers a station release; external launchers must
         # instead refuse a held claim, as bash does.
-        saved = None
+        saved = hardware.vacate()
         previous = os.environ.get('RIG_CLAIMED')
-        if os.name != 'nt':
-            import fcntl
-            try:
-                saved = fcntl.fcntl(9, fcntl.F_DUPFD_CLOEXEC, 10)
-            except OSError as exc:
-                if exc.errno != 9:
-                    raise
         descriptor = None
         try:
             devices = hardware.Devices(self.cat_port, self.ptt_port, self.audio_in, self.audio_out,
@@ -519,9 +517,7 @@ class Launcher:
                         os.environ.pop('RIG_CLAIMED', None)
                     else:
                         os.environ['RIG_CLAIMED'] = previous
-                    if saved is not None:
-                        os.dup2(saved, 9, inheritable=False)
-                        os.close(saved)
+                    hardware.restore(saved)
 
     @contextmanager
     def possession(self, verb, *, parent=False):
@@ -670,7 +666,7 @@ class Launcher:
         deadline = time.monotonic() + timeout
         reply, completed = bytearray(), 0
         try:
-            with phase(f'rigctld TCP {requests!r}'), socket.create_connection(('127.0.0.1', 4532), timeout=timeout) as connection:
+            with phase(f'rigctld TCP {requests!r}'), socket.create_connection(('127.0.0.1', self.rigctld_port), timeout=timeout) as connection:
                 connection.settimeout(max(.001, deadline - time.monotonic()))
                 connection.sendall(payload.encode())
                 while True:
@@ -739,6 +735,7 @@ class Launcher:
 
     @phase('rigctld startup')
     def start_daemon(self, *, dummy=False):
+        bind = hamlib.rigctld_bind()
         if not dummy:
             self.require_cat(transmit=True)
         # Inventory before spawning preserves the old daemon's CAT handoff.
@@ -748,7 +745,10 @@ class Launcher:
             argv += ['-r', self.cat_port, '-s', str(self.profile.get('baud', 38400))]
         argv += ['--set-conf=ptt_type=None']
         if dummy:
-            argv += ['-T', '127.0.0.1', '-t', '4532']
+            argv += ['-T', '127.0.0.1']
+        elif bind:
+            argv += ['-T', bind]
+        argv += ['-t', str(self.rigctld_port)]
         with phase('rigctld spawn/handle acknowledgement'):
             self.daemon = spawn_native(argv, claim_fd=self.descriptor,
                 long_lived=not dummy, device=None if dummy else self.cat_port)
@@ -941,7 +941,7 @@ class Launcher:
             print('  CAT none; dial unverified', flush=True)
             return
         try:
-            with socket.create_connection(('127.0.0.1', 4532), timeout=CAT_QUERY_S):
+            with socket.create_connection(('127.0.0.1', self.rigctld_port), timeout=CAT_QUERY_S):
                 pass
         except OSError:
             self.tune_native(dial)
@@ -1108,7 +1108,7 @@ class Launcher:
                     command = [sys.executable, str(ROOT / 'tools/kestrel_connect.py'),
                         '--gateway', gateway, '--mycall', os.environ['MYCALL'], '--bw', bandwidth,
                         '--tx-device', self.audio_out, '--rx-device', self.audio_in,
-                        '--rigctld', '127.0.0.1:4532', '--freq', f'{dial // 1000}.{dial % 1000:03d}',
+                        '--rigctld', f'127.0.0.1:{self.rigctld_port}', '--freq', f'{dial // 1000}.{dial % 1000:03d}',
                         '--arm', '--expect-model', expected, '--ptt-device', self.ptt_port, '--line-ptt',
                         *extra, '--run-dir', str(self.destination or evidence.session),
                         '--gateways', str(data / 'cache/winlink-vara-gateways.csv')]
@@ -1119,7 +1119,7 @@ class Launcher:
                     label = 'RPR mail'
                 else:
                     command = [sys.executable, '-m', 'hfmodem.besra.host.run_server',
-                        '--radio', self.name, '--rigctld', '127.0.0.1:4532',
+                        '--radio', self.name, '--rigctld', f'127.0.0.1:{self.rigctld_port}',
                         '--audio-in', self.audio_in, '--audio-out', self.audio_out,
                         '--channel', str(centre), '--bandwidth', bandwidth,
                         '--ptt-device', self.ptt_port, '--line-ptt',
@@ -1178,7 +1178,7 @@ class Launcher:
         rpr_mail.mail_flags(parser)
         args = parser.parse_args(mail)
         path = rpr_mail.prepare(os.environ.get('HFMODEM_STATION', str(ROOT / 'station.toml')),
-            centre, evidence.session, send=args.mail_send, to=args.mail_to, subject=args.mail_subject)
+            centre, evidence.session, port=self.rigctld_port, send=args.mail_send, to=args.mail_to, subject=args.mail_subject)
         print(f'  captures: {evidence.session} (station.toml, capture-*/stream, tx_events.jsonl, mail/)', flush=True)
         bound = rpr_mail.stop_bound(path, cwid_optional=args.cwid_optional)
         if os.name == 'nt':
@@ -1306,7 +1306,7 @@ class Launcher:
             with evidence.witness(self, dial, None, enabled=witness):
                 evidence.session.mkdir(parents=True, exist_ok=True)
                 command = [sys.executable, '-m', 'hfmodem.sabir.onair', '--transmit',
-                    '--radio', self.name, '--rigctld', '127.0.0.1:4532',
+                    '--radio', self.name, '--rigctld', f'127.0.0.1:{self.rigctld_port}',
                     '--ptt-device', self.ptt_port, '--line-ptt', '--channel', str(centre),
                     '--audio-in', self.audio_in, '--audio-out', self.audio_out,
                     '--mycall', os.environ['MYCALL'], *grid_args,
@@ -1394,6 +1394,7 @@ class Launcher:
                 command = [sys.executable, str(ROOT / 'tools' / script),
                     *(['--chat'] if verb == 'vara-chat' else []),
                     '--mycall', os.environ['MYCALL'], '--expect-model', expected,
+                    '--rigctld', f'127.0.0.1:{self.rigctld_port}',
                     '--ptt-device', self.ptt_port, '--tx-device', self.audio_out,
                     '--rx-device', self.audio_in, *defaults, *words[2:], *destination]
                 label = 'kestrel_host.py --chat' if verb == 'vara-chat' else script
@@ -1556,6 +1557,7 @@ def worker(verb, device):
 
 
 def main(argv=None):
+    hardware.reserve()
     launch_io.initialize()
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] in (['--help'], ['-h']):

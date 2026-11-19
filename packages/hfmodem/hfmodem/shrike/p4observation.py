@@ -10,6 +10,8 @@ WORD_HORIZON_S = 0.275
 RESPONSE_S = 0.935
 """Centre of the 0.90-0.97 s bracket after our packet's start where a peer's word
 answers it: VE3KPG answers at +0.944-0.950, N9VC reaches +0.968."""
+# Peer words on the 11-14..11-17 tapes sit within 3.7 Hz of its packets' carrier.
+PEER_WORD_CFO_HZ = 10.
 
 
 class Kind(StrEnum):

@@ -16,7 +16,7 @@ from scipy.io import wavfile
 from hfmodem.core import wav
 from hfmodem.shrike import onair, p4hold, p4host, p4longdecode, p4longnative
 from hfmodem.shrike import p4receiver, p4shortlevels, p4turn
-from hfmodem.tests.evidence import RECORD, TREE, require_input
+from hfmodem.tests.evidence import OPERATOR_DATA, TREE, require_input
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Stream, Tx
 
 CAPTURES = {
@@ -75,7 +75,7 @@ def declared(stack, stream):
 
 
 def replay(name, **options):
-    capture = RECORD / 'operator-data/captures' / CAPTURES[name]
+    capture = OPERATOR_DATA / 'captures' / CAPTURES[name]
     metadata = json.loads(require_input(capture / 'stream.json').read_text())
     recorded = json.loads(require_input(capture / 'p4-probe.json').read_text())
     assert metadata['samplerate'] == FS and metadata.get('first_stream_sample', 0) == 0

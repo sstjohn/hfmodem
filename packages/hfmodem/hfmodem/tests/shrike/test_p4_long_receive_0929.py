@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -10,9 +9,9 @@ import pytest
 from hfmodem.shrike import p4oracle, session
 from hfmodem.shrike.p4receiver import P4Receiver, Clock, Expect, Kind, Observation, Registered
 from hfmodem.tests.shrike.corpora import n9vc_0802
+from hfmodem.tests.evidence import CAPTURES
 
 FS = 48000
-ROOT = Path(__file__).resolve().parents[5]
 
 
 def receiver(at, cfo=1.54):
@@ -30,7 +29,7 @@ def provisional(rx, at):
 
 @pytest.mark.parametrize('at, lead', [(2688057, 8), (2868057, 2)])
 def test_ve0121_long_uses_bounded_context_from_a_rolling_window(at, lead):
-    path = ROOT/'captures/onair-0929-0121/stream.flac'
+    path = CAPTURES/'onair-0929-0121/stream.flac'
     if not path.exists():
         pytest.skip('local VE3KPG long recording absent')
     audio = session.load_wav(str(path), FS)
@@ -115,7 +114,7 @@ def test_three_genuinely_missed_packets_still_allow_word_reacquisition(monkeypat
 
 
 def test_weak_ve0121_long_still_fails_full_coherence():
-    path = ROOT/'captures/onair-0929-0121/stream.flac'
+    path = CAPTURES/'onair-0929-0121/stream.flac'
     if not path.exists():
         pytest.skip('local VE3KPG long recording absent')
     audio = session.load_wav(str(path), FS)
@@ -210,7 +209,7 @@ def test_negotiated_chirp_crc_failure_is_bounded_and_never_confirmed(monkeypatch
 def test_ws0131_repeated_normal_packets_keep_decode_budget(monkeypatch):
     import json
 
-    directory = ROOT/'captures/onair-0929-0131'
+    directory = CAPTURES/'onair-0929-0131'
     if not (directory/'stream.flac').exists():
         pytest.skip('local WS8EOC normal-starvation recording absent')
     audio = session.load_wav(str(directory/'stream.flac'), FS)
@@ -259,7 +258,7 @@ def test_ws0131_repeated_normal_packets_keep_decode_budget(monkeypatch):
 
 @pytest.mark.parametrize('at', [2268068, 2988928, 3168073])
 def test_ve0124_long_uses_a_second_bounded_noise_context(at):
-    path = ROOT/'captures/onair-0929-0124/stream.flac'
+    path = CAPTURES/'onair-0929-0124/stream.flac'
     if not path.exists():
         pytest.skip('local VE3KPG second long recording absent')
     audio = session.load_wav(str(path), FS)
@@ -274,7 +273,7 @@ def test_ve0124_long_uses_a_second_bounded_noise_context(at):
 
 
 def test_second_ve0121_long_survives_own_ack_gap_and_clock_offset():
-    path = ROOT/'captures/onair-0929-0121/stream.flac'
+    path = CAPTURES/'onair-0929-0121/stream.flac'
     if not path.exists():
         pytest.skip('local VE3KPG long recording absent')
     audio = session.load_wav(str(path), FS)
@@ -297,7 +296,7 @@ def test_second_ve0121_long_survives_own_ack_gap_and_clock_offset():
 
 
 def test_partial_ve0121_long_uses_envelope_not_ambiguous_symbol_phase():
-    path = ROOT/'captures/onair-0929-0121/stream.flac'
+    path = CAPTURES/'onair-0929-0121/stream.flac'
     if not path.exists():
         pytest.skip('local VE3KPG long recording absent')
     audio = session.load_wav(str(path), FS)
@@ -346,7 +345,7 @@ def test_recorded_chirp_header_corrects_the_placed_clock(error_ms):
 def test_incomplete_long_failure_can_retry_then_reuses_accepted_crc(monkeypatch):
     from hfmodem.shrike import p4robustrx
 
-    path = ROOT/'captures/onair-0929-0121/stream.flac'
+    path = CAPTURES/'onair-0929-0121/stream.flac'
     if not path.exists():
         pytest.skip('local VE3KPG long recording absent')
     audio = session.load_wav(str(path), FS)

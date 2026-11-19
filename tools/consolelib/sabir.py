@@ -21,6 +21,7 @@ import subprocess
 import time
 import tomllib
 
+from hfmodem.core.hamlib import rigctld_port
 from hfmodem.sabir.proof import PROOF_PROFILES
 from hfmodem.station import wire
 
@@ -57,15 +58,16 @@ def read_rig_dial(descriptor=None):
     Send only a frequency query: no daemon startup, tuning or keying. Do not
     contend for serial CAT if a running daemon fails to answer correctly.
     """
+    port = rigctld_port()
     try:
-        connection = wire.create_connection(('127.0.0.1', 4532), timeout=2)
+        connection = wire.create_connection(('127.0.0.1', port), timeout=2)
     except ConnectionRefusedError:
         value = station.cat('f', descriptor=descriptor)
         source = 'serial CAT'
     except OSError as exc:
         raise RuntimeError(f'cannot read rig dial from rigctld: {exc}') from exc
     else:
-        source = 'rigctld 127.0.0.1:4532'
+        source = f'rigctld 127.0.0.1:{port}'
         with connection:
             connection.sendall(b'+f\n')
             reply = b''

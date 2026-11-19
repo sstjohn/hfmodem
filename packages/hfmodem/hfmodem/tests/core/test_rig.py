@@ -17,6 +17,7 @@ FT-891's response to an RTS edge from a foreign fd.
 from __future__ import annotations
 
 import errno
+from functools import partial
 import os
 import socket
 import threading
@@ -27,14 +28,21 @@ import time
 
 import pytest
 
-from hfmodem.core import config
+from hfmodem.core import config, rig as rig_module
 from hfmodem.core.cat import RigctldCat
 from hfmodem.core.regulatory import Control, Emission, Unregulated, centred
 from hfmodem.core.regulatory.part97 import Licence, Part97
 from hfmodem.core.rig import Cat, KeyToken, Rig, RigError, StuckTransmitter
 from hfmodem.tests.core.fakerig import FakePtt, FakeRigctld
+from hfmodem.core.waits import sleep_until
+from hfmodem.tests.clock_steps import JOIN, step_backward, step_forward
 
 BENCH = Unregulated(because="unit test, no radio present")
+
+
+def slow_release(rig, monkeypatch, seconds=0.1):
+    release = rig.ptt.release
+    monkeypatch.setattr(rig.ptt, "release", lambda: (time.sleep(seconds), release())[1])
 
 
 class SocketPairRig(FakeRigctld):
@@ -1404,3 +1412,68 @@ def test_finite_key_still_requires_a_duration(fake):
     with pytest.raises(TypeError, match='duration_s'):
         rig.key(burst(), why='missing duration')
     assert not rig.keyed
+
+
+# --- wall-clock steps: every keying bound runs on monotonic time -------------
+
+@pytest.mark.parametrize("step", [partial(step_forward, joins=True), step_backward])
+def test_the_watchdog_fires_on_monotonic_time_through_a_wall_clock_step(fake, monkeypatch, step):
+    r = make(fake)
+    fired = []
+    monkeypatch.setattr(r, "_watchdog_fired", lambda why, deadline_s: fired.append(time.monotonic()))
+    with monkeypatch.context() as patcher:
+        step(patcher)
+        start = time.monotonic()
+        r._arm_watchdog(0.2, "test")
+        try:
+            assert sleep_until(lambda: fired, start + 2), "the watchdog never fired"
+        finally:
+            r._cancel_watchdog()
+    assert fired[0] - start >= 0.2, "the watchdog fired early"
+
+
+def test_the_off_main_thread_deadman_keeps_its_budget_through_a_forward_step(monkeypatch):
+    exits = []
+    monkeypatch.setattr(rig_module.os, "_exit", lambda status: exits.append(time.monotonic()))
+    with monkeypatch.context() as patcher:
+        step_forward(patcher, joins=True)
+        start = time.monotonic()
+        arming = threading.Thread(target=rig_module.arm_deadman, args=(0.2,))
+        arming.start()
+        JOIN(arming)
+        assert sleep_until(lambda: exits, start + 5), "the deadman never fired"
+    assert exits[0] - start >= 0.2, "the deadman fired early"
+
+
+def test_a_forward_step_does_not_shorten_the_proof_hold(fake, monkeypatch):
+    r, ptt = full(fake)
+    r.admission_cancel = threading.Event()
+    edges = []
+    assert_ = ptt.assert_
+    monkeypatch.setattr(ptt, "assert_", lambda on: (edges.append(time.monotonic()), assert_(on))[1])
+    with monkeypatch.context() as patcher:
+        step_forward(patcher, joins=True)
+        r.arm(prove_ptt=True)
+    assert not r.retired, r.retired_why
+    assert edges[-1] - edges[0] >= 0.2, "the proof hold was cut short"
+
+
+def test_a_forward_step_does_not_leave_the_keying_line_behind_in_a_panic(fake, monkeypatch, capfd):
+    fake.ptt_type = "None"
+    r = make(fake)
+    r.key(burst(), why="test", duration_s=1.0)
+    slow_release(r, monkeypatch)
+    with monkeypatch.context() as patcher:
+        step_forward(patcher, joins=True)
+        r.panic_unkey("bench")
+    err = capfd.readouterr().err
+    assert "has not answered" not in err and "keying line reads low" in err
+
+
+def test_a_forward_step_does_not_fail_a_close_whose_line_releases(fake, monkeypatch):
+    r = make(fake)
+    slow_release(r, monkeypatch)
+    with monkeypatch.context() as patcher:
+        step_forward(patcher, joins=True)
+        r.close()
+    assert "during close" not in (r.retired_why or "")

@@ -91,9 +91,9 @@ MOVED = {f'docs/protocols/{name}': f'docs/implementation/{name}' for name in (
 # Search titles and descriptions for the site's own pages, by output route.
 METADATA = {
     'index.html': (
-        'hfmodem: HF data modem for PACTOR, VARA, ARDOP and more',
-        'An HF modem with PACTOR, VARA, ARDOP, Robust Packet, ALE, selcall, voice, CW and '
-        'text-mode monitoring. Protocol guides, recorded exchanges and operator console.'),
+        'hfmodem: the first open-source PACTOR-3 modem',
+        'A free, open-source HF data modem for PACTOR-1, -2 and -3. It also supports VARA, ARDOP, '
+        'Robust Packet, ALE, selcall, voice and CW, and monitors text modes.'),
     'pactor/index.html': (
         'PACTOR 1–4 in hfmodem: waveform, coding and ARQ',
         'How hfmodem’s shrike implements PACTOR-1, -2 and -3, with partial experimental '
@@ -131,7 +131,7 @@ METADATA = {
         'Carrier placement, timing and mode parameters for PACTOR, VARA, ARDOP and sabir '
         'side by side, with recorded off-air audio.'),
     'examples/index.html': (
-        'Recorded HF contacts: Winlink and VarAC replays with packets',
+        'Recorded HF contacts: PACTOR-3, VARA and ARDOP replays',
         'Replays of real hfmodem contacts over PACTOR-3, VARA and ARDOP: listen to the '
         'audio and inspect each packet’s timing, signal and decoded bytes.'),
     'examples/logbook/index.html': (
@@ -146,10 +146,10 @@ METADATA = {
         'ARDOP Winlink send to WW2MI on 40 m: recorded replay',
         'One Winlink message delivered to WW2MI over ARDOP on 40 m, August 23, 2026, '
         'confirmed by destination receipt. KiwiSDR witness audio and packets.'),
-    'examples/pactor3-mail/index.html': (
-        'PACTOR-3 Winlink mail with K4MSU on 40 m: recorded replay',
-        'One Winlink message sent to K4MSU and one received over PACTOR-3 on 40 m, November 14, '
-        '2026, with a normal close. Receiver, monitor and witness audio.'),
+    'examples/pactor3-long/index.html': (
+        'PACTOR-3 long-cycle Winlink mail with VE3KPG on 40 m: replay',
+        'One Winlink message sent to VE3KPG and one received over PACTOR-3 on 40 m, November 16, '
+        '2026, with mail data on long-cycle packets. Three recordings.'),
     'examples/pactor3-receive/index.html': (
         'PACTOR-3 Winlink receive from WS8EOC on 80 m: recorded replay',
         'A complete Winlink message received from WS8EOC over PACTOR-3 on 80 m, October 3, '

@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.shrike import p4turn
 from hfmodem.shrike.p4observation import Registered
 from hfmodem.shrike.p4receiver import Kind
@@ -272,9 +272,8 @@ def test_v53_ack_is_still_u27():
 def test_2031_placed_turn_word_requires_a_full_word_at_the_irs_answer_slot(case):
     from hfmodem.shrike import onair
     from hfmodem.shrike.p4receiver import Emission, Expect, P4Receiver, Role
-    from hfmodem.tests.shrike.p4_after_handover_helpers import ROOT
 
-    path = require_input(ROOT/'captures/onair-0930-2031/stream.flac')
+    path = require_input(CAPTURES/'onair-0930-2031/stream.flac')
     audio = onair.session.load_wav(str(path), FS)
     rx = P4Receiver(FS, admitted=True, cfo_hz=2.633705096044118)
     rx.enable_hold()

@@ -21,8 +21,9 @@ import pytest
 
 
 from hfmodem.shrike import p2rx, spec
+from hfmodem.tests import evidence
 
-ARCHIVE = Path(__file__).resolve().parents[5] / "working" / "pactor"
+ARCHIVE = evidence.WORKING / "pactor"
 FS = 48000
 PASS = 0
 FAILURES: list[str] = []

@@ -15,6 +15,7 @@ import time
 
 from hfmodem.ax25.connected import Connection
 from hfmodem.core.recording import inherit_boundaries
+from hfmodem.core.waits import join, result
 
 
 @dataclass
@@ -72,7 +73,7 @@ class PacketRuntime:
         except queue.Full:
             raise ConnectionAbortedError('packet owner command queue full') from None
         try:
-            return future.result(timeout=2)
+            return result(future, time.monotonic() + 2)
         except TimeoutError:
             if future.cancel():
                 raise
@@ -285,8 +286,7 @@ class PacketRuntime:
     def stop(self, timeout=2.):
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout)
-            if self._thread.is_alive():
+            if not join(self._thread, time.monotonic() + timeout):
                 raise RuntimeError('packet owner did not retire')
         self.link.drop_pending()
         if self._transmission is not None:

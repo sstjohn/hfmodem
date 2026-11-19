@@ -42,11 +42,14 @@ CASES = (
 
 @pytest.fixture(scope="module")
 def original_acquisition():
+    _acquisition_archive()
     revision = "df946ce0c"
     path = "packages/hfmodem/hfmodem/shrike/p3acquire.py"
+    repo = Path(__file__).resolve().parents[5]
+    if not (repo / ".git").exists():
+        pytest.skip(f"no git history to read {revision} from")
     source = subprocess.run(["git", "show", f"{revision}:{path}"],
-                            cwd=Path(__file__).resolve().parents[5],
-                            capture_output=True, text=True)
+                            cwd=repo, capture_output=True, text=True)
     if source.returncode:
         pytest.skip(f"acquisition source at {revision} absent")
     module = ModuleType(f"hfmodem.shrike._p3_acquire_at_{revision}")

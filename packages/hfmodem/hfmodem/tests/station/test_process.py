@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
 import threading
+import time
 from types import SimpleNamespace as NS
 
 import numpy as np
@@ -11,6 +12,7 @@ from hfmodem.core import claim, config, hostio
 from hfmodem.core.audio import AudioError, StationAudio
 from hfmodem.core.operations import LeaseTimeout
 from hfmodem.station import hosts, process
+from hfmodem.tests.clock_steps import step_forward
 
 
 def configuration(*, transmit=True, cat='none', protocols=None):
@@ -655,7 +657,7 @@ def test_own_admission_deadline_is_cancelled_and_joined(station, monkeypatch):
             self.cancelled = True
         def join(self):
             self.joined = True
-    monkeypatch.setattr(process.threading, 'Timer', Timer)
+    monkeypatch.setattr(process, 'Timer', Timer)
     station.own(receive=True)
     timer = timers[0]
     assert timer.seconds == 40 and timer.fn == station.fatal_shutdown
@@ -1250,7 +1252,7 @@ def test_rollback_cancels_admission_timer_before_teardown(station, monkeypatch):
             self.cancelled = True
         def join(self):
             self.joined = True
-    monkeypatch.setattr(process.threading, 'Timer', Timer)
+    monkeypatch.setattr(process, 'Timer', Timer)
     monkeypatch.setattr(station, 'open_audio', lambda: (_ for _ in ()).throw(process.RigError('rollback')))
     original = station._teardown
     def teardown(**kw):
@@ -1672,3 +1674,52 @@ def test_shutdown_stops_rf_producing_ticks(station, when, monkeypatch):
     station.arbiter = station.rig = None
     station.lanes = {}
     station._poll_stop = threading.Event()
+
+
+@pytest.fixture
+def forward_step(monkeypatch):
+    step_forward(monkeypatch, joins=True)
+
+
+def test_own_admission_budget_outlasts_a_forward_step(station, monkeypatch, forward_step):
+    open_audio = station.open_audio
+    monkeypatch.setattr(station, 'open_audio', lambda: (time.sleep(0.05), open_audio()))
+    station.own(receive=True)
+    assert not any(isinstance(c, tuple) and c[0] == 'fatal' for c in station.calls)
+    station.release()
+
+
+def test_preflight_dwell_outlasts_a_forward_step(monkeypatch, forward_step):
+    from hfmodem.station import preflight
+    monkeypatch.setattr(preflight, 'DWELL_S', 0.1)
+    read, lanes = [], []
+    st = object.__new__(process.Station)
+    st._stop, st.rig = threading.Event(), None
+    st.audio = NS(subscribe=lambda lane: lanes.append(lane) or lane, _lanes=lanes)
+    st._preflight = NS(_read=lambda: (read.append(time.monotonic()), None),
+                       _duplex=lambda *a: None, _xruns=lambda a: None, _offset=lambda a: None,
+                       _keying=lambda a, r: None, _clock=lambda a: None, verdict=lambda: 0)
+    st._check_own_cancelled = lambda: None
+    start = time.monotonic()
+    st.preflight_measure(None)
+    assert read[0] - start >= 0.1
+
+
+def test_line_close_outlasts_a_forward_step(station, monkeypatch, forward_step):
+    station.own()
+    line = station.rig.ptt
+
+    def release():
+        time.sleep(0.05)
+        line.released_low = True
+
+    def fail():
+        raise LeaseTimeout('lane')
+
+    monkeypatch.setattr(line, 'release', release)
+    monkeypatch.setattr(station.rig, 'close', lambda: None)
+    station.lanes['fake'] = NS(stop=fail)
+    with pytest.raises(LeaseTimeout) as raised:
+        station.release()
+    assert 'keying line still closing' not in str(raised.value)
+    assert line.released_low is True

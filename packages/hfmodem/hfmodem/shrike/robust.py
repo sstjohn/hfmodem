@@ -50,6 +50,28 @@ def acquire(audio, at: int, *, radius: int, fs: int = 48000,
     return Control(entry, round((frame+d-p2rx.CS_FRAME_LAG)/p2rx.ACQ_RATE*fs), swap)
 
 
+def read_held_prefix(audio, at: int, fs: int = 48000, *, entry: int,
+                    sense: int | None, offset_hz: float = 0.0,
+                    checked: dict[int, int] | None = None) -> p1rx.RobustAnswer | None:
+    """Read an exact held word, shortening whole-bit prefixes within its bracket."""
+    if at < 0:
+        return None
+    sps = int(p1rx.CS_BIT_S * fs)
+    reach = round(p1rx.HELD_ANSWER_SEARCH_S * fs)
+    bits = min(p1rx.ROBUST_CS_BITS, (len(audio) - at) // sps)
+    for n in range(bits, 15, -1):
+        if checked is not None:
+            available = min(len(audio) - at, n * sps + reach)
+            if checked.get(n, 0) >= available:
+                continue
+            checked[n] = available
+        got = p1rx.read_held_answer(audio, at, fs, sense=sense, offset_hz=offset_hz,
+                                  words={entry: p1rx.ROBUST_CS_WORDS[entry]}, bits=n)
+        if got is not None and got.errors == 0:
+            return got
+    return None
+
+
 @dataclass
 class Bridge:
     mycall: str
@@ -58,9 +80,10 @@ class Bridge:
     max_cycles: int = 10
     force_after: int | None = None
     offset_hz: float = 0.0
-    marker_flag: str = 'parity'
-    opening: str = 'none'
+    marker_flag: str = 'inverted'
+    opening: str = 'k9'
     fs: int = 48000
+    fsk_entry: int = 0
     fsk_sense: int | None = None
     fsk_slot: int | None = None
     phase: int | None = None
@@ -129,14 +152,15 @@ class Bridge:
             # is heard, not silent, so it never starts a re-acquisition.
             sense = (None if self.fsk_sense is None or self.fsk_slot is None
                      else self.fsk_sense ^ ((slot - self.fsk_slot) & 1))
-            fsk = p1rx.read_held_answer(audio, boundary+self.fsk_phase-origin, self.fs,
-                                        sense=sense, offset_hz=self.offset_hz)
+            fsk = read_held_prefix(audio, boundary+self.fsk_phase-origin, self.fs,
+                                  entry=self.fsk_entry, sense=sense, offset_hz=self.offset_hz)
             if fsk is not None:
                 self.silent = 0
-                report = f'FSK entry {fsk.entry} errors={fsk.errors}'
+                report = (f'FSK entry {fsk.entry} errors={fsk.errors} bits={fsk.bits} '
+                          f'tone={fsk.tone} sense={fsk.sense} onset={origin+round(fsk.at*self.fs)}')
                 row = dict(slot=slot, form='FSK', entry=fsk.entry,
                            onset=origin+round(fsk.at*self.fs), offset_hz=fsk.offset_hz,
-                           errors=fsk.errors, tone=fsk.tone)
+                           errors=fsk.errors, tone=fsk.tone, bits=fsk.bits, sense=fsk.sense)
             else:
                 self.silent += 1
                 if self.silent >= 2:

@@ -344,6 +344,8 @@ os.execv(sys.executable, [sys.executable, *args])
         'MYCALL=W0QXR; IDCALL=W0QXR; MYGRID=AA00aa',
         'CAT_PORT=/unused; PTT_PORT=/unused; AUDIO=synthetic; AUDIO_IN=synthetic; AUDIO_OUT=synthetic',
         'RIG_NAME=ft891; RIG_EXPECT_MODEL=synthetic',
+        # Exported as ports.sh exports the resolver's port; nothing listens here.
+        'RIGCTLD_PORT=14533; export RIGCTLD_PORT',
         'station_mycall() { echo W0QXR; }', 'die() { echo "$*" >&2; exit 2; }',
     ]) + '\n')
     rig = tmp_path / 'rig.sh'
@@ -430,6 +432,17 @@ unkey_and_exit() { exit "$1"; }
         return result, events
 
     return run
+
+
+@SHELL
+def test_shell_unresolved_rigctld_port_is_named_not_unbound(shell_launch, tmp_path, monkeypatch):
+    monkeypatch.delenv('RIGCTLD_PORT', raising=False)
+    ports = tmp_path / 'ports.sh'
+    ports.write_text(ports.read_text().replace('RIGCTLD_PORT=14533; export RIGCTLD_PORT\n', ''))
+    result, events = shell_launch('ardop')
+    assert result.returncode != 0 and not events
+    assert 'RIGCTLD_PORT unresolved: ports.sh did not provide it' in result.stderr, result.stderr
+    assert 'unbound variable' not in result.stderr, result.stderr
 
 
 @pytest.mark.parametrize('verb', ('ardop', 'ardop-mail'))

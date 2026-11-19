@@ -7,6 +7,7 @@ import runpy
 import pytest
 
 from hfmodem.shrike import p4chirprx, session
+from hfmodem.tests.evidence import CAPTURES
 
 ROOT = Path(__file__).resolve().parents[5]
 REPLAY = ROOT / 'working/p4-plan-0930/chirp-rx/replay.py'
@@ -22,7 +23,7 @@ def replay(tmp_path, arm, start, end, cost=35):
     require_local(REPLAY)
     require_local(ROOT / 'working/p4-plan-0930/stall-bisect/drive.py')
     for name in ('stream.flac', 'p4-probe.json'):
-        require_local(ROOT / f'captures/onair-0930-{arm}' / name)
+        require_local(CAPTURES / f'onair-0930-{arm}' / name)
     return runpy.run_path(str(REPLAY))['replay'](
         arm, tmp_path/'replay.json', start, end, cost)
 
@@ -98,7 +99,7 @@ def test_envelope_without_acquired_marker_does_not_enter_fast_decode(tmp_path, m
 def test_recorded_chirp_mixes_at_reduced_rate(monkeypatch):
     # A source-work bound, not a wall-clock assertion: both lane mixers together
     # must process 52,920 samples, rather than 317,520 at the capture rate.
-    path = require_local(ROOT / 'captures/onair-0930-2206/stream.flac')
+    path = require_local(CAPTURES / 'onair-0930-2206/stream.flac')
     audio = session.load_wav(str(path), 48000)
     audio = audio[1908010:1908010+158760]
     sizes = []

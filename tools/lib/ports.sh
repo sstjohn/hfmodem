@@ -22,7 +22,18 @@
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENV="$(dirname "${HFMODEM_PYTHON:-$REPO/.venv/bin/python}")"
-_rig_fields=$(PYTHONPATH="$REPO/packages/hfmodem${PYTHONPATH:+:$PYTHONPATH}" "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.rigs) || exit 1
+_rig_python="${HFMODEM_PYTHON:-$VENV/python}"
+_rig_fields=$(PYTHONPATH="$REPO/packages/hfmodem${PYTHONPATH:+:$PYTHONPATH}" "$_rig_python" -m hfmodem.core.rigs) || exit 1
+# Nine fields, the rigctld port last. An empty port is stripped with the
+# trailing newline, so the count catches it too. Counted before reading, since a
+# short read under -e would end the launcher without a word.
+_rig_count=$(printf '%s\n' "$_rig_fields" | wc -l | tr -d ' ')
+if [ "$_rig_count" -ne 9 ]; then
+  echo "ports.sh: $_rig_python -m hfmodem.core.rigs gave $_rig_count of 9 fields" \
+       "(name, model, baud, mode, audio, cat, ptt, audio out, rigctld port);" \
+       "is that interpreter this tree's?" >&2
+  exit 1
+fi
 {
   IFS= read -r RIG_NAME
   IFS= read -r MODEL
@@ -32,7 +43,9 @@ _rig_fields=$(PYTHONPATH="$REPO/packages/hfmodem${PYTHONPATH:+:$PYTHONPATH}" "${
   IFS= read -r _rig_cat
   IFS= read -r _rig_ptt
   IFS= read -r AUDIO_OUT
+  IFS= read -r RIGCTLD_PORT
 } <<< "$_rig_fields"
+export RIGCTLD_PORT
 CAT_PORT="${CAT_PORT-}"
 PTT_PORT="${PTT_PORT-}"
 CAT_PORT="${CAT_PORT:-$_rig_cat}"
@@ -46,7 +59,7 @@ esac
 AUDIO_IN="$AUDIO"
 export AUDIO_IN AUDIO_OUT
 export HFMODEM_RIG="$RIG_NAME"
-unset _rig_fields _rig_cat _rig_ptt
+unset _rig_fields _rig_cat _rig_ptt _rig_python _rig_count
 
 # The callsign the launchers hand every modem: the operator's MYCALL when it is
 # set, else the station file's. Without either this says so and the launcher goes
@@ -448,6 +461,7 @@ import sys
 import time
 import tomllib
 from hfmodem.core import claim
+from hfmodem.core.hamlib import rigctld_port
 from hfmodem.core.rigs import CAT_BACKENDS, profile_cat
 from hfmodem.core.native import NativeChild, REAP_GRACE_S
 
@@ -542,7 +556,7 @@ def settings():
     if cat not in CAT_BACKENDS:
         raise claim.ClaimError('unknown CAT backend: ' + str(cat))
     backend = CAT_BACKENDS[cat]
-    return path, body.get('station', {}).get('port', 8737), backend, rig.get('host', '127.0.0.1'), rig.get('port', 4532)
+    return path, body.get('station', {}).get('port', 8737), backend, rig.get('host', '127.0.0.1'), rigctld_port(path)
 
 
 def recorded():
@@ -619,8 +633,8 @@ def inventory():
             print(f'delegated rigctld pid {pid} on {host}:{port}', flush=True)
         stations = {pid for pid, row in rows.items() if station(row[2])} | listeners(station_port)
         protected = {pid for pid in rows if any(within(pid, s, rows) for s in stations)}
-        device_rows = claim.openers(nodes, deadline=deadline) if nodes else []
-        audio_rows = claim.openers(audio, deadline=deadline) if audio else []
+        device_rows = claim.settled_openers(nodes, deadline=deadline) if nodes else []
+        audio_rows = claim.settled_openers(audio, deadline=deadline) if audio else []
         device_rows += [r for r in audio_rows if Path(r.command).name not in
                         {'pipewire', 'pulseaudio', 'coreaudiod', 'wireplumber', 'jackd'}]
         device_pids = {r.pid for r in device_rows} - delegates

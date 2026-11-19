@@ -197,5 +197,7 @@ threading.Thread(target=lambda: st.fatal_shutdown('worker')).start()
 while True:
     signal.pause()
 '''
-    result = subprocess.run([sys.executable, '-c', script], capture_output=True, timeout=2)
+    # The deadman fires 0.1 s after the handoff; this bound only catches a hang, and
+    # interpreter start plus the station import alone took over 2 s on a loaded host.
+    result = subprocess.run([sys.executable, '-c', script], capture_output=True, timeout=30)
     assert result.returncode == -signal.SIGALRM

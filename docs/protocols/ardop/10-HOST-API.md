@@ -4,9 +4,8 @@
 
 This document is the functional record of the ARDOP host interface: the ASCII/TCP
 dialect a client (Pat, Winlink Express, ARIM, hamChat) speaks to drive an ARDOP modem.
-It was compiled **entirely by reading open reference implementations** — no reverse
-engineering, no traffic capture. It states functional facts only (command names,
-argument value-types, reply/echo grammar, notification grammar, port and framing
+Its sources are open reference implementations. It states functional facts only
+(command names, argument value-types, reply/echo grammar, notification grammar, port and framing
 behaviour) so that the `besra` modem can consume it; every non-obvious claim carries a
 `file:line` citation into one of the sources below, marked `[code]`, `[doc]`, or
 `[spec-pdf]` for provenance.

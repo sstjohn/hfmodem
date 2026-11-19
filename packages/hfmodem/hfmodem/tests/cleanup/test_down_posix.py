@@ -110,7 +110,8 @@ def cleanup(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(down_posix.subprocess, 'Popen', lambda *a, **kw: pytest.fail('spawned a process'))
     openers = claim.openers
     def discover(paths, **kwargs):
-        kwargs['platform'] = 'darwin'
+        # A scenario that scripts fdinfo takes the Linux discovery path that reads it.
+        kwargs['platform'] = 'linux' if 'fdinfo' in scenario else 'darwin'
         return openers(paths, **kwargs)
     monkeypatch.setattr(claim, 'openers', discover)
     # Unless a scenario sets `linux`, it models darwin, where `ps -o lstart=` (faked above) is the
@@ -210,7 +211,7 @@ def cleanup(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ptt, 'RtsPtt', Ptt)
     monkeypatch.setattr(cat, 'YaesuCat', Cat)
     def connect(endpoint, timeout):
-        assert endpoint == ('127.0.0.1', 4532)
+        assert endpoint == ('127.0.0.1', scenario.get('rig_port', 4532))
         return Connection()
     monkeypatch.setattr(down.socket, 'create_connection', connect)
     replace = os.replace
@@ -222,12 +223,13 @@ def cleanup(tmp_path, monkeypatch, capsys):
         return replace(source, target)
     monkeypatch.setattr(down.os, 'replace', publish)
 
-    def cleanup(body=None, *, backend='none', inherited=False, forged=False):
+    def cleanup(body=None, *, backend='none', inherited=False, forged=False, rig_port=None):
         body = dict(body or {})
         for name in ('rows', 'arrive'):
             if name in body:
                 body[name] = {int(pid): row for pid, row in body[name].items()}
-        station.write_text('[rig]\ncat = ' + json.dumps(backend) + '\n')
+        station.write_text('[rig]\ncat = ' + json.dumps(backend) + '\n'
+                           + (f'port = {rig_port}\n' if rig_port is not None else ''))
         claim.bootstrap()
         with monkeypatch.context() as context:
             if body.get('linux'):
@@ -241,6 +243,14 @@ def cleanup(tmp_path, monkeypatch, capsys):
                         pid = int(path.parent.name)
                         ticks = pid * 100 + int(pid in scenario.get('reused', []))
                         return f'{pid} (fake process)) S ' + '0 ' * 18 + str(ticks)
+                    if 'fdinfo' in scenario and path.parent.name == 'fdinfo':
+                        pid = int(path.parent.parent.name)
+                        if pid in scenario['fdinfo'].get('vanish', []):
+                            # It closed the descriptor after lsof listed it, and lives on.
+                            scenario['fdinfo']['vanish'].remove(pid)
+                            scenario['devices'].remove(pid)
+                            raise FileNotFoundError(str(path))
+                        return 'pos:\t0\n'
                     return read_text(path, *args, **kwargs)
                 context.setattr(Path, 'read_text', read)
             descriptor = None
@@ -426,6 +436,15 @@ def test_unknown_device_blocks_all_signals(cleanup):
     assert cleanup.journal.read_text() == ''
 
 
+def test_a_live_reader_that_closes_its_device_mid_inventory_is_relisted(cleanup, monkeypatch):
+    monkeypatch.setattr(claim, '_exited', lambda pid: pid not in (202, 303))
+    result = cleanup({'linux': True, 'rows': {'202': [1, 'hfmodem.shrike.onair'], '303': [1, 'unrelated']},
+                      'devices': [202, 303], 'fdinfo': {'vanish': [303]}})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'CLEANUP COMPLETE' in result.stdout
+    assert 'TERM 202' in cleanup.journal.read_text() and '303' not in cleanup.journal.read_text()
+
+
 def test_legacy_target_verified_then_inventory_repeated(cleanup):
     result = cleanup({'rows': {'202': [1, 'hfmodem.shrike.onair']}, 'devices': [202]})
     assert result.returncode == 0, result.stdout + result.stderr
@@ -451,14 +470,22 @@ def test_station_release_retries_transitioning(cleanup):
     assert 'TERM' not in cleanup.journal.read_text()
 
 
-def test_delegated_daemon_not_signalled_or_serial_queried(cleanup):
+@pytest.mark.parametrize('station_port,override,expected', [
+    (14533, None, 14533), (14533, '14599', 14599), (None, None, 4532),
+    (None, '14599', 14599),
+])
+def test_delegated_daemon_not_signalled_or_serial_queried(cleanup, monkeypatch, station_port, override, expected):
+    monkeypatch.delenv('RIGCTLD_PORT', raising=False)
+    if override is not None:
+        monkeypatch.setenv('RIGCTLD_PORT', override)
     result = cleanup({'rows': {'303': [1, 'rigctld -m 1036']},
-                    'listeners': {'4532': [303]}}, backend='rigctld')
+                    'rig_port': expected, 'listeners': {str(expected): [303]}},
+                    backend='rigctld', rig_port=station_port)
     assert result.returncode == 0, result.stdout + result.stderr
     log = cleanup.journal.read_text()
     assert 'TERM' not in log
     assert 'CAT TCP readback' in log and 'CAT serial' not in log
-    assert 'delegated rigctld pid 303' in result.stdout
+    assert f'delegated rigctld pid 303 on 127.0.0.1:{expected}' in result.stdout
 
 
 @pytest.mark.parametrize('survive', [False, True])

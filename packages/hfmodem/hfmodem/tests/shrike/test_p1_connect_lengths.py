@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 from hfmodem.shrike import p1rx, pactor1, pactor2, rxfront
+from hfmodem.tests.evidence import CAPTURES, WORKING
 
-TREE = Path(__file__).resolve().parents[5]
 CALLS = ("A", "A1", "A1B", "W1AW", "N3HYM", "WS8EOC", "N3HYM-1",
          "N3HYM-10", "AA1AAA-1", "WS8EOC-10", "3DA0XYZ-15", "N3HYM-15", "DL6MAA-1")
 SESSIONS = (
@@ -119,8 +119,8 @@ def test_full_address_requires_the_rate_change(invert):
 
 @pytest.mark.parametrize("session,call,first,count,logname", SESSIONS)
 def test_recorded_connect_bursts(session, call, first, count, logname):
-    audio_path = TREE / "captures" / session / "stream.flac"
-    log_path = TREE / "working" / session / logname
+    audio_path = CAPTURES / session / "stream.flac"
+    log_path = WORKING / session / logname
     if not audio_path.exists() or not log_path.exists():
         pytest.skip(f"individual recording/log links absent for {session}")
     bounds = []

@@ -12,6 +12,7 @@ from hfmodem import cli
 from hfmodem.core import grid_fold
 from hfmodem.shrike import p3acquire, placement, rx, spec
 from hfmodem.shrike.p3acquire import SEARCH_FS, STEP, _fold_length, _fold_weight, fft, ifft
+from hfmodem.tests import native as native_helpers
 from hfmodem.tests.shrike.archive import requires_ws8eoc_p3
 from hfmodem.tests.shrike.test_p3_gateway_acquisition import audio
 
@@ -86,13 +87,13 @@ def test_fold_bits(width, scale):
 
 
 def test_native_admitted():
-    pytest.importorskip('hfmodem.core._dsp')
+    native_helpers.dsp()
     assert grid_fold.NATIVE.startswith('native: yes (Rust grid fold, ')
     assert grid_fold.fold_grid is not grid_fold.fold_numpy
 
 
 def test_native_dispatch():
-    native = pytest.importorskip('hfmodem.core._dsp')
+    native = native_helpers.dsp()
     calls = []
 
     def counted(*args):
@@ -120,7 +121,7 @@ def test_wrong_kernel_refused(monkeypatch):
     assert len(caught) == 1
     assert fold is grid_fold.fold_numpy
     assert status == 'native: no (extension does not match this NumPy)'
-    native = pytest.importorskip('hfmodem.core._dsp')
+    native = native_helpers.dsp()
     try:
         with monkeypatch.context() as m:
             m.setattr(native, 'fold_grid', wrong)
@@ -170,7 +171,7 @@ def test_non_finite_grid_matches_numpy(poison):
 
 
 def test_probe_ignores_caller_float_errors():
-    native = pytest.importorskip('hfmodem.core._dsp')
+    native = native_helpers.dsp()
     with np.errstate(all='raise'):
         assert grid_fold.probe(native.fold_grid) is not None
 

@@ -51,15 +51,8 @@ jobs:
               if next(iter(versions.values())) != tag[1:]:
                   sys.exit(f"tag {tag} disagrees with {versions}")
           EOF
-      - name: Install build tools
-        run: python -m pip install build twine
-      - name: Build sdists and wheels
-        run: |
-          for p in hfhost hfmodem creance; do
-            python -m build "packages/$p" --outdir "dist/$p"
-          done
-      - name: Check distribution metadata
-        run: python -m twine check --strict dist/*/*
+      - name: Build and check distributions
+        run: publish/ci/release-check.sh build dist
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -93,25 +86,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends flac ffmpeg libportaudio2 strace lsof
       - name: Install editable packages and test tools
-        run: >-
-          python -m pip install
-          -e 'packages/hfhost[dev]'
-          -e 'packages/hfmodem[dev]'
-          -e 'packages/creance[dev]'
-          pytest-xdist
+        run: publish/ci/release-check.sh install
       - name: Run release tests
         # Hosted runners do not guarantee station-class timing. The unchanged
         # realtime and wall-clock budgets are qualified separately before
         # tagging; see docs/STATUS.md#release-qualification.
-        run: |
-          selection='not slow and not realtime and not wall_clock and not corpus and not hardware and not ardopcf'
-          nice -n 19 python -m pytest -c pyproject.toml -q -n auto --dist loadfile --durations=50 \
-            -m "$selection" \
-            --ignore packages/hfmodem/hfmodem/tests/coexist \
-            packages
-          nice -n 19 python -m pytest -c pyproject.toml -q -n 0 --durations=50 \
-            -m "$selection" \
-            packages/hfmodem/hfmodem/tests/coexist
+        run: publish/ci/release-check.sh test
   publish:
     needs: [build, test]
     # A branch dispatch rehearses build and test; a tag dispatch can recover a
@@ -123,10 +103,18 @@ jobs:
     permissions:
       id-token: write
     steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
+      - name: Check distributions before upload
+        run: publish/ci/release-check.sh check-dist dist
       - name: Publish hfhost
         uses: pypa/gh-action-pypi-publish@release/v1
         with:

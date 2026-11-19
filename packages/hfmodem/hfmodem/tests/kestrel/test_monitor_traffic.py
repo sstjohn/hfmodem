@@ -28,6 +28,7 @@ import pytest
 
 from hfmodem.kestrel.vara import vara_control as VC
 from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.timing import within
 
 VM = corpora.harness("vara_monitor")
 
@@ -202,6 +203,8 @@ def test_a_muted_receiver_does_not_pull_the_floor_under_the_band():
         "-26 dBFS band noise it is supposed to describe")
 
 
+# It asserts on the wall time a decode takes, so a loaded host changes the verdict.
+@pytest.mark.realtime
 @corpora.requires_onair_connect_attempt
 def test_it_decodes_far_faster_than_real_time():
     """Which is why the wideband decode is no longer skipped on a live device.
@@ -212,7 +215,7 @@ def test_it_decodes_far_faster_than_real_time():
     t0 = time.perf_counter()
     _onair()
     dt = time.perf_counter() - t0
-    assert dt < 60.0, f"150 s of audio took {dt:.1f} s"
+    within(dt, "decoding 150 s of audio", at_most=60.0)
 
 
 # --------------------------------------------------------------------------- #

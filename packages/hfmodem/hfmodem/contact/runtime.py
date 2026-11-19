@@ -24,6 +24,7 @@ from hfmodem.core.audio import host_api_name, playback_callback, timestamp_limit
 from hfmodem.core.devices import find_device
 from hfmodem.core.regulatory import Emission
 from hfmodem.core.recording import ContactBoundaries, RecordingSession, resolve_recording
+from hfmodem.core.waits import wait_until
 from .audio import BLOCK, RATE, Segmenter, resample
 from .waveforms import select_waveform
 from .facts import facts_from
@@ -166,7 +167,7 @@ class Session:
         decided = threading.Event() if wait else None
         self.boundaries.ended(self._candidate_key, self._positions(), reason,
                               keep=keep, decided=decided.set if decided else None)
-        if decided is not None and not decided.wait(5):
+        if decided is not None and not wait_until(decided.wait, time.monotonic() + 5):
             self.recording.report_later('Recording contact decision acknowledgement timed out')
 
     def event(self, kind, **record):
@@ -177,8 +178,10 @@ class Session:
         return data
 
     def start_models(self):
+        if self.cfg.voice.language_backend == 'openai' and (self.watermark_name or self.tx_mark.mode != 'off'):
+            raise ValueError('Transmission marks and watermarks require language_backend="local"')
         self.speech = self.waveform.open_modem(self.cfg.voice, self.directory)
-        self.language = Language(self.cfg.voice.language_model, self.cfg.voice.llama_server, self.directory)
+        self.language = Language.from_settings(self.cfg.voice, self.directory)
         if self.watermark_name:
             from .watermark import Encoder, Options
             self.watermark_encoder = Encoder(self.language, Options(codebook=self.watermark_name, symbol_bits=1,
@@ -186,7 +189,7 @@ class Session:
             self.event('watermark_configuration', codebook=self.watermark_name,
                        vocabulary=self.watermark_encoder.codebook.words,
                        vocabulary_sha256=self.watermark_encoder.codebook.digest)
-        elif self.test:
+        elif self.test and self.cfg.voice.language_backend == 'local':
             self.mark_codec = LLMMark(self.language, key=self.watermark_key)
             self.event('tx_mark_configuration', layer='llm-logit-bias',
                        vocabulary=self.mark_codec.words, vocabulary_sha256=self.mark_codec.digest,
@@ -194,9 +197,12 @@ class Session:
         # llama.cpp writes its own memory allocation detail; RSS plus MLX pool is
         # sampled by the speech host and the language process has a separate sample.
         import subprocess
-        rss = subprocess.run(['ps', '-o', 'rss=', '-p', str(self.language.process.pid)],
-                             capture_output=True, text=True, timeout=2)
-        total = self.speech.ready['rss_gb'] + int(rss.stdout.strip() or 0) * 1024 / 1e9
+        language_rss = 0
+        if self.language.process is not None:
+            rss = subprocess.run(['ps', '-o', 'rss=', '-p', str(self.language.process.pid)],
+                                 capture_output=True, text=True, timeout=2)
+            language_rss = int(rss.stdout.strip() or 0) * 1024 / 1e9
+        total = self.speech.ready['rss_gb'] + language_rss
         self.event('models_loaded', measured_rss_gb=total, memory_gb=self.cfg.models.memory_gb,
                    settings=asdict(self.cfg.voice))
         if total > self.cfg.models.memory_gb:
@@ -422,6 +428,8 @@ class Session:
         return revision
 
     def set_tx_mark(self, tag):
+        if tag.mode != 'off' and self.cfg.voice.language_backend == 'openai':
+            raise ValueError('Transmission marks require language_backend="local"')
         if not self.test or self.rig is not None or self.monitor or self.replay:
             raise ValueError('Transmission marks are currently available in computer tests only')
         if self.playing is not None:
@@ -708,7 +716,8 @@ class Session:
                     source_start_sample=lo)
                 self.play(preview=True)
                 if self.playing is not None:
-                    complete = self.output_done.wait(self.draft['duration_s'] + 5)
+                    complete = wait_until(self.output_done.wait,
+                                          time.monotonic() + self.draft['duration_s'] + 5)
                     self.finish_playback(cancelled=not complete)
                     if not complete:
                         break
@@ -771,7 +780,7 @@ class Session:
 
 
 def model_hashes(settings, waveform='voice'):
-    files = [Path(settings.language_model).expanduser()]
+    files = [Path(settings.language_model).expanduser()] if settings.language_backend == 'local' else []
     for directory in ((settings.recognition_model, settings.synthesis_model) if waveform == 'voice' else ()):
         files.extend(p for p in Path(directory).expanduser().rglob('*') if p.is_file())
     result = {}

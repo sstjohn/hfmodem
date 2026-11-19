@@ -4,7 +4,6 @@
 """WS8EOC-80 2026-09-29 23:27 and 23:49: the turn after our empty break-in body."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -13,8 +12,8 @@ from hfmodem.shrike.p4receiver import Emission, Kind, Role
 from hfmodem.shrike.p4turn import State
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Stream, Tx
 from hfmodem.tests.shrike.test_p4turn import body, machine, word
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 GRID = onair._MasterGrid(0, 60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800)
 B2F = (b";FW: W9SSJ\r[Pat-1.0.0-B2FHM$]\r;PR: 12345678\r; WS8EOC DE W9SSJ (EN63bc)\r"
        b"FC EM K0BVVV7209VS 654 486 0\rF> 8D\r")
@@ -82,7 +81,7 @@ def test_a_v27_that_does_not_answer_our_breakin_body_does_not_take_the_turn(resp
 
 
 def replay_2349(monkeypatch):
-    capture = ROOT / "captures/onair-0929-2349"
+    capture = CAPTURES / "onair-0929-2349"
     if not (capture / "stream.flac").exists():
         pytest.skip("local WS8EOC 2026-09-29 23:49 capture absent")
     audio = onair.session.load_wav(str(capture / "stream.flac"), FS)

@@ -82,6 +82,7 @@ import pytest
 from hfmodem.shrike import live, onair, p3rx, placement, rxfront, spec
 from hfmodem.tests.kestrel import corpora
 from hfmodem.tests.shrike.test_p3level_session import _Session, _payload
+from hfmodem.tests.timing import within
 
 FS = rxfront.FS
 FIXTURES = corpora.REGRESS_FIXTURES
@@ -253,21 +254,18 @@ def test_the_cycles_own_read_fits_it() -> None:
     assert all(got for *_, got in rows), \
         [(sl, long) for sl, long, _, _, got in rows if not got]
 
-    short = [(sl, t) for sl, long, _, t, _ in rows if not long]
-    assert all(t < PRE_KEY_S for _, t in short), \
-        f"{max(short, key=lambda r: r[1])} against {PRE_KEY_S:.3f} s"
-
-    long = [(sl, t) for sl, long_, _, t, _ in rows if long_]
-    assert all(t < spec.CYCLE_LONG_S for _, t in long), \
-        f"{max(long, key=lambda r: r[1])} against {spec.CYCLE_LONG_S:.2f} s"
-
-    # ...and the structural half, which no clock on any box can move: the read
-    # that has to find the frame from cold is the dearer one, which is why the
-    # cycle that comes up empty scans at the TOP of the next one and not in
-    # front of its key (`onair._SessionRx.deep_scan`).
+    # The structural half, which no clock on any box can move: the read that
+    # has to find the frame from cold is the dearer one, which is why the cycle
+    # that comes up empty scans at the TOP of the next one and not in front of
+    # its key (`onair._SessionRx.deep_scan`).
     assert all(b > t for _, _, b, t, _ in rows), \
         [(sl, long, round(b * 1e3, 1), round(t * 1e3, 1))
          for sl, long, b, t, _ in rows if b <= t]
+
+    sl, t = max(((sl, t) for sl, long, _, t, _ in rows if not long), key=lambda r: r[1])
+    within(t, f'the SL{sl} short-cycle tracked read', at_most=PRE_KEY_S)
+    sl, t = max(((sl, t) for sl, long, _, t, _ in rows if long), key=lambda r: r[1])
+    within(t, f'the SL{sl} long-cycle tracked read', at_most=spec.CYCLE_LONG_S)
 
 
 def test_main() -> None:

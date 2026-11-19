@@ -41,10 +41,10 @@ import numpy as np
 import pytest
 
 from hfmodem.shrike import arq, onair, rxfront, spec
+from hfmodem.tests.evidence import CAPTURES
 
 FS = rxfront.FS
 REPO = Path(__file__).resolve().parents[5]
-CAPTURES = REPO / "captures"
 
 #: The turnaround band a 1.25 s schedule with this station's settle can search.
 D_MAX_N = onair._d_max_n(1.25, 0.030)

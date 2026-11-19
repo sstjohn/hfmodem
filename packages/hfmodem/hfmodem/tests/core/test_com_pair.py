@@ -12,6 +12,7 @@ import pytest
 from hfmodem.core import hamlib, serialline
 from hfmodem.core.cat import RigctldCat, YaesuCat
 from hfmodem.core.rigs import RIGS
+from hfmodem.tests import hermetic
 from hfmodem.tests.core.fakeyaesu import SerialFakeYaesu
 
 pytestmark = [pytest.mark.hardware(opt_in='HFMODEM_COM_PAIR'),
@@ -158,6 +159,7 @@ def test_rigctld_over_pair(pair, peer, tmp_path):
     with socket.socket() as reservation:
         reservation.bind(('127.0.0.1', 0))
         port = reservation.getsockname()[1]
+    hermetic.guard.own_port(port)
     with (tmp_path / 'rigctld.log').open('w+') as log:
         proc = hamlib.spawn_rigctld(['-m', '1036', '-r', serialline.device_name(pair[0]),
             '-s', '38400', '-t', str(port), '-T', '127.0.0.1', '--set-conf=ptt_type=None'],

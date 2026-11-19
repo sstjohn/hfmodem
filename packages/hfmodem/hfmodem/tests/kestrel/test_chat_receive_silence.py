@@ -128,7 +128,7 @@ def test_earlier_rate_acceptance_still_requires_a_complete_clean_owned_reply(cas
     assert decoded.complete
     if case == 'unrequested-rate':
         h._rx_retry_rates.clear()
-        h._rx_resend = (1, (True,))
+        h._rx_resend = (1, (True,), None)
     elif case == 'our-echo': h._keyed_bodies.add(body)
     elif case == 'our-turn': h.turn = A._TURN_OURS
     elif case == 'incomplete': decoded.observation_complete = False

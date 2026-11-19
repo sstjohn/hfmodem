@@ -906,6 +906,7 @@ def test_real_drivers_service_retained_request_inside_segmenter_tail(
         monkeypatch.setattr(SR, 'time', _Clock)
         capture = SR.StationTransport.__new__(SR.StationTransport)
         capture.contact = SimpleNamespace(receive_boundary=(0, 0))
+        capture.link = SimpleNamespace(station=SimpleNamespace(audio=SimpleNamespace(samples=0)))
         capture._init_receive_state()
         capture.hs = h
         capture._segmenter, capture._bursts = transport.segmenter, deque()

@@ -175,14 +175,14 @@ def test_all_durable_publication_belongs_to_storage_worker(sessions, monkeypatch
                                  clock_id='card', continuous=True)
     calls = []
     marking = threading.local()
-    mark_origin = module().Lane._mark_origin
-    def marker(lane):
+    sync_origin = module().Lane._sync_origin
+    def marker(lane, path):
         marking.active = True
         try:
-            return mark_origin(lane)
+            return sync_origin(lane, path)
         finally:
             marking.active = False
-    monkeypatch.setattr(module().Lane, '_mark_origin', marker)
+    monkeypatch.setattr(module().Lane, '_sync_origin', marker)
     def watch(label, fn):
         def checked(*args, **kwargs):
             if not getattr(marking, 'active', False):

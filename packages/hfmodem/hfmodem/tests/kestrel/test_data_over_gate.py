@@ -42,6 +42,7 @@ import pytest
 from hfmodem.kestrel.arq import phy as _phy
 from hfmodem.kestrel.rx import varahf2300 as rx
 from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.timing import within
 from hfmodem.kestrel.tx import varahf2300_tx as tx
 from hfmodem.kestrel.vara import vara_arq as VA
 from hfmodem.kestrel.vara import vara_frames as VF
@@ -706,6 +707,8 @@ def test_the_guard_threshold_sits_between_the_two_measured_populations():
         f"{VA._OVER_GUARD_MIN} the gate opens on")
 
 
+# Times the gate on the wall clock against a 0.30 s per-burst budget.
+@pytest.mark.wall_clock
 def test_the_check_stays_inside_the_per_burst_budget():
     """It runs inside a live ARQ turnaround, once per delivered burst, alongside the
     connected-ack matcher's 0.28 s. Measured: 70 ms to reject a 6 s bracket, 102 ms
@@ -721,5 +724,5 @@ def test_the_check_stays_inside_the_per_burst_budget():
     t0 = time.perf_counter()
     _keys(over)
     accept = time.perf_counter() - t0
-    assert reject < 0.30, f"rejecting a 9 s bracket took {reject * 1000:.0f} ms"
-    assert accept < 0.30, f"accepting an over took {accept * 1000:.0f} ms"
+    within(reject, "rejecting a 9 s bracket", at_most=0.30)
+    within(accept, "accepting an over", at_most=0.30)

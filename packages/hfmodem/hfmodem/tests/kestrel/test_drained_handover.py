@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 from functools import cache
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -196,9 +197,11 @@ def test_the_narrow_stream_takes_it_once():
     assert len(io.sent) == 2 and hs.turn == VA._TURN_OURS
 
 
-def test_the_release_ladder_is_the_ask_where_the_peer_only_idles():
+def test_the_release_ladder_is_the_ask_where_the_peer_only_idles(monkeypatch):
     """With a queue this was the control burst again until 2026-09-29. A VARA
     HF caller asks at the callee's 745 instead, every time."""
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(VA, "time", SimpleNamespace(monotonic=lambda: 1000.0))
     hs, io = _awaiting_release()
     hs.on_rx_audio(MK.synth_burst(CALLED, VF.for_bw(VF.SESSION_RESPONDER_OVER_IDLE,
                                                     "500")))

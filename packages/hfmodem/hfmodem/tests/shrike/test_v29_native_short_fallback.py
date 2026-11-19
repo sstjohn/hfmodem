@@ -3,11 +3,11 @@
 
 """Native captured cutoff and both physical carrier hints, no resampling."""
 from dataclasses import replace
-from pathlib import Path
 import numpy as np
 import pytest
 from scipy.io import wavfile
 from hfmodem.shrike import p3acquire, p3rx, placement, rxfront
+from hfmodem.tests.evidence import CAPTURES
 
 
 @pytest.mark.parametrize('swapped', [False, True])
@@ -33,8 +33,7 @@ def test_weak_sl3_preserves_physical_order_without_field_ranking(monkeypatch, sw
 
 
 def test_native_hold56_driver_cutoff_one_crc_at_retained_offset(monkeypatch):
-    root = Path(__file__).resolve().parents[5]
-    path = root / 'captures/onair-0914-1835/stream.wav'
+    path = CAPTURES / 'onair-0914-1835/stream.wav'
     if not path.exists():
         pytest.skip('external native capture not present')
     fs, record = wavfile.read(path, mmap=True)

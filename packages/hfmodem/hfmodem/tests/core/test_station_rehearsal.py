@@ -496,6 +496,8 @@ def test_a_protocol_at_its_own_rate_reaches_the_card_at_the_cards(bench):
 
 # -- half duplex ---------------------------------------------------------------
 
+# The card pumps on the wall clock; the arbiter must keep pace with its callbacks.
+@pytest.mark.wall_clock
 def test_the_lanes_are_flushed_past_the_stations_own_carrier(bench):
     """A receiver hears its own transmitter, and four decoders must not.
 
@@ -559,3 +561,58 @@ def test_a_refused_burst_never_reaches_the_keying_line(bench):
     assert written == 0.0, (
         f"the card was handed audio peaking at {written:.3f} for a burst the "
         "regulatory gate had refused")
+
+
+def test_a_refused_burst_stays_off_the_card_however_late_the_key_runs(bench):
+    """A key thread descheduled past the settle must not let the refused audio out.
+
+    The card plays whatever is armed whether or not the line came up, and a VOX
+    rig transmits it. Here the key stalls for 2.5 settles before its own profile
+    check, so only a refusal decided before the audio is armed can hold the card.
+    """
+    b = bench(profile=Part97(licence="general"))
+    key = b.rig.key
+
+    def late(*args, **kwargs):
+        time.sleep(2.5 * SETTLE_S)
+        return key(*args, **kwargs)
+
+    b.rig.key = late
+    with pytest.raises(Refused, match="part97 bandwidth"):
+        b.arb.submit(b.request(tone(1000.0, 1.0),
+                               emission=centred(7_100_000, 4000.0)))
+    time.sleep(0.05)
+
+    assert not any(on for _, on in b.ptt.edges), f"a refused burst keyed the transmitter: {b.ptt.edges}"
+    written = float(np.abs(b.card.written).max())
+    assert written == 0.0, (
+        f"the card was handed audio peaking at {written:.3f} for a burst the "
+        "regulatory gate had refused")
+
+
+def test_a_key_that_fails_after_the_arm_takes_the_burst_off_the_card_itself(bench):
+    """The containment thread is a supervisor poll and two thread hops away.
+
+    A stale dial is a refusal only key() can give, so the audio is armed by then;
+    the failed key must drop it before it returns rather than leave it to them.
+    """
+    b = bench()
+    b.rig.dial_max_age_s = 1e-9
+    key, contain, armed, looked = b.arb._key, b.arb._contain, [], threading.Event()
+
+    def watched(*args, **kwargs):
+        try:
+            return key(*args, **kwargs)
+        finally:
+            armed.append(b.audio._burst is not None)
+            looked.set()
+
+    def after_the_look(flight):
+        looked.wait(5)
+        contain(flight)
+
+    b.arb._key, b.arb._contain = watched, after_the_look
+    with pytest.raises(Refused, match="cached dial is stale"):
+        b.arb.submit(b.request(tone(1000.0, 1.0)))
+    assert armed == [False], "a failed key left its burst armed on the card"
+    assert not any(on for _, on in b.ptt.edges)

@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 
 from hfmodem import cli
-from hfmodem.core import config
+from hfmodem.core import cat as cat_module, config, rig as rig_module
 from hfmodem.core.cat import CatDesync, QueryRefused
 from hfmodem.core.rig import ArmReport
 from hfmodem.core.rates import CARD_RATE_HZ
@@ -145,13 +145,21 @@ class KeyedCard(QuietCard):
                               floor=self.FLOOR))]
 
 
-def armed(tmp_path, monkeypatch, line: FakePtt):
+def armed(tmp_path, monkeypatch, line: FakePtt, *, arms=True):
     """A `Preflight` whose rig is armed against a fake rigctld and `line`."""
     rigctld = FakeRigctld(ptt_line=line, ptt_type="None")
     monkeypatch.setattr(preflight, "RtsPtt", lambda port: line)
+    # None of these tests is about the arm path's real-time bounds, so the CAT
+    # deadline and the proof's watchdog slack are only hang bounds here.
+    monkeypatch.setattr(cat_module, "EXCHANGE_S", 30.0)
+    monkeypatch.setattr(rig_module, "_WATCHDOG_SLACK_S", 30.0)
     cfg = config.load(station_file(tmp_path, transmit=True, port=rigctld.port, cat="rigctld"))
     p = preflight.Preflight(cfg)
-    return p, p._rig(), rigctld
+    rig = p._rig()
+    if arms and rig is None:
+        rigctld.close()
+        pytest.fail(f"the arm gate refused: {p.lines[-1].detail}")
+    return p, rig, rigctld
 
 
 @pytest.fixture
@@ -709,7 +717,7 @@ class AfterUnkeys(FakeLine):
 
 
 class Deadmen:
-    """`threading` as preflight sees it, recording every deadman it starts."""
+    """The deadman Timer as preflight sees it, recording every deadman it starts."""
 
     def __init__(self) -> None:
         self.started = []
@@ -743,7 +751,7 @@ def test_an_unconfirmed_unkey_stops_the_keying_and_fences_the_rig(
         assert "== preflight FAILED ==" in capsys.readouterr().out
 
         deadmen = Deadmen()
-        monkeypatch.setattr(preflight, "threading", deadmen)
+        monkeypatch.setattr(preflight, "Timer", deadmen.Timer)
         with pytest.raises(preflight.RigError, match="keying line is unconfirmed"):
             p._key(rig)
         assert deadmen.started == [], "a refused key armed a deadman"
@@ -850,7 +858,7 @@ def test_a_line_that_will_not_come_down_never_reaches_the_measurement(
         tmp_path, monkeypatch):
     """The line sticks up, so the arm gate's own proof retires the rig."""
     line = FakeLine(stick=True)
-    p, rig, rigctld = armed(tmp_path, monkeypatch, line)
+    p, rig, rigctld = armed(tmp_path, monkeypatch, line, arms=False)
     try:
         assert rig is None      # the arm gate's own proof never came down
         assert p.lines[-1].verdict == preflight.UNKNOWN

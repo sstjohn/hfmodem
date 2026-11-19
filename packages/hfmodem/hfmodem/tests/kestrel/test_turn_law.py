@@ -40,6 +40,7 @@ the frame from the next search.
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -528,7 +529,7 @@ def test_an_unanswered_turn_request_is_repeated_and_then_given_up():
     assert any("giving the turn back" in m for m in io.msgs), io.msgs
 
 
-def test_a_peer_that_takes_the_turn_back_ends_up_with_it():
+def test_a_peer_that_takes_the_turn_back_ends_up_with_it(monkeypatch):
     """The move the real Winlink flow makes every session, and the one state this
     machine had no way out of.
 
@@ -548,6 +549,8 @@ def test_a_peer_that_takes_the_turn_back_ends_up_with_it():
     cadence tells a station that is transmitting that we hold the turn and have
     nothing to put in it.
     """
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(VA, "time", SimpleNamespace(monotonic=lambda: 1000.0))
     hs, io = _connected()
     hs.send(_overs(3))
     hs.on_rx_audio(_peer_control())                  # granted; over #1 keyed

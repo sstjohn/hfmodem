@@ -21,10 +21,10 @@ tune() {
     read -r roof width shift <<< "$commands"
     # The dial goes first: on another band the band stack brings back that band's own
     # mode and filters. Then the mode, then the filters, which belong to it.
-    if nc -z -w 3 127.0.0.1 4532 2>/dev/null; then
+    if nc -z -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null; then
       daemon=1
       reply=$(PYTHONPATH="$package${PYTHONPATH:+:$PYTHONPATH}" "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.ftdx10 batch "$dial" \
-              | nc -w 5 127.0.0.1 4532 2>&1 | tr '\000' '\n'; exit "${PIPESTATUS[1]}") || rc=$?
+              | nc -w 5 127.0.0.1 "$RIGCTLD_PORT" 2>&1 | tr '\000' '\n'; exit "${PIPESTATUS[1]}") || rc=$?
     else
       reply=$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" -o \
               V VFOA F VFOA "$dial" f VFOA w 'MD0C;' \
@@ -36,10 +36,10 @@ tune() {
           "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.ftdx10 dial "$rc" "$daemon")
   else
     if ! printf '+\\set_freq %d\nq\n' "$dial" \
-         | nc -w 3 127.0.0.1 4532 2>/dev/null | grep -q '^RPRT 0'; then
+         | nc -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null | grep -q '^RPRT 0'; then
       claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" F "$dial" >/dev/null 2>&1 || true
     fi
-    got=$(printf '+\\get_freq\nq\n' | nc -w 5 127.0.0.1 4532 2>/dev/null \
+    got=$(printf '+\\get_freq\nq\n' | nc -w 5 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null \
           | sed -n 's/^Frequency: //p' | head -1)
     [ -n "$got" ] || got=$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" f 2>/dev/null | head -1)
   fi
@@ -71,10 +71,10 @@ tune() {
 rig_readback() {
   local reply rc=0 daemon=0 package
   package="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/packages/hfmodem"
-  if nc -z -w 3 127.0.0.1 4532 2>/dev/null; then
+  if nc -z -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null; then
     daemon=1
     reply=$(PYTHONPATH="$package${PYTHONPATH:+:$PYTHONPATH}" "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.core.ftdx10 readback-batch \
-            | nc -w 5 127.0.0.1 4532 2>&1 | tr '\000' '\n'; exit "${PIPESTATUS[1]}") || rc=$?
+            | nc -w 5 127.0.0.1 "$RIGCTLD_PORT" 2>&1 | tr '\000' '\n'; exit "${PIPESTATUS[1]}") || rc=$?
   else
     reply=$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" \
             w 'MD0;' w 'SH0;' w 'RF0;' w 'IS0;' 2>&1 | tr '\000' '\n'; exit "${PIPESTATUS[0]}") || rc=$?
@@ -93,10 +93,10 @@ print(mode_passband(RIGS[sys.argv[1]], int(sys.argv[2])))' "${RIG_NAME:-ft891}" 
 
 ipo_off() {
   local reply reading error rc=0 daemon=0
-  if nc -z -w 3 127.0.0.1 4532 2>/dev/null; then
+  if nc -z -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null; then
     daemon=1
     reply=$(printf '+\\set_level PREAMP 0\n+\\get_level PREAMP\nq\n' \
-            | nc -w 3 127.0.0.1 4532 2>&1) || rc=$?
+            | nc -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>&1) || rc=$?
     # Up to the get_level's own status: the closing q answers RPRT 0 as well.
     reply=$(printf '%s\n' "$reply" | awk '{ print } /^RPRT / && ++n == 2 { exit }')
   else
@@ -129,10 +129,10 @@ agc_off() {
   [ "$RIG_NAME" = ftdx10 ] || return 0
   local reading reply part level rc=0 error daemon=0
   if [ "${1:-}" = --rigctld ] \
-     || { [ "$#" -eq 0 ] && nc -z -w 3 127.0.0.1 4532 2>/dev/null; }; then
+     || { [ "$#" -eq 0 ] && nc -z -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null; }; then
     daemon=1
     reply=$(printf '+\\set_level AGC 0\n+\\get_level AGC\n+\\set_level PREAMP 0\n+\\get_level PREAMP\nq\n' \
-            | nc -w 3 127.0.0.1 4532 2>&1) || rc=$?
+            | nc -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>&1) || rc=$?
   elif [ "$#" -gt 0 ]; then
     reply="$1" rc="${2:-0}"
   else
@@ -299,9 +299,15 @@ rx_level() {
 
 claim_daemon_start() {
   local log="$1" result pid started reply deadline
+  case "${RIGCTLD_BIND:-}" in
+    ''|127.0.0.1) ;;
+    *) printf 'RIGCTLD_BIND must be 127.0.0.1 or unset\n' >&2; return 1 ;;
+  esac
   if [ -n "${RIGCTLD_PID:-}" ] && claim_processes alive "$RIGCTLD_PID"; then return 0; fi
-  claim_spawn --long-lived --device "$CAT_PORT" -- \
-      rigctld -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" --set-conf=ptt_type=None \
+  local -a argv=(rigctld -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD"
+                 --set-conf=ptt_type=None -t "$RIGCTLD_PORT")
+  if [ -n "${RIGCTLD_BIND:-}" ]; then argv+=(-T "$RIGCTLD_BIND"); fi
+  claim_spawn --long-lived --device "$CAT_PORT" -- "${argv[@]}" \
       >"$log" 2>&1 || return
   result=$(sed -n 's/^CLAIM NATIVE /CLAIM NATIVE /p' "$log" | tail -1)
   read -r _ _ pid started <<< "$result"
@@ -311,7 +317,7 @@ claim_daemon_start() {
   deadline=$((SECONDS + 12))
   while [ "$SECONDS" -lt "$deadline" ]; do
     claim_processes alive "$pid" || break
-    reply=$(printf '\\get_conf ptt_type\nq\n' | nc -w 3 127.0.0.1 4532 2>/dev/null) || reply=
+    reply=$(printf '\\get_conf ptt_type\nq\n' | nc -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null) || reply=
     case "$reply" in *ptt_type=None*|None) return 0 ;; esac
     sleep 0.1
   done

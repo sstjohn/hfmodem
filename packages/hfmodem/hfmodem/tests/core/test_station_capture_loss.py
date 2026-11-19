@@ -206,9 +206,11 @@ def sample_station_arm(monkeypatch, *, breathe):
 
 def test_the_station_loses_capture_under_the_listening_cycle_and_counts_it(monkeypatch):
     overwritten, counted, worst = sample_station_arm(monkeypatch, breathe=False)
-    assert _per_cycle(overwritten) > 150
+    # As in test_capture_loss: the size fell with the batched PACTOR scoring;
+    # what is pinned is that an unbreathed station loses and counts all of it.
+    assert overwritten > 0
     assert counted == overwritten
-    assert worst > 4*gil.PERIOD
+    assert worst > RING_S
 
 
 def test_breathing_from_the_polling_thread_takes_the_stations_loss_to_zero(monkeypatch):

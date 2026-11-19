@@ -412,7 +412,7 @@ def test_recorded_ws8eoc_repeated_changeover_timing(tmp_path, policy):
     import re
     from hfmodem.tests import evidence
 
-    directory = evidence.RECORD / 'operator-data/working/onair-20261108T234755210382Z-e11d8b1e-3a27-4752-b2ef-859bfc8941cc'
+    directory = evidence.OPERATOR_DATA / 'working/onair-20261108T234755210382Z-e11d8b1e-3a27-4752-b2ef-859bfc8941cc'
     logs = sorted(directory.glob('*.log'))
     if not logs:
         pytest.skip('optional WS8EOC 11-08 23:48Z operator recording is absent')

@@ -44,9 +44,8 @@ import numpy as np
 import pytest
 
 from hfmodem.shrike import rxfront
+from hfmodem.tests.evidence import CAPTURES
 
-REPO = Path(__file__).resolve().parents[5]
-CAPTURES = REPO / "captures"
 
 #: The evening arm. Named rather than globbed: `captures/` is ignored and holds
 #: whatever the last run wrote, so a glob measures the machine and this measures

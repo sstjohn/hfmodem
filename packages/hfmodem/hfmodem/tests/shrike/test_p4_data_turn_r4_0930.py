@@ -10,7 +10,7 @@ import sys
 import numpy as np
 import pytest
 
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.shrike import onair, p4breakintx
 from hfmodem.shrike.p4observation import Kind, Registered
 from hfmodem.shrike.p4turn import P4Turn, State
@@ -128,7 +128,7 @@ def test_word_yield_refusal_budget_excludes_unconfirmed_answers(invalid):
 @pytest.mark.realtime
 def test_0210_full_stream_driver_stops_at_word_yield_retry_divergence(monkeypatch):
     root = Path(__file__).resolve().parents[5]
-    capture = root/'captures/onair-0930-0210'
+    capture = CAPTURES/'onair-0930-0210'
     # Required evidence: missing audio must fail this pin, never silently skip it.
     require_input(capture/'stream.flac')
     require_input(capture/'p4-probe.json')

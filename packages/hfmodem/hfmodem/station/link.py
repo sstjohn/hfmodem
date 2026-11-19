@@ -54,6 +54,7 @@ from hfmodem.core.recording import inherit_boundaries, contact_ended
 from hfmodem.core.regulatory import Emission
 from hfmodem.core.rig import RigError
 from hfmodem.core.tx_events import TxEvents
+from hfmodem.core.waits import join, wait_until
 from hfmodem.station.arbiter import LIVE, ERRAND, Refused, RequestState, TxRequest, longest_burst_s
 
 
@@ -717,8 +718,7 @@ class AleLink(_ThreadedModemLink):
         super().stop()
         directory = getattr(self, "_directory_thread", None)
         if directory is not None:
-            directory.join(.25)
-            if directory.is_alive():
+            if not join(directory, time.monotonic() + .25):
                 raise LeaseTimeout("ale-directory")
         rig = self.station.rig
         if rig is not None:
@@ -960,7 +960,7 @@ class RprLink(ProtocolLink):
                 or self._active is not None or bool(self._queue))
 
     def _record(self, request, outcome, reason="", *, final=True, **fields):
-        if not self._journal_lock.acquire(timeout=2):
+        if not wait_until(lambda r: self._journal_lock.acquire(True, r), time.monotonic() + 2):
             self._fatal("rpr journal producer did not drain")
         try:
             event = self.events.record("completed", request.identifier, outcome=outcome,
@@ -989,7 +989,7 @@ class RprLink(ProtocolLink):
 
     def flush_events(self, timeout=None):
         acquired = (self._journal_lock.acquire() if timeout is None else
-                    self._journal_lock.acquire(timeout=timeout))
+                    wait_until(lambda r: self._journal_lock.acquire(True, r), time.monotonic() + timeout))
         if acquired:
             try:
                 self._drain_events()
@@ -1027,8 +1027,7 @@ class RprLink(ProtocolLink):
         self.drop_pending()
         if self._worker is not None:
             limit = self.station.cfg.rig.max_key_s + self.station.cfg.rig.ptt.settle_s + 5
-            self._worker.join(limit)
-            if self._worker.is_alive():
+            if not join(self._worker, time.monotonic() + limit):
                 self._fatal("rpr worker did not stop")
         contact_ended(getattr(self.packet_engine, 'engine', None), 'RPR lane stopped')
         if not self.flush_events(timeout=2):

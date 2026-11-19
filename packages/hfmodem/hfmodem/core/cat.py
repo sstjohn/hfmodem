@@ -18,6 +18,7 @@ from .operations import OperationGate, leased
 from .rig import IdentityMismatch, RigError
 from .rigs import RIGS
 from .rxreadiness import RadioMode
+from .waits import join, wait_until
 from . import serialline
 
 
@@ -248,7 +249,7 @@ class SerialTransport(_Driver):
             self._thread = threading.Thread(target=self._run, args=(deadline,),
                                             name='cat-serial', daemon=True)
             self._thread.start()
-        if not self._ready.wait(max(0, deadline - time.monotonic())):
+        if not wait_until(self._ready.wait, deadline):
             self._stop.set()
             self.poisoned = True
             raise RigError('CAT open deadline expired')
@@ -260,8 +261,7 @@ class SerialTransport(_Driver):
         self._poison('CAT closed')
         thread = self._thread
         if thread is not None:
-            thread.join(EXCHANGE_S)
-            if thread.is_alive():
+            if not join(thread, time.monotonic() + EXCHANGE_S):
                 raise RigError('CAT transport did not close')
         with self._condition:
             self._thread = None
@@ -312,7 +312,7 @@ class SerialTransport(_Driver):
                 raise RigError('CAT is not open')
             self._queue.append(request)
             self._condition.notify_all()
-        request.done.wait(max(0, request.deadline - time.monotonic()))
+        wait_until(request.done.wait, request.deadline)
         with self._condition:
             if not request.done.is_set():
                 if request.sent and request.prefix:
@@ -333,7 +333,7 @@ class SerialTransport(_Driver):
                 return None
             self._emergency = request
             self._condition.notify_all()
-        request.done.wait(max(0, request.deadline - time.monotonic()))
+        wait_until(request.done.wait, request.deadline)
         return {'TX0;': False, 'TX1;': True, 'TX2;': True}.get(request.result)
 
     def _write(self, command, deadline):
@@ -532,7 +532,7 @@ class SerialTransport(_Driver):
                                     delay = self.profile['setter_readback_delay_s']
                                     if delay:
                                         try:
-                                            if self._stop.wait(min(delay, _remaining(request.deadline))):
+                                            if wait_until(self._stop.wait, time.monotonic() + min(delay, _remaining(request.deadline))):
                                                 raise RigError('CAT transport stopped')
                                             self._check(request.deadline, request.arming)
                                         except RigError:

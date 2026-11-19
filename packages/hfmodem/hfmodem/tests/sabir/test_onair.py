@@ -767,6 +767,23 @@ def test_the_watchdog_unkeys_and_retires_when_the_play_overruns(monkeypatch):
     assert r._keyer.events.count("unkey") >= 2
 
 
+def test_a_forward_wall_clock_step_does_not_fire_the_watchdog(monkeypatch, forward_step):
+    """A timed wait parked on the wall clock ends at once when the clock steps
+    forward; the watchdog keeps its bound on monotonic time instead."""
+    import time
+    r = rig()
+    calls: list[int] = []
+
+    def plays(audio, fs, device):
+        calls.append(audio.size)
+        if len(calls) > 1:
+            time.sleep(0.3)
+    monkeypatch.setattr(radio, "play_drained", plays)
+    radio.transmit(r, np.ones(int(0.1 * radio.FS)), EMISSION, max_key_s=10.0)
+    time.sleep(0.05)
+    assert not r.retired
+    assert r._keyer.events.count("unkey") == 1
+
 def test_a_retired_rig_refuses_key_up_and_never_key_down():
     """After a signal-time unkey a racing thread must not put the line back up
     in the window before the interpreter exits."""

@@ -290,12 +290,9 @@ FS = spec.SAMPLE_RATE
 
 @pytest.fixture(scope='module')
 def close_audio():
-    root = Path(__file__).resolve().parents[5]
     result = {}
     for name, pin in FIXTURE['audio'].items():
-        path = root / 'captures/onair-1002-1137' / name
-        if not path.is_file():
-            path = evidence.CAPTURES / 'onair-1002-1137' / name
+        path = evidence.CAPTURES / 'onair-1002-1137' / name
         if not path.is_file():
             pytest.skip(f'close recording unavailable: {path}')
         assert path.stat().st_size == pin['bytes']

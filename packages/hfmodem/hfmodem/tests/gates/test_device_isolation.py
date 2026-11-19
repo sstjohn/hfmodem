@@ -219,7 +219,7 @@ def test_native_cat_is_refused_before_process_creation(device_guard, event, tram
 @pytest.mark.parametrize('port', POSIX_SERIAL + COM_SERIAL)
 def test_native_cat_command_checks_posix_and_windows_devices(device_guard, program, port):
     with pytest.raises(PermissionError):
-        device_guard.check_command([program, '-r', port])
+        device_guard.check_command([program, '-r', port, *(['-t4533'] if program == 'rigctld' else [])])
 
 
 @pytest.mark.posix_only('POSIX symlink to a terminal')
@@ -252,7 +252,8 @@ def test_native_cat_accepts_own_pty(device_guard, monkeypatch):
 def test_native_cat_accepts_temporary_files(device_guard, tmp_path):
     fake = tmp_path / 'fake-cat'
     fake.touch()
-    device_guard.check_command(['rigctld', '-r', str(fake)])
+    device_guard.own_port(4533)
+    device_guard.check_command(['rigctld', '-r', str(fake), '-T127.0.0.1', '-t4533'])
     fake = tmp_path / 'fake-COM41.dat'
     fake.touch()
     device_guard.check_command(['rigctl', '-r', str(fake)])
@@ -316,7 +317,8 @@ else:
 try:
     port = 'COM3' if os.name == 'nt' else '/dev/ttys000'
     subprocess.Popen([sys.argv[1], '-P', 'NONE', '-m', '1036',
-                      '-r', port, '2', '0.05', '7100000', 'PKTUSB'])
+                      '-r', port, *(['-t4533'] if sys.argv[1] == 'rigctld' else []),
+                      '2', '0.05', '7100000', 'PKTUSB'])
 except PermissionError as exc:
     assert 'not owned by this test' in str(exc), str(exc)
     print('native spawn refused before OS boundary')
@@ -414,7 +416,7 @@ def test_native_cat_relative_owned_pty_uses_child_cwd(monkeypatch):
         port = Path(os.ttyname(slave))
         # From /dev: every native argv word is checked as an endpoint, and in
         # Linux's /dev/pts even '-r' names a would-be terminal.
-        argv = ['rigctl', '-r', str(port.relative_to('/dev'))]
+        argv = ['rigctl', '-r', './' + str(port.relative_to('/dev'))]
         with pytest.raises(AssertionError, match='unguarded OS process creation'):
             subprocess.Popen(argv, cwd='/dev')
         hermetic.guard.closed_pty(master)
@@ -1014,10 +1016,10 @@ def test_other_endpoint_on_same_port_does_not_authorize_tcp_ipv4(
     monkeypatch.setattr(device_guard, '_listened', lambda *a: True)
     _socket_driver(device_guard, monkeypatch)
     with socket.socket(family, transport, dual=dual) as server:
-        server.bind((host, 4532))
+        server.bind((host, 8300))
         client = NS(family=socket.AF_INET, type=socket.SOCK_STREAM)
         with pytest.raises(PermissionError):
-            device_guard.guard('socket.connect', (client, ('127.0.0.1', 4532)))
+            device_guard.guard('socket.connect', (client, ('127.0.0.1', 8300)))
 
 
 @pytest.mark.parametrize('family,host,dual,destination', [
@@ -1033,15 +1035,15 @@ def test_owned_listener_endpoint_stays_reachable(
     monkeypatch.setattr(device_guard, '_listened', lambda *a: True)
     _socket_driver(device_guard, monkeypatch)
     with socket.socket(family, dual=dual) as server:
-        server.bind((host, 4532))
+        server.bind((host, 8300))
         client_family = socket.AF_INET6 if destination == '::1' else socket.AF_INET
         client = NS(family=client_family, type=socket.SOCK_STREAM)
-        device_guard.guard('socket.connect', (client, (destination, 4532)))
+        device_guard.guard('socket.connect', (client, (destination, 8300)))
 
 
 def test_failed_bind_does_not_grant_access_to_foreign_listener(device_guard, monkeypatch):
     monkeypatch.setattr(device_guard, '_listened', lambda *a: True)
-    address = ('127.0.0.1', 4532)
+    address = ('127.0.0.1', 8300)
     server = _socket_driver(device_guard, monkeypatch, fail=True)
     client = NS(family=socket.AF_INET, type=socket.SOCK_STREAM)
     with pytest.raises(PermissionError):
@@ -1100,16 +1102,17 @@ def test_closing_one_socket_keeps_only_the_other_sockets_port_grant(device_guard
 
 @pytest.mark.parametrize('event', ['os.exec', 'subprocess.Popen'])
 def test_owned_rigctld_registers_only_when_this_process_becomes_it(device_guard, monkeypatch, event):
-    argv = ['rigctld', '-m', '1', '-t', '4532']
+    device_guard.own_port(8300)
+    argv = ['rigctld', '-m', '1', '-T127.0.0.1', '-t', '8300']
     monkeypatch.setattr(device_guard, 'check_launch', lambda *args: None)
     monkeypatch.setattr(device_guard, '_listened', lambda *address: True)
     device_guard.guard(event, (argv[0], argv, None, None) if event == 'subprocess.Popen' else (argv[0], argv, None))
     client = NS(family=socket.AF_INET, type=socket.SOCK_STREAM)
-    connect = lambda: device_guard.guard('socket.connect', (client, ('127.0.0.1', 4532)))
+    connect = lambda: device_guard.guard('socket.connect', (client, ('127.0.0.1', 8300)))
     if event == 'os.exec':
         connect()
     else:
-        with pytest.raises(PermissionError, match='connected to 127.0.0.1:4532'):
+        with pytest.raises(PermissionError, match='connected to 127.0.0.1:8300'):
             connect()
 
 
@@ -1128,8 +1131,8 @@ def _windows_creation(device_guard, monkeypatch, command, create_process, enviro
 
 
 @pytest.mark.parametrize('command,owned', [
-    ('rigctld.exe -m 1 -t 4532', True), ('rigctld.exe -m 1 -t 4533', False),
-    ('rigctld.exe -m 1 -t4532 --port=4533', False), ('rigctld.exe -m 1 -T 127.0.0.1 -T 10.0.0.1', False),
+    ('rigctld.exe -m 1 -T127.0.0.1 -t 8300', True), ('rigctld.exe -m 1 -T127.0.0.1 -t 8301', False),
+    ('rigctld.exe -m 1 -T127.0.0.1 -t8300 --port=8301', False), ('rigctld.exe -m 1 -t8300 -T 127.0.0.1 -T 10.0.0.1', False),
     ('rigctl.exe -m 1', False)])
 def test_windows_created_rigctld_endpoint_lives_as_long_as_that_process(device_guard, monkeypatch, command, owned):
     # The native supervisor that creates rigctld exits once it runs; the
@@ -1138,38 +1141,44 @@ def test_windows_created_rigctld_endpoint_lives_as_long_as_that_process(device_g
     monkeypatch.setattr(winclaim, 'process_info',
                         lambda pid, handle=None: (f'win:{pid}', pid not in running))
     monkeypatch.setattr(device_guard, '_listened', lambda *address: True)
+    device_guard.own_port(8300)
+    device_guard.own_port(8301)
     create = _windows_creation(device_guard, monkeypatch, command, lambda *args: (7, 8, 4242, 9))
+    if '10.0.0.1' in str(command):
+        with pytest.raises(PermissionError, match='non-loopback'):
+            create()
+        return
     assert create()[2] == 4242
     client = NS(family=socket.AF_INET, type=socket.SOCK_STREAM)
-    connect = lambda: device_guard.guard('socket.connect', (client, ('127.0.0.1', 4532)))
+    connect = lambda: device_guard.guard('socket.connect', (client, ('127.0.0.1', 8300)))
     if owned:
         connect()
     else:
-        with pytest.raises(PermissionError, match='connected to 127.0.0.1:4532'):
+        with pytest.raises(PermissionError, match='connected to 127.0.0.1:8300'):
             connect()
     # Exited, though a retained handle still names the same process.
     running.clear()
-    with pytest.raises(PermissionError, match='connected to 127.0.0.1:4532'):
+    with pytest.raises(PermissionError, match='connected to 127.0.0.1:8300'):
         connect()
 
 
 @pytest.mark.parametrize('argv,host', [
-    (['rigctld', '-m', '1', '-T', '127.0.0.1', '-t', '4532'], '127.0.0.1'),
-    (['rigctld', '-r', '/dev/ttys000', '-vt4532'], '127.0.0.1'),
-    (['rigctld', '-t4533', '--port=4532'], '127.0.0.1'),
+    (['rigctld', '-m', '1', '-T', '127.0.0.1', '-t', '4533'], '127.0.0.1'),
+    (['rigctld', '-r', '/dev/null', '-vt4533'], '127.0.0.1'),
+    (['rigctld', '-t4534', '--port=4533'], '127.0.0.1'),
     (['rigctld', '--listen=::1'], '::1'),
-    (['rigctld', '--', '-t4533'], '127.0.0.1'),
-    (['rigctld', '-m', '1', '-t4532', '-vt4533'], None),
-    (['rigctld', '--por=4533'], None),
-    (['rigctld', '-vT192.0.2.1'], '192.0.2.1'),
-    (['rigctld', '--p=4532'], None),
-    (['rigctld', '-b'], None),
-    (['rigctld', '-q'], None),
-    (['rigctld', '-t'], None),
-    (['rigctld', '-t4533', 'stray', '-t4532'], '127.0.0.1'),
+    (['rigctld', '--', '-t4534'], '127.0.0.1'),
+    (['rigctld', '-m', '1', '-t4533', '-vt4534'], '127.0.0.1'),
+    (['rigctld', '--por=4534'], '127.0.0.1'),
+    (['rigctld', '-vT192.0.2.1'], 'refused'),
+    (['rigctld', '--p=4533'], 'refused'),
+    (['rigctld', '-b'], 'refused'),
+    (['rigctld', '-q'], 'refused'),
+    (['rigctld', '-t'], 'refused'),
+    (['rigctld', '-t4534', 'stray', '-t4533'], '127.0.0.1'),
     (['rigctld', '-T192.0.2.1', 'stray', '-T127.0.0.1'], '127.0.0.1'),
     (['rigctld', '--list'], None),
-    (['rigctld', '--li'], None),
+    (['rigctld', '--li'], 'refused'),
     (['rigctld', '-l'], None),
     (['rigctld', '--dump-caps', '-m', '1'], None),
     (['rigctld', '-m1', '-u'], None),
@@ -1184,18 +1193,32 @@ def test_windows_created_rigctld_endpoint_lives_as_long_as_that_process(device_g
     (['rigctld', '--show-conf'], None),
     (['rigctld', '--show'], None)])
 def test_owned_rigctld_endpoint_is_read_as_rigctld_reads_its_options(device_guard, argv, host):
+    device_guard.own_port(4533)
+    device_guard.own_port(4534)
+    argv = [argv[0], '-T127.0.0.1', '-t4533', *argv[1:]]
+    if host == 'refused':
+        with pytest.raises(PermissionError):
+            device_guard._owned_rigctld(None, argv, {})
+        return
     endpoint = device_guard._owned_rigctld(None, argv, {})
     assert (endpoint and endpoint[2]) == host
 
 
 @pytest.mark.parametrize('argv,host', [
-    (['rigctld', '-t4533', 'stray', '-t4532'], None),
-    (['rigctld', '-t4532', 'stray', '-t4533'], '127.0.0.1'),
-    (['rigctld', '-T192.0.2.1', 'stray', '-T127.0.0.1'], '192.0.2.1'),
+    (['rigctld', '-t4534', 'stray', '-t4533'], '127.0.0.1'),
+    (['rigctld', '-t4533', 'stray', '-t4534'], '127.0.0.1'),
+    (['rigctld', '-T192.0.2.1', 'stray', '-T127.0.0.1'], 'refused'),
     (['rigctld', 'stray', '--list'], '127.0.0.1'),
     (['rigctld', '-', '-b'], '127.0.0.1')])
 def test_owned_rigctld_options_end_at_the_first_operand_when_posixly_correct(device_guard, argv, host):
     # With POSIXLY_CORRECT, rigctld's getopt_long stops at the first operand.
+    device_guard.own_port(4533)
+    device_guard.own_port(4534)
+    argv = [argv[0], '-T127.0.0.1', '-t4533', *argv[1:]]
+    if host == 'refused':
+        with pytest.raises(PermissionError):
+            device_guard._owned_rigctld(None, argv, {'POSIXLY_CORRECT': '1'})
+        return
     endpoint = device_guard._owned_rigctld(None, argv, {'POSIXLY_CORRECT': '1'})
     assert (endpoint and endpoint[2]) == host
 
@@ -1211,7 +1234,9 @@ def test_owned_rigctld_reads_its_options_in_the_childs_environment(device_guard,
     # with Windows reading its keys without regard to case.
     monkeypatch.delenv('POSIXLY_CORRECT', raising=False)
     monkeypatch.setattr(device_guard, '_listened', lambda *address: True)
-    command = 'rigctld.exe -m 1 -t4533 stray -t4532'
+    device_guard.own_port(8300)
+    device_guard.own_port(8301)
+    command = 'rigctld.exe -T 127.0.0.1 -m 1 -t8301 stray -t8300'
     if event == 'os.exec':
         if os.name == 'nt':
             pytest.skip('Windows has no exec')
@@ -1223,11 +1248,11 @@ def test_owned_rigctld_reads_its_options_in_the_childs_environment(device_guard,
         _windows_creation(device_guard, monkeypatch, command, lambda *args: (7, 8, 4242, 9),
                           environment)()
     client = NS(family=socket.AF_INET, type=socket.SOCK_STREAM)
-    connect = lambda: device_guard.guard('socket.connect', (client, ('127.0.0.1', 4532)))
+    connect = lambda: device_guard.guard('socket.connect', (client, ('127.0.0.1', 8300)))
     if owned:
         connect()
     else:
-        with pytest.raises(PermissionError, match='connected to 127.0.0.1:4532'):
+        with pytest.raises(PermissionError, match='connected to 127.0.0.1:8300'):
             connect()
 
 
@@ -1245,8 +1270,9 @@ def test_windows_rigctld_left_unregistered_is_ended_before_the_error_returns(dev
     def unregistered(*registration):
         raise OSError('manifest write failed')
     monkeypatch.setattr(device_guard, '_created', unregistered)
+    device_guard.own_port(8300)
     create = _windows_creation(
-        device_guard, monkeypatch, 'rigctld.exe -m 1 -t 4532', lambda *args: (7, 8, 4242, 9),
+        device_guard, monkeypatch, 'rigctld.exe -T 127.0.0.1 -m 1 -t 8300', lambda *args: (7, 8, 4242, 9),
         TerminateProcess=lambda handle, code: call('terminate', handle),
         WaitForSingleObject=lambda handle, ms: call('wait', handle, 0 if ended else 258),
         CloseHandle=lambda handle: call('close', handle))
@@ -1272,14 +1298,14 @@ def test_windows_rigctld_left_unregistered_is_ended_before_the_error_returns(dev
 @pytest.mark.posix_only('mocked POSIX PTY allocation')
 @pytest.mark.parametrize('port,served,reached', [
     (4532, None, False),
-    (4532, 'nothing listening', True),
-    (4532, ['rigctld', '-m', '1036', '-r', '/dev/ttys003'], True),
+    (4532, 'nothing listening', False),
+    (4532, ['rigctld', '-m', '1036', '-r', '/dev/ttys003'], False),
     (4532, ['rigctld', '-m', '1036', '-r', '/dev/ttys003', '-t', '4533'], False),
-    (4532, ['rigctld', '-r', '/dev/ttys003', '-T', '127.0.0.1', '-t', '4532'], True),
-    (4532, ['rigctld', '-r', '/dev/ttys003', '--port=4532'], True),
+    (4532, ['rigctld', '-r', '/dev/ttys003', '-T', '127.0.0.1', '-t', '4532'], False),
+    (4532, ['rigctld', '-r', '/dev/ttys003', '--port=4532'], False),
     (4532, ['rigctld', '-r', '/dev/ttys003', '-t4533'], False),
     (4532, ['rigctld', '-m', '1036', '-r', '/dev/ttys000'], False),
-    (4532, 'bind', True),
+    (4532, 'bind', False),
     (8515, 'bind', True),
     (8515, ['rigctld', '-m', '1036', '-r', '/dev/ttys003'], False)])
 def test_rig_and_modem_ports_reached_only_while_this_test_serves_them(
@@ -1292,7 +1318,11 @@ def test_rig_and_modem_ports_reached_only_while_this_test_serves_them(
     monkeypatch.setattr(device_guard, '_listened', lambda *address: probes.append(address) or listening)
     if served == 'bind':
         server = _socket_driver(device_guard, monkeypatch)
-        server.bind(('127.0.0.1', port))
+        if port == 4532:
+            with pytest.raises(PermissionError, match="4532.*operator's station port"):
+                server.bind(('127.0.0.1', port))
+        else:
+            server.bind(('127.0.0.1', port))
     elif listening and served:
         try:
             device_guard.guard('os.exec', (served[0], served, None))
@@ -1305,7 +1335,8 @@ def test_rig_and_modem_ports_reached_only_while_this_test_serves_them(
     else:
         with pytest.raises(PermissionError):
             connect('127.0.0.1')
-    with pytest.raises(PermissionError, match=f'connected to 192.0.2.1:{port}'):
+    with pytest.raises(PermissionError, match="4532.*operator's station port" if port == 4532
+                       else f'connected to 192.0.2.1:{port}'):
         connect('192.0.2.1')
     assert ('192.0.2.1', port) not in probes
     if not listening:
@@ -1321,6 +1352,43 @@ def test_rig_and_modem_ports_reached_only_while_this_test_serves_them(
     device_guard.armed = True
     with pytest.raises(PermissionError):
         connect('127.0.0.1')
+
+
+@pytest.mark.parametrize('options', [[], ['-t', '4532'], ['-t4532'],
+    ['--port=4532'], ['-t4533', '-t4532'], ['-t', '04532']])
+@pytest.mark.parametrize('event', ['os.exec', 'subprocess.Popen', 'CreateProcess'])
+def test_fixture_rigctld_cannot_use_operator_station_port(device_guard, monkeypatch, options, event):
+    argv = ['rigctld', '-m', '1', '-T127.0.0.1', *options]
+    with pytest.raises(PermissionError, match="4532.*operator's station port"):
+        if event == 'CreateProcess':
+            create = _windows_creation(device_guard, monkeypatch, ' '.join(argv),
+                                       lambda *args: pytest.fail('created forbidden rigctld'))
+            create()
+        else:
+            args = (argv[0], argv, None, None) if event == 'subprocess.Popen' else (argv[0], argv, None)
+            device_guard.guard(event, args)
+
+
+@pytest.mark.parametrize('port', [4533, 49152])
+def test_fixture_rigctld_may_use_its_own_port(device_guard, port):
+    device_guard.own_port(port)
+    argv = ['rigctld', '-m', '1', '-T127.0.0.1', '-t4532', '-t', str(port)]
+    device_guard.check_command(argv, environment={})
+    assert device_guard._owned_rigctld(None, argv, {})[3] == port
+
+
+@pytest.mark.parametrize('host', ['127.0.0.1', '192.0.2.1', '::1', '::'])
+def test_operator_station_port_cannot_be_bound_or_reached_even_with_a_grant(
+        device_guard, monkeypatch, host):
+    server = _socket_driver(device_guard, monkeypatch)
+    with pytest.raises(PermissionError, match="4532.*operator's station port"):
+        server.bind((host, 4532))
+    # Model a socket bound before the guard was armed; ownership cannot admit 4532.
+    device_guard._serve([socket.SOCK_STREAM, socket.AF_INET, host, 4532, False])
+    monkeypatch.setattr(device_guard, '_listened', lambda *a: pytest.fail('probed station port'))
+    client = NS(family=socket.AF_INET, type=socket.SOCK_STREAM)
+    with pytest.raises(PermissionError, match="4532.*operator's station port"):
+        device_guard.guard('socket.connect', (client, (host, 4532)))
 
 
 @pytest.mark.parametrize('shadow,refused', [(None, False), ('sitecustomize.py', True),
@@ -1425,3 +1493,37 @@ def test_listener_probe_is_silent_and_unguarded(device_guard):
     finally:
         server.close()
     assert not device_guard._listened(host, port)
+
+
+@pytest.mark.parametrize('option', ['-L', '--show-conf', '--show', '-vL'])
+@pytest.mark.parametrize('rig_file', [['-r', '/dev/null'], ['--rig-file=/dev/null'], ['-r/dev/null']])
+def test_show_conf_with_rig_file_still_listens(device_guard, option, rig_file):
+    with pytest.raises(PermissionError, match="4532.*operator's station port"):
+        device_guard.check_command(['rigctld', '-m1', '-T127.0.0.1', *rig_file, option])
+    device_guard.own_port(14599)
+    endpoint = device_guard._owned_rigctld(None, ['rigctld', '-T127.0.0.1', '-t14599', *rig_file, option])
+    assert endpoint[3] == 14599
+
+
+@pytest.mark.parametrize('option', ['-h', '--help', '-V', '--version', '-l', '--list', '-u', '--dump-caps'])
+def test_unconditional_rigctld_listings_with_rig_file_do_not_listen(device_guard, option):
+    assert device_guard._rigctld_port(['rigctld', '-r/dev/null', option]) is None
+
+
+@pytest.mark.parametrize('options', [
+    ['-m2'], ['--model=2'], ['-vm2'], ['-m+2'],
+    ['-m2', '-rlocalhost'], ['-m2', '-r[::1]'], ['-m2', '-r::1'],
+    ['-m2', '-r', '127.0.0.1:4532'], ['-rhost:4532'],
+    ['--rig-file=localhost:4532'], ['--rig-file', '[::1]:4532'],
+    ['-r', ':4532'], ['-r', 'host:04532'],
+])
+def test_native_rigctl_cannot_reach_station_port(device_guard, options):
+    with pytest.raises(PermissionError):
+        device_guard.check_command(['rigctl', *options, 'f'])
+
+
+@pytest.mark.parametrize('options', [['-m1'], ['-m2', '-r127.0.0.1:14599'],
+                                    ['-m2', '--rig-file=[::1]:14599']])
+def test_native_rigctl_can_use_other_endpoints(device_guard, options):
+    device_guard.own_port(14599)
+    device_guard.check_command(['rigctl', *options, 'f'])

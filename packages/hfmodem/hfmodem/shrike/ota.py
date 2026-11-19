@@ -49,6 +49,7 @@ from ..core.ptt import (LineKeyer, PttError, derive_ptt_port,
                         require_char_device)
 from ..core.rig import arm_deadman
 from ..core.rigs import RIGS, flight_defaults, mode_passband
+from ..core.waits import sleep_until
 
 FS = spec.SAMPLE_RATE
 
@@ -580,7 +581,7 @@ def _play(audio_f32, device, max_key, rig, settle=0.10, *, admit=None):
     limit = dur + max(5.0, 0.25 * dur)          # generous margin over the real length
 
     def watchdog():
-        if not stop.wait(limit + settle):
+        if not sleep_until(stop.is_set, time.monotonic() + limit + settle):
             try:
                 if rig: rig.stop()
             except Exception: pass

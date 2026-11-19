@@ -129,9 +129,11 @@ def shell_setup(harness):
     binary(harness, 'python', '''
         import os, sys
         if sys.argv[1:3] == ['-m', 'hfmodem.core.rigs']:
+            from hfmodem.core.hamlib import rigctld_port
             print('generic\\n1\\n38400\\nUSB\\nCoexist fake audio\\n'
                   + os.environ['CAT_PORT'] + '\\n' + os.environ['PTT_PORT']
                   + '\\nCoexist fake audio')
+            print(rigctld_port())
         else:
             os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
     ''')
@@ -384,7 +386,7 @@ def test_assessment_under_claim_between_campaign_attempts(harness, request, with
               'trap - EXIT INT TERM HUP\n'
               'claim_close\nrm -f "$CLAIM_CHILDREN"\n')
     campaign = command(harness, ['/bin/bash', '-c', script])
-    event = harness.reached('audio_before_open', timeout=10, quiescent=True)
+    event = harness.reached('audio_before_open', quiescent=True)
     path = harness.root / 'rig.claim'
     nonce = int(path.read_text().split()[4])
     assert_claim_possession(harness.observer.latest, pid=event['pid'],
@@ -796,7 +798,7 @@ def test_rigctld_backend_delegation(harness, request, fake_yaesu, with_line, dif
                                 + shlex.quote(line[0] if line else '') + '\n"$REPO/tools/onair.sh" down'],
                       env=dict(harness.env, HFMODEM_STATION=selected), cwd=cwd)
     try:
-        harness.reached('delegate-released', timeout=10, quiescent=True)
+        harness.reached('delegate-released', quiescent=True)
         refresh()
         harness.release('delegate-released')
         out, err = completed(cleanup)
@@ -892,7 +894,7 @@ with corpus_watch.receiver(args, Path(os.environ['HFMODEM_STATE_DIR'])):
         body = f'''
 import hfcapture
 from hfcapture import close_native, stop_native
-hfcapture.RIGCTLD = ('127.0.0.1', {port})
+os.environ['RIGCTLD_PORT'] = '{port}'
 owned = claim.acquire('tool', 'hfcapture-daemon')
 children = []
 with (Path(os.environ['HFMODEM_STATE_DIR']) / 'daemon.log').open('w') as log:
@@ -932,7 +934,7 @@ assert child.wait(timeout=30) == 1
 claim.release(9)
 '''
     parent = launch(harness, 'from pathlib import Path\n' + textwrap.dedent(body))
-    event = harness.reached('daemon-ready', timeout=10, quiescent=True)
+    event = harness.reached('daemon-ready', quiescent=True)
     assert_claim_possession(harness.observer.latest, pid=event['pid'],
         claim_path=harness.root / 'rig.claim',
         nonce=int((harness.root / 'rig.claim').read_text().split()[4]))
@@ -1545,7 +1547,7 @@ def test_external_down_during_own(harness, request, with_line, failed):
         harness.release('own-in-progress')
         harness.release('transition-refused')
         if not failed:
-            harness.reached('station-released', timeout=15, quiescent=True)
+            harness.reached('station-released', quiescent=True)
             inventory(harness, {event['pid']: f'hfmodem station {path}'})
             harness.release('station-released')
         out, _ = completed(cleanup)
@@ -1869,7 +1871,7 @@ def test_unconfirmed_unkey_refuses_next_key_preflight(harness, entry):
     observe(harness)
     child = launch(harness, f'''
         from contextlib import nullcontext
-        from types import SimpleNamespace
+        import threading
         from hfmodem.core.regulatory import Control, Unregulated
         from hfmodem.core.rig import Rig, RigError
         from hfmodem.station.preflight import Preflight
@@ -1909,7 +1911,7 @@ def test_unconfirmed_unkey_refuses_next_key_preflight(harness, entry):
                   control=Control.LOCAL, transmit=True)
         check = Preflight.__new__(Preflight)
         check.cancelled = lambda: False
-        check.cancel_event = SimpleNamespace(wait=lambda timeout: False)
+        check.cancel_event = threading.Event()
         try:
             rig.arm(prove_ptt=False)
             assert rig.line_state == 'low'

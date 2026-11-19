@@ -19,6 +19,7 @@ aborted:watchdog.
 
 from __future__ import annotations
 
+import queue
 import secrets
 import threading
 import time
@@ -26,7 +27,7 @@ from pathlib import Path
 
 from . import scenarios
 from hfhost.client import ModemClient, ModemError
-from .link import CONNECTED, DISCONNECTED, Link, open_link
+from .link import CONNECTED, DISCONNECTED, Link, LinkEvent, open_link
 from .config import Config
 from .metrics import SessionMetrics, compute
 from .report import write_session
@@ -114,10 +115,15 @@ def run_session(config: Config, modem_name: str, dst: str, scenario: str,
 
         meta["version"] = client.request_version() or ""
 
-        client.connect(dst)
-        connected = client.wait_for(CONNECTED,
-                                    config.initiator.connect_timeout_s,
-                                    cancel=cancel)
+        # A CONNECTED the modem sends before a wait subscribes is lost.
+        events: queue.Queue = queue.Queue()
+        client.subscribe(events)
+        try:
+            client.connect(dst)
+            connected = _next(events, CONNECTED,
+                              config.initiator.connect_timeout_s, cancel)
+        finally:
+            client.unsubscribe(events)
         if connected is None:
             try:
                 client.abort()
@@ -153,6 +159,20 @@ def run_session(config: Config, modem_name: str, dst: str, scenario: str,
             if owns_supervisor:
                 supervisor.stop_all()
         transcript.close()
+
+
+def _next(events: queue.Queue, kind: str, timeout: float,
+          cancel: threading.Event) -> LinkEvent | None:
+    deadline = time.monotonic() + timeout
+    while (remaining := deadline - time.monotonic()) > 0 \
+            and not cancel.is_set():
+        try:
+            ev = events.get(timeout=min(remaining, 0.1))
+        except queue.Empty:
+            continue
+        if ev.kind == kind:
+            return ev
+    return None
 
 
 def _disconnect(client: Link) -> None:

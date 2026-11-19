@@ -23,6 +23,7 @@ from hfmodem.core import band, posix, rigs
 from hfmodem.core.operations import LeaseTimeout, OperationGate, leased
 from hfmodem.core.ptt import Ptt, PttError
 from hfmodem.core.regulatory import Control, Emission, NotPermitted, Profile
+from .waits import Timer, join, wait_until
 
 if TYPE_CHECKING:
     from .cat import CatDriver
@@ -92,7 +93,7 @@ def arm_deadman(budget_s: float = PANIC_BUDGET_S, *, message: bytes | None = Non
         signal.signal(signal.SIGALRM, terminate)
         signal.setitimer(signal.ITIMER_REAL, budget_s)
     except (ValueError, OSError):
-        threading.Timer(budget_s, terminate).start()
+        Timer(budget_s, terminate).start()
 
 
 @contextlib.contextmanager
@@ -362,7 +363,7 @@ class Rig:
         if cancel is None:
             if seconds:
                 time.sleep(seconds)
-        elif cancel.wait(seconds):
+        elif wait_until(cancel.wait, time.monotonic() + seconds):
             raise RigError("ownership cancelled by STOP")
 
     def _prove_ptt(self, notes: list[str]) -> bool:
@@ -471,6 +472,28 @@ class Rig:
 
     # -- keying ------------------------------------------------------------
 
+    def permit(self, emission: Emission, *, responding: bool = False) -> None:
+        """Raise RigError for a refusal key() would give that waiting cannot lift.
+
+        The arbiter asks before it hands the card any audio, because the card plays
+        what is armed whether or not the line comes up. key() asks again under its lock.
+        """
+        if not self.transmit:
+            raise RigError("transmit is disabled for this station")
+        if self.retired:
+            raise RigError(f"this rig is retired: {self._retired_why}")
+        if self._dial_at is None:
+            return              # key() refuses a rig with no dial reading
+        checked = Emission(self._dial_hz, emission.audio_lo_hz, emission.audio_hi_hz,
+                           power_w=emission.power_w, designator=emission.designator,
+                           technique=emission.technique,
+                           symbol_rate_bd=emission.symbol_rate_bd,
+                           drift_hz=emission.drift_hz)
+        try:
+            self.profile.check(checked, control=self.control, responding=responding)
+        except NotPermitted as exc:
+            raise RigError(f"refused by {self.profile.name}: {exc}") from None
+
     @leased
     def key(self, emission: Emission, *, why: str, duration_s: float | None = None,
             settle_s: float = 0.0, responding: bool = False,
@@ -496,15 +519,7 @@ class Rig:
                     raise RigError("no dial reading has succeeded")
                 if not (attended or self._dial_pins) and self.dial_age_s > self.dial_max_age_s:
                     raise RigError("cached dial is stale")
-                checked = Emission(self._dial_hz, emission.audio_lo_hz, emission.audio_hi_hz,
-                                   power_w=emission.power_w, designator=emission.designator,
-                                   technique=emission.technique,
-                                   symbol_rate_bd=emission.symbol_rate_bd,
-                                   drift_hz=emission.drift_hz)
-                try:
-                    self.profile.check(checked, control=self.control, responding=responding)
-                except NotPermitted as exc:
-                    raise RigError(f"refused by {self.profile.name}: {exc}") from None
+                self.permit(emission, responding=responding)
                 deadline = None if open else self._deadline(duration_s, settle_s)
                 self._seq += 1
                 now = time.monotonic()
@@ -647,8 +662,7 @@ class Rig:
 
         line = threading.Thread(target=self._release_line, daemon=True)
         line.start()
-        line.join(RELEASE_BUDGET_S)
-        if line.is_alive():
+        if not join(line, time.monotonic() + RELEASE_BUDGET_S):
             fatal_write(b"   the keying line has not answered; going on to CAT\n")
 
         # The keying line answers first, because on this station it is the only
@@ -750,7 +764,7 @@ class Rig:
 
     def _arm_watchdog(self, deadline_s: float, why: str) -> None:
         self._cancel_watchdog()
-        t = threading.Timer(deadline_s, self._watchdog_fired, args=(why, deadline_s))
+        t = Timer(deadline_s, self._watchdog_fired, args=(why, deadline_s))
         t.daemon = True
         self._timer = t
         t.start()
@@ -793,8 +807,7 @@ class Rig:
 
         line = threading.Thread(target=release, daemon=True)
         line.start()
-        line.join(RELEASE_BUDGET_S)
-        if line.is_alive():
+        if not join(line, time.monotonic() + RELEASE_BUDGET_S):
             self._retire("keying line did not release during close")
             raise LeaseTimeout("keying line did not release during close")
         if errors:

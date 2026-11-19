@@ -76,9 +76,12 @@ def _stalled_arm(tmp_path, monkeypatch, requests, *extra, ends=None):
     assert p1 and all(what.startswith("P1 pkt#1") for what in p1), aired
     replies = aired[len(p1):]
     # D S1.4 and knob row 51: a stall runs the opening, then answers every peer slot.
-    assert [what.split(" (")[0] for _, what in replies] == [
+    # KO4HJO 1117: the repeat request stands in every slot after the words stop too.
+    names = [what.split(" (")[0] for _, what in replies]
+    assert names[:4 + WORDS] == [
         "P4 PROBE ROBUST 1/2 v=7 hdr=A", "P4 PROBE ROBUST 2/2 v=38 hdr=A",
         "P4 LINK short 7", "P4 LINK short 7", *["P4 LINK word V27"] * WORDS], log
+    assert set(names[4 + WORDS:]) <= {"P4 LINK word V27"}, log
     assert f"P1 stall: {STALL} repeat requests; keying robust shorts" in log, log
     probe = json.loads((tmp_path / "out" / "p4-probe.json").read_text())
     return aired, p1, log, probe

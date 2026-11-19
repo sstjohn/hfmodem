@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
+include native/Cargo.toml native/Cargo.lock
+recursive-include native/src *.rs
+include native/p4long/Cargo.toml native/p4long/Cargo.lock native/p4long/src/lib.rs

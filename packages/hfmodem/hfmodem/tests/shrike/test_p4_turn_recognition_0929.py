@@ -5,7 +5,6 @@
 
 import hashlib
 import json
-from pathlib import Path
 
 from hfmodem.tests.shrike import p4_stock_peer as stock
 
@@ -17,8 +16,8 @@ from hfmodem.shrike.p4receiver import Clock, Emission, Expect, Kind, Observation
 from hfmodem.shrike.p4turn import State
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Stream, Tx
 from hfmodem.tests.shrike.test_p4turn import body, machine, word
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 SID = b"[Pat-1.0.0-B2FHM$]\r;PR: 25286779\r; VE3KPG DE W9SSJ (EN63bc)\rFC EM 1TQ2Z9X 608 404 0\rF> 7A\r"
 GRID = onair._MasterGrid(0, 60000, 0, packet_n=36000, cs_n=12000, d_max_n=4800)
 
@@ -218,7 +217,7 @@ def test_body_then_normals_through_counter_wrap_with_a_lost_ack():
 
 
 def recorded_1024():
-    capture = ROOT / "captures/onair-0929-1024"
+    capture = CAPTURES / "onair-0929-1024"
     if not (capture / "stream.flac").exists():
         pytest.skip("local VE3KPG 2026-09-29 10:24 capture absent")
     audio = onair.session.load_wav(str(capture / "stream.flac"), FS)
@@ -337,7 +336,7 @@ def test_a_word_answering_our_body_is_placed_in_the_090_097_bracket(after):
 
 
 def test_ws8eoc_1151_normal_short_headers_tell_first_copies_from_repeats():
-    capture = ROOT / "captures/onair-0929-1151"
+    capture = CAPTURES / "onair-0929-1151"
     if not (capture / "stream.flac").exists():
         pytest.skip("local WS8EOC 2026-09-29 11:51 capture absent")
     audio = onair.session.load_wav(str(capture / "stream.flac"), FS)

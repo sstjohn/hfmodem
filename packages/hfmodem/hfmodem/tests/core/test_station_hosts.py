@@ -4,6 +4,8 @@
 """Host openings over socket pairs, without a listening TCP port."""
 import queue
 import socket
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -674,3 +676,42 @@ def test_socketpair_stall_retains_every_byte_after_send_timeout():
         client.close()
         producer.join(2)
     assert not producer.is_alive()
+
+
+def test_a_forward_step_does_not_cancel_a_send_waiting_for_the_send_lock():
+    from hfmodem.core import hostio
+    client, peer = socket.socketpair()
+    conn = hostio.Connection(_Socket(peer))
+    lock = conn._send_lock
+
+    class Stepped:
+        """A timed acquire ends within 5 ms, as a forward wall-clock step ends one."""
+        def acquire(self, blocking=True, timeout=-1):
+            return lock.acquire(blocking, timeout if timeout < 0 else min(timeout, 0.005))
+
+        def release(self):
+            lock.release()
+
+    conn._send_lock = Stepped()
+    lock.acquire()
+    threading.Timer(0.1, lock.release).start()
+    try:
+        conn.sendall(b"ok")
+        assert not conn.closed, "the send was cancelled"
+        client.settimeout(2)
+        assert client.recv(2) == b"ok"
+    finally:
+        conn.close()
+        client.close()
+
+
+def test_a_forward_step_does_not_time_out_a_posted_command(monkeypatch):
+    from hfmodem.core import hostio
+    park = threading.Event.wait
+    monkeypatch.setattr(threading.Event, "wait",
+                        lambda self, timeout=None: park(self, None if timeout is None else min(timeout, 0.005)))
+
+    def post(fn):
+        threading.Thread(target=lambda: (time.sleep(0.1), fn())).start()
+
+    assert hostio.posted(post, lambda: "answered", timeout=2) == "answered"

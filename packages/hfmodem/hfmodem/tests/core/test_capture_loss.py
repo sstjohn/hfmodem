@@ -65,6 +65,7 @@ import pytest
 
 from hfmodem.core import gil, rates
 from hfmodem.shrike import live, p3rx, pactor1, rxfront
+from hfmodem.tests.evidence import CAPTURES
 
 FS = rates.CARD_RATE_HZ
 BLOCK = 128
@@ -400,7 +401,7 @@ class SampleCapture:
 
 def recorded_session():
     from hfmodem.shrike import session
-    path = Path(__file__).resolve().parents[5] / 'captures/onair-0830-1215/stream.wav'
+    path = CAPTURES / 'onair-0830-1215/stream.wav'
     if not path.exists():
         pytest.skip(f'local recording absent: {path}')
     audio = session.load_wav(str(path), FS)[:round(CYCLE_S*FS)]
@@ -421,15 +422,21 @@ def sample_arm(monkeypatch, *, breathe, keyed=False):
 def test_a_listening_cycle_loses_capture_and_a_keyed_cycle_does_not(monkeypatch):
     heard, step, worst, _ = sample_arm(monkeypatch, breathe=False)
     keyed, _, _, _ = sample_arm(monkeypatch, breathe=False, keyed=True)
-    assert _per_cycle(heard) > 150
+    # The loss tracks how much Python a listening cycle's readers run, and that
+    # fell by orders of magnitude once the PACTOR scoring was batched. What this
+    # pins is the phase -- listening loses, keyed does not -- not a size.
+    assert heard > 0
     assert step == heard
-    assert worst > 4*gil.PERIOD
+    assert worst > RING_S
     assert keyed < heard/4
 
 
 def test_breathing_the_whole_receive_path_takes_the_loss_to_zero(monkeypatch):
     lost, step, worst, busy = sample_arm(monkeypatch, breathe=True)
-    reference, _, _, plain = sample_arm(monkeypatch, breathe=False)
+    with monkeypatch.context() as bare:
+        # RollingRx._decode breathes on its own; the reference must not.
+        bare.setattr(gil, 'breathing', _Null)
+        reference, _, _, plain = sample_arm(bare, breathe=False)
     assert (lost, step) == (0, 0)
     assert worst < 5*gil.PERIOD
     assert reference > 0

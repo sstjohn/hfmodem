@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 // Read-only adapter for the curated public logbook. No station services or audio copies.
 const approved = Object.freeze([
-  ['vara-send', 'NS0A', 'VARA', 'VARA', 'send'],
-  ['vara-receive', 'N5TW', 'VARA', 'VARA', 'receive'],
   ['pactor3-send', 'VE1YZ', 'PACTOR-3', 'PACTOR', 'send'],
   ['pactor3-receive', 'WS8EOC', 'PACTOR-3', 'PACTOR', 'receive'],
+  ['vara-send', 'NS0A', 'VARA', 'VARA', 'send'],
+  ['vara-receive', 'N5TW', 'VARA', 'VARA', 'receive'],
   ['ardop-send', 'WW2MI', 'ARDOP', 'ARDOP', 'send'],
   ['ardop-receive', 'W6IDS', 'ARDOP', 'ARDOP', 'receive'],
 ].map(Object.freeze));

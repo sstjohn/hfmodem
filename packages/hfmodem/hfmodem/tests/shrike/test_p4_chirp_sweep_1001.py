@@ -33,7 +33,7 @@ CALIBRATION_MS = {
 
 @lru_cache(None)
 def witness():
-    path = ROOT / INVENTORY['witness']
+    path = evidence.RECORD / INVENTORY['witness']
     for filename in (path, path.with_suffix('.json')):
         evidence.require_input(filename)
         with filename.open('rb') as source:
@@ -137,7 +137,7 @@ def test_s2_both_carriers_have_independent_sample_origin_and_geometry(monkeypatc
 
 @lru_cache(None)
 def stream(arm):
-    return wav.read(evidence.require_input(ROOT / f'captures/onair-{arm}/stream.flac'), 48000)
+    return wav.read(evidence.require_input(evidence.CAPTURES / f'onair-{arm}/stream.flac'), 48000)
 
 
 def identity(result):

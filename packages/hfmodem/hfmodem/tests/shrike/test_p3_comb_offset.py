@@ -29,12 +29,12 @@ from scipy.io import wavfile
 from scipy.signal import resample_poly
 
 from hfmodem.shrike import onair, rxfront, spec
+from hfmodem.tests.evidence import CAPTURES
 
 FS = onair.FS
-REPO = Path(__file__).resolve().parents[5]
 FIXTURE = Path(__file__).with_name("fixtures") / "kb5lzk-answer-0915"
 
-WS8EOC = REPO / "captures" / "onair-0914-2252"
+WS8EOC = CAPTURES / "onair-0914-2252"
 """The 80 m greeting of 2026-09-14, recorded twice: this station's own input and
 an independently registered witness receiver 11999 Hz away."""
 
@@ -127,7 +127,7 @@ def test_the_full_strength_answer_outreads_the_faded_one(kb5lzk):
 def ws8eoc():
     """Main and witness copies of the three SL3 greeting packets, by head."""
     if not (WS8EOC / "stream.wav").exists() or not (WS8EOC / "witness.wav").exists():
-        pytest.skip(f"no {WS8EOC.name} under {REPO / 'captures'}")
+        pytest.skip(f"no {WS8EOC.name} under {CAPTURES}")
     out = {}
     for head, delta, cfo in WS8EOC_PACKETS:
         main = _cut(WS8EOC / "stream.wav", head + 4320 + delta, DATA_N)

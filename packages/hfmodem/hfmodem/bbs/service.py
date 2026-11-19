@@ -5,6 +5,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import time
 
+from ..core.waits import join
 from .config import load
 
 
@@ -107,8 +108,7 @@ class Service:
             if pool is None:
                 continue
             for worker in tuple(pool._threads):
-                worker.join(max(0, end - time.monotonic()))
-                if worker.is_alive():
+                if not join(worker, end):
                     raise RuntimeError('BBS worker retirement still pending; owner lock retained')
         self._reload_pool = None
         self._reload_futures.clear()

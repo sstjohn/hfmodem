@@ -4,14 +4,13 @@
 import contextlib
 import io
 import json
-from pathlib import Path
 import re
 import sys
 
 import numpy as np
 import pytest
 
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.shrike import onair, p4probe, pactor1
 from hfmodem.shrike.p4receiver import P4Receiver
 from hfmodem.tests.shrike.test_p1_robust_0926 import FS, PACKET_N, SLOT_N
@@ -117,7 +116,7 @@ def test_irs_keys_every_cs_inside_its_cycle_and_reads_the_greeting(tmp_path, mon
 
 def test_irs_hold_word_reads_the_peer_position_not_the_window(monkeypatch):
     from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
-    capture = Path(__file__).resolve().parents[5] / 'captures/onair-0929-1240/hold_03.flac'
+    capture = CAPTURES / 'onair-0929-1240/hold_03.flac'
     require_input(capture)
     audio = onair.session.load_wav(str(capture), FS)
     end = json.loads(capture.with_suffix('.json').read_text())['end_stream_sample']
@@ -153,7 +152,7 @@ def test_irs_hold_word_reads_the_peer_position_not_the_window(monkeypatch):
 ])
 def test_1240_hold_windows_contain_recorded_controls(number, expected):
     from hfmodem.shrike import p1rx, rxfront
-    path = Path(__file__).resolve().parents[5]/f'captures/onair-0929-1240/hold_{number:02}.flac'
+    path = CAPTURES/f'onair-0929-1240/hold_{number:02}.flac'
     require_input(path)
     audio = onair.session.load_wav(str(path), FS)
     origin = json.loads(path.with_suffix('.json').read_text())['end_stream_sample']-len(audio)

@@ -74,7 +74,7 @@ sys.exit(sense.main(sys.argv[3:]))
 ''')
     shim.chmod(0o755)
     env = dict(shell_guard, HFMODEM_PYTHON=str(shim), HFMODEM_RECORDING=policy,
-               REPO=str(stage4.root), AUDIO='synthetic',
+               REPO=str(stage4.root), AUDIO='synthetic', RIGCTLD_PORT='14533',
                PYTHONPATH=f'{ROOT}/tools:{ROOT}/packages/hfmodem:{ROOT}/packages/hfhost')
     script = f'''source {shlex.quote(str(ROOT / 'tools/lib/rig.sh'))}
 tune() {{ :; }}

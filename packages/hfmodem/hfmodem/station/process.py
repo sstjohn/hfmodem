@@ -31,6 +31,7 @@ from hfmodem.core.rates import CARD_RATE_HZ
 from hfmodem.core.rigs import CAT_BACKENDS
 from hfmodem.core.rig import FATAL_SIGNALS, Rig, RigError, arm_deadman, fatal_write
 from hfmodem.core.virtualrig import VirtualRig
+from hfmodem.core.waits import Timer, join, wait_until
 from hfmodem.station.arbiter import Identity, TxArbiter
 from hfmodem.station.qsolog import SessionRecords
 from hfmodem.station.sessions import Registry
@@ -301,7 +302,7 @@ class Station:
         check = self._preflight
         check.tap = self.audio.subscribe(StreamLane(CARD_RATE_HZ))
         try:
-            if self._stop.wait(DWELL_S):
+            if wait_until(self._stop.wait, time.monotonic() + DWELL_S):
                 raise RigError("shutdown requested")
             check._duplex(check._read()[0], reference)
             check._xruns(self.audio)
@@ -440,8 +441,8 @@ class Station:
             self.is_ready = False
             self._owning = True
             self.failed = self._unavailable()
-            deadline = threading.Timer(40, self.fatal_shutdown,
-                                       args=("own exceeded its 40 s admission budget",))
+            deadline = Timer(40, self.fatal_shutdown,
+                             args=("own exceeded its 40 s admission budget",))
             deadline.daemon = True
             deadline.start()
             try:
@@ -575,8 +576,8 @@ class Station:
         from hfmodem.station import hosts
         close("hosts", lambda: hosts.stop_all(self.hosts))
         if self._poll_thread is not None:
-            self._poll_thread.join(self.cfg.rig.max_key_s + self.cfg.rig.ptt.settle_s + 5)
-            if self._poll_thread.is_alive():
+            limit = self.cfg.rig.max_key_s + self.cfg.rig.ptt.settle_s + 5
+            if not join(self._poll_thread, time.monotonic() + limit):
                 failures.append("station-lanes")
         for name, lane in self.lanes.items():
             if hasattr(lane, "stop"):
@@ -599,8 +600,7 @@ class Station:
                 worker = threading.Thread(target=lambda: close("line", line.release),
                                           name="station-line-close", daemon=True)
                 worker.start()
-                worker.join(.25)
-                if worker.is_alive():
+                if not join(worker, time.monotonic() + .25):
                     failures.append("keying line still closing")
             driver = self._driver or getattr(self.rig, "cat", None)
             if driver is not None:

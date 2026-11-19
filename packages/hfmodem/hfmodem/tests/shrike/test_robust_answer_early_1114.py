@@ -5,7 +5,6 @@ import contextlib
 from functools import lru_cache
 import io
 import json
-from pathlib import Path
 import sys
 import time
 
@@ -15,11 +14,11 @@ import pytest
 from hfmodem.shrike import onair, p1rx, p4probe, session
 from hfmodem.shrike.arq import PactorArq
 from hfmodem.shrike import pactor1
+from hfmodem.tests.evidence import CAPTURES, OPERATOR_DATA
 
 FS, SLOT, SPS = 48000, 60000, 480
-ROOT = Path(__file__).resolve().parents[5]
-K4MSU = ROOT / 'operator-data/captures/onair-20261114T020853404736Z-6622e5fd-8875-4776-85c4-2a5a6d1b650d'
-VE3KPG = ROOT / 'captures/onair-0923-1636'
+K4MSU = OPERATOR_DATA / 'captures/onair-20261114T020853404736Z-6622e5fd-8875-4776-85c4-2a5a6d1b650d'
+VE3KPG = CAPTURES / 'onair-0923-1636'
 
 
 @lru_cache(maxsize=2)
@@ -53,6 +52,11 @@ def _grid():
 def _window(audio, slot):
     start = slot * SLOT + round(.88 * FS)
     return audio[start:(slot + 1) * SLOT - round(.089 * FS)], start
+
+
+def _single_window(audio, slot):
+    start = slot * SLOT + round(.88 * FS)
+    return audio[start:(slot + 1) * SLOT - round(.043 * FS)], start
 
 
 def _offer(anchor, audio, slot, grid):
@@ -114,7 +118,9 @@ def test_recorded_answer_replaces_next_call_with_consecutive_shorts(tmp_path, mo
     calls, opening, log, elapsed = _replay(tmp_path, monkeypatch, peer, 'p4-robust')
     slots = [s for s, _ in opening[:3]]
     assert slots == list(range(calls[-1] + 1, calls[-1] + 4)), log
-    assert all(f'v={v} hdr=A' in label for (_, label), v in zip(opening, (6, 9, 8)))
+    # K4MSU repeats its entry through the opening, so v6/A is keyed again.
+    values = (6, 6, 6) if peer == 'K4MSU' else (6, 9, 8)
+    assert all(f'v={v} hdr=A' in label for (_, label), v in zip(opening, values))
     if peer == 'K4MSU':
         assert 4 <= slots[0] <= 6, log
         assert calls[-1] <= 5, log
@@ -126,7 +132,7 @@ def test_recorded_answer_replaces_next_call_with_consecutive_shorts(tmp_path, mo
 def test_k4msu_p2_bridge_replaces_next_call(tmp_path, monkeypatch):
     calls, opening, log, _ = _replay(tmp_path, monkeypatch, 'K4MSU', 'p2')
     assert opening[0][0] == calls[-1] + 1, log
-    assert opening[0][1].startswith('P2 ROBUST BRIDGE'), opening
+    assert opening[0][1].startswith('P2 ROBUST OPENING'), opening
     assert calls[-1] <= 5, log
 
 
@@ -134,10 +140,13 @@ def test_k4msu_p2_bridge_replaces_next_call(tmp_path, monkeypatch):
     ('K4MSU', 3, .985, 3), ('VE3KPG', 24, .956, 0)])
 def test_noise_slots_cannot_confirm_any_offered_phase(peer, noise_slots, phase, entry):
     audio, grid = _tape(peer), _grid()
-    offered, accepts = [], 0
+    offered, accepts, single = [], 0, 0
     for slot in range(noise_slots):
         anchor = onair._RobustAnswerAnchor()
         _offer(anchor, audio, slot, grid)
+        seg, start = _single_window(audio, slot)
+        single += onair._robust_single_answer(seg, start, slot * SLOT + round(.88 * FS),
+            (slot + 1) * SLOT, grid, grid.d_max_n, False) is not None
         offered.extend(anchor.candidates)
     # Every offered phase is tried against every noise slot, with both parities;
     # this also exercises the one-error sweep win in 16:36 slot 7.
@@ -147,8 +156,9 @@ def test_noise_slots_cannot_confirm_any_offered_phase(peer, noise_slots, phase, 
                 anchor = onair._RobustAnswerAnchor()
                 anchor.candidates = [(slot - 1, at, e, p)]
                 accepts += _confirm(anchor, audio, slot, grid) is not None
-    print(f'{peer}: {len(offered)}/{noise_slots} candidate windows, {accepts} noise accepts')
-    assert accepts == 0
+    print(f'{peer}: {len(offered)}/{noise_slots} candidate windows, {accepts} repeat accepts, '
+          f'{single}/{noise_slots} recorded noise-slot single accepts')
+    assert accepts == single == 0
 
 
 @pytest.mark.parametrize('peer,slots,phase,entry', [
@@ -197,8 +207,8 @@ def test_held_prefix_reads_sixteen_bits_exactly(faded):
 
 def test_seeded_noise_run_has_no_anchored_accepts():
     rng, grid, anchor = np.random.default_rng(1114), _grid(), onair._RobustAnswerAnchor()
-    candidates = accepts = 0
-    windows = 1000
+    candidates = accepts = single = prekey = 0
+    windows = 2000
     for slot in range(windows):
         window = rng.normal(0, .05, SLOT)
         start = slot * SLOT
@@ -206,6 +216,13 @@ def test_seeded_noise_run_has_no_anchored_accepts():
         anchor.offer(window, start, start + round(.88 * FS), (slot + 1) * SLOT,
                      grid, grid.d_max_n, False, slot)
         candidates += sum(c[0] == slot for c in anchor.candidates)
+        single += onair._robust_single_answer(window, start, start + round(.88 * FS),
+            start + SLOT, grid, round(.13 * FS), False) is not None
+        seg, origin = _single_window(window, 0)
+        prekey += onair._robust_single_answer(seg, start + origin, start + round(.88 * FS),
+            start + SLOT, grid, grid.d_max_n, False) is not None
     print(f'seeded noise: {accepts}/{windows} accepts, {candidates}/{windows} candidates '
           f'({candidates / windows:.1%})')
-    assert accepts == 0
+    print(f'single-slot gate: {single}/{windows} accepts; '
+          f'pre-key geometry: {prekey}/{windows} accepts')
+    assert accepts == single == prekey == 0

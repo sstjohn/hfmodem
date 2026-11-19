@@ -855,14 +855,45 @@ def test_a_holder_that_exits_before_its_fdinfo_is_read_is_not_a_holder(exited_pi
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX claim contract; Windows twin in test_claim_windows.py")
-def test_a_live_holder_whose_fdinfo_vanishes_fails_closed():
-    live = os.getpid()
+def test_a_live_opener_that_closes_its_descriptor_mid_discovery_is_relisted(monkeypatch):
+    descriptor = acquire()
+    live, nonce = os.getpid(), descriptor.offset()
+    listings = iter((f"p{live}\ncclaimant\nf9\no0t{nonce}\np4242\ncrelaunch\nf9\no0t0\n",
+                     f"p{live}\ncclaimant\nf9\no0t{nonce}\n"))
+    reads = []
 
     def fdinfo(pid, fd):
+        reads.append(pid)
+        if pid == 4242:
+            raise FileNotFoundError(f"/proc/{pid}/fdinfo/{fd}")
+        return f"pos:\t{nonce}\n"
+    monkeypatch.setattr(claim, "_exited", lambda pid: False)
+    monkeypatch.setattr(claim.time, "sleep", lambda seconds: None)
+    try:
+        rows = claim.holders(descriptor, lsof=lambda paths: next(listings), platform="linux",
+                             started=lambda pid: f"start-{pid}", fdinfo=fdinfo)
+        assert [(r.pid, r.fd) for r in rows] == [(live, 9)]
+        assert 4242 in reads
+    finally:
+        claim.release(descriptor)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX claim contract; Windows twin in test_claim_windows.py")
+def test_a_live_holder_whose_fdinfo_never_reads_fails_closed_after_retries(monkeypatch):
+    descriptor = acquire()
+    live, reads = os.getpid(), []
+
+    def fdinfo(pid, fd):
+        reads.append(pid)
         raise FileNotFoundError(f"/proc/{pid}/fdinfo/{fd}")
-    with pytest.raises(claim.ClaimError, match="unavailable"):
-        claim.openers([claim.claim_path()], lsof=lambda paths: f"p{live}\nclive\nf7\no0t5\n",
-                      platform="linux", started=lambda pid: f"start-{pid}", fdinfo=fdinfo)
+    monkeypatch.setattr(claim.time, "sleep", lambda seconds: None)
+    try:
+        with pytest.raises(claim.ClaimError, match="openers changed"):
+            claim.holders(descriptor, lsof=lambda paths: f"p{live}\nclive\nf9\no0t5\n",
+                          platform="linux", started=lambda pid: f"start-{pid}", fdinfo=fdinfo)
+        assert reads == [live] * 10
+    finally:
+        claim.release(descriptor)
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
@@ -993,6 +1024,41 @@ def test_blank_port_is_no_port(blank):
     assert claim.line_factory(blank) is None
     verdicts = claim.check_devices(devices, lsof=lambda paths: pytest.fail(f"lsof {paths}"))
     assert [v.endpoint for v in verdicts] == ["capture", "playback"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX holder discovery")
+def test_device_check_relists_a_port_closed_by_a_live_opener_mid_discovery(monkeypatch):
+    monkeypatch.setattr(claim, "serial_nodes", lambda *a, **k: ("/dev/ttyUSB7",))
+    monkeypatch.setattr(claim, "audio_nodes", lambda *a, **k: ())
+    monkeypatch.setattr(claim, "_exited", lambda pid: False)
+    monkeypatch.setattr(claim.time, "sleep", lambda seconds: None)
+    listings = iter(("p4242\ncminicom\nf3\no0t0\n", ""))
+
+    def fdinfo(pid, fd):
+        raise FileNotFoundError(f"/proc/{pid}/fdinfo/{fd}")
+    verdicts = claim.check_devices(claim.Devices(cat_port="/dev/ttyUSB7", ptt_port=None, cat="serial"),
+                                   lsof=lambda paths: next(listings), platform="linux",
+                                   started=lambda pid: f"start-{pid}", fdinfo=fdinfo)
+    assert [(v.endpoint, v.verdict) for v in verdicts] == [
+        ("cat", "clear"), ("capture", "cooperative"), ("playback", "cooperative")]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX holder discovery")
+def test_cleanup_waits_out_an_admission_that_closes_the_mutex_mid_discovery(monkeypatch):
+    claim.bootstrap()
+    fd = os.open(claim.mutex_path(), os.O_RDWR | os.O_CREAT, 0o600)
+    monkeypatch.setattr(claim, "_exited", lambda pid: False)
+    monkeypatch.setattr(claim.time, "sleep", lambda seconds: None)
+    listings = iter(("p4242\ncadmission\nf8\no0t0\n", ""))
+
+    def fdinfo(pid, fd):
+        raise FileNotFoundError(f"/proc/{pid}/fdinfo/{fd}")
+    try:
+        assert claim._mutex_busy(fd, lsof=lambda paths: next(listings), platform="linux",
+                                 started=lambda pid: f"start-{pid}", fdinfo=fdinfo) == (
+            False, "admission in progress (holder unknown)")
+    finally:
+        os.close(fd)
 
 
 def test_serial_check_without_nodes_never_runs_discovery(monkeypatch):
@@ -1468,6 +1534,89 @@ claim.close(received)
     finally:
         os.close(owner_read)
         os.close(owner_write)
+
+
+@pytest.fixture
+def nine_free(monkeypatch):
+    if os.name == "nt":
+        pytest.skip("POSIX claim descriptor 9")
+    try:
+        saved = fcntl.fcntl(9, fcntl.F_DUPFD_CLOEXEC, 10)
+        os.close(9)
+    except OSError:
+        saved = None
+    monkeypatch.setattr(claim, "_reserved", None)
+    try:
+        yield
+    finally:
+        try:
+            os.close(9)
+        except OSError:
+            pass
+        if saved is not None:
+            os.dup2(saved, 9, inheritable=False)
+            os.close(saved)
+
+
+def test_reservation_and_own_claim_on_nine_may_be_vacated(nine_free):
+    assert claim.vacate() is None
+    claim.reserve()
+    assert os.path.samestat(os.fstat(9), os.stat(os.devnull))
+    assert not os.get_inheritable(9)
+    saved = claim.vacate()
+    assert os.path.samestat(os.fstat(saved), os.fstat(9))
+    os.close(saved)
+    descriptor = acquire()
+    os.dup2(descriptor.fd, 9, inheritable=False)
+    try:
+        saved = claim.vacate()
+        assert os.path.samestat(os.fstat(saved), os.stat(claim.claim_path()))
+        os.close(saved)
+    finally:
+        os.close(9)
+        claim.release(descriptor)
+
+
+def test_reservation_replaces_a_stray_file_inherited_on_nine(nine_free, tmp_path):
+    opened = os.open(tmp_path / "inherited", os.O_RDWR | os.O_CREAT, 0o600)
+    # With nine free, open may return 9 itself; a non-inheritable dup2 is Linux dup3,
+    # which refuses to duplicate a descriptor onto itself.
+    stray = fcntl.fcntl(opened, fcntl.F_DUPFD_CLOEXEC, 10)
+    os.close(opened)
+    try:
+        os.dup2(stray, 9, inheritable=False)
+        claim.reserve()
+        assert os.path.samestat(os.fstat(9), os.stat(os.devnull))
+        saved = claim.vacate()
+        os.close(saved)
+    finally:
+        os.close(stray)
+    assert (tmp_path / "inherited").read_bytes() == b""
+
+
+def test_reservation_keeps_a_claim_inherited_on_nine(nine_free):
+    descriptor = acquire()
+    os.dup2(descriptor.fd, 9, inheritable=False)
+    try:
+        claim.reserve()
+        assert claim._reserved is None
+        assert os.path.samestat(os.fstat(9), os.stat(claim.claim_path()))
+        assert claim.inherited(9).offset() == descriptor.offset()
+    finally:
+        os.close(9)
+        claim.release(descriptor)
+
+
+def test_a_file_opened_on_nine_after_start_is_not_vacated(nine_free, tmp_path):
+    claim.reserve()
+    stray = os.open(tmp_path / "stderr", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.dup2(stray, 9, inheritable=False)
+        with pytest.raises(claim.ClaimError, match="descriptor 9"):
+            claim.vacate()
+        assert os.path.samestat(os.fstat(9), os.fstat(stray))
+    finally:
+        os.close(stray)
 
 
 def test_spawn_refuses_claim_elsewhere(posix_spawn_claim, monkeypatch):

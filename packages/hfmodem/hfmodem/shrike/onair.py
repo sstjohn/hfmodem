@@ -56,7 +56,7 @@ from scipy.fft import next_fast_len
 from . import (compress, live, ota, p1rx, p2rx, p3acquire, p3frame, p3rx, p4chirp,
                p4oracle, p4robusttx, p4shorttx, p4sig, p4words, pactor1, pactor2,
                placement, rxfront, session, spec, traffic)
-from ..core import band, config, cwid, gil, identification, levels, posix, rates, wav
+from ..core import band, config, cwid, gil, identification, levels, posix, rates, waits, wav
 from ..core.audio import host_api_name, input_latency, open_stream, timestamp_limitation
 from ..core.devices import find_device
 from ..core.occupied import occupied_hz
@@ -927,6 +927,7 @@ class RadioTx:
         # A keyed P3 changeover establishes our data-carrier order relative
         # to local slot parity. Keep that order through the following data.
         self._p3_packet_swap_bias = False
+        self._p3_entry_keys: deque = deque(maxlen=4)
         # Actual CS3 emission, scoped to the outstanding ARQ object. A peer
         # can replace its packet with CS2 before acknowledging this field;
         # that invalidates IRS geometry, not the emitted ISS pulse raster.
@@ -1236,6 +1237,14 @@ class RadioTx:
     changeovers and not one read. A retry of a changeover already keyed is the
     ISS's and is unaffected: it has no answer of its own to fall back to.
     """
+
+    p3_entry_swap_reference = "answered"
+    """`answered`: ISS data alternates its carriers from the entry the peer's
+    first corroborated answer followed, where the gateway counts from. `last`
+    (`--p3-entry-swap-reference last`) takes the last entry keyed, which put
+    VE3KPG 2026-11-17 06:42 and five other arms a cycle out of step: entries at
+    slots 14 and 15, the first answered, and every packet from slot 16 on in the
+    arrangement the gateway was not reading."""
 
     p3_displaced_answer = "comb"
     """`comb`: the answer a refused IRS changeover gives way to keys on the
@@ -2393,7 +2402,8 @@ class RadioTx:
         if (self._linked_p3_grid() and a.role == IRS and keyed is not None
                 and keyed.acceptance == a.p3_acceptance and answer != CS_NAK):
             parity = (a.cfg.p3_unread_after_gear == "parity"
-                      and (keyed.cs == CS_CYCLE_TOG
+                      and (keyed.cs == CS_CYCLE_TOG and (a.cfg.p3_unread_after_cs6 == "parity"
+                                                       or a.cycle_request is None)
                            or keyed.cs == CS_SPEED_UP and a._p3_rx_sl != P3_LADDER.top))
             released = keyed.maxdown and a.cfg.p3_maxdown_hold != "held"
             if not (parity or released):
@@ -2787,9 +2797,21 @@ class RadioTx:
                 # from that actually emitted arrangement. A later emitted
                 # entry renews the reference; a refused attempt cannot.
                 self._p3_packet_swap_bias = self.raster.shift(self.slot)
+                self._p3_entry_keys.append(
+                    (self.tx_audio_start, self._p3_packet_swap_bias))
         self._log_p3_packet(sl, payload, status, kind="ENTRY")
         return (REFUSED if self.refused else
                 placement.SPEED_PATHS[sl].crc_bytes - 3)
+
+    def p3_entry_answered(self, head: int) -> None:
+        """The peer's answer whose head is at `head` read the entry keyed last
+        before it; a re-keyed entry it then did not need is not its reference."""
+        if self.p3_entry_swap_reference != "answered":
+            return
+        keyed = [bias for start, bias in self._p3_entry_keys
+                 if start is not None and start < head]
+        if keyed:
+            self._p3_packet_swap_bias = keyed[-1]
 
     def _entry_burst(self, sl: int, payload: bytes, status: int,
                      acquire: bool) -> tuple[np.ndarray, bytes]:
@@ -3323,7 +3345,10 @@ class RadioTx:
         """
         preview = getattr(getattr(self.host, "arq", None), "next_packet", None)
         label = self._tx_offset_hz
-        for fields in ((sl, payload, status), preview() if preview else None):
+        # And the one a CS4 starts a level up: K4MSU 11-16 22:42Z rendered its
+        # first SL3 long packet after the word and missed slot 60 by 6.4 ms.
+        for fields in ((sl, payload, status), preview() if preview else None,
+                       preview(climb=True) if preview else None):
             if fields is not None:
                 # The current render is already coded. A preview belongs to
                 # the original-character queue and must use the same policy.
@@ -5328,7 +5353,7 @@ class _LiveInput:
         self._watchdog_at = None
 
         def watchdog():
-            if not b.done.wait(limit):
+            if not waits.sleep_until(b.done.is_set, time.monotonic() + limit):
                 self._watchdog_at = time.monotonic()
                 self._tx = None
                 try:
@@ -5447,7 +5472,7 @@ class _LiveInput:
                 return False
             b.stop.set()
             self._tx = None
-        b.done.wait(1.0)
+        waits.wait_until(b.done.wait, time.monotonic() + 1.0)
         self._close_burst(b)
         return True
 
@@ -5460,7 +5485,7 @@ class _LiveInput:
         with b.lock:
             b.stop.set()
             self._tx = None
-        if not b.done.wait(1.0) and b.key:
+        if not waits.wait_until(b.done.wait, time.monotonic() + 1.0) and b.key:
             try:
                 b.key(False)
             except Exception:
@@ -5865,6 +5890,7 @@ class _SessionRx:
         self._p3_early_sl3 = None
 
         self.p3_wideband_prekey = False
+        self.p3_changeover_answer_reach = "word"
         self._p3_long_window_checked_at = None
         self._p3_long_candidate = None
         self._p3_read_long = None
@@ -6386,6 +6412,7 @@ class _SessionRx:
             print(f"    [p3] candidate {spec.CS_NAMES[ev.cs]} at {head / FS:.3f} s, "
                   f"RX {hz:+g} Hz, read behind the key; awaiting a distinct "
                   "corroborating cycle", flush=True)
+            self.host.arq.note_entry_candidate()
 
     P3_AIMED_RESERVE_S = .002
     """One tracked read where an aim points: 0.8-1.4 ms on the entry answers of
@@ -6451,6 +6478,23 @@ class _SessionRx:
                 return True, None
         return False, None
 
+    def _p3_candidate_head(self, head: int) -> int:
+        """The first head of the answer stream `head` continues: a pending
+        candidate one or two cycles before it and on its period, else `head`."""
+        candidate = self._p3_head_candidate
+        if candidate is None or not 1 <= self._p3_acquisition_cycle - candidate[0] <= 2:
+            return head
+        cycle_n = round(self.host.arq.cycle_s * FS)
+        periods = round((head - candidate[1]) / cycle_n)
+        if periods < 1 or abs(head - candidate[1] - periods * cycle_n) > round(.020 * FS):
+            return head
+        return candidate[1]
+
+    def _entry_answered(self, head: int) -> None:
+        answered = getattr(getattr(self.host, "peer", None), "p3_entry_answered", None)
+        if answered is not None and self.host.arq.entry_pending:
+            answered(head)
+
     def _p3_corroborate(self, seg: np.ndarray, seg_start: int, at: int):
         """A fresh candidate's word read where it repeats, at its own frequency.
 
@@ -6474,6 +6518,7 @@ class _SessionRx:
                 or ev.cs != placement.BREAKIN_CS
                 and not rxfront._last_symbol_on_air(seg, ev.start)):
             return None
+        self._entry_answered(candidate[1])
         self._follow_p3_offset(candidate[2], word=candidate[3])
         self._p3_answer_at = seg_start + ev.start
         self._p3_preferred_phase = None
@@ -7074,6 +7119,8 @@ class _SessionRx:
                           f"{spec.CS_NAMES[ev.cs]}, "
                           f"{displacement_ms:+.1f} ms from projected answer",
                           flush=True)
+            if self._p3_answer_at is None:
+                self._entry_answered(self._p3_candidate_head(seg_start + ev.start))
             self._queue_tracked_p3_offset(seg, ev)
             self._p3_answer_at = seg_start + ev.start
             self._p3_preferred_phase = None
@@ -7299,12 +7346,16 @@ class _SessionRx:
         preferred_at = (None if self._p3_preferred_phase is None else
                         (self._p3_preferred_phase - seg_start - lo)
                         % round(spec.CYCLE_SHORT_S * FS))
+        # The answer to our changeover ends where our next keying of it
+        # starts, and the window closes a key notice before that.
+        reach = (p3acquire.WORD_REACH_S if self.p3_changeover_answer_reach == "word"
+                 and self.host.arq.unconfirmed_breakin else p3acquire.REACH_S)
         return lo, self._p3_read_ahead(
-            ("acquire", seg_start + lo, hi - lo, preferred, preferred_at),
+            ("acquire", seg_start + lo, hi - lo, preferred, preferred_at, reach),
             lambda: p3acquire.control_signal(
                 seg[lo:hi], offsets=p3acquire.ENTRY_CONTROL_OFFSETS_HZ,
                 preferred_hz=preferred,
-                preferred_at=preferred_at))
+                preferred_at=preferred_at, reach_s=reach))
 
     def _acquire_answer(self, seg: np.ndarray, seg_start: int, at: int):
         """`_p3_cs`'s cold half: the answer's phase and frequency, searched.
@@ -7346,11 +7397,12 @@ class _SessionRx:
         self._p3_head_candidate = (now, absolute, offset_hz, ev.cs)
         elapsed = 0 if previous is None else absolute - previous[1]
         periods = round(elapsed / cycle_n)
-        if ev.packet is None and (previous is None
-                or not 1 <= now-previous[0] <= 2
-                or periods < 1
-                or abs(elapsed - periods * cycle_n) > round(.020*FS)
-                or abs(offset_hz-previous[2]) > 25):
+        paired = not (previous is None
+                      or not 1 <= now-previous[0] <= 2
+                      or periods < 1
+                      or abs(elapsed - periods * cycle_n) > round(.020*FS)
+                      or abs(offset_hz-previous[2]) > 25)
+        if ev.packet is None and not paired:
             if (ev.cs == placement.BREAKIN_CS
                     and (self._p3_entry_body_checked_at is None
                          or absolute > self._p3_entry_body_checked_at + rxfront.SPS)):
@@ -7361,7 +7413,9 @@ class _SessionRx:
             print(f"    [p3] candidate {spec.CS_NAMES[ev.cs]} "
                   f"at {absolute / FS:.3f} s, RX {offset_hz:+g} Hz; "
                   "awaiting a distinct corroborating cycle", flush=True)
+            self.host.arq.note_entry_candidate()
             return None
+        self._entry_answered(previous[1] if paired else absolute)
         self._follow_p3_offset(offset_hz, word=ev.cs)
         self._p3_answer_at = absolute
         self._p3_preferred_phase = None
@@ -13826,11 +13880,8 @@ class _CaptureWriter:
 
     def drain(self, timeout: float) -> int:
         """Wait for the queue to empty; answer with what never made it."""
-        deadline = time.monotonic() + timeout
         with self._idle:
-            while self.pending:
-                if not self._idle.wait(max(0.0, deadline - time.monotonic())):
-                    break
+            self._idle.wait_for(lambda: not self.pending, timeout)
             return self.pending
 
     def store(self) -> None:
@@ -16262,7 +16313,7 @@ def _cs_name(ev) -> str:
     return names[ev.cs]
 
 
-def _held_answers(held: list) -> str:
+def _held_answers(held: list, robust_observer=None) -> str:
     """What the peer said INSIDE the link, which is what a hold's ending left out.
 
     Six sessions of the 2026-08-19 evening ended down the same branch, and they
@@ -16296,6 +16347,13 @@ def _held_answers(held: list) -> str:
     demodulator was unsure of is not evidence that the peer's answer changed.
     """
     cs = [ev for ev in held if ev.cs is not None or ev.spare is not None]
+    if robust_observer is not None:
+        diagnostic = robust_observer.summary()
+        if not any(ev.protocol == Protocol.PACTOR3 for ev in cs):
+            diagnostic += "; no P3 control decoded"
+        if not cs:
+            return diagnostic
+        return diagnostic + "; " + _held_answers(held)
     if not cs:
         return "no control codewords decoded inside the link (data frames counted separately)"
     heard: dict[str, int] = {}
@@ -16383,6 +16441,7 @@ def _observe_out_the_hold(live, raster: _MasterGrid, tx, sessrx, host,
         whole = _listen_until_answer(live, boundary - live.pos, host, sessrx, 0)
         whole, seg_start, bridge = _collect(live, sessrx, whole,
                                             live.pos - whole.size, boundary)
+        robust_rows = _observe_robust_held(tx, whole, seg_start)
         sessrx.flush()
         if whole.size:
             _scan_frame(sessrx, whole, seg_start, upgrade=True)
@@ -16393,7 +16452,7 @@ def _observe_out_the_hold(live, raster: _MasterGrid, tx, sessrx, host,
         print(f"    [grid] hold {h} slot {slot}; captured "
               f"{whole.size / FS:.3f} s, bridged {bridge:.0f} ms "
               f"-- OBSERVING, not keying", flush=True)
-        if sessrx.count == before:
+        if sessrx.count == before and not robust_rows:
             print(f"    HOLD {h} RX (quiet)", flush=True)
         # Off the air, and further past our own last carrier with every cycle:
         # nothing heard here can be an answer to us, which is what `update`
@@ -16402,6 +16461,7 @@ def _observe_out_the_hold(live, raster: _MasterGrid, tx, sessrx, host,
                              reading=_scheduler_reading(sessrx, host, raster),
                              since_tx=seg_start - (tx.tx_end or 0),
                              linked=host.arq.state in LINKED)
+        line = _robust_grid_report(line, onsets, tx)
         if line:
             print(f"    [grid] {line}", flush=True)
 
@@ -17382,6 +17442,11 @@ def _p4_held_answer(tx, raster, audio, begin, phase):
     return recent
 
 
+def _p4_call_held(probe):
+    """The gateway has repeated its robust entry since our opening and answered nothing."""
+    return bool(getattr(probe, 'robust_repeats', None)) and not getattr(probe, 'left_call_phase', False)
+
+
 def _p4_held_answer_reason(probe):
     repeats = getattr(probe, 'robust_repeats', {})
     if not repeats:
@@ -17557,6 +17622,7 @@ def _run_p4_link(tx, live, raster):
         v53_hold=args.p4_v53_hold,
         y27_first_body=args.p4_y27_first_body,
         turn_entry=args.p4_turn_entry,
+        ack_flip=args.p4_ack_flip,
         peer_ack=args.p4_peer_ack,
         train_policy=args.p4_train_policy,
         session_end=link_end,
@@ -17576,6 +17642,7 @@ def _run_p4_link(tx, live, raster):
                 train_words=frozenset(('X27', 'Z27', 'Y27'))
                 if entry.get('value') == 38 else None))
         machine.seed_opening(probe.emissions, receiver.observations, values=probe.values or (7, 38))
+        machine.call_held = not stock_parity and _p4_call_held(probe)
     receiver.expected_words = machine.expected_words()
     begin = live.pos
     audio = np.empty(0, np.float32)
@@ -17586,8 +17653,21 @@ def _run_p4_link(tx, live, raster):
     if getattr(probe, "handoff_audio", None) is not None:
         begin, audio = probe.handoff_audio
         audio = audio.copy()
-    receiver.normal_deadline = lambda at: time.monotonic() + (
-        at + round(T[Kind.SHORT]*FS) - lead - max(live.pos, int(live.sample_now()))) / FS
+    # The answer is keyable until the admission check, `key_notice` in front of
+    # the key; keying a cached word needs well under 10 ms of that. K4SPB 1117
+    # 28.516 gave up on c2 at the decision instant, 18 ms before its key could
+    # still go, and keyed a repeat request over a copy its refine read.
+    key_slack = (max(0, lead - getattr(live, "key_notice", 0) - round(.010*FS))
+                 if getattr(live, 'transmit', None) is not None else 0)
+
+    def normal_deadline(at):
+        # Not while the robust and chirp probes still wait behind the decode.
+        primary = (receiver.clock is not None and receiver.clock.expects == Expect.PACKET
+                   and abs(receiver.clock.next_due-at) < FS//10 and not receiver.probes_pending)
+        end = at + round(T[Kind.SHORT]*FS) - lead + (key_slack if primary else 0)
+        return time.monotonic() + (end - max(live.pos, int(live.sample_now()))) / FS
+
+    receiver.normal_deadline = normal_deadline
     long_deadlines = {}
 
     def long_deadline(at, *, sf8=False):
@@ -18014,6 +18094,7 @@ def _run_p4_link(tx, live, raster):
             obs = reg.observation
             if not obs.provisional and not obs.weak and not obs.unexpected:
                 probe.left_call_phase = True
+                machine.call_held = False
             row = dict(
                 phase="link",
                 kind=obs.kind,
@@ -18223,8 +18304,9 @@ def _run_p4_link(tx, live, raster):
                 cycle_onset = receiver.clock.next_due if receiver.clock else live.pos
                 silent = receiver.finish_cycle(cycle_onset)
                 held_reason = None
+                _p4_held_answer(tx, raster, audio, begin, 'link')
+                machine.call_held = not stock_parity and _p4_call_held(probe)
                 if stock_parity:
-                    _p4_held_answer(tx, raster, audio, begin, 'link')
                     held_reason = _p4_held_answer_reason(probe)
                 if held_reason:
                     machine.link_down(held_reason)
@@ -18422,7 +18504,16 @@ def _run_p4_link(tx, live, raster):
                                                  and not (o.kind == Kind.NORMAL and o.provisional)
                                                  for o in receiver.observations):
                     read('read_partial', receiver.read_partial, audio, begin, deadline=live.pos)
-                read('read_window', receiver.read_window, audio, begin, whole=True)
+                # A placed normal is this slot's packet; the whole-window read
+                # after the key completes it. Before the key it cost the 11-17
+                # normals the 9 ms they were late by.
+                placed_normal = (machine.state == P4State.IRS_ANSWER and not word_expected
+                                 and delay == T[Kind.SHORT]
+                                 and any(o.kind == Kind.NORMAL and not o.provisional
+                                         and abs(o.stream_sample-onset) < FS//10
+                                         for o in receiver.observations))
+                if not placed_normal:
+                    read('read_window', receiver.read_window, audio, begin, whole=True)
                 if not word_expected and receiver.clock is clock:
                     onset = clock.next_due
                 pending = pending_onsets()
@@ -18714,6 +18805,15 @@ def _run_p4_link(tx, live, raster):
                                           and machine.peer_phase.kind in (Kind.LONG, Kind.CHIRP))
                         tx.p4_tx_admit = admit_answer if guarded_answer else None
                         tx.p4_tx_capture_end = proposal.stream_sample - lead - key_wait
+                        # How much of the decision-to-admission interval keying
+                        # left; the normal decode spends all but 10 ms of it.
+                        keying = max(live.pos, int(live.sample_now()))
+                        admission = proposal.stream_sample-getattr(live, 'key_notice', 0)
+                        probe.link_events.append(dict(event='KeyAdmission', at=proposal.stream_sample,
+                            decision_at=decision, now_sample=keying, admission_at=admission))
+                        messages.append(f"    [p4 key] at {proposal.stream_sample/FS:.3f} "
+                                        f"{(keying-decision)/FS*1000:+.1f}ms after decision, "
+                                        f"admission margin {(admission-keying)/FS*1000:.1f}ms")
                         try:
                             admit_answer()
                             if timing is None:
@@ -18881,6 +18981,8 @@ def _run_p4_link(tx, live, raster):
                                         -round(.935*FS)) < FS//10
                                 for o in receiver.observations)):
                 read('read_turn_word', receiver.read_turn_word, audio, begin)
+            if machine._repeating_opening_breakin():
+                read('read_repeat_answer', receiver.read_repeat_answer, audio, begin)
             later_work = {k: round(v-decision_work.get(k, 0.), 3) for k, v in work_ms.items()
                           if v != decision_work.get(k, 0.)}
             decision_row.update(postdecision_work_ms=later_work,
@@ -18909,6 +19011,7 @@ def _run_p4_link(tx, live, raster):
             if yielding and machine.state == P4State.ISS_GRANT:
                 receiver.restore_grant_clock(onset)
             repeating = _p4_held_answer(tx, raster, audio, begin, 'link')
+            machine.call_held = not stock_parity and _p4_call_held(probe)
             held_reason = _p4_held_answer_reason(probe) if stock_parity else None
             if held_reason:
                 machine.link_down(held_reason)
@@ -18973,6 +19076,24 @@ def _p4_robust_v6_sense(probe, answer, slot):
     return None
 
 
+def _p4_held_v6(tx, raster, attempt):
+    """The opening's v6/A index to key again, not advance past, while the gateway holds.
+
+    VE3KPG 11-16 22:17Z repeated entry 0 through v6/A v9/A v8/A. Stock keys v9
+    only after the gateway's T27 to v6/A (KF7RSF 10-01). The stock-parity trial
+    keeps its own opening and stops on the held entry instead.
+    """
+    probe, args = tx.p4_probe, getattr(tx, 'p4_link_options', None)
+    if args is None or getattr(args, 'p4_robust_parity', 'current') == 'stock' or not probe.received:
+        return None
+    index = next((i for i, vh in enumerate(zip(probe.values, probe.headers)) if vh == (6, 'A')), None)
+    if index is None or attempt <= index:
+        return None
+    _, origin, window = probe.received[-1]
+    _p4_held_answer(tx, raster, window, origin, 'opening')
+    return index if _p4_call_held(probe) else None
+
+
 def _prepare_p4_probe(tx):
     probe = tx.p4_probe
     if getattr(probe, 'opening_waveforms', None) is None:
@@ -19007,7 +19128,6 @@ def _run_p4_probe(tx, live, raster, *, in_slot: bool = False, stalled: int = 0,
     shorts = 0 if heard is not None else probe.attempts
     probe.path = "hold word" if heard is not None else "stall" if stalled else "trigger"
     label = 'ROBUST'
-    asked = [f" v={v} hdr={h}" for v, h in zip(probe.values, probe.headers)]
     keyed, spoken = probe.values, probe.headers
     _prepare_p4_probe(tx)
     waveforms = probe.opening_waveforms[:shorts]
@@ -19150,7 +19270,11 @@ def _run_p4_probe(tx, live, raster, *, in_slot: bool = False, stalled: int = 0,
             # Capture early waiting time without invoking the rolling decoder.
             if not capture(boundary - reserve, "prekey"):
                 break
-            what = f"P4 PROBE {label} {attempt + 1}/{probe.attempts}{asked[attempt]}"
+            value, header = probe.values[attempt], probe.headers[attempt]
+            held_v6 = _p4_held_v6(tx, raster, attempt) if reactive else None
+            if held_v6 is not None:
+                value, header, audio = 6, 'A', probe.opening_waveforms[held_v6]
+            what = f"P4 PROBE {label} {attempt + 1}/{probe.attempts} v={value} hdr={header}"
             before = len(tx.slots_used)
             probe.emitting = True
             try:
@@ -19197,8 +19321,8 @@ def _run_p4_probe(tx, live, raster, *, in_slot: bool = False, stalled: int = 0,
                                         audio_end=tx.tx_end,
                                         **owner_timing(live),
                                         status=None,
-                                        value=probe.values[attempt],
-                                        header=probe.headers[attempt],
+                                        value=value,
+                                        header=header,
                                         word=None,
                                         waveform_sha256=hashlib.sha256(audio.tobytes()).hexdigest()))
             if probe.received:
@@ -19225,6 +19349,10 @@ def _run_p4_probe(tx, live, raster, *, in_slot: bool = False, stalled: int = 0,
             gap = gap or (getattr(tx, 'p4_link_options', None) is not None and attempt + 1 == total)
             until = (raster.boundary(raster.next_slot(tx.slot)) - tight if gap
                      else tx.tx_end + round(probe.listen_seconds * FS))
+            if gap and attempt + 1 == total:
+                # VE3KPG 1116 robust 6.367: the link reads this tail itself and
+                # needs the word's read instant, not the probe's last 30 ms.
+                until = min(until, tx.tx_audio_start + round((.923 + .215) * FS))
             print("    [p4 probe] "
                   + f"{label.lower()} {len(probe.emissions)}/{probe.attempts}; "
                   + f"status={_p4_spell(probe.emissions[-1])}; "
@@ -19329,6 +19457,131 @@ def _robust_answer(seg, seg_start: int, keyed_at: int, boundary: int,
     return None
 
 
+def _robust_single_answer(seg, seg_start, keyed_at, boundary, raster, d_max_n,
+                          projected):
+    """The answer in its first slot: an exact twenty-bit word on both tones.
+
+    The envelope read misses an answer whose tones are unequal (VE3KPG's 11-16
+    first answers broke into 27-37 ms runs), and the anchor admits only a
+    repeat; AI4Y answered K4MCK once. So a sweep exact on both tones, read again
+    exactly at its own instant and standing at the codeword level, is taken
+    alone; anything less still waits for the anchored repeat.
+    """
+    for origin in _answer_origins(keyed_at, boundary, raster.slot_n,
+                                  raster.p1_data_n, projected):
+        since = seg_start - origin
+        lo = max(0.0, ROBUST_ANSWER_FLOOR_S - since / FS)
+        hi = min(d_max_n - since,
+                 seg.size - p1rx.ROBUST_CS_BITS * p1rx.CS_BIT_S * FS) / FS
+        candidate = p1rx.sweep_robust_answer(seg, lo, hi - lo)
+        if (candidate is None or candidate.bits != 20
+                or candidate.errors != 0 or candidate.tone != 0):
+            continue
+        got = p1rx.read_held_answer(seg, round(candidate.at * FS),
+            words={candidate.entry: p1rx.ROBUST_CS_WORDS[candidate.entry]},
+            sense=candidate.sense, offset_hz=candidate.offset_hz, bits=20)
+        if (got is not None and got.bits == 20 and got.errors == 0 and got.tone == 0
+                and (got.entry, got.sense) == (candidate.entry, candidate.sense)
+                and _candidate_excess(seg, candidate.at) >= ANSWER_CODEWORD_X):
+            return got, got.at + since / FS
+    return None
+
+
+class _RobustHeldObserver:
+    """Diagnostic repeats on the original answer clock, independent of the grid.
+
+    Retires after `RETIRE_AFTER` wholly read slots in a row hold nothing, so a
+    link the peer took does not log a miss in every slot it runs for. C's
+    11-17 bridge faded for two slots and answered again after them."""
+
+    RETIRE_AFTER = 4
+
+    def __init__(self, answer, slot, onset, phase):
+        self.entry, self.sense = answer.entry, answer.sense
+        self.offset_hz = answer.offset_hz
+        self.slot, self.onset, self.phase = slot, onset, phase
+        self.observations = {}
+        self.checked = {}
+        self.retired = False
+
+    def observe(self, audio, origin):
+        from .robust import read_held_prefix
+        if self.retired:
+            return []
+        n = round(spec.CYCLE_SHORT_S * FS)
+        sps = round(p1rx.CS_BIT_S * FS)
+        end = origin + len(audio)
+        first = max(self.slot + 1, self.slot + -(-(origin - self.onset) // n))
+        last = self.slot + (end - self.onset - 16 * sps) // n
+        rows = []
+        for slot in range(first, last + 1):
+            if slot in self.observations:
+                continue
+            predicted = self.onset + (slot - self.slot) * n
+            at = predicted - origin
+            got = read_held_prefix(audio, at, entry=self.entry,
+                sense=self.sense ^ ((slot - self.slot) & 1), offset_hz=self.offset_hz,
+                checked=self.checked.setdefault(slot, {}))
+            if got is None:
+                continue
+            onset = origin + round(got.at * FS)
+            row = dict(slot=slot, entry=got.entry, word=got.word,
+                       onset=onset, phase=(self.phase + onset - predicted) / FS,
+                       sense=got.sense, bits=got.bits, errors=got.errors, tone=got.tone)
+            self.observations[slot] = row
+            rows.append(row)
+        heard = max(self.observations, default=self.slot)
+        full = 16 * sps + round(p1rx.HELD_ANSWER_SEARCH_S * FS)
+        missed = sorted(slot for slot, bits in self.checked.items()
+                        if slot > heard and bits.get(16, 0) >= full)
+        self.retired = any(sum(1 for _ in group) >= self.RETIRE_AFTER
+                           for _, group in itertools.groupby(
+                               enumerate(missed), lambda v: v[1] - v[0]))
+        return rows
+
+    def summary(self):
+        slots = sorted(self.observations)
+        if not slots:
+            return "held robust repeats unread"
+        runs = []
+        for _, group in itertools.groupby(enumerate(slots), lambda v: v[1] - v[0]):
+            run = [v for _, v in group]
+            runs.append(str(run[0]) if len(run) == 1 else f"{run[0]}–{run[-1]}")
+        return (f"gateway held robust entry {self.entry} "
+                f"({p1rx.ROBUST_CS_WORDS[self.entry]:06X}) in slots {', '.join(runs)}")
+
+
+def _observe_robust_held(tx, audio, origin):
+    observer = getattr(tx, 'robust_observer', None)
+    if observer is None:
+        return []
+    checked_before = {slot: dict(bits) for slot, bits in observer.checked.items()}
+    rows = observer.observe(audio, origin)
+    for row in rows:
+        print(f"    [robust held] entry {row['entry']} ({row['word']:06X}) "
+              f"slot={row['slot']} onset={row['onset']} phase={row['phase']:.6f}s "
+              f"sense={row['sense']} bits={row['bits']} errors={row['errors']} "
+              f"tone={row['tone']}", flush=True)
+    for slot, bits in observer.checked.items():
+        if slot not in observer.observations and bits != checked_before.get(slot, {}):
+            print(f"    [robust held] slot={slot} unread; checked bits={sorted(bits)}", flush=True)
+            rows.append(dict(slot=slot, unread=True))
+    return rows
+
+
+def _robust_grid_report(line, onsets, tx):
+    observer = getattr(tx, 'robust_observer', None)
+    if not line or observer is None or 'UNDER THE FLOOR' not in line:
+        return line
+    for row in observer.observations.values():
+        if any(row['onset'] - round(.04 * FS) <= at
+               <= row['onset'] + row['bits'] * 480 for at in onsets):
+            return (line.split(' -- a transmission where only ')[0]
+                    + f" -- measured held robust entry {row['entry']} ({row['word']:06X}) "
+                    f"at sample {row['onset']}, phase={row['phase'] * 1000:.1f} ms")
+    return line
+
+
 class _RobustAnswerAnchor:
     """A phase found after one key, confirmed before a later key.
 
@@ -19420,6 +19673,9 @@ def _run_robust_bridge(args, bridge, live, raster, tx, host, sessrx, outdir):
             if bridge.cycles >= bridge.max_cycles:
                 break
             _key_robust_bridge(tx, bridge)
+            _observe_robust_held(tx, audio, origin)
+        if bridge.cycles:
+            _observe_robust_held(tx, audio, origin)
         if not granted:
             print(f"    !! P2 call packet never taken: {bridge.cycles} cycles, "
                   f"words seen {[(h['form'], h['entry']) for h in bridge.heard]}; "
@@ -20215,14 +20471,20 @@ def _run(args, *, admission=None) -> int:
     host.arq.cfg.p3_max_down = getattr(args, "p3_max_down", ArqConfig.p3_max_down)
     host.arq.cfg.p3_maxdown_hold = args.p3_maxdown_hold
     host.arq.cfg.p3_breakin_tries = args.p3_breakin_tries
+    host.arq.cfg.p3_handback_limit = args.p3_handback_limit
     host.arq.cfg.p3_breakin_cs5 = args.p3_breakin_cs5
     host.arq.cfg.p3_counter_gap = args.p3_counter_gap
     host.arq.cfg.p3_resumed_silence = args.p3_resumed_silence
+    host.arq.cfg.p3_handback_silence = args.p3_handback_silence
     host.arq.cfg.p3_speed_policy = getattr(args, "p3_speed_policy", "current")
     host.arq.cfg.p3_cs4_turn_open = getattr(args, "p3_cs4_turn_open", "next")
     host.arq.cfg.p3_cs4_parity = getattr(args, "p3_cs4_parity", False)
+    host.arq.cfg.p3_unkeyed_answer = getattr(args, "p3_unkeyed_answer",
+                                             ArqConfig.p3_unkeyed_answer)
     host.arq.cfg.p3_repeated_cs4 = args.p3_repeated_cs4
     host.arq.cfg.p3_unread_after_gear = args.p3_unread_after_gear
+    host.arq.cfg.p3_unread_after_cs6 = args.p3_unread_after_cs6
+    host.arq.cfg.p3_entry_candidate_cycles = args.p3_entry_candidate_cycles
     if host.arq.cfg.p3_cs4_parity:
         print("  --p3-cs4-parity: a CS4 on an even counter asks for the packet "
               "again; the counter keeps its bytes.", flush=True)
@@ -20290,9 +20552,11 @@ def _run(args, *, admission=None) -> int:
     tx.p3_breakin_unplaced = args.p3_breakin_unplaced
     tx.p3_turn_phase = args.p3_turn_phase
     tx.p3_displaced_answer = args.p3_displaced_answer
+    tx.p3_entry_swap_reference = args.p3_entry_swap_reference
     print(f"  P3 changeover: place={tx.p3_breakin_place}, "
           f"unplaced={tx.p3_breakin_unplaced}, tries="
-          f"{args.p3_breakin_tries or 'unbounded'}, "
+          f"{args.p3_breakin_tries or 'unbounded'}, hand-backs="
+          f"{args.p3_handback_limit or 'unbounded'}, "
           f"turn phase={tx.p3_turn_phase}.", flush=True)
     # SAID AT THE TOP OF THE ARM, because both of these are settings whose whole
     # failure mode is nobody remembering they are off. A grant cannot be drawn
@@ -20397,6 +20661,7 @@ def _run(args, *, admission=None) -> int:
     tx.p4_link_mail = mail
     sessrx = _SessionRx(host)
     sessrx.p3_wideband_prekey = getattr(args, "p3_wideband_prekey", False)
+    sessrx.p3_changeover_answer_reach = args.p3_changeover_answer_reach
     if sessrx.p3_wideband_prekey:
         print("P3 bounded wideband pre-key read enabled (short IRS cycles)", flush=True)
     tx.sessrx = sessrx
@@ -20923,6 +21188,9 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                         and host.arq.state == State.CONNECTING
                         and host.arq.connect_variant == 'robust'):
                     robust = robust_anchor.confirm(seg, seg_start, keyed_at, raster, slot - 1)
+                    if robust is None:
+                        robust = _robust_single_answer(seg, seg_start, keyed_at, boundary,
+                            raster, d_max_n, final_listen or hush)
                 if robust is not None:
                     got = robust[0]
                     # Measured against the slot it was heard after: `_regrid` below
@@ -20933,6 +21201,9 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                     args._robust_answer = dict(entry=got.entry, form="FSK",
                         onset=seg_start/FS+got.at, phase=answer_phase/FS,
                         offset_hz=got.offset_hz, sense=got.sense, slot=answer_slot)
+                    if args.after_robust != 'p4-robust':
+                        tx.robust_observer = _RobustHeldObserver(got, answer_slot,
+                            seg_start + round(got.at * FS), answer_phase)
                     host.arq.on_rx_robust_answer(got.entry)
                     if args.after_robust == 'p4-robust':
                         # Replace the next call: onair-0923-1636 left this slot
@@ -21039,7 +21310,7 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                         text=args.robust_call_text, max_cycles=max(1, args.robust_p2_max),
                         force_after=args.robust_p3_without_grant, offset_hz=got.offset_hz,
                         marker_flag=args.robust_p2_marker_flag, opening=args.robust_p2_opening,
-                        fsk_sense=got.sense, fsk_slot=answer_slot)
+                        fsk_entry=got.entry, fsk_sense=got.sense, fsk_slot=answer_slot)
                     if host.enter_robust_bridge():
                         tx.aim(raster, slot)
                         _key_robust_bridge(tx, bridge_state)
@@ -21068,6 +21339,7 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
             # leaves before the key and 0.96 s of our own carrier after it. See
             # `PREKEY_RESERVE_S` and `_SessionRx.upgrade_scan` -- an upgrade is
             # followed a cycle later, never not at all.
+            _observe_robust_held(tx, seg, seg_start)
             if (live is not None and host.arq.state == State.CONNECTING
                     and host.arq.connect_variant == 'robust'):
                 robust_anchor.offer(*robust_window)
@@ -21248,6 +21520,7 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                 reading=_scheduler_reading(sessrx, host, raster, answered),
                 since_tx=seg_start - keyed_at, answered=answered,
                 linked=host.arq.state in LINKED)
+            line = _robust_grid_report(line, onsets, tx)
             onsets = []
             prev, prev_start = seg, seg_start
             if line:
@@ -21390,7 +21663,7 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                                 "no goodbye was sent")
                         ended = (f"the link went down in hold cycle {h} of "
                                  f"{budget.deadline} ({host.arq.state}); "
-                                 f"{_held_answers(sessrx.cs_log[held_from:])}; "
+                                 f"{_held_answers(sessrx.cs_log[held_from:], getattr(tx, 'robust_observer', None))}; "
                                  f"{sent}")
                         # The rest of the budget is spent one of two ways, and
                         # never on the air either way: stop, or listen. See
@@ -21429,7 +21702,8 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                         # the third -- so a gateway heard on every cycle and a
                         # channel nobody was on printed the same sentence. See
                         # `_held_answers`.
-                        heard = _held_answers(sessrx.cs_log[held_from:])
+                        heard = _held_answers(sessrx.cs_log[held_from:],
+                                              getattr(tx, 'robust_observer', None))
                         if host.arq.state in (State.DISCONNECTED,
                                               State.LISTENING):
                             # A closed link is not an answered one. The state
@@ -21847,6 +22121,7 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                             host.tick(elapsed_ticks=1 if closing_now else elapsed_ticks,
                                       cycle_ticks=raster.ticks)
                             tx.emit_pending_cs()
+                    robust_rows = _observe_robust_held(tx, whole, seg_start)
                     if not hush:
                         word_slot = (None if live is None
                                      or getattr(host, "decode_pactor1_only", False)
@@ -21964,7 +22239,7 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                         # deliver one.
                         _forecast_next_key(sessrx, tx, raster, seg_start)
                         sessrx._note_p3_recovery_cost("tail", whole.size, tail_started)
-                    if sessrx.count == before:
+                    if sessrx.count == before and not robust_rows:
                         print(f"    HOLD {h} RX (quiet)", flush=True)
                     # Same fold as the setup loop, in the same place and for the
                     # same reason: the receive window is corrected where the audio
@@ -21973,6 +22248,7 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
                                          reading=_scheduler_reading(
                                              sessrx, host, raster),
                                          linked=host.arq.state in LINKED)
+                    line = _robust_grid_report(line, onsets, tx)
                     if raster.nearest_gap_n is not None:
                         # In-band on the same two bounds `_acquire` accepts a
                         # turnaround inside, because that is the whole of what
@@ -22175,6 +22451,9 @@ def _drive_session(args, *, tx, host, sessrx, live, rig, dx, reply, outdir,
             print(f'transfer unconfirmed: outstanding field and suffix retained in {retained_path}',
                   flush=True)
         if tx.p4_probe is None:
+            observer = getattr(tx, 'robust_observer', None)
+            if observer is not None and observer.summary() not in str(ended):
+                ended += "; " + _held_answers(sessrx.cs_log, observer)
             _summary(sessrx.cs_log, tx.slots_used, cycles_run, tx.keyed, args.cycle,
                      tx.seq_sent, evidence, ended, captures,
                      leads=tx.leads, settle=tx.settle, breakin_at=tx.breakin_at)
@@ -22525,6 +22804,16 @@ def build_parser() -> argparse.ArgumentParser:
                             "instant, or the earlier of that and our own comb (boundary, the old "
                             "clamp; a comb more than 5 ms early keys on the held grid; "
                             "default %(default)s)")
+    entry.add_argument("--p3-entry-swap-reference", choices=("answered", "last"),
+                       default=RadioTx.p3_entry_swap_reference,
+                       help="P3 ISS data carrier alternation after a re-keyed entry: from the entry "
+                            "the peer's first corroborated answer followed, or from the last entry "
+                            "keyed (the old reference) (default %(default)s)")
+    entry.add_argument("--p3-entry-candidate-cycles", type=int,
+                       default=ArqConfig.p3_entry_candidate_cycles, metavar="N",
+                       help="P3 entries still keyed once a first answer head awaits its "
+                            "corroborating cycle; 0 leaves the retry budget as it was "
+                            "(default %(default)s)")
     entry.add_argument("--p3-breakin-unplaced", choices=("answer", "held"),
                        default=RadioTx.p3_breakin_unplaced,
                        help="IRS changeover with no fresh P3 packet/control pair: key the answer "
@@ -22535,6 +22824,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="unanswered P3 changeover keyings before the turn goes back to the "
                             "peer and the IRS answers again; 0 never hands it back "
                             "(default %(default)s)")
+    entry.add_argument("--p3-handback-limit", type=int, choices=range(0, 100),
+                       default=ArqConfig.p3_handback_limit, metavar="N",
+                       help="unread P3 changeover bursts on one peer counter before the link "
+                            "ends on a QRT instead of another hand-back; 0 hands back for as "
+                            "long as the peer keys (the old rule; default %(default)s)")
     entry.add_argument("--p3-breakin-cs5", choices=("accept", "repeat"),
                        default=ArqConfig.p3_breakin_cs5,
                        help="a CS5 to our P3 changeover: take it as the acknowledgement and "
@@ -22546,11 +22840,27 @@ def build_parser() -> argparse.ArgumentParser:
                             "request (at once if it invites the changeover) and log the lost "
                             "packet, or hold it for as long as it comes (hold, the old rule; "
                             "default %(default)s)")
-    entry.add_argument("--p3-resumed-silence", choices=("budget", "lifetime"),
+    entry.add_argument("--p3-resumed-silence", choices=("unread", "budget", "lifetime"),
                        default=ArqConfig.p3_resumed_silence,
                        help="what ends a P3 stint handed back after unread changeovers when the "
-                            "peer then keys nothing: the live-link retry budget, or the 120 s "
-                            "CRC-free lifetime (lifetime, the old bound; default %(default)s)")
+                            "peer then keys nothing: the live-link retry budget once the peer "
+                            "asked for the changeover again or repeated its counter through an "
+                            "earlier hand-back (unread), only after the request (budget, the "
+                            "11-14 rule), or the 120 s CRC-free lifetime (lifetime, the old "
+                            "bound; default %(default)s)")
+    entry.add_argument("--p3-changeover-answer-reach", choices=("word", "symbol"),
+                       default="word",
+                       help="how much audio the cold search for the answer to our own P3 "
+                            "changeover needs behind a candidate: the 21-symbol word (word), "
+                            "or the word and one more symbol (symbol, the old reach; "
+                            "default %(default)s)")
+    entry.add_argument("--p3-handback-silence", choices=("resume", "qrt", "lifetime"),
+                       default=ArqConfig.p3_handback_silence,
+                       help="a first P3 hand-back the peer never answered, then windows with "
+                            "no decode and no packet structure: take the changeover as read "
+                            "and send our next packet (resume), end on the retry budget (qrt), "
+                            "or leave it to the 120 s CRC-free lifetime (lifetime, the old "
+                            "bound; default %(default)s)")
     entry.add_argument("--p3-displaced-answer", choices=("comb", "changeover"),
                        default=RadioTx.p3_displaced_answer,
                        help="the answer a refused P3 changeover gives way to keys on its own "
@@ -22618,10 +22928,21 @@ def build_parser() -> argparse.ArgumentParser:
                               "(default %(default)s, off)")
     traffic.add_argument("--p3-cs4-parity", action="store_true",
                          help="unflown: a CS4 acknowledges only an odd packet counter, as PIII_Complete_1's IRS answers")
+    traffic.add_argument("--p3-unkeyed-answer", choices=("parity", "ack"),
+                         default=ArqConfig.p3_unkeyed_answer,
+                         help="P3 ISS CS1/CS2 on a cycle whose packet was never keyed: the peer's "
+                              "awaited counter, returning an even speed-up trial a CS4 answered "
+                              "one level down (parity), or an acknowledgement (ack, the old "
+                              "reading) (default %(default)s)")
     traffic.add_argument("--p3-unread-after-gear", choices=("parity", "repeat"),
                          default=ArqConfig.p3_unread_after_gear,
                          help="IRS unread copies after CS4 below SL6 or CS6: answer the last accepted "
                               "counter's parity, or repeat the keyed command (default %(default)s)")
+    traffic.add_argument("--p3-unread-after-cs6", choices=("repeat", "parity"),
+                         default=ArqConfig.p3_unread_after_cs6,
+                         help="IRS unread copies after our CS6: key CS6 again, or answer the last "
+                              "accepted counter's parity as before (needs --p3-unread-after-gear "
+                              "parity) (default %(default)s)")
     traffic.add_argument("--p3-repeated-cs4", choices=("repeat", "ack"), default="repeat",
                          help="P3 ISS CS4 at the speed ceiling: repeat the pending packet, or "
                               "restore acknowledgement; below the ceiling CS4 can "
@@ -22707,10 +23028,10 @@ def build_parser() -> argparse.ArgumentParser:
     robust.add_argument("--robust-call-text", choices=("pmc", "ascii"), default="pmc")
     robust.add_argument("--robust-p2-max", type=int, default=10)
     robust.add_argument("--robust-p2-marker-flag", choices=("parity", "inverted"),
-                        default="parity",
+                        default="inverted",
                         help="bit 0 of the bridge's P2 marker: the packet counter's parity, or its complement "
                              "(keys k=2 as K4MCK's did). Bridge frames only")
-    robust.add_argument("--robust-p2-opening", choices=("none", "k9"), default="none",
+    robust.add_argument("--robust-p2-opening", choices=("none", "k9"), default="k9",
                         help="k9 keys K4MCK's counter-0 frame before the first callsign packet, "
                              "counting as one of --robust-p2-max's slots")
     robust.add_argument("--robust-p3-without-grant", type=int, metavar="K")
@@ -22758,7 +23079,12 @@ def build_parser() -> argparse.ArgumentParser:
     p4.add_argument('--p4-turn-entry', choices=('current', 'ladder'), default='current',
                     help='after V27 answers our hand-back body: current keys normal idles; ladder keys '
                          'the stock robust-short ladder first (13,60 before a long, else 13,12,11,10 '
-                         'and an SL5 idle offering the turn) (default %(default)s)')
+                         'and an SL5 idle offering the turn). ladder also takes V27 to our first body '
+                         'of a turn as its ack and goes on 13,60 and the long (default %(default)s)')
+    p4.add_argument('--p4-ack-flip', type=int, default=0, metavar='N',
+                    help='after N repeats of a packet we acked, all answered with the same word, switch to '
+                         'the partner word; the chain then follows it, so N more held repeats switch back '
+                         '(default %(default)s, off)')
     p4.add_argument('--p4-breakin', choices=('body', 'y27'), default='body',
                     help="how the IRS asks for the turn: an idle 0x40 body, or a bare Y27 at +0.920 that waits "
                          "for the peer's Y27 + idle 0x40 grant")

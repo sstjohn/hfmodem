@@ -8,13 +8,16 @@ wrong, or to a way the merge makes it newly possible to get wrong.
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from hfhost.config import ConfigError
 
-from hfmodem.core import config
+from hfmodem.core import config, hamlib
 
 REPO = Path(__file__).resolve().parents[5]
 EXAMPLE = REPO / "examples" / "station.toml"
@@ -22,6 +25,51 @@ EXAMPLE = REPO / "examples" / "station.toml"
 
 def base() -> dict:
     return tomllib.loads(EXAMPLE.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize('station_port,override,expected', [
+    (14533, None, 14533), (14533, '14599', 14599), (None, None, 4532),
+    (None, '14599', 14599),
+])
+def test_rigctld_port_precedence(tmp_path, monkeypatch, station_port, override, expected):
+    path = tmp_path / 'station.toml'
+    path.write_text('[rig]\n' + (f'port = {station_port}\n' if station_port else ''))
+    monkeypatch.setenv(config.STATION_ENV, str(path))
+    monkeypatch.delenv('RIGCTLD_PORT', raising=False)
+    if override is not None:
+        monkeypatch.setenv('RIGCTLD_PORT', override)
+    assert hamlib.rigctld_port() == expected
+    assert hamlib.rigctld_port(path, environ={} if override is None else
+                               {'RIGCTLD_PORT': override}) == expected
+    raw = base()
+    raw['rig'].pop('port', None)
+    if station_port is not None:
+        raw['rig']['port'] = station_port
+    cfg = config.parse(raw)
+    assert cfg.rig.port == expected
+    path.unlink()
+    assert hamlib.rigctld_port(rig=cfg.rig) == expected
+
+
+def test_rigctld_port_without_station_and_with_explicit_inputs(tmp_path):
+    assert hamlib.rigctld_port(environ={}) == 4532
+    path = tmp_path / 'selected.toml'
+    path.write_text('[rig]\nport = 14533\n')
+    env = {config.STATION_ENV: str(tmp_path / 'wrong.toml')}
+    assert hamlib.rigctld_port(path, environ=env) == 14533
+    assert hamlib.rigctld_port(rig=SimpleNamespace(port=14599), environ=env) == 14599
+
+
+def test_rigctld_port_import_is_lightweight():
+    result = subprocess.run([sys.executable, '-c', """
+import sys
+sys.platform = 'linux'
+from hfmodem.core.hamlib import rigctld_port
+assert rigctld_port(environ={}) == 4532
+assert 'hfmodem.core.config' not in sys.modules
+assert 'scipy' not in sys.modules
+"""], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
 
 
 def test_the_shipped_example_loads():

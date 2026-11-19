@@ -52,6 +52,7 @@ from hfmodem.core.ptt import PttError, RtsPtt
 from hfmodem.core.rates import CARD_RATE_HZ
 from hfmodem.core.rigs import RIGS, resolve_rig
 from hfmodem.core.rig import Rig, RigError, unkey_on_signal
+from hfmodem.core.waits import Timer, sleep_until
 from hfmodem.station.process import cat_backend, cat_driver
 
 #: How long each stream is listened to before its level is believed.
@@ -520,14 +521,14 @@ class Preflight:
             raise RigError("ownership cancelled by STOP")
         if rig.line_state != "low":
             raise RigError(f"keying line is {rig.line_state}")
-        deadman = threading.Timer(
+        deadman = Timer(
             HOLD_S + DEADMAN_SLACK_S, rig.panic_unkey,
             args=(f"preflight held the key past {HOLD_S + DEADMAN_SLACK_S:.2f} s",))
         deadman.daemon = True
         deadman.start()
         try:
             rig.ptt.assert_(True)
-            if self.cancel_event.wait(HOLD_S) or self.cancelled():
+            if sleep_until(self.cancel_event.is_set, time.monotonic() + HOLD_S) or self.cancelled():
                 raise RigError("ownership cancelled by STOP")
         finally:
             try:

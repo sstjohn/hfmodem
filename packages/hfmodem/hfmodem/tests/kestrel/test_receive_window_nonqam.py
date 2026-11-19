@@ -708,7 +708,11 @@ def test_erased_single_close_after_h2_pair_query_between_single_and_double_bound
     record_property('emissions', ledger)
 
 
-@pytest.mark.parametrize('bw,level', [('2300', 7), ('2300', 10), ('2750', 11)])
+# Our continue asked for +3, which the sender missed. At these levels the climb
+# makes the retry fall 3 back to the level the sender is still keying, without
+# landing on a level the climb passes over (at 2300 a retry from 7 lands on 7,
+# passes over it and keys 6, so 7 is not one of them).
+@pytest.mark.parametrize('bw,level', [('2300', 9), ('2300', 10), ('2750', 11)])
 @pytest.mark.parametrize('role', ['initiator', 'responder'])
 def test_answered_double_late_query_arms_replay_and_reads_both_frames_once(
         monkeypatch, record_property, bw, level, role):

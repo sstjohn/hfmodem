@@ -26,11 +26,11 @@ BASELINE = Path(__file__).with_name('p3_control_driver_peer_1111.json')
 
 
 def control_runs(capture):
-    cap = evidence.RECORD / 'operator-data' / 'captures' / capture
+    cap = evidence.OPERATOR_DATA / 'captures' / capture
     identity_path = cap / 'capture-identity.json'
     evidence.require_input(identity_path)
     identity = json.loads(identity_path.read_text())
-    log = (evidence.RECORD / 'operator-data' / 'working' / capture
+    log = (evidence.OPERATOR_DATA / 'working' / capture
            / identity['transcript']['path'])
     evidence.require_input(log)
     evidence.require_input(next(cap.glob('stream-*.flac'), cap / 'stream.wav'))

@@ -59,12 +59,17 @@ class OperatorSdist(sdist):
         copy_operator(Path(base_dir) / '_operator_source')
 
 
+# Release wheels are py3-none-any (PyPI refuses bare linux tags), so a pure build
+# outranks HFMODEM_NATIVE; source installs and editable checkouts still build the
+# P4 LONG kernel when cargo is present.
+pure = os.environ.get('HFMODEM_PURE') == '1'
+
 native_options = {}
-if os.environ.get('HFMODEM_NATIVE') == '1':
+if os.environ.get('HFMODEM_NATIVE') == '1' and not pure:
     from setuptools_rust import Binding, RustExtension
 
-    # setuptools-rust is not a declared build requirement, so default builds stay
-    # pure; an opt-in build brings its own. From packages/hfmodem, in place:
+    # setuptools-rust is not a declared build requirement, so default builds need
+    # none; an opt-in build brings its own. From packages/hfmodem, in place:
     #   HFMODEM_NATIVE=1 python setup.py build_rust --inplace --release
     # or a wheel: HFMODEM_NATIVE=1 pip wheel --no-build-isolation --no-deps .
     native_options = {
@@ -78,7 +83,8 @@ if os.environ.get('HFMODEM_NATIVE') == '1':
 
 class NativeBuild(build_ext):
     def get_ext_filename(self, fullname):
-        if fullname != 'hfmodem.shrike._p4long_native':
+        # get_ext_fullpath passes only the last component of the module name.
+        if fullname.rpartition('.')[2] != '_p4long_native':
             return super().get_ext_filename(fullname)
         target = os.environ.get('CARGO_BUILD_TARGET', '')
         platform = ('win32' if 'windows' in target else 'darwin' if 'apple' in target
@@ -102,6 +108,10 @@ class NativeBuild(build_ext):
             subprocess.run([cargo, 'build', '--offline', '--release', '--locked',
                             '--manifest-path', str(crate / 'Cargo.toml'),
                             '--target-dir', str(crate / 'target')], check=True, env=environment)
+            if self.editable_mode:
+                # An editable checkout loads the kernel from native/p4long/target; a copy
+                # beside the sources would shadow later cargo builds.
+                return
             destination = Path(self.get_ext_fullpath(ext.name))
             suffix = destination.suffix
             source = crate / 'target' / target / 'release' / (
@@ -112,7 +122,8 @@ class NativeBuild(build_ext):
             self.warn(f'P4 LONG native build unavailable; installing Python fallback: {error}')
 
 
+p4long = [] if pure else [
+    Extension('hfmodem.shrike._p4long_native', ['native/p4long/src/lib.rs'], optional=True)]
+
 setup(cmdclass={'build_py': OperatorBuild, 'sdist': OperatorSdist, 'build_ext': NativeBuild},
-      ext_modules=[Extension('hfmodem.shrike._p4long_native',
-                             ['native/p4long/src/lib.rs'], optional=True)],
-      **native_options)
+      ext_modules=p4long, **native_options)

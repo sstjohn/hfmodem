@@ -37,12 +37,31 @@ _inherited = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p
 os.environ["PYTHONPATH"] = os.pathsep.join(
     _PACKAGES + [p for p in _inherited if p not in _PACKAGES])
 
-from hfmodem.tests.hermetic import captures_untouched, station_kept_out  # noqa: F401  (autouse fixtures)
+from hfmodem.tests.hermetic import captures_untouched, rigctld_owner, station_kept_out  # noqa: F401  (autouse fixtures)
+
+
+def _reserve_claim_descriptor(config):
+    # Capture files are opened before any conftest loads, and a runner that
+    # inherits an extra descriptor shifts one onto 9, where the claim goes.
+    if os.name == "nt":
+        return
+    from hfmodem.core import claim
+    capture = config.pluginmanager.getplugin("capturemanager")
+    if capture is None or not capture.is_globally_capturing():
+        claim.reserve()
+        return
+    capture.stop_global_capturing()
+    try:
+        claim.reserve()
+    finally:
+        capture.start_global_capturing()
+        capture.suspend_global_capture()
 
 
 def pytest_configure(config):
     import importlib
     from hfmodem.tests.hermetic import GUARD
+    _reserve_claim_descriptor(config)
     for arg in config.invocation_params.args:
         path = Path(config.invocation_params.dir, str(arg).split("::")[0]).resolve()
         if path == GUARD.resolve() or GUARD.resolve() in path.parents:

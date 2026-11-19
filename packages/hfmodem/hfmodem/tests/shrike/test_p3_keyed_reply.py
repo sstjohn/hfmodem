@@ -57,7 +57,8 @@ def test_keyed_command_answers_two_unread_copies(tmp_path, seq, word, policy):
         arm_reply(tx, live, grid, grid.next_slot(tx.slot))
         words.append(emit_reply(tx, live))
     parity = arq.CS_REQUEST if seq % 2 else arq.CS_ACK
-    assert words == [word] + [word if policy == 'repeat' else parity] * 2
+    held = policy == 'repeat' or word == arq.CS_CYCLE_TOG
+    assert words == [word] + [word if held else parity] * 2
     assert a.rx_seq == seq and a.rx_progress == accepted
 
 
@@ -237,6 +238,9 @@ def test_unread_gear_answers_at_observed_levels(
     s, tx, live, grid = receiving(tmp_path)
     a = s.host.arq
     a.cfg.repeat_gear = 0
+    # The CS6 row is the stock IRS's answer, which the gateways of 2026-11-17
+    # took as an ACK (test_p3_unread_after_cs6_1117); its knob reproduces it.
+    a.cfg.p3_unread_after_cs6 = 'parity'
     if seq == 2:
         arm_reply(tx, live, grid, 2)
         packet(s, tx, 1)

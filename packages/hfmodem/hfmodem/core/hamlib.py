@@ -7,6 +7,39 @@ import os
 import shutil
 import signal
 import subprocess
+import tomllib
+from pathlib import Path
+
+
+RIGCTLD_PORT = 4532
+
+
+def rigctld_bind(environ=None) -> str | None:
+    """Return the optional process bind address."""
+    environ = os.environ if environ is None else environ
+    bind = environ.get('RIGCTLD_BIND') or None
+    if bind is not None and bind != '127.0.0.1':
+        raise ValueError('RIGCTLD_BIND must be 127.0.0.1 or unset')
+    return bind
+
+
+def rigctld_port(station_path: str | Path | None = None, *, rig=None,
+                 environ=None) -> int:
+    """Resolve the process override, station's [rig] port, then the default.
+
+    Callers holding a loaded configuration pass its rig to keep the same station.
+    Reading only the rig table also supports the cleanup tools' legacy files.
+    """
+    environ = os.environ if environ is None else environ
+    if 'RIGCTLD_PORT' in environ:
+        return int(environ['RIGCTLD_PORT'])
+    if rig is not None:
+        return rig.port
+    path = station_path if station_path is not None else environ.get('HFMODEM_STATION')
+    if path:
+        body = tomllib.loads(Path(path).expanduser().read_text(encoding='utf-8'))
+        return body.get('rig', {}).get('port', RIGCTLD_PORT)
+    return RIGCTLD_PORT
 
 
 def _runnable(path):

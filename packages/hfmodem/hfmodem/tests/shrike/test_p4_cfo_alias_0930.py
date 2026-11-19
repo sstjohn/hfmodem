@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """Carrier steps and tone aliases from WS8EOC's September 30 recordings."""
-from pathlib import Path
 
 import pytest
 
@@ -9,14 +8,14 @@ from hfmodem.shrike import onair, p4breakin, p4words, session
 from hfmodem.shrike.p4observation import Kind
 from hfmodem.shrike.p4receiver import Clock, Expect, P4Receiver
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Stream, Tx
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 GREETING = b'RMS Trimode 1.4.4.0\r\nW9SSJ has '
 
 
 @pytest.fixture(scope='module')
 def recordings():
-    paths = [ROOT/f'captures/onair-0930-{arm}/stream.flac' for arm in ('2153', '2221')]
+    paths = [CAPTURES/f'onair-0930-{arm}/stream.flac' for arm in ('2153', '2221')]
     if not all(p.exists() for p in paths):
         pytest.skip('local September 30 2153/2221 recordings absent')
     return [session.load_wav(str(p), FS) for p in paths]

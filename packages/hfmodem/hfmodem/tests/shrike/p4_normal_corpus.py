@@ -3,16 +3,15 @@
 
 from collections import Counter
 import hashlib
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import onair, p4short
 from hfmodem.shrike.p4receiver import P4Receiver, Emission, Role, Kind, Registered
+from hfmodem.tests.evidence import CAPTURES, RECORD
 
 FS = 48000
-ROOT = Path(__file__).resolve().parents[5]
 SEED = 92804
 
 
@@ -21,7 +20,7 @@ def inputs():
     for arm, phase, cut in [('0927-1544', 35.9772, None), ('0927-1547', 12.2445, None),
                              ('0927-1549', 25.9974, None), ('0927-1553', 15.999, None),
                              ('0928-0951', None, 28.5)]:
-        path = ROOT/'captures'/f'onair-{arm}'/'stream.flac'
+        path = CAPTURES / f'onair-{arm}'/'stream.flac'
         if not path.exists():
             pytest.skip(f'local corpus absent: {path}')
         audio = onair.session.load_wav(str(path), FS)
@@ -117,5 +116,5 @@ def run(epochs=300):
                                      short_polarity=1, acked_counter=1,
                                      precedence=True, complete_bracket=True),
                 longest_false_live_run=0,
-                inputs={str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+                inputs={str(p.relative_to(RECORD)): hashlib.sha256(p.read_bytes()).hexdigest()
                                  for p, _, _ in source}, counts=dict(tally))

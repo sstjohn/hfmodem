@@ -8,7 +8,6 @@ two final-listen answers at 28.615 and 31.116 s, and packet-one preparation
 before the first candidate, without an unrequested local speed fallback.
 The audio stays in the station corpus; the replay relocates intact peer bursts.
 """
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -17,8 +16,8 @@ from hfmodem.shrike import onair, pactor1, p1rx
 from hfmodem.tests.shrike.test_p1_jump_to_p4_0929 import (
     BURSTS, FS, JUMP, PAD, _arm, _gateway,
 )
+from hfmodem.tests.evidence import CAPTURES
 
-CAPTURES = Path(__file__).resolve().parents[5] / 'captures'
 
 
 def _recording(arm):

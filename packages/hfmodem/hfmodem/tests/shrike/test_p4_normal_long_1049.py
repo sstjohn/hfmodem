@@ -13,6 +13,7 @@ from hfmodem.shrike import (p4frame, p4longdecode as engine,
                             p4longnative, p4longtx, p4rx, p4short, p4turn, session)
 from hfmodem.shrike.p4observation import Kind, Observation, Registered, RegisteredObservation
 from hfmodem.shrike.p4receiver import Clock, Expect, P4Receiver
+from hfmodem.tests import native as native_helpers
 from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.tests.shrike.p4_chirp_deadline_support import FS, prerender, protocol_heard, replay
 from hfmodem.tests.shrike.test_p4_long_decode_1111 import encoded
@@ -99,8 +100,7 @@ def test_1049_pin_fails_without_the_lattice_candidate(monkeypatch):
 
 @pytest.mark.wall_clock  # measured performance runs serially at nice 0
 def test_1049_sample_clock_receive_cost():
-    if p4longnative.backend is None:
-        pytest.skip('pure-Python LONG decode measured over the publication budget; the native backend meets it')
+    native_helpers.p4long()
     result = recorded('onair-1002-1049', 52*FS, measured_work=True)
     decisions = [e for e in result['events'] if e['event'] == 'Decision'
                  and e['at'] >= round(45.5*FS)]
@@ -268,8 +268,7 @@ def test_new_long_frame_can_contradict_an_early_repeat():
 
 
 def test_failed_quick_decode_gets_eight_iteration_refine(monkeypatch):
-    if p4longnative.backend is None:
-        pytest.skip('reference eight-member refine needs over 2 s; native fits the 250 ms grant')
+    native_helpers.p4long()
     tape = audio()
     rx = receiver()
     start = FIRST-round(.050*FS)

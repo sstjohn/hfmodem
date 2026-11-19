@@ -2,15 +2,14 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
 import json
-from pathlib import Path
 
 import pytest
 
 from hfmodem.shrike import session
 from hfmodem.shrike.p4receiver import P4Receiver, Clock, Expect, Kind
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
-CAPTURE = ROOT/'captures/onair-0929-0923'
+CAPTURE = CAPTURES/'onair-0929-0923'
 FS = 48000
 C2 = b'(EN72QQ)\r{SFI = 95 On 2026-09-29 11:00 U'
 C3 = b'TC}\r\n[WL2K-5.0-B2FWIHJM$]\r;PQ: 29277567\r'

@@ -237,6 +237,7 @@ class CleanupRun:
         python = self.root / 'bin/python'
         python.write_text('#!/bin/bash\nif [ "$1 $2" = "-m hfmodem.core.rigs" ]; then\n'
             'printf "ft891\\n1036\\n38400\\nPKTUSB\\nfake audio\\n%s\\n%s\\nfake audio\\n" "$CAT_PORT" "$PTT_PORT"\n'
+            + shlex.quote(sys.executable) + ' -c "from hfmodem.core.hamlib import rigctld_port; print(rigctld_port())"\n'
             'else\nexec ' + shlex.quote(sys.executable) + ' "$@"\nfi\n')
         python.chmod(0o700)
         self.env['HFMODEM_PYTHON'] = str(python)
@@ -1887,13 +1888,13 @@ def test_nested_cleanup_overlap(proof_run, case):
     proof = run.h.reached('during_line_proof', quiescent=True)
     if case in ('returned_none', 'kill_due'):
         run.h.release('settle_entered')
-        run.h.reached('overlap_refused', timeout=25, quiescent=True)
+        run.h.reached('overlap_refused', quiescent=True)
         assert proof['pid'] in run.snapshot('proof_survives_escalation').participants
         run.h.release('during_line_proof')
         run.h.release('overlap_refused')
     else:
         run.h.release('during_line_proof')
-    run.h.reached('console_released', timeout=25, quiescent=True)
+    run.h.reached('console_released', quiescent=True)
     run.h.release('console_released')
     run.finish(actor)
     record = json.loads((run.root / 'flight/provenance.json').read_text())
@@ -2019,7 +2020,7 @@ def test_tap_and_witness_recorders(proof_run, kind, configured):
         run.h.paths.add(endpoint)
     actor = run.python(source)
     recorder = run.h.reached('recorder_ready', quiescent=True)
-    modem = run.h.reached('modem_ready', timeout=10, quiescent=True)
+    modem = run.h.reached('modem_ready', quiescent=True)
     snapshot = run.snapshot('recording')
     assert any(fd.get('path') == endpoint for fd in snapshot.descriptors[recorder['pid']])
     if kind == 'tap':
@@ -2029,7 +2030,7 @@ def test_tap_and_witness_recorders(proof_run, kind, configured):
         assert not any(fd.get('path') == str(run.root / 'rig.claim')
                        for fd in snapshot.descriptors[recorder['pid']])
     os.kill(modem['pid'], signal.SIGTERM)
-    run.h.reached('console_released', timeout=20, quiescent=True)
+    run.h.reached('console_released', quiescent=True)
     assert recorder['pid'] not in run.snapshot('recorder_ended').participants
     run.h.release('console_released')
     run.finish(actor)

@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.shrike import onair
 from hfmodem.shrike.p4observation import Kind
 from hfmodem.tests.shrike import test_p4_link_0927 as support
@@ -17,7 +17,7 @@ from hfmodem.tests.shrike import test_p4_link_0927 as support
 @pytest.mark.parametrize('body_ms', [50, 70])
 def test_0210_deferred_opening_does_not_poison_following_deadlines(monkeypatch, body_ms):
     root = Path(__file__).resolve().parents[5]
-    capture = root/'captures/onair-0930-0210'
+    capture = CAPTURES/'onair-0930-0210'
     require_input(capture/'stream.flac')
     require_input(capture/'p4-probe.json')
     require_input(root/'working/p4-plan-0930/stall-bisect/drive.py')

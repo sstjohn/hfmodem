@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """S5(g): K9KDJ 0146 weak normals, with the recorded decision allowance."""
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -10,15 +9,15 @@ import pytest
 from hfmodem.shrike import p4decode, p4frame, p4short, p4words, session
 from hfmodem.shrike.p4receiver import Clock, Expect, P4Receiver, RegisteredObservation, Registered
 from hfmodem.tests.shrike.test_p4turn import machine
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 FS = 48000
 SINGLES = (2508144, 2628141, 2748141, 2868138, 3168138, 3288138)
 
 
 @pytest.fixture(scope='module')
 def recording():
-    path = ROOT/'captures/onair-0930-0146'
+    path = CAPTURES/'onair-0930-0146'
     if not (path/'stream.flac').exists():
         pytest.skip('local K9KDJ 0146 recording absent')
     return session.load_wav(str(path/'stream.flac'), FS), json.loads((path/'p4-probe.json').read_text())

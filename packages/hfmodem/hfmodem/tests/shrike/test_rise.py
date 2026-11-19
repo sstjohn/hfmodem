@@ -27,15 +27,15 @@ buffer with no frame in it must still yield nothing.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import p1rx, pactor1, rxfront
+from hfmodem.tests.evidence import CAPTURES
 
 FS = p1rx.FS
-HOLD = Path(__file__).resolve().parents[5] / "captures" / "onair-0818-2235"
+HOLD = CAPTURES / "onair-0818-2235"
 
 PAYLOAD = b"RISETEST"
 SIGMA = 0.02

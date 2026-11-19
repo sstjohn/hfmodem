@@ -89,7 +89,7 @@ def test_previous_rate_rule_opens_to_every_base_level_only_above_four():
     h, _ = station()
     assert all(h._previous_base_retry_rate(level) for level in (1, 2, 3, 4))
     assert not h._previous_base_retry_rate(5)
-    h._rx_resend, h._expect_level = (4, (False,)), 3
+    h._rx_resend, h._expect_level = (4, (False,), None), 3
     h._rx_retry_rates = {4, 3}
     assert not h._previous_base_retry_rate(1)
 

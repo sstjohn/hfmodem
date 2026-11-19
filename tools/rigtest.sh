@@ -25,6 +25,7 @@
 set -uo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ports.sh"
+: "${RIGCTLD_PORT:?RIGCTLD_PORT unresolved: ports.sh did not provide it}"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/rig.sh"
 
 GW="${GW:-}"

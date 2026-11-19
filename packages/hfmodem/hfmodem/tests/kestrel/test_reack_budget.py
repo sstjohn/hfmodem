@@ -55,7 +55,7 @@ def test_the_ladder_fits_inside_the_give_up_budget():
     assert VA._REACK_MAX < VA._MAX_WITHOUT_PROGRESS
 
 
-def test_the_ladder_says_when_it_is_spent():
+def test_the_ladder_says_when_it_is_spent(clock):
     """A peer that cannot hear us must not be keyed at forever, and the operator
     reads which over it was and how much of the delivery was still behind it."""
     hs, io = answering()
@@ -73,7 +73,7 @@ def test_the_ladder_says_when_it_is_spent():
     assert any("over #2 unacknowledged after 4 attempt(s)" in m for m in io.msgs), io.msgs
 
 
-def test_a_spent_ladder_owes_the_ask_while_the_wide_delivery_is_open():
+def test_a_spent_ladder_owes_the_ask_while_the_wide_delivery_is_open(clock):
     """The queue is not thrown away with the ladder, and it does not take the
     channel either. A VARA HF wide receiver never asks while an over
     of the peer's may be owed, and asks only in answer to the peer's query (both

@@ -23,7 +23,7 @@ from hfmodem.shrike import arq, onair, spec
 from hfmodem.tests import evidence
 from hfmodem.tests.shrike.onair_support import _Bench, _CallbackBench, _FakeCodec, _Rig, _Session
 
-CAP = (evidence.RECORD / 'operator-data' / 'captures'
+CAP = (evidence.OPERATOR_DATA / 'captures'
        / 'onair-20261108T193518175243Z-849e1e66-2259-41a9-8251-1c7629cced6b'
        / 'stream.wav')
 CYCLE = 60000

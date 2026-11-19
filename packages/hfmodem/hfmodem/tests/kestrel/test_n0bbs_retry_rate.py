@@ -26,7 +26,7 @@ def station():
     h.role, h.caller, h.called = 'initiator', 'W9SSJ', 'N0BBS'
     h.turn = A._TURN_PEER
     # The query across our second direct NAK replaces that unheard step.
-    h._rx_resend = (8, (False, True, True))
+    h._rx_resend = (8, (False, True, True), None)
     h._expect_level = A._resend_level('500', *h._rx_resend)
     assert h._expect_level == 1
     h._expect_500 = h._next_500 = 1
@@ -60,7 +60,7 @@ def test_recorded_retry_delivered_once_and_acknowledged(block):
 @pytest.mark.parametrize('case', ['unrequested-rate', 'our-echo', 'our-turn'])
 def test_recorded_retry_still_requires_receive_ownership_and_valid_history(case):
     h, io = station()
-    if case == 'unrequested-rate': h._rx_resend = (1, (True,))
+    if case == 'unrequested-rate': h._rx_resend = (1, (True,), None)
     if case == 'our-turn': h.turn = A._TURN_OURS
     if case == 'our-echo':
         d = A._RX500.decode_stream(recording())

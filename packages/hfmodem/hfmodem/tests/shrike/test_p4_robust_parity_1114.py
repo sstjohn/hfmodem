@@ -5,7 +5,6 @@ import contextlib
 from functools import lru_cache
 import io
 import json
-from pathlib import Path
 import sys
 from types import SimpleNamespace
 
@@ -14,9 +13,9 @@ import pytest
 
 from hfmodem.shrike import onair, pactor1, p4probe, p4robusttx, session
 from hfmodem.shrike.arq import PactorArq
+from hfmodem.tests.evidence import OPERATOR_DATA
 
 FS, SLOT = 48000, 60000
-ROOT = Path(__file__).resolve().parents[5]
 
 
 @lru_cache(maxsize=2)
@@ -24,7 +23,7 @@ def _tape(flight='0518'):
     capture, anchor = {
         '0518': ('onair-20261114T051818581719Z-1ef33e2d-*', 5269),
         '0550': ('onair-20261114T055020092775Z-401a2dbf-*', 5431)}[flight]
-    stream = next((ROOT / 'operator-data/captures').glob(
+    stream = next((OPERATOR_DATA / 'captures').glob(
         f'{capture}/stream-l7278-*.flac'), None)
     if stream is None:
         pytest.skip(f'WS8EOC {flight}Z recording is not available')
@@ -117,7 +116,9 @@ def test_replay_opening_slots(tmp_path, monkeypatch, parity, calls, slots):
         (s, bool(s & 1)) for s in calls]
     opening = [(s, label, inv) for s, label, inv in keyed if label.startswith('P4 PROBE')]
     assert [s for s, _, _ in opening] == slots, log
-    assert all(f'v={v} hdr=A' in label for (_, label, _), v in zip(opening, (6, 9, 8)))
+    # WS8EOC holds entry 0 from slot 2: only stock parity advances past v6/A.
+    values = (6, 9, 8) if parity == 'stock' else (6, 6, 6)
+    assert all(f'v={v} hdr=A' in label for (_, label, _), v in zip(opening, values))
     assert opening[0][2] is (parity != 'stock')
     assert [e['slot'] for e in result['emissions']] == slots
 
@@ -131,8 +132,9 @@ def test_0550_replay_places_v6_after_v9(tmp_path, monkeypatch, parity, first):
     opening = [(s, label, inv) for s, label, inv in keyed if label.startswith('P4 PROBE')]
     assert [(s, inv) for s, _, inv in opening] == [
         (s, bool(s & 1)) for s in range(first, first+4)], log
-    assert all(f'v={v} hdr={h}' in label for (_, label, _), (v, h) in zip(
-        opening, ((9, 'A'), (6, 'A'), (9, 'B'), (8, 'A'))))
+    keyed = ((9, 'A'), (6, 'A'), (9, 'B'), (8, 'A')) if parity == 'stock' else (
+        (9, 'A'), (6, 'A'), (6, 'A'), (6, 'A'))
+    assert all(f'v={v} hdr={h}' in label for (_, label, _), (v, h) in zip(opening, keyed))
     assert opening[1][2] is (parity != 'stock')
     assert [e['slot'] for e in result['emissions']] == list(range(first, first+4))
 

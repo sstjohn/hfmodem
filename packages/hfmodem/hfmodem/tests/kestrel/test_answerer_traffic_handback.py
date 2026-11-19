@@ -100,7 +100,7 @@ def test_a_clean_base_resend_is_read_with_our_ask_outstanding(turn):
     hs, io = station()
     hs.chat = hs._chat_profile = True
     hs._link_high_speed = True
-    hs._rx_resend, hs._rx_retry_rates = (4, (True,)), {4, 1}
+    hs._rx_resend, hs._rx_retry_rates = (4, (True,), None), {4, 1}
     hs._expect_level, hs._lv_owed = 1, True
     hs.turn = turn
     hs._key(False)
@@ -164,7 +164,7 @@ def test_the_callers_poll_behind_a_traffic_grant_draws_our_ask():
 
 def _naked(hs):
     hs._txq.clear()
-    hs._rx_resend, hs._rx_retry_rates, hs._expect_level = (4, (True,)), {4, 1}, 1
+    hs._rx_resend, hs._rx_retry_rates, hs._expect_level = (4, (True,), None), {4, 1}, 1
     hs.send(b'text written behind our NAK')
 
 

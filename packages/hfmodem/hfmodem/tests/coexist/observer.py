@@ -633,6 +633,7 @@ class Trace:
 def parse_trace(text):
     trace = Trace()
     pending = {}
+    killed_at_entry = set()
     if not text or not text.endswith('\n'):
         raise ObservationError('empty or truncated trace')
     for line in text.splitlines():
@@ -643,8 +644,11 @@ def parse_trace(text):
         stamp = round(float(match[3]) * 1e9)
         body = match[4]
         trace.pids.add(pid)
+        if pid in killed_at_entry and not body.startswith('+++ killed by '):
+            raise ObservationError('undecoded syscall not followed by its kill')
         if body.startswith('+++ exited with ') or body.startswith('+++ killed by '):
             trace.exited.add(pid)
+            killed_at_entry.discard(pid)
             pending.pop(pid, None)
             continue
         if body.startswith('--- '):
@@ -655,12 +659,19 @@ def parse_trace(text):
             pending[pid] = (stamp, body[:-len('<unfinished ...>')])
             continue
         if body.startswith('<... '):
-            resumed = re.match(r'<\.\.\. (\w+) resumed>(.*)', body)
+            resumed = re.match(r'<\.\.\. (\w+|\?\?\?) resumed>(.*)', body)
             if not resumed or pid not in pending:
                 raise ObservationError('unmatched resumed syscall')
             stamp, prefix = pending.pop(pid)
             if not prefix.startswith(resumed[1] + '('):
                 raise ObservationError('resumed syscall mismatch')
+            if resumed[1] == '???':
+                # A SIGKILL that lands at a syscall-entry stop leaves strace no
+                # number to decode, and the call never returns: nothing to record.
+                if prefix != '???( ' or resumed[2] != ') = ?':
+                    raise ObservationError('undecoded syscall with arguments or a result')
+                killed_at_entry.add(pid)
+                continue
             body = prefix + resumed[2]
         call = re.fullmatch(r'(\w+)\((.*)\)\s+=\s+(.*)', body)
         if not call:
@@ -689,6 +700,8 @@ def parse_trace(text):
         trace.records.append(record)
     if pending:
         raise ObservationError('trace ends inside syscall')
+    if killed_at_entry:
+        raise ObservationError('undecoded syscall not followed by its kill')
     return trace
 
 

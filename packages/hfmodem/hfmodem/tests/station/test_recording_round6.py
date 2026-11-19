@@ -162,6 +162,44 @@ os._exit(0)
         assert all(d['lane'] == name for d in loaded['segments'] if Path(d['source']).parent == Path(row['source']).parent)
 
 
+def test_crash_recovers_origin_while_storage_blocked_before_first_block(tmp_path):
+    root = tmp_path / 'crashed'
+    script = '''
+import os, sys, threading
+from hfmodem.core.recording import RecordingSession
+from hfmodem.tests.station.recording_support import RATE, TIMEOUT, flush, pcm
+rec = RecordingSession('everything', sys.argv[1], report=lambda message: None)
+lane = rec.stream('submitted/tx', rate=RATE, clock='output')
+flush(rec)
+entered, release, consumed = (threading.Event() for _ in range(3))
+def blocked():
+    entered.set()
+    assert release.wait(30)
+rec._enqueue(blocked)
+assert entered.wait(TIMEOUT)
+consume = rec._consume
+def observed(*args):
+    consume(*args)
+    consumed.set()
+rec._consume = observed
+lane.push(1000, pcm(1000, 1024))
+for first in [1024, 1032]:
+    consumed.clear()
+    lane.push(first, pcm(first, first + RATE))
+    assert consumed.wait(TIMEOUT)
+lane.writer.flush()
+os._exit(0)
+'''
+    subprocess.run([sys.executable, '-c', script, str(root)], check=True, timeout=30)
+    loaded = module().load_recording_index(root)
+    row = loaded['lanes']['submitted/tx']
+    assert row['origin'] == 1000
+    assert row['position'] == row['unknown_from'] == 1040
+    assert row['gaps'] == [[1000, 1024]]
+    assert loaded['segments']
+    assert all(d['lane'] == 'submitted/tx' for d in loaded['segments'])
+
+
 def test_clean_reload_preserves_leading_drop(sessions):
     rec, root = sessions('everything')
     lane = rec.stream('rx', rate=RATE, clock='card')
@@ -237,19 +275,27 @@ def test_owned_lane_family_keeps_journal_identity_and_readers(sessions):
 
 
 @pytest.mark.parametrize('policy', ['contacts', 'everything'])
-def test_origin_markers_precede_pcm_on_owner_and_producer(sessions, monkeypatch, policy):
+def test_origin_markers_precede_pcm_off_producer(sessions, monkeypatch, policy):
     rec, root = sessions(policy)
-    calls = []
-    mark = module().Lane._mark_origin
+    writes, syncs = [], []
+    write = module().Lane._write_origin
+    sync = module().Lane._sync_origin
     def observed(lane):
-        mark(lane)
-        calls.append((lane.origin, threading.current_thread().name))
-    monkeypatch.setattr(module().Lane, '_mark_origin', observed)
+        path = write(lane)
+        writes.append((lane.origin, threading.current_thread().name))
+        return path
+    def synced(lane, path):
+        sync(lane, path)
+        syncs.append((lane.origin, threading.current_thread().name))
+    monkeypatch.setattr(module().Lane, '_write_origin', observed)
+    monkeypatch.setattr(module().Lane, '_sync_origin', synced)
     lane = rec.stream('rx', rate=RATE, clock='card')
     assert len(list(root.rglob('*-ounknown.lane'))) == 1
     consumed = rec._consume
+    origins = []
     def check(*args):
         assert len(list(root.rglob(f'*-o{1000:020d}.lane'))) == 1
+        origins.append(args[0].origin)
         consumed(*args)
     monkeypatch.setattr(rec, '_consume', check)
     producer = threading.Thread(target=lambda: lane.push(1000, pcm(1000, 1008)), name='test-producer')
@@ -257,7 +303,10 @@ def test_origin_markers_precede_pcm_on_owner_and_producer(sessions, monkeypatch,
     producer.join(5)
     assert not producer.is_alive()
     flush(rec)
-    assert calls == [(None, threading.current_thread().name), (1000, 'test-producer')]
+    assert len(list(root.rglob(f'*-o{1000:020d}.lane'))) == 1
+    assert writes == [(None, threading.current_thread().name), (1000, 'recording-pcm')]
+    assert syncs == [(None, threading.current_thread().name), (1000, 'recording-store')]
+    assert origins == [1000]
     assert lane.consumed == 1008
     assert not lane.disabled
 

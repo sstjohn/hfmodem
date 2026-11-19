@@ -99,10 +99,15 @@ def test_kb5lzk_0927_link_holds_while_y27_continues(monkeypatch):
     assert receiver.silent_cycles == 16
     assert sum(e['event'] == 'BREAKIN_UNREAD' for e in tx.p4_probe.link_events) >= 11
     # Each unread copy draws the repeat request at its own answer instant, never an ack.
+    # KO4HJO 1117: the request stands in every slot while the body is unread,
+    # including the slots after the copies stop.
     unread = [e['at'] for e in tx.p4_probe.link_events if e['event'] == 'BREAKIN_UNREAD']
     keys = [e for e in tx.p4_probe.link_events if e['event'] == 'Keyed']
     assert {k['word'] for k in keys} == {'V27'}
-    assert all(any(abs(k['at']-u-round(.920*FS)) <= FS//50 for u in unread) for k in keys)
+    copies = [k for k in keys if k['at'] <= unread[-1] + round(.920*FS) + FS//50]
+    assert all(any(abs(k['at']-u-round(.920*FS)) <= FS//50 for u in unread) for k in copies)
+    assert all(abs(b['at']-a['at']-round(1.25*FS)) <= FS//50 for a, b in zip(keys, keys[1:]))
+    assert len(keys) > len(copies)
     assert len(keys) >= len(unread)-1
     assert len(tx.p4_probe.emissions) == 2 + len(keys)
 

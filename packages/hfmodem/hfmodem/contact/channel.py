@@ -17,6 +17,7 @@ from .language import Language
 from .runtime import Session, write_wav
 from .watermark import Encoder, GenerationFailure, carrier_text, detector, frame_from_symbols, pack, symbols, unpack
 from . import cover
+from ..core import waits
 
 TOPICS = (
     'Enjoying friendly conversations and sharing ideas about amateur radio.',
@@ -87,6 +88,8 @@ def replay(directory, key=None):
 
 
 def simulate(cfg, directory, payload, options, *, repetitions=1, rounds=2, controls=4, noise=0., seed=1, text_only=False, key=None, topic=None):
+    if cfg.voice.language_backend != 'local':
+        raise ValueError('The channel experiment requires language_backend="local"')
     if not 1 <= repetitions <= 5 or not 1 <= rounds <= 5 or not 0 <= controls <= 100:
         raise ValueError('repetitions/rounds must be 1–5 and controls 0–100')
     if not np.isfinite(noise) or not 0 <= noise <= .2:
@@ -130,7 +133,7 @@ def simulate(cfg, directory, payload, options, *, repetitions=1, rounds=2, contr
                 paths = {}
             else:
                 session.make_draft('channel', generated['text'])
-                session.pending.result(timeout=60)
+                waits.result(session.pending, time.monotonic() + 60)
                 draft = session.poll_draft()
                 duration = draft['duration_s']
                 seconds += duration

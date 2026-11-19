@@ -31,11 +31,14 @@ termios = posix.module("termios")
 #: line will not read low fenced rather than panicked, and the Ptt protocol naming
 #: its port (reviewed 2026-11-05), then rig.py refusing a profile objection on
 #: every arm, the launcher's advisory kept to an unread identity (reviewed
-#: 2026-11-09). A change here is a change to the keying path:
+#: 2026-11-09), then rig.py's profile check exposed as permit() so the arbiter
+#: refuses before it arms the audio (reviewed 2026-11-19), then rig.py's watchdog,
+#: deadman fallback, STOP dwell and line joins timed on the monotonic clock
+#: (reviewed 2026-11-19). A change here is a change to the keying path:
 #: review it, then record the new digest.
 REVIEWED = {
     'ptt': 'f864e83be5129991d4c3a59d33e2a3e848acf299ec9a400fcea6e6b6e46684c4',
-    'rig': '0337184f1d2ff58f7afcd827d0d71f316c7ef2f616722077ec03db07256bcc17',
+    'rig': '698377ab9def6fd9c9e160e373330607c22bcc827a9119675acd125fd97235ee',
 }
 GUARD = '''
 if os.environ.get("HFMODEM_COEXIST_HARNESS") == "1" and os.environ.get("HFMODEM_COEXIST_INSTRUMENT") == "1":

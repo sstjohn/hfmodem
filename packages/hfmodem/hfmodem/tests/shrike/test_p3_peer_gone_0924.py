@@ -12,13 +12,12 @@ in hold 40; holds 41-46 are dark and each drew a CS1, because the live driver
 keys a window's answer before that window's verdict was taken.
 """
 import json
-from pathlib import Path
 
 import pytest
 
 from hfmodem.shrike import arq, onair, rxfront, spec
+from hfmodem.tests.evidence import CAPTURES
 
-CAPTURES = Path(__file__).resolve().parents[5] / 'captures'
 P3 = spec.Protocol.PACTOR3
 WS8EOC = dict(session='onair-0923-2150', first=3, last_heard=56, last=66,
               decoded=set(range(3, 57)) - {5, 23, 28, 29, 30, 50})

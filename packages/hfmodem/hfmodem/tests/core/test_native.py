@@ -45,6 +45,8 @@ def namespace(tmp_path, monkeypatch, request):
     monkeypatch.setenv("PATH", str(fakebin) + os.pathsep + os.environ["PATH"])
     monkeypatch.setattr(claim, "audio_nodes", lambda *a, **k: ())
     monkeypatch.setattr(claim, "_lsof", lambda paths: "")
+    monkeypatch.setenv("HFMODEM_OWNER_PID", str(os.getpid()))
+    monkeypatch.setenv("HFMODEM_OWNER_STARTED", claim.process_started(os.getpid()))
     monkeypatch.setattr(native, "REAP_GRACE_S", 0.1)
 
 
@@ -70,6 +72,71 @@ def children():
 
 def command(code):
     return [sys.executable, "-c", code]
+
+
+CLOSE_FDS_CHILD = """
+import os, sys
+from hfmodem.core import native
+
+def unexpected_closerange(*args):
+    raise AssertionError("descriptor directory unavailable")
+
+native.os.closerange = unexpected_closerange
+kept = 10
+os.dup2(int(sys.argv[1]), kept)
+devnull = os.open(os.devnull, os.O_RDONLY)
+for fd in (4, 11, 200):
+    os.dup2(devnull, fd)
+os.close(devnull)
+native._close_fds_except(kept)
+def is_open(fd):
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
+print(sorted(fd for fd in range(256) if is_open(fd)))
+os.write(kept, b"1")
+"""
+
+
+def test_close_fds_except_leaves_only_stdio_and_the_kept_descriptor():
+    reader, writer = os.pipe()
+    try:
+        result = subprocess.run([sys.executable, "-c", CLOSE_FDS_CHILD, str(writer)],
+                                pass_fds=(writer,), stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "[0, 1, 2, 10]"
+        assert os.read(reader, 1) == b"1"
+    finally:
+        os.close(reader)
+        os.close(writer)
+
+
+@pytest.mark.parametrize("exiting", [0, 1])
+def test_owner_wait_returns_when_either_process_exits(exiting):
+    processes = [subprocess.Popen(command("import sys; sys.stdin.read()"),
+                                 stdin=subprocess.PIPE) for _ in range(2)]
+    watcher = subprocess.Popen(command(
+        "from hfmodem.core import native; "
+        "print('ready', flush=True); "
+        f"native._wait_for_exit({processes[0].pid}, {processes[1].pid})"),
+        stdout=subprocess.PIPE)
+    try:
+        assert watcher.stdout.readline() == b"ready\n"
+        assert watcher.poll() is None
+        processes[exiting].stdin.close()
+        assert watcher.wait(timeout=5) == 0
+        assert processes[1 - exiting].poll() is None
+    finally:
+        for process in [watcher, *processes]:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+            for stream in (process.stdin, process.stdout):
+                if stream is not None:
+                    stream.close()
 
 
 @pytest.mark.wall_clock
@@ -201,13 +268,51 @@ def test_identity_failure_prevents_exec(owned, monkeypatch, tmp_path):
     assert mutex_available()
 
 
-def supervise_observer(monkeypatch, *, timeout=1.0, observe=False, output_observed=None):
+def supervise_observer(monkeypatch, *, timeout=1.0, observe=False, output_observed=None, registration_error=None, owner_gone=False, owner_started=None):
     helper = native._helper
     def launch(verb, config, **kwargs):
         if verb != "--supervise":
             return helper(verb, config, **kwargs)
+        # The short bound is for observation; exec shares OPEN_TIMEOUT_S, and a
+        # loaded host can take longer than that to start the child at all.
         setup = ("import json,sys; from hfmodem.core import native; "
-                 f"native.OPEN_TIMEOUT_S={timeout}; native.REAP_GRACE_S=.1; ")
+                 f"native.OPEN_TIMEOUT_S={timeout}; native.REAP_GRACE_S=.1; "
+                 "\n_start = native._start\n"
+                 "def start(*a, **kw):\n"
+                 "    bound, native.OPEN_TIMEOUT_S = native.OPEN_TIMEOUT_S, 60.0\n"
+                 "    try:\n"
+                 "        return _start(*a, **kw)\n"
+                 "    finally:\n"
+                 "        native.OPEN_TIMEOUT_S = bound\n"
+                 "native._start = start\n")
+        if owner_started is not None:
+            setup += (
+                "\nimport os\nfrom hfmodem.core import claim\n"
+                "process_started = claim.process_started\n"
+                "def started(pid):\n"
+                "    if str(pid) == os.environ['HFMODEM_OWNER_PID']:\n"
+                f"        return {owner_started!r}\n"
+                "    return process_started(pid)\n"
+                "claim.process_started = started\n")
+        if owner_gone:
+            setup += (
+                "\nfrom hfmodem.core import claim\n"
+                "process_started = claim.process_started\n"
+                "def started(pid):\n"
+                "    if str(pid) == native.os.environ['HFMODEM_OWNER_PID']:\n"
+                "        raise claim.ClaimError('owner vanished')\n"
+                "    return process_started(pid)\n"
+                "claim.process_started = started\n")
+        if registration_error:
+            setup += (
+                "\ndef fail_registration(*a, **kw):\n"
+                f"    raise {registration_error}('watch registration denied')\n"
+                "if hasattr(native.select, 'kqueue'):\n"
+                "    class FailedQueue:\n"
+                "        control = staticmethod(fail_registration)\n"
+                "        def close(self): pass\n"
+                "    native.select.kqueue = FailedQueue\n"
+                "else: native.os.pidfd_open = fail_registration\n")
         if observe:
             setup += "native._opened=lambda pid,nodes: bool(nodes) and __import__('pathlib').Path(nodes[0]).exists(); "
         if output_observed is not None:
@@ -232,6 +337,38 @@ def audio_command(tmp_path, code, output="pipe:1", backend="pulse"):
     argv = [str(script), "-f", backend, "-i", "fake", str(output)]
     hermetic.guard.admit(argv, os.environ)
     return argv
+
+
+@pytest.mark.parametrize("owner_tied", [False, True])
+def test_owner_watchdog_releases_inherited_stdio(owned, children, tmp_path, monkeypatch, owner_tied):
+    if owner_tied:
+        monkeypatch.setenv("HFMODEM_OWNER_PID", str(os.getpid()))
+    else:
+        monkeypatch.delenv("HFMODEM_OWNER_PID", raising=False)
+    child = native.spawn_native(audio_command(tmp_path,
+        "import os,sys; os.write(1,b'x'); os.close(1); os.close(2); sys.stdin.read()"),
+        claim_fd=owned)
+    children.append(child)
+    assert child.alive()
+    assert child.stdout.read(1) == b"x"
+    for stream in (child.stdout, child.stderr):
+        assert native.select.select([stream], [], [], 5)[0]
+        assert stream.read(1) == b""
+    assert child.alive()
+
+
+def test_owner_watchdog_ends_child_after_owner_exits(owned, children, tmp_path, monkeypatch):
+    with subprocess.Popen(command("import sys; sys.stdin.read()"),
+                          stdin=subprocess.PIPE) as owner:
+        monkeypatch.setenv("HFMODEM_OWNER_PID", str(owner.pid))
+        monkeypatch.setenv("HFMODEM_OWNER_STARTED", claim.process_started(owner.pid))
+        child = native.spawn_native(audio_command(tmp_path,
+            "import os,time; os.write(1,b'x'); time.sleep(20)"), claim_fd=owned)
+        children.append(child)
+        assert child.alive()
+        owner.stdin.close()
+        owner.wait(timeout=5)
+        assert child.wait_gone(5)
 
 
 def test_audio_first_byte_is_untouched_and_stderr_preserved(owned, children, tmp_path):
@@ -774,6 +911,7 @@ def dummy_rigctld_argv():
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
+    hermetic.guard.own_port(port)
     return [executable, "-P", "NONE", "-m", "1", "--set-conf=ptt_type=None",
             "-T", "127.0.0.1", "-t", str(port)]
 
@@ -1226,3 +1364,127 @@ def test_windows_observation_exit_during_inspection_precedes_walk_result(monkeyp
                        match=r"exited before acknowledgement \(exit code 23\)") as failure:
         native._observe_windows(child, config, lambda: False)
     assert failure.value.child is child
+
+
+@pytest.mark.parametrize("error", ["OSError", "PermissionError"])
+def test_owner_registration_failure_reports_spawn_failure(owned, children, tmp_path, monkeypatch, error):
+    supervise_observer(monkeypatch, registration_error=error)
+    with pytest.raises(native.NativeSpawnError, match="owner watchdog") as failure:
+        child = native.spawn_native(audio_command(tmp_path,
+            "import os,time; os.write(1,b'x'); time.sleep(20)"), claim_fd=owned)
+        children.append(child)
+    assert failure.value.child is not None
+    assert failure.value.child.wait_gone(5)
+
+
+@pytest.mark.parametrize("gone", [False, True])
+def test_owner_birth_identity_mismatch_ends_child(owned, children, tmp_path, monkeypatch, gone):
+    if gone:
+        supervise_observer(monkeypatch, owner_gone=True)
+    else:
+        monkeypatch.setenv("HFMODEM_OWNER_STARTED", "a previous incarnation")
+    with pytest.raises(native.NativeSpawnError, match="owner watchdog") as failure:
+        child = native.spawn_native(audio_command(tmp_path,
+            "import os,time; os.write(1,b'x'); time.sleep(20)"), claim_fd=owned)
+        children.append(child)
+    assert failure.value.child is not None
+    assert failure.value.child.wait_gone(5)
+
+
+def test_owner_without_birth_identity_refuses_before_spawn(owned, tmp_path, monkeypatch):
+    monkeypatch.delenv("HFMODEM_OWNER_STARTED")
+    monkeypatch.setattr(native, "_helper", lambda *a, **kw: pytest.fail("spawned without owner identity"))
+    with pytest.raises(native.NativeSpawnError, match="HFMODEM_OWNER_STARTED"):
+        native.spawn_native(audio_command(tmp_path, "raise RuntimeError('must not run')"), claim_fd=owned)
+
+
+@pytest.mark.parametrize("backend", ["kqueue", "pidfd"])
+@pytest.mark.parametrize("identity_error", [False, True])
+def test_owner_watch_registration_precedes_identity_check_and_closes_handles(monkeypatch, backend, identity_error):
+    events = []
+    with monkeypatch.context() as patch:
+        if backend == "kqueue":
+            class Queue:
+                def control(self, changes, *args):
+                    events.append("register" if changes else "wait")
+                def close(self):
+                    events.append("close")
+            patch.setattr(native.select, "kqueue", Queue, raising=False)
+            patch.setattr(native.select, "kevent", lambda pid, **kw: pid, raising=False)
+            for name in ("KQ_FILTER_PROC", "KQ_EV_ADD", "KQ_EV_ONESHOT", "KQ_NOTE_EXIT"):
+                patch.setattr(native.select, name, 1, raising=False)
+        else:
+            patch.delattr(native.select, "kqueue", raising=False)
+            patch.setattr(native.os, "pidfd_open", lambda pid: events.append("register") or pid, raising=False)
+            patch.setattr(native.os, "close", lambda fd: events.append("close"))
+            patch.setattr(native.select, "select", lambda *a: events.append("wait"))
+        def identity():
+            assert events == ["register"] * (1 if backend == "kqueue" else 2)
+            events.append("identity")
+            if identity_error:
+                raise OSError("owner gone")
+        if identity_error:
+            with pytest.raises(OSError, match="owner gone"):
+                native._wait_for_exit(123, 456, ready=identity)
+        else:
+            native._wait_for_exit(123, 456, ready=identity)
+    assert ("wait" in events) is not identity_error
+    assert events.count("close") == (1 if backend == "kqueue" else 2)
+
+
+def test_lost_supervisor_during_owner_readiness_ends_child(tmp_path):
+    marker, release = tmp_path / 'watching', tmp_path / 'release'
+    child = subprocess.Popen(command('import sys; sys.stdin.read()'), stdin=subprocess.PIPE)
+    setup = f'''
+import os, time
+from pathlib import Path
+from hfmodem.core import native
+
+def wait(*pids, ready):
+    Path({str(marker)!r}).touch()
+    while not Path({str(release)!r}).exists():
+        time.sleep(.01)
+    ready()
+
+native._wait_for_exit = wait
+native._owner_watchdog(native.NativeChild({child.pid}, {claim.process_started(child.pid)!r}, None, None, None),
+                       {os.getpid()}, {claim.process_started(os.getpid())!r})
+'''
+    supervisor = subprocess.Popen(command(setup), stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists():
+            assert supervisor.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(.01)
+        supervisor.kill()
+        supervisor.wait(timeout=5)
+        release.touch()
+        assert child.wait(timeout=5) is not None
+    finally:
+        release.touch()
+        for process in (supervisor, child):
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+        child.stdin.close()
+
+
+def test_namespace_linux_owner_token_allows_supervised_launch(tmp_path, monkeypatch, request, children):
+    token = 'linux:00000000-0000-0000-0000-000000000000:12345'
+    started = claim.process_started
+    monkeypatch.setattr(claim, 'process_started', lambda pid:
+                        token if pid == os.getpid() else started(pid))
+    inner = tmp_path / 'linux-namespace'
+    inner.mkdir()
+    namespace.__wrapped__(inner, monkeypatch, request)
+    supervise_observer(monkeypatch, owner_started=token)
+    held = claim.acquire('test', 'linux-owner')
+    try:
+        child = native.spawn_native(audio_command(inner,
+            "import os,time; os.write(1,b'x'); time.sleep(20)"), claim_fd=held)
+        children.append(child)
+        assert child.alive()
+    finally:
+        claim.release(held)

@@ -208,7 +208,7 @@ P4_LISTENED = re.compile(r"\[p4 probe\] listened to ([\d.]+); (entry ceiling .*)
 P4_CYCLE = re.compile(r"\[p4 (?:link\] (?:\w+ \S+ \w+ at |no live packet|BREAKIN_UNREAD)"
                       r"|frame\]|decision\]|read\]|detail\]|cycle\])")
 #: Timing and accounting the transcript keeps and the over already says.
-P4_QUIET = re.compile(r"\[p4 (?:query|probe\] query schedule|probe\] (?:robust|chirp|reply) \d)"
+P4_QUIET = re.compile(r"\[p4 (?:query|key\] at |probe\] query schedule|probe\] (?:robust|chirp|reply) \d)"
                       r"|\[p4 link\] .* responds to key |^P4 link: ")
 MAIL = re.compile(r"^(?:\S+ \S+Z )?mail: |^\s*\[mail\] ")
 COMPOSED = re.compile(r"^mail: we (?:said|queued): (.*)")

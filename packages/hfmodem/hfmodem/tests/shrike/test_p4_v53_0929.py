@@ -15,8 +15,8 @@ from hfmodem.shrike.p4turn import State
 from hfmodem.tests.shrike.corpora import n9vc_0802
 from hfmodem.tests.shrike.test_p4turn import machine
 from hfmodem.tests.shrike.test_p4_peer_ladder_0928 import receiver
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 FS = 48000
 
 
@@ -63,7 +63,7 @@ def test_53_no_progress_counts_physical_copies_not_our_answers():
 
 
 def test_latest_recorded_53_is_answered_without_reader_threshold_changes():
-    path = ROOT/'captures/onair-0929-0126/stream.flac'
+    path = CAPTURES/'onair-0929-0126/stream.flac'
     if not path.exists():
         pytest.skip('local KB5LZK 0126 recording absent')
     audio = onair.session.load_wav(str(path), FS)

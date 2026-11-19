@@ -20,6 +20,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from hfmodem.ax25 import kiss
+from hfmodem.core.waits import join
 
 BEACON = 2
 ADVANCED_BEACON = re.compile(r'2[01][A-Z][A-R]{2}[0-9]{2}[A-Xa-x]{2}[A-Z0-9]{3,7}')
@@ -181,5 +182,4 @@ class KissPort:
     def stop(self, timeout=5.0) -> bool:
         self._stop.set()
         self._listener.close()
-        self._thread.join(timeout)
-        return not self._thread.is_alive()
+        return join(self._thread, time.monotonic() + timeout)

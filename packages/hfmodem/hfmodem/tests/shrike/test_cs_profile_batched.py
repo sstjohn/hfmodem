@@ -11,24 +11,23 @@ without.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hfmodem.core import wav
 from hfmodem.shrike import rxfront
+from hfmodem.tests.evidence import CAPTURES, OPERATOR_DATA
 from hfmodem.tests.kestrel import corpora
 
 FS = rxfront.FS
-REPO = Path(__file__).resolve().parents[5]
 
 #: WS8EOC answering, 2026-07-30: hold windows with and without a control signal.
-HOLDS = [REPO / "captures" / "onair-0730-2036" / f"hold_0{n}.wav" for n in (1, 2, 5, 9)]
+HOLDS = [CAPTURES / "onair-0730-2036" / f"hold_0{n}.wav" for n in (1, 2, 5, 9)]
 
 #: Tonight's arms through the FTDX10, 3.7 s windows. Not committed: a checkout
 #: without `operator-data/` skips them.
-ARMS = REPO / "operator-data" / "captures"
+ARMS = OPERATOR_DATA / "captures"
 ARM_WINDOWS = [
     (ARMS / "onair-20261106T043227401104Z-85aaa031-9fa7-482a-9ec0-6e19ad0f8aa9"
      / "stream-l7278-20261106T0432Z-s00000000000000168577.flac", 25.0),

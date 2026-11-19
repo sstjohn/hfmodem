@@ -22,6 +22,8 @@ and calls |x| > 0.99 clipped — so these are absolute levels, not relative ones
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -100,8 +102,10 @@ def _peer_over_idle(station):
         np.zeros(int(0.13 * MK.FS))]))
 
 
-def test_every_transmitted_burst_is_at_drive_level():
+def test_every_transmitted_burst_is_at_drive_level(monkeypatch):
     """Sweep one whole session's transmit audio, both stations, every burst kind."""
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(VA, "time", SimpleNamespace(monotonic=lambda: 1000.0))
     a_in: list[np.ndarray] = []
     b_in: list[np.ndarray] = []
     A = VaraStationHandshake(["W9SSJ"], _Capture(b_in), bw="2300")

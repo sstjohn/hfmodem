@@ -20,7 +20,7 @@ class Handshake:
         self.chunks, self.gaps, self.frontiers = [], [], {}
         self.io = SimpleNamespace(channel_activity=lambda active: None)
         self.bw = '500'
-    def on_rx_stream(self, samples, *, sample_start):
+    def on_rx_stream(self, samples, *, sample_start, backlog=0):
         self.chunks.append((sample_start, samples.copy()))
     def rx_gap(self, sample_start): self.gaps.append(sample_start)
     def set_receive_frontier(self, route, sample): self.frontiers[route] = sample

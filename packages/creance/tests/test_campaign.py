@@ -55,6 +55,7 @@ class PeerService:
         self.tmp_path = tmp_path
         self.n = n
         self.results = []
+        self.error = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -67,18 +68,24 @@ class PeerService:
                    if c.startswith("CONNECT"))
 
     def _run(self):
+        try:
+            self._serve()
+        except Exception as exc:
+            self.error = exc
+
+    def _serve(self):
         seen = 0
         for i in range(self.n):
             if self._stop.is_set():
                 return
-            cr = self.bridge.link("b", f"resp{i}")
-            try:
-                cr.attach()
-            except Exception:
-                continue
+            cr = self.bridge.link("b", f"resp{i}", attach_timeout_s=15.0)
+            cr.attach()
             deadline = time.monotonic() + 15.0
-            while self._connects() <= seen and time.monotonic() < deadline \
-                    and not self._stop.is_set():
+            while self._connects() <= seen:
+                if self._stop.is_set():
+                    return
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"session {i}: no CONNECT within 15 s")
                 time.sleep(0.02)
             seen += 1
             self.bridge.a.notify("CONNECTED N0AAA K7XYZ 2300")
@@ -100,6 +107,8 @@ class PeerService:
     def stop(self):
         self._stop.set()
         self._thread.join(timeout=2.0)
+        if self.error is not None:
+            raise self.error
 
 
 # -- plan validation ---------------------------------------------------------

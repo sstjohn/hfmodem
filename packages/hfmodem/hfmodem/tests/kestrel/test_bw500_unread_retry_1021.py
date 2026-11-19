@@ -113,7 +113,7 @@ def test_a_missed_retry_waits_for_the_query_and_names_missing_data():
     _unread(hs, io, 7)
     hs._note_close_level([phy.vara_body(b"x" * 89, CALLER)])
     hs._expect_level, hs._rx_failed = 5, True
-    hs._rx_resend = (5, ())
+    hs._rx_resend = (5, (), None)
     _feed(hs, _noise(4.0))
     _feed(hs, _query(VF.SESSION_RESPONDER_IDLE_SHORT, lead=0.1))
     assert any(m.startswith("tx session-over-nak-short keyed") for m in io.msgs), io.msgs[-3:]

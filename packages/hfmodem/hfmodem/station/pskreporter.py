@@ -19,6 +19,8 @@ import struct
 import threading
 import time
 
+from hfmodem.core.waits import join
+
 
 SOFTWARE = 'hfmodem 0.4.0'
 ENDPOINT = ('report.pskreporter.info', 4739)
@@ -281,7 +283,7 @@ class Reporter:
                 self._worker = threading.Thread(target=self._run, name='pskreporter', daemon=True)
                 self._worker.start()
             self._condition.notify_all()
-        self._worker.join(timeout)
+        join(self._worker, time.monotonic() + timeout)
         with self._condition:
             if not self._stop:
                 self.inflight_at_shutdown = self._active_count if self._inflight else 0

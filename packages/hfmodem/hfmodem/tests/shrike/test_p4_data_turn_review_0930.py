@@ -3,7 +3,6 @@
 """0058 proposal hand-back and k0003 empty acceptance / FS prefix credit."""
 from dataclasses import replace
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -19,6 +18,7 @@ from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
 from hfmodem.tests.shrike.test_p4_normal_short_0928 import normal
 from hfmodem.tests.shrike.test_p4_breakin_v27_0929 import GRID
 from hfmodem.tests.shrike import p4_stock_peer as stock
+from hfmodem.tests.evidence import CAPTURES
 
 
 @pytest.mark.parametrize('queued', [False, True])
@@ -110,8 +110,7 @@ def test_normal_idle_ack_is_counted_once_and_partial_ack_waits():
 
 @pytest.mark.parametrize('reply', ['normal', 'breakin-normal', 'idle-ack-normal', 'last-body-normal'])
 def test_0058_prompt_then_scripted_parity_delivery_idle_and_peer_reply(monkeypatch, reply):
-    root = Path(__file__).resolve().parents[5]
-    capture = root/'captures/onair-0930-0058'
+    capture = CAPTURES/'onair-0930-0058'
     if not (capture/'stream.flac').exists():
         pytest.skip('local WS8EOC 0058 recording absent')
     probe = json.loads((capture/'p4-probe.json').read_text())

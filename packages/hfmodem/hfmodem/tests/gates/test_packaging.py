@@ -135,7 +135,10 @@ def wheels(tmp_path_factory):
             # as an admitted site-free probe with pip on its path.
             argv = [sys.executable, "-S", "-m", "pip", "wheel", "--no-deps", "-q",
                     "-w", str(out), str(package)]
-            env = dict(os.environ, PYTHONPATH=sysconfig.get_paths()["purelib"])
+            # The pure wheel is the one PyPI receives (publish/ci/release-check.sh),
+            # and stays pure in a native run.
+            env = dict(os.environ, PYTHONPATH=sysconfig.get_paths()["purelib"],
+                       HFMODEM_PURE="1", HFMODEM_NATIVE="1")
             hermetic.guard.admit(argv, env)
             r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=900)
             if r.returncode != 0:
@@ -143,6 +146,7 @@ def wheels(tmp_path_factory):
                             f"{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
             built = list(out.glob("*.whl"))
             assert len(built) == 1, f"expected one {dist} wheel, got {built}"
+            assert built[0].name.endswith("-py3-none-any.whl"), built[0].name
             _built[dist] = zipfile.ZipFile(built[0])
         return _built[dist]
     return build

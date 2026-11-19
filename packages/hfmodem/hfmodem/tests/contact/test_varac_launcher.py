@@ -990,6 +990,21 @@ def chat_host(launch, transport, step=lambda: None):
         modem=SimpleNamespace(observer=SimpleNamespace(transmission_count=0)), step=step))
 
 
+def deadline_after_keying(monkeypatch, launch, transport):
+    """Expire the identification deadline once the keyer has keyed.
+
+    A short real deadline can lapse before the identification thread is
+    scheduled at all, which no host decides deterministically.
+    """
+    class Clock:
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def monotonic(self):
+            return time.monotonic() + (launch.IDENT_TIMEOUT_S if transport.keyed else 0)
+    monkeypatch.setattr(launch, 'time', Clock())
+
+
 @pytest.mark.parametrize('bw', [500, 2300, 2750])
 @pytest.mark.parametrize('stepped', [False, True])
 def test_the_chat_host_keys_the_idcall_in_audio_cw_at_the_channel_centre(launch, tools, bw, stepped):
@@ -1170,7 +1185,7 @@ def test_session_keeps_debt_after_production_keyer_reports_failure(launch, tools
     if ending == 'by-hand':
         transport.burst_level = None
     else:
-        monkeypatch.setattr(launch, 'IDENT_TIMEOUT_S', .01)
+        deadline_after_keying(monkeypatch, launch, transport)
         def tx(audio, drive, *, identification=False, cancelled=None):
             assert identification and cancelled.wait(2)
             raise InterruptedError('identification cancelled')
@@ -1626,7 +1641,7 @@ def test_cw_handoff_preserves_broadcast_keying_and_debt(launch, tools, monkeypat
             raise OSError('identification playback failed')
         transport.tx = tx
     if outcome in ('cancelled', 'deadline-rejected'):
-        monkeypatch.setattr(launch, 'IDENT_TIMEOUT_S', .01)
+        deadline_after_keying(monkeypatch, launch, transport)
     if outcome == 'deadline-rejected':
         keyer = host.identify
         def late_identify(*args, cancelled, **kwargs):
@@ -1689,6 +1704,7 @@ def test_cw_handoff_preserves_broadcast_keying_and_debt(launch, tools, monkeypat
     assert confirmations == [True]
     assert len(d.ids) == 0
     assert len(transport.played) == (1 if outcome in ('success', 'deadline-rejected') else 0)
+    assert transport.keyed == ([] if outcome == 'by-hand' else [True, False])
     assert sum('send W9SSJ by hand' in line for line in d.said) == (outcome != 'success')
     assert len(d.host.kiss.sent) == 1
     assert 'ABORT' not in d.sent[before:]

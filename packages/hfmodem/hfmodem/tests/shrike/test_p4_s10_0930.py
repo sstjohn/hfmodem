@@ -5,7 +5,6 @@
 from dataclasses import replace
 from functools import lru_cache
 import json
-from pathlib import Path
 
 import pytest
 
@@ -15,13 +14,13 @@ from hfmodem.shrike.p4turn import Proposal, State
 from hfmodem.tests.shrike.test_p4turn import FS, machine, word
 from hfmodem.tests.shrike.test_p4_data_turn_0930 import CYCLE, T, receive
 from hfmodem.tests.shrike.test_p4_bare_y27_0929 import k0003
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 
 
 @lru_cache
 def tape(arm):
-    path = ROOT / f'captures/onair-{arm}'
+    path = CAPTURES / f'onair-{arm}'
     if not (path / 'stream.flac').exists():
         pytest.skip(f'local {arm} recording absent')
     return (onair.session.load_wav(str(path / 'stream.flac'), FS),

@@ -12,7 +12,7 @@
 Project contact: [hfmodem@ssj.lol](mailto:hfmodem@ssj.lol).
 
 HF modems and shared station tools. The operator controls the station.
-PACTOR-1/2/3, VARA and ARDOP are beta; PACTOR-4 and all other modes are alpha or experimental.
+PACTOR-1, PACTOR-3, VARA and ARDOP are beta; PACTOR-2, PACTOR-4 and all other modes are alpha or experimental.
 
 **Experimental prerelease for developers only.** This keys a transmitter. Every interop claim below is bounded by
 the dated bench and on-air observations, and most of them are narrower than
@@ -59,14 +59,14 @@ For a first PACTOR-3 or VARA Winlink call, follow the
 station operation and `docs/CONFIG.md` describes the station file.
 
 Explore recorded Winlink mail transfers in the [curated logbook](https://hfmodem.ssj.lol/examples/logbook/):
-[VARA send](https://hfmodem.ssj.lol/examples/vara-send/) and
-[receive](https://hfmodem.ssj.lol/examples/vara-receive/),
-[PACTOR-3 mail both ways](https://hfmodem.ssj.lol/examples/pactor3-mail/),
+[PACTOR-3 long-cycle mail](https://hfmodem.ssj.lol/examples/pactor3-long/),
 [send](https://hfmodem.ssj.lol/examples/pactor3-send/) and
-[receive](https://hfmodem.ssj.lol/examples/pactor3-receive/), plus
+[receive](https://hfmodem.ssj.lol/examples/pactor3-receive/),
+[VARA send](https://hfmodem.ssj.lol/examples/vara-send/) and
+[receive](https://hfmodem.ssj.lol/examples/vara-receive/), plus
 [ARDOP send](https://hfmodem.ssj.lol/examples/ardop-send/) and
 [receive](https://hfmodem.ssj.lol/examples/ardop-receive/).
-The retained examples show VARA L9 send/L4 receive and PACTOR-3 SL6 send/SL3 receive.
+The retained examples show PACTOR-3 SL6 send/SL3 receive and VARA L9 send/L4 receive.
 
 A single data-loss incident cost significant development work and logbook material,
 including the high-speed VARA receive recording and these ARDOP sessions'

@@ -17,6 +17,7 @@ from hfmodem.contact import chat_state as s
 from hfmodem.contact.chat_controller import Controller
 from hfmodem.contact.chat_session import SessionAdapter
 from hfmodem.contact.varac import Client, Flow, HostError, Mailbox, Session, CALLING_HZ
+from hfmodem.core.waits import join, result, wait_until
 from hfmodem.kestrel.host.server import ReportingSession
 from .sessions import Refused
 
@@ -124,7 +125,7 @@ class PrivateSession(ReportingSession):
         super()._dispatch_live(command)
 
     def beacon_submit(self, text):
-        if not self._operation_lock.acquire(timeout=1):
+        if not wait_until(lambda r: self._operation_lock.acquire(True, r), time.monotonic() + 1):
             raise HostError('beacon admission deadline expired before submission')
         try:
             self.fence.check()
@@ -264,7 +265,7 @@ class Chat:
             self.fence.check()
             self.attachment = self.attachment_factory(self)
             self.controller = self.controller_factory(self.attachment.open)
-            self.controller.ready.result(timeout=30)
+            result(self.controller.ready, time.monotonic() + 30)
             self.fence.check()
             self._subscription = self.controller.subscribe()
             self.state = 'ready'
@@ -292,10 +293,10 @@ class Chat:
                     cleanup_errors.append(error)
             if self.controller is not None:
                 try:
-                    self.controller.shutdown().result(timeout=max(0, deadline - time.monotonic()))
+                    result(self.controller.shutdown(), deadline)
                 except BaseException as error:
                     self._failure = self._failure or error
-                if not self.controller.join(max(0, deadline - time.monotonic())):
+                if not wait_until(self.controller.join, deadline):
                     cleanup_errors.append(RuntimeError('chat controller did not retire'))
             self.fence.revoke()
             if self.attachment is not None:
@@ -388,8 +389,7 @@ class Chat:
             with self._lock:
                 self.state = 'idle'
         if thread is not None:
-            thread.join(max(0, deadline - time.monotonic()))
-            if thread.is_alive():
+            if not join(thread, deadline):
                 raise RuntimeError('chat teardown deadline; attachment retained')
         if self.state == 'failed':
             raise RuntimeError('chat cleanup incomplete') from self._failure
@@ -747,8 +747,8 @@ class Attachment:
             state.cancel()
             if worker.is_alive():
                 self.station.arbiter.stop(self.chat.session.id)
-            worker.join(min(3, max(0, (self.deadline or time.monotonic() + 3) - time.monotonic())))
-            if worker.is_alive():
+            now = time.monotonic()
+            if not join(worker, min(now + 3, self.deadline or now + 3)):
                 raise HostError('chat identification worker did not retire')
             if errors:
                 raise HostError(f'chat identification failed: {errors[0]}') from errors[0]
@@ -786,16 +786,14 @@ class Attachment:
                 # retirement. Closing Client's sockets should wake a blocked
                 # write; retain admission until its actual worker has exited.
                 def retire_writer():
-                    writer._thread.join(max(0, self.deadline - time.monotonic()))
-                    if writer._thread.is_alive():
+                    if not join(writer._thread, self.deadline):
                         raise RuntimeError('chat data writer did not retire')
                 close(retire_writer)
         if self.host is not None:
             self.host.submitter_live = False
             close(lambda: self.host.close(deadline=self.deadline))
         if self.worker is not None:
-            self.worker.join(max(0, self.deadline - time.monotonic()))
-            if self.worker.is_alive():
+            if not join(self.worker, self.deadline):
                 failures.append(RuntimeError('chat host worker did not retire'))
             else:
                 close(lambda: self.host.ensure_retired(deadline=self.deadline))

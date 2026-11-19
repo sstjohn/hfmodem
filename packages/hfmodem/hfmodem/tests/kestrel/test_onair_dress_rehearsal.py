@@ -58,6 +58,7 @@ import sys
 import time
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -67,6 +68,7 @@ from hfmodem.tests.kestrel.fake_rigctld import FakeRigctld
 from hfmodem.tests.kestrel.fake_line_keyer import (LINE_ENV, FakeLineKeyer, LineRecord,
                                                    child_path, pty_line)
 from hfmodem.tests.kestrel.test_station_id import _decode
+from hfmodem.tests.timing import within
 from hfmodem.kestrel.vara import vara_frames as VF
 from hfmodem.kestrel.vara import vara_mfsk as MK
 
@@ -700,7 +702,10 @@ def test_the_identification_unkeys_before_the_device_claim_is_settled(monkeypatc
         yield None
         order.append("claim settled")
     monkeypatch.setattr(S, "device_claim", claimed)
-    monkeypatch.setattr(S.sd, "query_devices", lambda *a: {"max_output_channels": 1})
+    # The whole module, not its attribute: reading one off the hermetic stub
+    # trips the distribution's guard.
+    monkeypatch.setattr(S, "sd", SimpleNamespace(
+        query_devices=lambda *a: {"max_output_channels": 1}))
     monkeypatch.setattr(S, "play_drained", lambda *a: order.append("drained"))
     monkeypatch.setattr(S, "device_opened", lambda: order.append("opened"))
     S.play(np.zeros(480, np.float32), "card", emitted=lambda: order.append("unkey"))
@@ -708,6 +713,8 @@ def test_the_identification_unkeys_before_the_device_claim_is_settled(monkeypatc
 
 
 @PTY
+# Each PTT edge must land within a real-time window of its audio in another process.
+@pytest.mark.wall_clock
 def test_the_key_brackets_the_audio_closely_at_both_edges(rigctld, session):
     """Both edges of the keyed region, and each of them has cost something.
 
@@ -753,15 +760,10 @@ def test_the_key_brackets_the_audio_closely_at_both_edges(rigctld, session):
     bursts = attempt[:-1]
     assert bursts, "the attempt never played anything"
     assert ident, "the session never identified, so the lead is unproven where it was"
+    leads, tails = [], []
     for e in played:
         up = s.line.raised_before(e["t"])
         assert up is not None, f"audio at {e['t']} went out over an unkeyed transmitter"
-        assert e["t"] - up <= _CARRIER_LEAD_S, (
-            f"{e['t'] - up:.3f} s of unmodulated carrier before {e['secs']:.2f} s of "
-            f"audio, more than {_CARRIER_LEAD_S:.2f} s — a keyed transmitter carrying "
-            f"nothing, on a shared band, every time")
-
-    for e in played:
         end = e["t"] + e["secs"]
         down = s.line.dropped_after(end)
         assert down is not None, f"audio ending at {end} left the transmitter keyed"
@@ -769,16 +771,35 @@ def test_the_key_brackets_the_audio_closely_at_both_edges(rigctld, session):
             f"PTT dropped {down - end:.4f} s past the last sample, less than the "
             f"{_TAIL_HOLD_MIN_S:.2f} s a deliberate idle hold puts there — either the "
             f"key is being dropped on the device's heels or the hold is gone")
-        assert down - end <= KC.TX_IDLE_HOLD_S + _TAIL_MARGIN_S, (
-            f"PTT was held {down - end:.3f} s past the last sample, more than "
-            f"{KC.TX_IDLE_HOLD_S + _TAIL_MARGIN_S:.2f} s — an unmodulated transmitter "
-            f"on a shared band")
+        leads.append((e["t"] - up, e))
+        tails.append((down - end, e))
 
     cr = len(MK.synth_burst(TARGETS[0][0], VF.CR)) / 48000
     assert all(e["secs"] == pytest.approx(cr, abs=0.01) for e in bursts), (
         f"the connect-request is {cr:.3f} s and what the transmitter carried was "
         f"{sorted({round(e['secs'], 3) for e in bursts})} s — either the burst was "
         "padded rather than the key held, or its end never left the device")
+
+    # The nearest edges are only this burst's own while every burst keys and unkeys
+    # once: a key held across bursts, or a play slipped into a keyed window, would
+    # hand the ceilings below stale edges that could still read as close.
+    edges = sorted((t, on) for t, _, on in s.line.edges())
+    assert [on for _, on in edges] == [True, False] * len(played), (
+        f"{len(played)} plays against the keying line {[on for _, on in edges]} — "
+        "each burst wants its own key-up and its own drop, alternating")
+    windows = list(zip(edges[::2], edges[1::2]))
+    for ((up, _), (down, _)), e in zip(windows, sorted(played, key=lambda e: e["t"])):
+        assert up <= e["t"] and e["t"] + e["secs"] <= down, (
+            f"{e['secs']:.2f} s of audio at {e['t']} is not inside its own keyed "
+            f"window {up}-{down}: a play shares a key-up with another")
+
+    lead, e = max(leads, key=lambda m: m[0])
+    within(lead, f"unmodulated carrier before {e['secs']:.2f} s of audio, a keyed "
+           "transmitter carrying nothing, on a shared band, every time", at_most=_CARRIER_LEAD_S)
+    tail, e = max(tails, key=lambda m: m[0])
+    within(tail, f"PTT held past the last sample of {e['secs']:.2f} s of audio at {e['t']}, "
+           "an unmodulated transmitter on a shared band",
+           at_most=KC.TX_IDLE_HOLD_S + _TAIL_MARGIN_S)
 
 
 @PTY

@@ -46,20 +46,18 @@ from __future__ import annotations
 
 import sys
 from itertools import product
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import onair, p1rx, pactor1
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 
 FS = p1rx.FS
-REPO = Path(__file__).resolve().parents[5]
 
 #: Arm 1 of 2026-08-28, and the window its 22.35 s cycle was decided on. The
 #: whole session is on disk; `hold_11` is the cycle the role reversed in.
-ARM1 = REPO / "captures" / "onair-0828-1838"
+ARM1 = CAPTURES / "onair-0828-1838"
 ARM1_CYCLE = ARM1 / "hold_11.wav"
 #: Where the session's own grid put the anchor in that window, which began at
 #: 22.266 s: 84 ms in, 2.8 bit periods past the codeword.
@@ -68,14 +66,14 @@ ARM1_ANCHOR = 0.084
 #: The only recording in which a gateway ever took the channel from this
 #: station and sent a readable field behind the codeword, and where its head
 #: sits on that stream. `test_breakin` reads the same instant.
-K4MSU = REPO / "captures" / "onair-0819-2210" / "stream.wav"
+K4MSU = CAPTURES / "onair-0819-2210" / "stream.wav"
 K4MSU_AT = 64.855
 
 #: Arm 2 of the same slot, and the six sessions of 2026-07-30 in which WS8EOC
 #: answered every cycle. Named rather than globbed, for `test_cs_evidence`'s
 #: reason: `captures/` is ignored and holds whatever the last run wrote, so a
 #: glob measures the machine and these measure the checkout.
-CORPUS = [REPO / "captures" / n for n in
+CORPUS = [CAPTURES / n for n in
           ("onair-0828-1838", "onair-0828-1844", "onair-0730-2036",
            "onair-0730-2037", "onair-0730-2039", "onair-0730-2047",
            "onair-0730-2049", "onair-0730-2050")]

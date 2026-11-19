@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 """KB5LZK 30 m 2026-09-26: SL2 stays readable after our CS4 for SL3 and the lock's drop."""
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import onair, p3frame, placement, rxfront
 from hfmodem.tests.shrike.test_p3_sl2_offset_band_0926 import GREETING, ROWS, recorded, receiver
+from hfmodem.tests.evidence import CAPTURES
 
 
 def test_requested_level_outlives_the_lock_drop(tmp_path, monkeypatch):
@@ -49,7 +49,7 @@ def test_the_pair_ends_with_the_links_silence_budget(tmp_path, monkeypatch):
     assert not s.rx.sl2_prekey_expected() and not s.rx._p3_expected_levels
 
 
-STREAM = Path(__file__).resolve().parents[5] / 'captures' / 'onair-0926-1920' / 'stream.flac'
+STREAM = CAPTURES / 'onair-0926-1920' / 'stream.flac'
 
 
 @pytest.mark.skipif(not STREAM.is_file(), reason='needs captures/onair-0926-1920')

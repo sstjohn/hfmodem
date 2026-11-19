@@ -10,7 +10,7 @@ import pytest
 from hfmodem.shrike import p4oracle, session
 from hfmodem.shrike.p4receiver import Clock, Emission, Expect, Kind, P4Receiver, Registered, Role
 from hfmodem.shrike.p4turn import State
-from hfmodem.tests.evidence import RECORD, require_input
+from hfmodem.tests.evidence import OPERATOR_DATA, require_input
 from hfmodem.tests.shrike.test_p4_chirp_changeover_1010 import chirp
 from hfmodem.tests.shrike.test_p4turn import FS, machine
 
@@ -21,7 +21,7 @@ PAYLOAD = b'KO4HJO regression\r'
 
 @pytest.fixture(scope='module')
 def recording():
-    root = RECORD / 'operator-data' / 'captures' / CAPTURE
+    root = OPERATOR_DATA / 'captures' / CAPTURE
     for name, digest in (
         ('p4-probe.json', '4e44a6518b708f7bdbd430f14e8362838313ac92630a4c8d229d10ff34693065'),
         ('stream.flac', '0d03f3e13d607467da1d7631f2a8e4c2bb785eac0b7740eeb23e36a3e4e54986'),

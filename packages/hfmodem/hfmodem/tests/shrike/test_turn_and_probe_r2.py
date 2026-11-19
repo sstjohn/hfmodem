@@ -607,7 +607,10 @@ def test_r2_close_grant_handshake(shape):
     proposal = turn.decide(due-turn.lead)
     assert proposal is not None and getattr(proposal, 'purpose', None) == 'close-grant'
     assert any(r.responds_to == turn.close_context.emission for r in regs)
-    assert proposal.kind == Kind.BODY and proposal.status == 0x40
+    # Y27 with an idle 0x40 is the peer taking the turn (K4MSU 11-14 05:05Z, pinned in
+    # test_p4_irs_slot_fixes_1114), so it is granted with V27; a bare Y27 with the 0x40 body.
+    assert ((proposal.kind, proposal.word) == (Kind.WORD, 'V27') if shape == 'empty'
+            else (proposal.kind, proposal.status) == (Kind.BODY, 0x40))
     assert proposal.stream_sample == due and turn.state == State.ISS_CLOSE
     turn.refused('admission')
     assert turn.state == State.ISS_CLOSE and turn.close_context.grants == 0
@@ -632,6 +635,13 @@ def test_r2_close_grant_handshake(shape):
     assert bytes(arq._outbuf)
     wall[0] = 31
     assert turn.decide(keyed.stream_sample+FS) is None
+    if shape == 'empty':
+        # The peer's turn stays granted with words, and a word reply holds the
+        # expired close only for its word horizon.
+        assert (keyed.kind, keyed.word) == (Kind.WORD, 'V27')
+        assert turn.state == State.DOWN and turn.reason == 'close deadline'
+        ledger.check()
+        return
     assert turn.state == State.IRS_ANSWER
     assert turn.decide(keyed.stream_sample+round(1.25*FS)) is None
     assert turn.state == State.DOWN and turn.reason == 'close deadline'

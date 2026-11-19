@@ -11,6 +11,7 @@ from hfmodem.shrike.p4turn import State
 from hfmodem.tests.shrike.test_p4turn import FS, machine, body, word
 from hfmodem.tests.shrike.test_p4_bare_y27_0929 import k0003
 from hfmodem.tests.shrike.test_p4_normal_short_0928 import receiver, read_copy
+from hfmodem.tests.evidence import CAPTURES
 
 T = round(.920 * FS)
 CYCLE = round(1.25 * FS)
@@ -162,7 +163,6 @@ def test_k0003_tape_counter_evidence_and_fs_body_is_data():
 def test_2327_recording_then_real_b2f_round_trip(monkeypatch, fs_reply):
     from datetime import datetime, timezone
     import json
-    from pathlib import Path
     import numpy as np
     from hfmodem.shrike import arq, compress, onair, p4breakintx, p4shorttx
     from hfmodem.tests.shrike import p4_stock_peer as stock
@@ -173,8 +173,7 @@ def test_2327_recording_then_real_b2f_round_trip(monkeypatch, fs_reply):
     from hfmodem.tests.shrike.test_p4_breakin_v27_0929 import X27_2327, GRID
     from hfmodem.winlink import B2FSession, MailClient, compose
 
-    root = Path(__file__).resolve().parents[5]
-    capture = root/'captures/onair-0929-2327'
+    capture = CAPTURES/'onair-0929-2327'
     if not (capture/'stream.flac').exists():
         pytest.skip('local 2327 recording absent')
     recorded = onair.session.load_wav(str(capture/'stream.flac'), FS)

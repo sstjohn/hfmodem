@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
-"""Build first: cargo build --offline --release --manifest-path packages/hfmodem/native/p4long/Cargo.toml."""
+"""Build first: packages/hfmodem/build-native.sh."""
 import ctypes as ct
 from dataclasses import replace
 from pathlib import Path
 import runpy
 import subprocess
+import sys
 import time
 
 import hfmodem
@@ -13,6 +14,7 @@ import numpy as np
 import pytest
 
 from hfmodem.shrike import p4longdecode as engine, p4longnative as native
+from hfmodem.tests import native as native_helpers
 from hfmodem.tests.shrike import test_p4_long_decode_1111 as reference
 
 
@@ -20,8 +22,7 @@ from hfmodem.tests.shrike import test_p4_long_decode_1111 as reference
 def backend():
     assert Path(hfmodem.__file__).resolve().parents[1] == Path(__file__).resolve().parents[3]
     path = native._library_path()
-    if not path.is_file():
-        pytest.skip('P4 LONG native library is not built; build it with the command in the module docstring')
+    native_helpers.p4long()
     # A present but broken library must fail, never silently skip.
     result = native._load(path)
     assert result is not None, 'Built P4 LONG library failed ABI validation or self-test'
@@ -310,7 +311,7 @@ def test_abi_rejects_bad_buffers_before_mutation(backend, damage):
     assert not np.any(job.priors) and not np.any(job.first)
 
 
-@pytest.mark.parametrize('available', ['missing', 'failed', 'built'])
+@pytest.mark.parametrize('available', ['missing', 'failed', 'built', 'editable'])
 def test_optional_packaging(monkeypatch, tmp_path, available):
     setuptools = pytest.importorskip('setuptools', reason='setup.py needs setuptools in the test interpreter')
     captured = {}
@@ -322,6 +323,7 @@ def test_optional_packaging(monkeypatch, tmp_path, available):
     command = command_type(setuptools.Distribution({'ext_modules': captured['ext_modules']}))
     command.ensure_finalized()
     command.build_lib = str(tmp_path / 'output')
+    command.editable_mode = available == 'editable'
     extension = captured['ext_modules'][0]
     assert extension.optional
     monkeypatch.delenv('CARGO_BUILD_TARGET', raising=False)
@@ -341,8 +343,13 @@ def test_optional_packaging(monkeypatch, tmp_path, available):
     monkeypatch.setattr(definitions['subprocess'], 'run', build)
     command.build_extension(extension)
     destination = Path(command.get_ext_fullpath(extension.name))
+    suffix = '.dll' if sys.platform == 'win32' else '.dylib' if sys.platform == 'darwin' else '.so'
+    # The name p4longnative._library_path loads from an installed package.
+    assert destination == tmp_path / 'output/hfmodem/shrike' / ('_p4long_native' + suffix)
     if available == 'built':
         assert destination.read_bytes() == b'packaged native library' and not warnings
+    elif available == 'editable':
+        assert not destination.exists() and not warnings
     else:
         assert not destination.exists() and warnings
 

@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from hfmodem.tests.evidence import require_input
 
 ROOT = Path(__file__).resolve().parents[5]
@@ -55,6 +57,20 @@ def _ruff_check(ruff: Path) -> subprocess.CompletedProcess[str]:
                           cwd=ROOT, capture_output=True, text=True)
 
 
+def _entry_point_help(mod: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([PY, "-m", f"hfmodem.shrike.{mod}", "--help"],
+                          cwd=ROOT, capture_output=True, text=True, timeout=90)
+
+
+def _suite_module_import(stem: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([PY, "-c", _IMPORT_PROBE, f"hfmodem.tests.shrike.{stem}"],
+                          cwd=ROOT, capture_output=True, text=True, timeout=90)
+
+
+def _failure_detail(r: subprocess.CompletedProcess[str]) -> str:
+    return (r.stderr.strip().splitlines() or [""])[-1][:90]
+
+
 def main(*, include_lint: bool = True) -> int:
     # In the monorepo an absent ruff means the gate is not running anywhere, which
     # is the state this file exists to prevent, so it is a failure and not a skip.
@@ -73,27 +89,25 @@ def main(*, include_lint: bool = True) -> int:
                   f"`{ROOT}/.venv/bin/pip install ruff` turns this check on")
 
     for mod in ENTRY_POINTS:
-        r = subprocess.run([PY, "-m", f"hfmodem.shrike.{mod}", "--help"],
-                           cwd=ROOT, capture_output=True, text=True, timeout=90)
+        r = _entry_point_help(mod)
         check(f"python -m hfmodem.shrike.{mod} --help runs", r.returncode == 0,
-              (r.stderr.strip().splitlines() or [""])[-1][:90])
+              _failure_detail(r))
 
     for t in sorted(SUITE.glob("test_*.py")):
-        r = subprocess.run([PY, "-c", _IMPORT_PROBE, f"hfmodem.tests.shrike.{t.stem}"],
-                           cwd=ROOT, capture_output=True, text=True, timeout=90)
+        r = _suite_module_import(t.stem)
         if r.stdout.startswith(_SKIPPED):
             print(f"  [SKIP] hfmodem.tests.shrike.{t.stem} imports: "
                   + r.stdout[len(_SKIPPED):].strip())
             continue
         check(f"hfmodem.tests.shrike.{t.stem} imports", r.returncode == 0,
-              (r.stderr.strip().splitlines() or [""])[-1][:90])
+              _failure_detail(r))
 
     event_kinds_declared()
     print("\nALL PASS" if ok else "\nFAILED")
     return 0 if ok else 1
 
 
-def event_kinds_declared() -> None:
+def _event_kind_checks() -> list[tuple[str, bool, str]]:
     """`rxfront.EVENT_KINDS` must list every kind rxfront actually emits.
 
     A consumer that maps kinds to its own vocabulary breaks on an undeclared one --
@@ -105,8 +119,8 @@ def event_kinds_declared() -> None:
     emitted = set(re.findall(r'Event\([^,]+,\s*"([a-z0-9]+)"', src))
     emitted |= set(re.findall(r'kind="([a-z0-9]+)"', src))
     undeclared = sorted(emitted - set(rxfront.EVENT_KINDS))
-    check("every emitted Event kind is in rxfront.EVENT_KINDS", not undeclared,
-          f"undeclared: {undeclared}" if undeclared else f"{len(emitted)} kinds")
+    checks = [("every emitted Event kind is in rxfront.EVENT_KINDS", not undeclared,
+               f"undeclared: {undeclared}" if undeclared else f"{len(emitted)} kinds")]
 
     # ...and every CONSUMER must handle all of them. Declaring the vocabulary is
     # only half the contract: shrike.monitor indexed its display map with [] and
@@ -116,8 +130,14 @@ def event_kinds_declared() -> None:
     # in another repo, so the gate has to cover consumption, not just declaration.
     from hfmodem.shrike import monitor
     unhandled = sorted(set(rxfront.EVENT_KINDS) - set(monitor._TAG))
-    check("shrike.monitor renders every declared Event kind", not unhandled,
-          f"missing from _TAG: {unhandled}" if unhandled else f"{len(monitor._TAG)} kinds")
+    checks.append(("shrike.monitor renders every declared Event kind", not unhandled,
+                   f"missing from _TAG: {unhandled}" if unhandled else f"{len(monitor._TAG)} kinds"))
+    return checks
+
+
+def event_kinds_declared() -> None:
+    for label, passed, detail in _event_kind_checks():
+        check(label, passed, detail)
 
 
 def test_ruff() -> None:
@@ -126,8 +146,24 @@ def test_ruff() -> None:
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-def test_main() -> None:
-    assert main(include_lint=False) == 0
+@pytest.mark.parametrize("mod", ENTRY_POINTS)
+def test_entry_point_help(mod: str) -> None:
+    r = _entry_point_help(mod)
+    assert r.returncode == 0, f"python -m hfmodem.shrike.{mod} --help runs: {_failure_detail(r)}"
+
+
+@pytest.mark.parametrize("stem", [t.stem for t in sorted(SUITE.glob("test_*.py"))],
+                         ids=str)
+def test_suite_module_imports(stem: str) -> None:
+    r = _suite_module_import(stem)
+    if r.stdout.startswith(_SKIPPED):
+        pytest.skip(r.stdout[len(_SKIPPED):].strip())
+    assert r.returncode == 0, f"hfmodem.tests.shrike.{stem} imports: {_failure_detail(r)}"
+
+
+def test_event_kinds_declared() -> None:
+    for label, passed, detail in _event_kind_checks():
+        assert passed, f"{label}: {detail}"
 
 
 if __name__ == "__main__":

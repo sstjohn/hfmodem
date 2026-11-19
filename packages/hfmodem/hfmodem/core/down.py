@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 
-from . import claim
+from . import claim, hamlib
 
 SETTLE_S = 45.0
 # Pauses between CAT proof tries, one fewer than the tries. With a fresh open
@@ -56,7 +56,7 @@ class Settings:
         path = Path(path).expanduser().resolve()
         cfg = config.load(path)
         return cls(path, cfg.station.port, CAT_BACKENDS[cfg.rig.cat], cfg.rig.host,
-                   cfg.rig.port, claim.serial_port(cfg.resolved_profile.get('cat_port')),
+                   hamlib.rigctld_port(rig=cfg.rig), claim.serial_port(cfg.resolved_profile.get('cat_port')),
                    claim.serial_port(cfg.rig.ptt.port), cfg.resolved_profile)
 
     @property

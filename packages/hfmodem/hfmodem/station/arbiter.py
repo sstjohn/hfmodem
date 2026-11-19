@@ -20,6 +20,7 @@ from hfmodem.core.operations import LeaseTimeout
 from hfmodem.core.rates import CARD_RATE_HZ
 from hfmodem.core.regulatory import Emission
 from hfmodem.core.rig import Rig, RigError, _WATCHDOG_FRACTION, _WATCHDOG_SLACK_S
+from hfmodem.core.waits import join, wait_until
 
 #: Priorities. Two is enough; a third would need a reason.
 LIVE = 0
@@ -626,6 +627,7 @@ class TxArbiter:
             with self._admit:
                 stopped = flight.stop.is_set()
                 self._halt_locked(flight, "key-up failed")
+            self._cancel_audio(flight)
             if not (stopped and isinstance(exc, RigError)):
                 raise
         finally:
@@ -674,6 +676,9 @@ class TxArbiter:
         settle = round(lead * CARD_RATE_HZ)
         deadline = time.monotonic() + lead + duration + 2
         try:
+            # The card plays whatever is armed; a refusal inside key() arrives too late.
+            if hasattr(self.rig, "permit"):
+                self.rig.permit(req.emission, responding=req.responding)
             hold = self.rig.hold() if hasattr(self.rig, "hold") else nullcontext(True)
             with hold as held:
                 if not held:
@@ -904,6 +909,12 @@ class TxArbiter:
                 flight.error = exc
             self._wake.set()
 
+    def _cancel_audio(self, flight):
+        lock = (flight.request._stream_lock if isinstance(flight.request, TxLease)
+                else nullcontext())
+        with lock:
+            self.audio.cancel_burst()
+
     def _contain(self, flight):
         returned = threading.Event()
         unkeyed = threading.Event()
@@ -921,11 +932,8 @@ class TxArbiter:
 
         def drop():
             try:
-                lock = (flight.request._stream_lock if isinstance(flight.request, TxLease)
-                        else nullcontext())
                 if flight.stop.is_set():
-                    with lock:
-                        self.audio.cancel_burst()
+                    self._cancel_audio(flight)
                 if flight.key_started is not None:
                     pending = not flight.key_done.is_set()
                     unkey()
@@ -935,8 +943,7 @@ class TxArbiter:
                     if getattr(self.rig, "line_state", None) == "low":
                         settled_low.set()
                 if flight.stop.is_set():
-                    with lock:
-                        self.audio.cancel_burst()
+                    self._cancel_audio(flight)
                     self.audio.finish_burst()
                     flight.end = flight.cut
                 else:
@@ -950,7 +957,7 @@ class TxArbiter:
 
         worker = threading.Thread(target=drop, name="tx-unkey", daemon=True)
         worker.start()
-        returned.wait(1.0)
+        wait_until(returned.wait, time.monotonic() + 1.0)
         confirmed = unkeyed.is_set() and getattr(self.rig, "line_state", None) == "low"
         pending_key = flight.key_started is not None and not flight.key_done.is_set()
         if flight.key_started is not None:
@@ -1074,8 +1081,7 @@ class TxArbiter:
             time.sleep(0.01)
         for thread in (self._supervisor, self._errand):
             if thread is not None:
-                thread.join(max(0, deadline - time.monotonic()))
-                if thread.is_alive():
+                if not join(thread, deadline):
                     raise LeaseTimeout("arbiter thread did not stop")
 
 

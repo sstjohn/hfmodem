@@ -3,23 +3,20 @@
 from hashlib import sha256
 from contextlib import redirect_stdout
 from io import StringIO
-from pathlib import Path
 from time import monotonic, perf_counter, sleep
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from hfmodem.shrike import onair, p4frame, p4longdecode, p4longnative, p4oracle, p4rx, p4turn, rxfront, session
+from hfmodem.shrike import onair, p4frame, p4longdecode, p4oracle, p4rx, p4turn, rxfront, session
 from hfmodem.shrike.p4budget import LongDeadline
 from hfmodem.shrike.p4host import P4Host, P4LateFrame
 from hfmodem.shrike.ptc import PtcHost
 from hfmodem.shrike.p4receiver import Clock, Emission, Expect, Kind, P4Receiver, Registered, Role
+from hfmodem.tests import native as native_helpers
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
-if (not (ROOT/'captures/onair-1002-2154/stream.flac').is_file()
-        and (ROOT.parents[2]/'captures/onair-1002-2154/stream.flac').is_file()):
-    ROOT = ROOT.parents[2]
 FS = 48000
 DATA_SHA = 'e8acf31f32a128b6d89a3bb2780cf3fa513014358934a4ba3f8966a922704a92'
 
@@ -48,7 +45,7 @@ def test_sf8_preparation_measures_rf_power_once(monkeypatch):
 
 
 def recording(name):
-    path = ROOT/f'captures/{name}/stream.flac'
+    path = CAPTURES/f'{name}/stream.flac'
     if not path.is_file():
         pytest.skip(f'{name} recording absent')
     return session.load_wav(str(path), FS)
@@ -492,8 +489,7 @@ def test_live_sf8_deadline_uses_recorded_driver_reserve(monkeypatch, stall_stage
 
 @pytest.mark.wall_clock
 def test_live_twelve_sf8_copies_keep_their_own_ack_deadlines(monkeypatch):
-    if p4longnative.backend is None:
-        pytest.skip('pure-Python LONG decode measured over the publication budget; the native backend meets it')
+    native_helpers.p4long()
     from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
     from hfmodem.tests.shrike.p4_nak_qam_support import neutral_keys
 

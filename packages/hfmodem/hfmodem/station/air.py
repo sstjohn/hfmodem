@@ -45,6 +45,7 @@ import numpy as np
 
 from hfmodem.core.audio import StreamLane
 from hfmodem.core.operations import LeaseTimeout
+from hfmodem.core.waits import join
 from hfmodem.sabir.monitor import Segmenter
 from hfmodem.sabir.offair import to_analytic, to_real
 from hfmodem.sabir.phy.modem import FS
@@ -115,8 +116,7 @@ class StationAir:
         self._running = False
         self._cmds.put(lambda: None)
         if self._thread:
-            self._thread.join(timeout=timeout)
-            if self._thread.is_alive():
+            if not join(self._thread, time.monotonic() + timeout):
                 raise LeaseTimeout("station air worker did not stop")
             self._thread = None
         elif self._end is not None:

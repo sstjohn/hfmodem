@@ -3,12 +3,11 @@
 
 from dataclasses import replace
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.shrike import onair, p4robusttx, p4oracle
 from hfmodem.shrike.p4receiver import P4Receiver, Emission, Role, Kind, Observation, Registered
 from hfmodem.shrike.p4observation import RegisteredObservation
@@ -16,12 +15,11 @@ from hfmodem.shrike.p4turn import State
 from hfmodem.tests.shrike.test_p4turn import machine
 from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx, FS
 
-ROOT = Path(__file__).resolve().parents[5]
 START = 1546767
 
 
 def capture(arm='2234'):
-    path = ROOT/f'captures/onair-0928-{arm}/stream.flac'
+    path = CAPTURES/f'onair-0928-{arm}/stream.flac'
     require_input(path)
     return onair.session.load_wav(str(path), FS)
 
@@ -197,7 +195,7 @@ def test_supported_packet_resets_unsupported_control_budget():
 
 def test_recorded_49_answer_is_followed_by_53_on_the_word_turnaround():
     audio = capture()
-    probe = json.loads((ROOT/'captures/onair-0928-2234/p4-probe.json').read_text())
+    probe = json.loads((CAPTURES/'onair-0928-2234/p4-probe.json').read_text())
     keyed = next(e for e in probe['emissions'] if e['audio_start'] == 1770925)
     assert keyed['word'] == 'X27'
     for delta, value in [(-44160,49),(15840,53)]:
@@ -230,7 +228,7 @@ def test_later_ve3kpg_controls_keep_their_actual_values(arm,at,cfo,value):
 
 
 def test_2031_opening_ladder_answers_v61_with_x27_and_keeps_v53_u27():
-    cap = ROOT/'captures/onair-0930-2031'
+    cap = CAPTURES/'onair-0930-2031'
     require_input(cap/'stream.flac')
     require_input(cap/'p4-probe.json')
     audio = onair.session.load_wav(str(cap/'stream.flac'), FS)

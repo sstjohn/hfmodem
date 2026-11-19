@@ -731,3 +731,13 @@ def test_the_operator_can_choose_the_word_for_any_ladder_value():
         m.keyed()
     obs = replace(body(1600000).observation, kind=Kind.SHORT, frame=None, value=51)
     assert propose_ack(m, RegisteredObservation(obs, Registered.NEW)).word == 'U27'
+
+
+@pytest.mark.parametrize('held,header', [(False, 'B'), (True, 'A')])
+def test_held_call_phase_repeats_v6a_not_v6b(held, header):
+    m, _ = machine(role="iss")
+    m.seed_opening([dict(audio_start=i*60000, value=v, header='A')
+                    for i, v in enumerate((6, 9, 8))], [], values=(6, 9, 8))
+    m.call_held = held
+    m.silence(3*60000)
+    assert (m._next.value, m._next.header, m._next.repeat) == (6, header, True)

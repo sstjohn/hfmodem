@@ -703,6 +703,38 @@ def test_truncated_or_unattributed_trace_refused(raw):
         parse_trace(raw)
 
 
+# test_claim_free_cleanup_faults[discovery] on WSL2, 1118e: the cleanup's SIGKILL
+# met the holder at a syscall-entry stop.
+KILLED_AT_ENTRY = ('968150 1795082574.440688 <... read resumed>"", 1) = 0\n'
+                   '967952 1795082574.440697 kill(968150, SIGKILL <unfinished ...>\n'
+                   '968150 1795082574.440716 ???( <unfinished ...>\n'
+                   '967952 1795082574.440719 <... kill resumed>) = 0\n'
+                   '968150 1795082574.440729 <... ??? resumed>) = ?\n'
+                   '968150 1795082574.441704 +++ killed by SIGKILL +++\n')
+READ = '968150 1795082574.440666 read(3</x.pyc>,  <unfinished ...>\n'
+
+
+def test_a_syscall_killed_at_entry_records_nothing():
+    trace = parse_trace(READ + KILLED_AT_ENTRY)
+    assert [(r['pid'], r['syscall']) for r in trace.records] == [(968150, 'read'), (967952, 'kill')]
+    assert trace.exited == {968150}
+
+
+@pytest.mark.parametrize('variant,message', [
+    (('<... ??? resumed>) = ?', '<... ??? resumed>) = 0'), 'undecoded syscall with arguments or a result'),
+    (('???( <unfinished ...>', '???(3 <unfinished ...>'), 'undecoded syscall with arguments or a result'),
+    (('<... ??? resumed>) = ?', '<... read resumed>) = ?'), 'resumed syscall mismatch'),
+    (('+++ killed by SIGKILL +++', '+++ exited with 0 +++'), 'undecoded syscall not followed by its kill'),
+    (('968150 1795082574.441704 +++ killed by SIGKILL +++\n', '968150 1795082574.441704 close(3) = 0\n'),
+     'undecoded syscall not followed by its kill'),
+    (('968150 1795082574.441704 +++ killed by SIGKILL +++\n', ''), 'undecoded syscall not followed by its kill'),
+    (('968150 1795082574.440716 ???( <unfinished ...>\n', ''), 'unmatched resumed syscall'),
+])
+def test_an_undecoded_syscall_is_accepted_only_where_its_kill_ends_it(variant, message):
+    with pytest.raises(ObservationError, match=message):
+        parse_trace(READ + KILLED_AT_ENTRY.replace(*variant))
+
+
 def test_trace_resumption_forks_threads_and_recorded_native_child(tmp_path):
     path = tmp_path / 'device'
     raw = ('11 1.0 clone(child_stack=NULL, flags=CLONE_THREAD) = 12\n'

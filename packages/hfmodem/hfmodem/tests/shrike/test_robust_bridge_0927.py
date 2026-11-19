@@ -80,7 +80,8 @@ def test_recorded_replay(tmp_path, monkeypatch):
     (tmp_path/'replay.log').write_text(log)
     assert [(s, w.split()[0]) for s,w,n in keyed[:4]] == [(0,'connect->K7ABC'),(1,'P2'),(2,'P2'),(3,'SL1')], log
     assert 'phase-delay=18.75ms' in keyed[1][1]
-    assert f'field={FIELD.hex()}' in keyed[1][1]
+    assert 'P2 ROBUST OPENING counter=0' in keyed[1][1]
+    assert f'field={FIELD.hex()}' in keyed[2][1]
     assert 'status=0x1a' in keyed[3][1]
     assert 'RX P3 CS4 SPEED-UP' in log
     # On the emitted timeline, distinguish the untrimmed render origin,
@@ -129,7 +130,7 @@ def _bridge_peer(tmp_path, entries):
 def test_bounded_bridge_orders(tmp_path, monkeypatch, entries, force, p3slot):
     _bridge_peer(tmp_path, entries)
     keyed = _keyed(monkeypatch)
-    flags = ['--after-robust','p2','--robust-p2-max','4']
+    flags = ['--after-robust','p2','--robust-p2-max','4','--robust-p2-opening','none']
     if force is not None:
         flags += ['--robust-p3-without-grant',str(force)]
     log = _air(tmp_path, *flags)
@@ -243,7 +244,8 @@ def test_peer_grants_only_a_decoded_callsign_then_sends_banner(tmp_path, monkeyp
             tx.live.audio[at:at+len(tail)] = tail
         return key(tx,audio,what,*a,**kw)
     monkeypatch.setattr(onair.RadioTx,'_tx',respond)
-    log = _air(tmp_path,'--after-robust','p2','--hold','16')
+    log = _air(tmp_path,'--after-robust','p2','--hold','16',
+               '--robust-p2-opening','none','--robust-p2-marker-flag','parity')
     assert seen == [(2,0x19,b'w9ssj\r')]*2
     assert 'Trimode 1.4.4.0 Welcome to AI4Y' in log
     assert 'CMS via AI4Y >' in log
@@ -306,9 +308,9 @@ def _marker(audio):
     return top[2], top[5]
 
 
-def test_default_marker_matches_head_render():
+def test_parity_marker_matches_head_render():
     from hfmodem.shrike.robust import Bridge
-    bridge = Bridge('W9SSJ', 0)
+    bridge = Bridge('W9SSJ', 0, opening='none', marker_flag='parity')
     seen = _bridge_keys(bridge, 2)
     path = pactor2.PATHS[1]
     field = pactor2.build_field(placement.field_info(bridge.payload, 14, 0x19), path)
@@ -320,7 +322,7 @@ def test_default_marker_matches_head_render():
 
 def test_inverted_callsign_marker_is_k4mcks():
     from hfmodem.shrike.robust import Bridge
-    (_, what), (audio, _) = _bridge_keys(Bridge('W9SSJ', 0, marker_flag='inverted'), 2)
+    (_, what), (audio, _) = _bridge_keys(Bridge('W9SSJ', 0, opening='none', marker_flag='inverted'), 2)
     assert 'P2 ROBUST BRIDGE counter=1 (inverted)' in what and 'marker=2 swap=0' in what
     recorded = _k4mck()[2*SLOT-4800:3*SLOT+4800]
     k4mck = max(p2rx.find_markers(recorded, FS, .8), key=lambda m: m[4])
@@ -328,18 +330,30 @@ def test_inverted_callsign_marker_is_k4mcks():
     assert _marker(audio) == (2, True)
 
 
-def test_k9_opening_precedes_the_callsign_packet():
+@pytest.mark.parametrize('parser', ['modem', 'console'])
+def test_k9_opening_precedes_the_callsign_packet(parser):
     from hfmodem.shrike.robust import Bridge
-    seen = _bridge_keys(Bridge('W9SSJ', 0, opening='k9'), 3)
+    if parser == 'modem':
+        args = onair.build_parser().parse_args([])
+    else:
+        import console
+        from consolelib import modes
+        args = console.parser_for(modes.resolve('pactor')).parse_args(['fly', 'AI4Y', '--sense'])
+    bridge = Bridge('W9SSJ', 0)
+    assert (bridge.opening, bridge.marker_flag) == (args.robust_p2_opening, args.robust_p2_marker_flag)
+    seen = _bridge_keys(bridge, 3)
     path = pactor2.PATHS[1]
     template = pactor2.build_field(placement.field_info(b'', 14, 0x18), path)
     (first, opening), (_, call), (_, again) = seen
     assert opening == f'P2 ROBUST OPENING counter=0 field={template.hex()} marker=9 swap=0'
-    assert call.startswith('P2 ROBUST BRIDGE counter=1 ') and 'marker=3 swap=1' in call
+    assert call.startswith('P2 ROBUST BRIDGE counter=1 ') and 'marker=2 swap=1' in call
     assert again.startswith('P2 ROBUST BRIDGE counter=1 ') and 'swap=0' in again
     recorded = _k4mck()[SLOT-4800:2*SLOT+4800]
     k4mck = max(p2rx.find_markers(recorded, FS, .8), key=lambda m: m[4])
     assert _marker(first) == (k4mck[2], k4mck[5]) == (9, False)
+    recorded = _k4mck()[2*SLOT-4800:3*SLOT+4800]
+    k4mck = max(p2rx.find_markers(recorded, FS, .8), key=lambda m: m[4])
+    assert _marker(seen[1][0]) == (k4mck[2], k4mck[5]) == (2, True)
 
 
 def test_k9_opening_counts_as_a_bridge_slot(tmp_path, monkeypatch):

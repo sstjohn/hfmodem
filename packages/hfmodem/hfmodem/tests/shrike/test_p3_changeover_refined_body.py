@@ -7,16 +7,16 @@ These are acquisition regressions, not callback/RadioTx deadline qualification.
 The held WAV cuts contain only audio available to the corresponding live read.
 """
 
-from pathlib import Path
 import wave
 
 import numpy as np
 import pytest
 
 from hfmodem.shrike import p3acquire, rxfront
+from hfmodem.tests.evidence import CAPTURES
 
 
-CAPTURE = Path(__file__).resolve().parents[5] / "captures/onair-0914-2101"
+CAPTURE = CAPTURES / "onair-0914-2101"
 
 
 @pytest.fixture(scope="module")

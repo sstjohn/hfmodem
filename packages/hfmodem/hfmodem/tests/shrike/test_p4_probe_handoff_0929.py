@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
 import json
-from pathlib import Path
 from time import perf_counter
 
 import numpy as np
@@ -13,12 +12,12 @@ from hfmodem.shrike import onair, p4oracle, p4robusttx
 from hfmodem.shrike.p4receiver import Emission, Kind, P4Receiver, Role
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Tx
 from hfmodem.tests.shrike.test_ws8eoc_p4_silent_0927 import Live
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 
 
 def capture():
-    path = ROOT / 'captures/onair-0929-0119'
+    path = CAPTURES / 'onair-0929-0119'
     if not (path / 'stream.flac').exists():
         pytest.skip('local WS8EOC September 29 0119 capture absent')
     return onair.session.load_wav(str(path / 'stream.flac'), FS), json.loads((path / 'p4-probe.json').read_text())

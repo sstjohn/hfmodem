@@ -1134,7 +1134,7 @@ claim.release(owned)
     assert not any(e['event'] == 'native_admitted' for e in harness.events())
     harness.release(point)
     try:
-        harness.reached('capture-finished', timeout=40 if entry == 'rx_levels' else 15, quiescent=True)
+        harness.reached('capture-finished', quiescent=True)
     except TimeoutError:
         completed(child)
         raise
@@ -1176,7 +1176,7 @@ coexist.event('capture_parent')
         assert child.wait(timeout=20) in (-9, 1)
         coexist.checkpoint('capture-parent-ended')
     ''')
-    event = harness.reached(point, timeout=10, quiescent=True)
+    event = harness.reached(point, quiescent=True)
     events = harness.events()
     parent = next(e['pid'] for e in events if e['event'] == 'capture_parent')
     supervisor_event = next(e for e in events if e['event'] == 'native_supervisor')
@@ -1348,7 +1348,7 @@ def test_native_spawn_admission_shrike_handle(harness, request, with_line, fake_
     if case == 'supervisor-failure':
         harness.reached('native_before_acknowledgement', quiescent=True)
         harness.release('native_before_acknowledgement')
-    harness.reached('handle-ready', timeout=10, quiescent=True)
+    harness.reached('handle-ready', quiescent=True)
     harness.release('interactive-open')
     harness.release('handle-ready')
     completed(owner)
@@ -1434,7 +1434,7 @@ def test_inherited_launch_admitted_before_cleanup(harness, request, with_line, p
         coexist.checkpoint('campaign-guardian-wait')
         assert child.wait(timeout=30) == {-9 if kill_root else 0}
     ''')
-    barrier_event = harness.reached(point, timeout=12, quiescent=True)
+    barrier_event = harness.reached(point, quiescent=True)
     events = harness.events()
     root_pid = next(e['pid'] for e in events if e['event'] == 'campaign_root')
     launcher_pid = next(e['launcher'] for e in events if e['event'] == 'campaign_launcher')
@@ -1462,7 +1462,7 @@ def test_inherited_launch_admitted_before_cleanup(harness, request, with_line, p
 
     try:
         if kill_launcher and not kill_root:
-            harness.reached('campaign-root-done', timeout=10, quiescent=True)
+            harness.reached('campaign-root-done', quiescent=True)
         targets = refresh()
         admission_held = not kill_launcher or point == 'modem-before-open'
         expected = 2 if admission_held else (0 if kill_root else 7)
@@ -1479,8 +1479,8 @@ def test_inherited_launch_admitted_before_cleanup(harness, request, with_line, p
                        for e in harness.events())
         harness.release(point)
         if not kill_launcher:
-            harness.reached('modem-active', timeout=10, quiescent=True)
-            harness.reached('campaign-admitted', timeout=10, quiescent=True)
+            harness.reached('modem-active', quiescent=True)
+            harness.reached('campaign-admitted', quiescent=True)
             targets = refresh()
             out, err = completed(down(harness, setup, line=line[0] if line else ''),
                                  0 if kill_root else 7, targets=targets)
@@ -1553,7 +1553,7 @@ def test_inherited_launch_admitted_before_cleanup_onair_entry(harness, request, 
         assert claim.inherited(9).offset() == owned.offset()
         claim.release(owned)
     ''')
-    harness.reached('after_launch_validation', timeout=15, quiescent=True)
+    harness.reached('after_launch_validation', quiescent=True)
     contender = launch(harness, '''
         try:
             claim.mutex(timeout=0)
@@ -1644,7 +1644,7 @@ with sounddevice.RawInputStream():
     inventory(harness, {modem: 'coexist-dead-root-modem'})
     cleanup = down(harness, setup, line=line[0] if line else '')
     try:
-        harness.reached(point, timeout=10, quiescent=True)
+        harness.reached(point, quiescent=True)
         harness.release('modem-ready')
         harness.reached('late-launch-done', quiescent=True)
         if bypass:
@@ -1716,7 +1716,7 @@ def test_native_audio_admission_silent_deadline(harness, request, with_line, out
         assert any(e['event'] == 'ffmpeg_header' for e in harness.events())
     assert not any(e['event'] == 'native_admitted' for e in harness.events())
     harness.release('ffmpeg_before_output')
-    harness.reached('silent-capture-ended', timeout=20, quiescent=True)
+    harness.reached('silent-capture-ended', quiescent=True)
     assert event['pid'] not in harness.observer.latest.participants
     harness.release('silent-capture-ended')
     completed(parent)

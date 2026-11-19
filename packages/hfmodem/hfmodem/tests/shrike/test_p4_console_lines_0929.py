@@ -127,7 +127,8 @@ def test_stall_counts_its_repeat_requests_and_hands_opening_to_link(tmp_path, mo
     assert re.findall(r"\[host\] first P1 packet repeat request (\d/\d) before the stall path", log) \
         == [f'{n}/{STALL}' for n in range(1, STALL)]
     # Knob rows 13–15: consecutive opening gaps replace the spaced probe's listen.
+    # The last hands the link its tail at the word read instant (VE3KPG 1116 robust 6.367).
     assert re.findall(r"\[p4 probe\] robust (\d/2);.*receiving (\d+) ms", log) == [
-        ('1/2', '422'), ('2/2', '422')]
+        ('1/2', '422'), ('2/2', '380')]
     assert probe['timeout_seconds'] == 90
     assert '[p4 link] LINK DOWN: capture ended' in log

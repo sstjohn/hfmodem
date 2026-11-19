@@ -31,6 +31,7 @@ import threading
 from collections import deque
 from hfmodem.core.socketpair import SocketPairAcceptor
 from hfmodem.core.hostio import Connection, MAX_OUTPUT, MAX_PENDING
+from hfmodem.core.waits import join, wait_until
 
 from .kiss import KissPort
 from .kiss_tx import KissTxQueue
@@ -122,8 +123,7 @@ class HostSession(ModemObserver):
             with self._operation_lock:
                 self._close()
             return
-        import time
-        if not self._operation_lock.acquire(timeout=max(0., deadline - time.monotonic())):
+        if not wait_until(lambda r: self._operation_lock.acquire(True, r), deadline):
             raise RuntimeError('VARA host close operation still pending')
         try:
             self._close()
@@ -135,8 +135,7 @@ class HostSession(ModemObserver):
         import time
         for worker in self._threads:
             if worker is not threading.current_thread():
-                worker.join(2. if deadline is None else max(0., deadline-time.monotonic()))
-                if worker.is_alive():
+                if not join(worker, (time.monotonic() + 2.) if deadline is None else deadline):
                     raise RuntimeError('VARA host reader did not retire')
         for conn in (self._cmd, self._data):
             if isinstance(conn, Connection):

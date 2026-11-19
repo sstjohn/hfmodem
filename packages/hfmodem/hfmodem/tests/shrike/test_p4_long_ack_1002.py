@@ -3,7 +3,6 @@
 """Opt-in robust LONG ACK selection on accepted, keyed source packets."""
 
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +14,7 @@ from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
 from hfmodem.shrike.p4turn import Proposal, State
 from hfmodem.shrike.p4receiver import Kind, Registered, RegisteredObservation
 from hfmodem.tests.shrike.test_p4turn import FS, ack_frame, machine, propose_ack
+from hfmodem.tests.evidence import CAPTURES
 
 
 def opening(turn):
@@ -158,10 +158,7 @@ def test_ve3kpg_normal_c1_copies_stay_v27():
 
 
 def test_k4msu_recorded_long_crc_and_identity():
-    root = Path(__file__).resolve().parents[5]
-    path = root / 'captures/onair-1002-2150/stream.flac'
-    if not path.exists():
-        path = root.parents[2] / 'captures/onair-1002-2150/stream.flac'
+    path = CAPTURES / 'onair-1002-2150/stream.flac'
     if not path.exists():
         pytest.skip('K4MSU recording absent')
     audio = session.load_wav(str(path), FS)

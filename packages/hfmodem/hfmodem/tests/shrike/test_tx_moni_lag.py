@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from hfmodem.shrike import pactor1
+from hfmodem.tests.evidence import CAPTURES
 
 TOOL = Path(__file__).resolve().parents[5] / 'tools' / 'tx_moni_lag.py'
 if not (TOOL).exists():
@@ -250,11 +251,8 @@ def test_recorded_p4_arm_emission_and_ptt_pin(monkeypatch):
         bursts.append((audio.copy(), tx.tx_audio_start))
 
     monkeypatch.setattr(Tx, '_tx', remember)
-    root = next((p for p in Path(__file__).resolve().parents
-                 if (p / 'captures/onair-0930-2028/p4-probe.json').exists()), None)
-    if root is None:
+    if not (CAPTURES / 'onair-0930-2028/p4-probe.json').exists():
         pytest.skip('local recorded P4 arm 0930-2028 absent')
-    monkeypatch.setattr(recorded, 'ROOT', root)
     recorded.replay('2028', end=40.3)
     assert bursts
     trace = emission_trace(monkeypatch, bursts)

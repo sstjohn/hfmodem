@@ -329,13 +329,13 @@ class SiteBuild(unittest.TestCase):
         text = (build.ROOT / 'site/index.html').read_text()
         modes = text.split('<section id="modes"', 1)[1].split('</section>', 1)[0]
         results = text.split('<section id="results"', 1)[1].split('</section>', 1)[0]
-        self.assertIn('PACTOR-1/2/3, VARA and ARDOP are beta. Lanner’s RTTY/SITOR-B/NAVTEX modes, voice and CW are alpha. PACTOR-4 and all other modes are experimental.', modes)
+        self.assertIn('PACTOR-1, PACTOR-3, VARA and ARDOP are beta. Lanner’s RTTY/SITOR-B/NAVTEX modes, voice and CW are alpha. PACTOR-2, PACTOR-4 and all other modes are experimental.', modes)
         for bird in ('shrike', 'kestrel', 'besra'):
             self.assertIn(bird+' · beta', modes)
         for bird in ('lanner', 'macagua + merlin'):
             self.assertIn(bird+' · alpha', modes)
         comparison = (build.ROOT / 'docs/viz/flock-compared.html').read_text()
-        self.assertIn('shrike · beta · P4 experimental', comparison)
+        self.assertIn('shrike · beta · P2 and P4 experimental', comparison)
         self.assertIn('kestrel · beta', comparison)
         self.assertIn('besra · beta', comparison)
         for bird in ('sabir', 'brubru', 'bateleur'):
@@ -385,7 +385,7 @@ class SiteBuild(unittest.TestCase):
                 for item in value:
                     yield from references(item)
 
-        for route in ('pactor3-mail', 'pactor3-send', 'pactor3-receive', 'vara-send', 'vara-receive',
+        for route in ('pactor3-long', 'pactor3-send', 'pactor3-receive', 'vara-send', 'vara-receive',
                       'ardop-send', 'ardop-receive'):
             page = build.ROOT / 'site/examples' / route
             data = page / 'data'
@@ -478,8 +478,10 @@ class SiteBuild(unittest.TestCase):
             self.assertIn(f'href="#evidence-{name}"', home)
         self.assertIn('href="examples/vara-send/?t=60"', home)
         self.assertIn('js/evidence-widget.mjs', home)
-        for heading in ('vara', 'pactor', 'ardop'):
+        for heading in ('pactor', 'vara', 'ardop'):
             self.assertIn(f'id="{heading}"', index)
+        self.assertLess(index.index('id="pactor"'), index.index('id="vara"'))
+        self.assertLess(index.index('id="vara"'), index.index('id="ardop"'))
 
     def test_curated_logbook_roles_speeds_and_legacy_routes(self):
         expected = {'vara-send': ('L9', 'NS0A', 9),

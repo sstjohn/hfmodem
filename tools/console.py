@@ -545,6 +545,7 @@ def main(argv=None):
     by `arm.fly` on its way out; this is the one line that covers every other
     place an interrupt can land, and the status a shell reads as interrupted.
     """
+    claim.hardware.reserve()
     try:
         return run(argv)
     except KeyboardInterrupt:

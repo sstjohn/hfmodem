@@ -269,6 +269,9 @@ class Converter:
             if p.is_relative_to(self.out):
                 continue
             r = recorded(*version(p))
+            if not r.get('call'):
+                self.skip('arm with no peer callsign', p)
+                continue
             found.append(dict(protocol=r['arm'].split('-', 1)[0], base=r['call'].upper().split('-')[0],
                               centre=r.get('centre_hz'), started=datetime.fromisoformat(r['started_utc']),
                               arm=r['arm'], dir=p.parent, capture_id=r.get('capture_id'), registry_sha256=r.get('registry_sha256')))
@@ -325,7 +328,11 @@ class Converter:
             key = version(path)
             digest, text = transcript(*key)
             from hfmodem.core.capture_identity import evidence_reference
-            identity = evidence_reference(path)
+            try:
+                identity = evidence_reference(path)
+            except FileNotFoundError:
+                self.skip('capture directory missing', path)
+                continue
             if identity['status'] == 'bound':
                 if identity['kind'] != 'arm':
                     self.skip('registered non-arm evidence', path)

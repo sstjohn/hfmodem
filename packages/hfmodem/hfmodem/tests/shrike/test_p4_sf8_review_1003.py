@@ -113,8 +113,8 @@ def test_playback_rechecks_same_deadline_at_actual_play(monkeypatch, stage):
     clock, played, keys = [0.], [], []
     monkeypatch.setattr(ota, '_warm_output',
                         lambda _: clock.__setitem__(0, 2. if stage == 'warmup' else 0.))
-    monkeypatch.setattr(ota.time, 'sleep',
-                        lambda _: clock.__setitem__(0, 2. if stage == 'settle' else 0.))
+    monkeypatch.setattr(ota, 'time', SimpleNamespace(
+        monotonic=monotonic, sleep=lambda _: clock.__setitem__(0, 2. if stage == 'settle' else 0.)))
     monkeypatch.setattr(ota, 'play_drained', lambda *a: played.append(True))
     rig = SimpleNamespace(ptt=lambda value: keys.append(value), stop=lambda: None)
     if stage == 'none':

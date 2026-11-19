@@ -3,7 +3,7 @@
 # Implementation evidence
 
 Results for hfmodem's data, linking and text modes.
-PACTOR-1/2/3, VARA and ARDOP are beta. Lanner’s RTTY/SITOR-B/NAVTEX modes, voice and CW are alpha. PACTOR-4 and all other modes are experimental.
+PACTOR-1, PACTOR-3, VARA and ARDOP are beta. Lanner’s RTTY/SITOR-B/NAVTEX modes, voice and CW are alpha. PACTOR-2, PACTOR-4 and all other modes are experimental.
 RF reception, gateway transfers, independent bench decodes and simulations
 are identified separately.
 
@@ -24,8 +24,10 @@ Four messages also received through KB5LZK over PACTOR-1, with a normal session 
 | PACTOR-3 payload prefixes decoded at all six speed levels | Reference decoder over virtual audio; idle/CR normalization, wider lock search at SL1/2 | Bench record |
 | PACTOR-3 grants and entry packets received | Station summary of 68 attempts: four reached a grant and two reached a grant plus a decoded entry packet. Separate 40 m and 80 m records contain banner and packet payload fragments | Station logs |
 
-PACTOR-3 mail transfer is demonstrated in both directions through WS8EOC and
-K4MSU. The K4MSU session sent and received a message and closed normally.
+hfmodem sent and received PACTOR-3 mail through K4MSU and VE3KPG, and received
+mail through WS8EOC. The K4MSU session sent and received a message and closed
+normally. The VE3KPG session moved mail both ways in long-cycle packets and
+closed normally.
 The outbound body acceptance and inbound saved message establish mail transfer;
 a confirmed PACTOR link shutdown is a separate result. Reliability across
 gateways remains open. PACTOR-2 evidence is at the bench
@@ -33,7 +35,7 @@ level. The association between status-byte bits 4–5 and a PACTOR-3 grant is an
 inference from two gateways; see
 [capability negotiation](protocols/pactor/pactor-capability.md).
 
-Recorded PACTOR-3 sessions with [K4MSU](../evidence/pactor3-k4msu-1114/README.md),
+Recorded PACTOR-3 sessions with [VE3KPG](../evidence/pactor3-ve3kpg-1116/README.md),
 [VE1YZ](../evidence/pactor3-ve1yz-0924/README.md)
 and [WS8EOC](../evidence/pactor3-ws8eoc-1003/README.md) are in the evidence index.
 
@@ -204,8 +206,8 @@ tone-pair acquisition through a receive audio passband up to 4 kHz.
 The tests cover code tables, local audio round trips, offset/noise and
 time-diversity behavior, chunked reception and bulletin parsing. Those tests
 establish software behavior; no named independent on-air Lanner decode is
-claimed here. SITOR-A ARQ and a two-way Lanner console terminal are not provided
-by these monitor commands.
+claimed here. `console rtty qso` is a two-way RTTY terminal in which the operator
+keys every over. SITOR-A ARQ is not provided.
 
 [Implementation and limits](implementation/sitor/README.md) ·
 [Passive monitoring](console-monitor.md)

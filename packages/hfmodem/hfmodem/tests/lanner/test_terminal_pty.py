@@ -40,7 +40,7 @@ pytestmark = [pytest.mark.posix_only('drives the bash launcher through a pty'),
 ARM = r'''
 set -euo pipefail
 MYCALL=W9SSJ; AUDIO_IN=codec; AUDIO_OUT=codec; PTT_PORT="$STUB/ptt"; RIG_NAME=ftdx10
-RIG_MODE=PKTUSB; MODEL=1; VENV="$STUB"; REPO="$STUB"
+RIG_MODE=PKTUSB; MODEL=1; RIGCTLD_PORT=14533; VENV="$STUB"; REPO="$STUB"
 die()              { printf '!! %s\n' "$*" >&2; exit 1; }
 say()              { :; }
 require_cat()      { :; }

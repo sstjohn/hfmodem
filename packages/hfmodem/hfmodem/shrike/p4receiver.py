@@ -11,7 +11,8 @@ from time import monotonic
 import numpy as np
 from . import p4oracle, p4words, p4robusttx, p4rx, p4shorttx, p4chirprx, p4short, p4chirp, p4robustrx, p4sf8rx, p4long, p4longtx, p4frame
 from . import p4shortlevels, p4longdecode, p4longrates, p4coding
-from .p4observation import Kind, Observation, Registered, RegisteredObservation, RESPONSE_S, WORD_HORIZON_S
+from .p4observation import (Kind, Observation, PEER_WORD_CFO_HZ, Registered, RegisteredObservation,
+                            RESPONSE_S, WORD_HORIZON_S)
 
 WORD_SLACK_S = .035
 SCAN_WINDOW_S = 1.25
@@ -181,6 +182,7 @@ class P4Receiver:
         self.capture_gaps = []
         self.acked_counter = None
         self.normal_deadline = None
+        self.probes_pending = False
         self.sf8_deadline = None
         self.long_deadline = None
         self._long_jobs = {}
@@ -1064,7 +1066,23 @@ class P4Receiver:
             return RegisteredObservation(obs, outcome, old, answer)
         return RegisteredObservation(obs, outcome)
 
+    def _off_lock(self, obs):
+        """A word whose carrier sits away from the locked peer cannot move the lock.
+
+        Peer words on the 11-14..11-17 tapes sit within 3.7 Hz of the peer's
+        packets. K4MSU 1116 137.855-171.602: V27s 111-114 Hz off it took the
+        lock, and every later scan centred there."""
+        if obs.kind != Kind.WORD or not self._body_carrier_known or self.cfo_hz is None:
+            return False
+        carrier = obs.cfo_hz - p4words.CARRIER_HZ.get(obs.word, 0.)
+        return abs(carrier - self.cfo_hz) > PEER_WORD_CFO_HZ
+
     def _emit(self, obs, result):
+        off_lock = self._off_lock(obs)
+        if off_lock:
+            self.live_events.append(dict(event='off-lock word', at=obs.stream_sample,
+                                         word=obs.word, cfo_hz=round(obs.cfo_hz, 2),
+                                         lock_hz=round(self.cfo_hz, 2)))
         reg = self.register(obs)
         if reg.outcome != Registered.DUPLICATE:
             result.append(reg)
@@ -1080,6 +1098,9 @@ class P4Receiver:
         if obs.kind == Kind.NORMAL and obs.frame is None:
             if self.clock and abs(obs.stream_sample-self.clock.next_due) < self.fs//10:
                 self.clock.misses = 0
+            return
+        if off_lock:
+            # An alias or another station's word: registered, but never the lock.
             return
         if (not obs.provisional or self.breakin and obs.word == "Y27"
                 or self.hold is not None and obs.kind == Kind.WORD
@@ -1294,6 +1315,31 @@ class P4Receiver:
                 self.clock.next_due = packet_due
             else:
                 self.clock.expects = Expect.WORD
+        return result
+
+    def read_repeat_answer(self, audio, origin):
+        """KO4HJO 1117 30.358: the gateway answered our opening repeat word with
+        V27 at word + RESPONSE_S each cycle, off the Y27 raster our clock holds."""
+        em = self.last_emission
+        if self.clock is None or em is None or em.kind != Kind.WORD or em.role != Role.IRS:
+            return []
+        cycle = round(1.25*self.fs)
+        first = em.stream_sample + round(RESPONSE_S*self.fs)
+        at = first + (origin + len(audio) - round(.300*self.fs) - first)//cycle*cycle
+        if at < origin or any(not o.provisional and abs(o.stream_sample-at) < self.fs//10
+                              for o in self.observations):
+            return []
+        args = (audio, self.fs, origin, (at-origin)/self.fs)
+        kwargs = dict(slack_s=.035, expected_words=self.expected_words,
+                      gaps=self._gaps(audio, origin), whole=True, diagnostics=self.live_events)
+        obs = p4oracle.word_at(*args, **kwargs, cfo_hz=self.clock.cfo_hz)
+        result = []
+        if (obs is not None and obs.word == 'V27' and not obs.provisional
+                and not obs.weak and not obs.unexpected):
+            due, expects = self.clock.next_due, self.clock.expects
+            self._emit(obs, result)
+            # The Y27 raster still owns the unread body's repeat.
+            self.clock.next_due, self.clock.expects = due, expects
         return result
 
     def _ladder_word(self, obs, end):
@@ -2488,6 +2534,7 @@ class P4Receiver:
         long_coherence = None
         sf8_candidate, sf8_tried = None, False
         chirp_prefix_available = True
+        normal_head = None
         if self.clock and self.clock.expects == Expect.PACKET:
             begin = max(0, self.clock.next_due-round(.5*fs)-origin)
             end = max(0, self.clock.next_due+round(3.355*fs)-origin)
@@ -2539,6 +2586,20 @@ class P4Receiver:
                 sf8_tried = True
                 if sf8_candidate is not None and sf8_candidate.frame is not None:
                     return sf8_candidate
+            if self.clock.cycle_s == 1.25 and self._normal_eligible():
+                # K4SPB 1117 28.516: the robust and chirp probes spent the
+                # normal's decode allowance on a slot a normal answers. Decode
+                # it first; only its CRC outranks them, since a weak robust
+                # short (2031 64.754) can place as a normal.
+                normal_head = p4oracle.placed_despread(audio, fs, onset, self.clock.cfo_hz)[0]
+                if normal_head < p4oracle.ROBUST_FRACTION_KNEE:
+                    self.probes_pending = True
+                    try:
+                        early_normal = self._normal(audio, origin)
+                    finally:
+                        self.probes_pending = False
+                    if early_normal is not None and early_normal.frame is not None:
+                        return early_normal
             field = p4oracle.robust_at(audio, fs, onset, self.clock.cfo_hz)
             knee = p4oracle.coherence_knee(field['p4_walsh_peak'], p4oracle.ROBUST_FRACTION_KNEE)
             self.packet_read = dict(
@@ -2650,8 +2711,10 @@ class P4Receiver:
                 if origin+len(audio) >= origin+first+round(p4chirp.PACKET_S*fs):
                     self._reject_chirp_header(origin+first)
         if self._normal_eligible():
-            head = p4oracle.placed_despread(audio, fs, onset, self.clock.cfo_hz)[0]
+            head = (p4oracle.placed_despread(audio, fs, onset, self.clock.cfo_hz)[0]
+                    if normal_head is None else normal_head)
             if head < p4oracle.ROBUST_FRACTION_KNEE:
+                # A second call continues the decode, now to the key's own deadline.
                 normal = self._normal(audio, origin)
                 if normal is not None:
                     return normal

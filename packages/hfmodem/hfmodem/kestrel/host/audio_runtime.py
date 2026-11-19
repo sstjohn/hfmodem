@@ -7,6 +7,8 @@ import queue
 import time
 import threading
 
+from hfmodem.core.waits import wait_until
+
 from .vara_modem import VaraHostModem
 from .modem_core import ModemObserver
 from ..rx.receive_context import ReceiveContext
@@ -46,7 +48,8 @@ class RetuneRequest:
         self._lock = threading.Lock()
 
     def cancel(self, *, timeout=-1):
-        if not self._lock.acquire(timeout=timeout):
+        if not (self._lock.acquire() if timeout < 0 else
+                wait_until(lambda r: self._lock.acquire(True, r), time.monotonic() + timeout)):
             raise TimeoutError('Receiver retune cancellation timed out')
         try:
             if self.done:
@@ -300,7 +303,8 @@ class AudioHostRuntime:
             if start is None:
                 hs.on_rx_audio(burst)
             else:
-                hs.on_rx_audio(burst, sample_start=start)
+                hs.on_rx_audio(burst, sample_start=start,
+                               backlog=getattr(self.transport, 'burst_backlog', 0))
         if self._service_retune():
             return
         active = getattr(self.transport, 'channel_active', None)

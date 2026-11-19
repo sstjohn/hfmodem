@@ -3,23 +3,21 @@
 """D6: a complete Walsh word survives weak spreading and header polarity."""
 import json
 from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-from hfmodem.tests.evidence import require_input
+from hfmodem.tests.evidence import CAPTURES, require_input
 from hfmodem.shrike import p4oracle, p4robusttx, session
 from hfmodem.shrike.p4receiver import Clock, Emission, Expect, Kind, P4Receiver, Role
 
-ROOT = Path(__file__).resolve().parents[5]
 FS = 48000
 
 
 @lru_cache(maxsize=3)
 def capture(arm):
     arm = arm if len(arm) > 4 else '0930-' + arm
-    path = ROOT / 'captures' / f'onair-{arm}' / 'stream.flac'
+    path = CAPTURES / f'onair-{arm}' / 'stream.flac'
     require_input(path)
     return session.load_wav(str(path), FS)
 
@@ -94,7 +92,7 @@ def test_2202_turn_two_header_is_b(at):
 
 @pytest.mark.parametrize('arm,count', [('2202', 5), ('2229', 8)])
 def test_recorded_unknown_headers_keep_the_measured_flag_and_header_knee(arm, count):
-    probe = json.loads(require_input(ROOT / 'captures' / f'onair-0930-{arm}' / 'p4-probe.json').read_text())
+    probe = json.loads(require_input(CAPTURES / f'onair-0930-{arm}' / 'p4-probe.json').read_text())
     rows = {r['onset_sample']: r for r in probe['heard']
             if r.get('kind') == 'short' and r.get('header') == '?'}
     assert len(rows) == count

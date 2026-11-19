@@ -1285,14 +1285,15 @@ def test_keyup_timeout_keeps_ownership_until_late_key_is_contained(bench):
     bench.rig.key_gate = threading.Event()
     lease = lease_of(bench)
     thread, result = background(lease.__enter__)
-    assert bench.rig.entered.wait(1)
+    # These waits return on the event; their bounds only stop a hang.
+    assert bench.rig.entered.wait(10)
     lease._flight.key_started -= 2
-    assert bench.rig.panicked.wait(1.5)
+    assert bench.rig.panicked.wait(10)
     assert bench._owner is lease
     bench.rig.key_gate.set()
     joined(thread)
     assert isinstance(result[0], Exception)
-    assert lease._flight.drained.wait(1)
+    assert lease._flight.drained.wait(10)
     assert not bench.rig.keyed and bench._owner is None
 
 

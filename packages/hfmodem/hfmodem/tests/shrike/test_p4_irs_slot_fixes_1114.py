@@ -14,7 +14,7 @@ from scipy.io import wavfile
 
 from hfmodem.core import wav
 from hfmodem.shrike import onair, p4host, p4turn
-from hfmodem.tests.evidence import RECORD, require_input
+from hfmodem.tests.evidence import OPERATOR_DATA, require_input
 from hfmodem.tests.shrike.test_p4_arm_replay_1112 import declared, preset
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Stream, Tx
 
@@ -44,11 +44,11 @@ def tape(capture):
     return audio
 
 
-def replay(name, *, read_window=.004, fail_at=None, queued=None, **options):
-    key = (name, read_window, fail_at, queued, tuple(sorted(options.items())))
+def replay(name, *, read_window=.004, read_partial=.003, fail_at=None, queued=None, **options):
+    key = (name, read_window, read_partial, fail_at, queued, tuple(sorted(options.items())))
     if key in _cache:
         return _cache[key]
-    capture = RECORD / 'operator-data/captures' / CAPTURES[name]
+    capture = OPERATOR_DATA / 'captures' / CAPTURES[name]
     recorded = json.loads(require_input(capture / 'p4-probe.json').read_text())
     audio = tape(capture)
     intervals = [(e['audio_start'], e['audio_end']) for e in recorded['emissions']]
@@ -93,7 +93,7 @@ def replay(name, *, read_window=.004, fail_at=None, queued=None, **options):
         return part
 
     stream.take_until = feed
-    for method, cost in (('read_partial', .003), ('read_window', read_window)):
+    for method, cost in (('read_partial', read_partial), ('read_window', read_window)):
         read = getattr(rx, method)
 
         def timed(*args, _read=read, _cost=cost, **kwargs):

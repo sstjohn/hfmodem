@@ -6,6 +6,7 @@ import pytest
 from hfmodem.shrike import onair, p4turn
 from hfmodem.shrike.p4receiver import Clock, Expect, Kind, Observation
 from hfmodem.tests.shrike.test_p4_link_0927 import FS, Stream, Tx
+from hfmodem.tests.evidence import CAPTURES
 
 
 def exchange(monkeypatch, *, offset=0., established=False, short=False):
@@ -72,8 +73,7 @@ def test_recorded_long_repeats_reach_their_own_driver_deadlines(monkeypatch, cos
     # Only the declared read charge advances this replay's sample clock.
     monkeypatch.setattr(p4longdecode, '_python_step_seconds', lambda *args: 0.)
     monkeypatch.setattr(p4longdecode, '_python_check_seconds', lambda _: 0.)
-    from pathlib import Path
-    path = Path.cwd()/'captures/onair-0929-0121/stream.flac'
+    path = CAPTURES/'onair-0929-0121/stream.flac'
     if not path.exists():
         pytest.skip('local VE3KPG long recording absent')
     audio = onair.session.load_wav(str(path), FS)

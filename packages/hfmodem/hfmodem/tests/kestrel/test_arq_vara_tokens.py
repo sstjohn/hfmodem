@@ -25,6 +25,7 @@ from hfmodem.kestrel.arq.modem import AudioChannel, KestrelModem
 from hfmodem.kestrel.host.server import VaraServer
 from hfmodem.tests.kestrel import turns_evidence as E
 from hfmodem.tests.kestrel.corpora import harness
+from hfmodem.tests.kestrel.host_lines import seen
 from hfmodem.kestrel.vara import vara_control as vc
 
 Transcript = harness("transcript").Transcript
@@ -74,7 +75,7 @@ def run_vara_session(payload: bytes, bandwidth: str = "500"):
         B.set_bandwidth(bandwidth); A.set_bandwidth(bandwidth)
         qB = B.subscribe(); B.listen(True)
         assert A.connect("BBBB2", timeout=60.0, p2p=True), "A did not reach CONNECTED"
-        assert B.wait_for("CONNECTED", timeout=30.0), "B host never got CONNECTED"
+        assert seen(qB, "CONNECTED", timeout=30.0), "B host never got CONNECTED"
         B.unsubscribe(qB)
         A.send_data(payload, label="vara")
         received = B.recv_data(len(payload), timeout=180.0)

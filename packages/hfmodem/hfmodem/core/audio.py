@@ -83,6 +83,7 @@ import numpy as np
 
 from hfmodem.core import gil, levels, rates, resample
 from hfmodem.core.operations import LeaseTimeout, OperationGate, leased
+from .waits import join, wait_until
 
 CARD_RATE_HZ = rates.CARD_RATE_HZ
 
@@ -434,7 +435,8 @@ class _RemovableLane:
         return invoke
 
     def retire(self, timeout):
-        acquired = self._lock.acquire() if timeout is None else self._lock.acquire(timeout=max(0, timeout))
+        acquired = self._lock.acquire() if timeout is None else wait_until(
+            lambda r: self._lock.acquire(True, r), time.monotonic() + max(0, timeout))
         if not acquired:
             raise TimeoutError('audio subscription callback still pending')
         try:
@@ -1123,8 +1125,7 @@ class StationAudio:
 
             self._close_thread = threading.Thread(target=close, name="station-audio-close", daemon=True)
             self._close_thread.start()
-        self._close_thread.join(max(0, deadline - time.monotonic()))
-        if self._close_thread.is_alive():
+        if not join(self._close_thread, deadline):
             raise LeaseTimeout("station audio did not close")
         if self._close_errors:
             raise AudioError(f"station audio close failed: {self._close_errors[0]}")

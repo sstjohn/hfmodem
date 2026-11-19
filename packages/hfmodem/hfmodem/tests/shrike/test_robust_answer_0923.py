@@ -326,7 +326,8 @@ def test_p4_robust_keys_the_robust_short_packets(tmp_path, monkeypatch):
     first = after[after.index('TX['):].splitlines()[0]
     assert 'P4 PROBE ROBUST 1/3 v=6 hdr=A' in first
     probe = json.loads((tmp_path/'out'/'p4-probe.json').read_text())
-    assert [e['value'] for e in probe['emissions']] == [6,9,8]
+    # The scripted peer repeats its answer every slot: the opening holds on v6/A.
+    assert [e['value'] for e in probe['emissions']] == [6,6,6]
     assert [e['header'] for e in probe['emissions']] == ['A']*3
     slots = [e['slot'] for e in probe['emissions']]
     calls = [slot for slot, what, _ in keyed if what.startswith('connect')]

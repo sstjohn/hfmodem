@@ -526,6 +526,43 @@ supervised contact; Enter approves each transmitted over. Voice requires local
 speech models and a speech runtime. `hfmodem console voice test` uses the
 computer's microphone and speakers without the radio.
 
+Both modes use the same `[voice]` language settings. By default,
+`language_backend = "local"` starts llama.cpp with `language_model` pointing to
+a local GGUF file. To use OpenAI API credits, add these settings to your station
+TOML (merge them into an existing `[voice]` section):
+
+```toml
+[voice]
+language_backend = "openai"
+language_base_url = "https://api.openai.com/v1"
+language_model = "gpt-4.1-mini"
+language_api_key_env = "OPENAI_API_KEY"
+```
+
+Set `OPENAI_API_KEY` in the environment of the process launching hfmodem. The
+configuration stores only the environment variable's name; the key is not
+written to session provenance. Use a model available to your API project that
+supports Chat Completions and JSON mode. The client follows the
+[OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+
+For another OpenAI-compatible service, set `language_base_url` to its API base
+(including `/v1` when required, without `/chat/completions`) and
+`language_model` to its model ID. Set `language_api_key_env` to that service's
+key variable, or `""` for an unauthenticated server. The service must support
+`response_format = {"type": "json_object"}`. For older endpoints that only
+accept `max_tokens`, set `language_token_parameter = "max_tokens"`; the default
+is `"max_completion_tokens"`. `language_max_tokens` defaults to 2048 and
+`language_timeout_s` to 30. Increase the token limit if a reasoning model
+exhausts it before producing its reply. Requests are not automatically retried.
+
+Endpoint mode sends QSO text, station facts and recent dialogue to the selected
+service for extraction and reply drafting. It requires no local GGUF or
+llama.cpp process. Macagua still uses local speech recognition and synthesis;
+`--models` can supply those speech paths without replacing the endpoint model
+ID. Merlin (`--waveform cw`) needs no speech-model manifest. Operator approval
+and station-fact checks still apply. Experimental transmission marks,
+watermarks and the `channel` experiment require the local backend.
+
 ## VARA transmit calibration
 
 `hfmodem console vara txcal --band 40 --execute` transmits stepped audio drives

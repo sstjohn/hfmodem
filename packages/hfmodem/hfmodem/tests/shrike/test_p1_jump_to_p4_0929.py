@@ -14,7 +14,6 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-from pathlib import Path
 import sys
 
 import numpy as np
@@ -22,8 +21,9 @@ import pytest
 
 from hfmodem.shrike import onair, p4probe, pactor1
 from hfmodem.tests.shrike.test_p1_robust_0926 import FS, PACKET_N, SLOT_N
+from hfmodem.tests.evidence import CAPTURES
 
-STREAM = Path(__file__).resolve().parents[5] / 'captures/onair-0929-2208/stream.flac'
+STREAM = CAPTURES / 'onair-0929-2208/stream.flac'
 # The peer's CS1 onsets as the arm's grid read them, 4.86 s to 16.11 s.
 BURSTS = (233034, 293178, 353108, 413082, 473130, 533226, 593130, 653034,
           713226, 773082)

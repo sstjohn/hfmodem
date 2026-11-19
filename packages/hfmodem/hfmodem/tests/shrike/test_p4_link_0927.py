@@ -10,6 +10,7 @@ from hfmodem.shrike import arq, onair, p4breakintx
 from hfmodem.shrike.p4probe import EntryProbe
 from hfmodem.shrike.p4receiver import P4Receiver
 from hfmodem.tests.shrike.test_p4turn import IO
+from hfmodem.tests.evidence import CAPTURES
 
 FS = 48000
 
@@ -256,10 +257,9 @@ def test_driver_preserves_peer_sample_positions_when_transmit_flushes(first):
 
 
 def test_ve3kpg_recording_keeps_answers_after_our_transmissions():
-    from pathlib import Path
     import json
 
-    capture = Path(__file__).resolve().parents[5] / "captures/onair-0928-0943"
+    capture = CAPTURES / "onair-0928-0943"
     if not (capture / "stream.flac").exists():
         pytest.skip("local VE3KPG flight recording absent")
     audio = onair.session.load_wav(str(capture / "stream.flac"), FS)
@@ -320,9 +320,8 @@ def test_robust_packet_after_three_flushed_word_keys_keeps_its_noise_floor():
 @pytest.mark.parametrize('arm,end', [('1151', 30.8), ('2200', 32.1)])
 def test_normal_ack_driver_policy_and_keyed_reason(policy, expected, arm, end):
     import json
-    from pathlib import Path
 
-    capture = Path(__file__).resolve().parents[5] / f'captures/onair-0929-{arm}'
+    capture = CAPTURES / f'onair-0929-{arm}'
     if not (capture / 'stream.flac').exists():
         pytest.skip(f'local WS8EOC {arm} recording absent')
     audio = onair.session.load_wav(str(capture / 'stream.flac'), FS)[:round(end*FS)]

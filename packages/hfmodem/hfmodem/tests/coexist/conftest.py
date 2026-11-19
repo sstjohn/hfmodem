@@ -24,6 +24,9 @@ from .oracle import Evidence, read_events
 
 TREE = Path(__file__).resolve().parents[5]
 HERE = Path(__file__).resolve().parent
+# A barrier wait only bounds a hang; no row asserts a barrier stays unreached.
+# WSL2 reaches some barriers in over 21 s under -n 4, and macOS in under 5 s.
+BARRIER_WAIT = 60
 
 
 def pytest_configure(config):
@@ -161,8 +164,8 @@ class Harness:
             raise ValueError('invalid barrier name')
         (self.barriers / point).touch()
 
-    def reached(self, point, timeout=5, *, quiescent=False):
-        deadline = time.monotonic() + timeout
+    def reached(self, point, *, quiescent=False):
+        deadline = time.monotonic() + BARRIER_WAIT
         while not (self.barriers / (point + '.reached')).exists():
             if time.monotonic() >= deadline:
                 raise TimeoutError(f'barrier not reached: {point}')

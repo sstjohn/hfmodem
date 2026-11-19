@@ -641,6 +641,8 @@ class Logbook:
         entries += (self.qso(r, program) for r, program in imported(paths)[0])
         out = []
         for e in entries:
+            if not e['call']:
+                continue  # a session that never named its peer is not a contact
             e = dict(e, answered=bool(set(e['reached']) - OURS))
             if not e['grid']:
                 e['grid'], qth = grids.get(e['call'].upper()) or grids.get(e['call'].split('-')[0].upper()) or (None, None)

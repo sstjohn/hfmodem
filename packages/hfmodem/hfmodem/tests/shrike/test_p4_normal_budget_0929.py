@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -9,8 +8,8 @@ import pytest
 from hfmodem.shrike import p4frame, p4shorttx, session
 from hfmodem.shrike.p4hold import BreakinHold
 from hfmodem.shrike.p4receiver import Clock, Expect, P4Receiver
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 FS = 48000
 
 
@@ -34,7 +33,7 @@ def test_fresh_normal_crc_fits_thirty_ms_even_after_a_slow_full_decode():
 
 @pytest.mark.parametrize('at,status', [(37.247, 1), (39.747, 2), (42.247, 2), (139.749, 2)])
 def test_ws0939_fresh_copy_decodes_inside_its_recorded_allowance(at, status):
-    path = ROOT/'captures/onair-0929-0939/stream.flac'
+    path = CAPTURES/'onair-0929-0939/stream.flac'
     if not path.exists():
         pytest.skip('local WS8EOC 0939 recording absent')
     audio = session.load_wav(str(path), FS)

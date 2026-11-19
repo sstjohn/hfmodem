@@ -15,6 +15,8 @@ instant is when the gate hands the bracket back.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 
 from hfmodem.kestrel.arq import phy as _phy
@@ -87,10 +89,12 @@ def test_a_burst_nothing_names_still_opens_the_turnaround():
     assert len(_requests(io)) == 1, io.msgs
 
 
-def test_a_lost_ask_is_asked_again_at_the_next_idle():
+def test_a_lost_ask_is_asked_again_at_the_next_idle(monkeypatch):
     """This pinned one ask per owed ask until 2026-09-29. A VARA HF caller asks at
     every idle the callee keys while its queue waits, twelve in a row
     [see _owes_turn]."""
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(VA, "time", SimpleNamespace(monotonic=lambda: 1000.0))
     hs, io = _connected()
     _owed(hs, io)
     hs.on_rx_audio(MK.synth_burst(_CALLED, VF.SESSION_RESPONDER_IDLE))
@@ -110,7 +114,7 @@ def test_a_gate_still_open_at_the_bracket_holds_the_ask():
     assert len(_requests(io)) == 1, io.msgs
 
 
-def test_an_over_under_the_owed_ask_is_answered_and_not_also_asked_into():
+def test_an_over_under_the_owed_ask_is_answered_and_not_also_asked_into(monkeypatch):
     """One burst per turnaround, and the over's own answer is what goes in it.
 
     Every over of the peer's is acknowledged, the last one included: the release
@@ -121,6 +125,8 @@ def test_an_over_under_the_owed_ask_is_answered_and_not_also_asked_into():
     there rather than re-keying the ack (2026-09-29)
     [see `_reack_release`].
     """
+    # Freshness is aged by wall time spent decoding; a loaded host must not change the answer.
+    monkeypatch.setattr(VA, "time", SimpleNamespace(monotonic=lambda: 1000.0))
     hs, io = _connected()
     _owed(hs, io)
     hs.on_rx_audio(_their_over(b"y" * _phy.payload_size("2300"), 1))

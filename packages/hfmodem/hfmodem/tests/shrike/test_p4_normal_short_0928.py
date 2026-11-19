@@ -13,15 +13,15 @@ from hfmodem.shrike.p4observation import RegisteredObservation
 from hfmodem.shrike.p4turn import State
 from hfmodem.tests.shrike.test_p4turn import machine
 from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx, FS
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 RASTER = 1667751
 TEXT = b'119 daily minutes remaining with WS8EOC '
 FX = Path(__file__).parent/'fixtures'/'p4-breakin'
 
 
 def capture(name='stream.flac'):
-    p = ROOT/'captures/onair-0928-0951'/name
+    p = CAPTURES/'onair-0928-0951'/name
     if not p.exists():
         pytest.skip('local WS8EOC recording absent')
     return onair.session.load_wav(str(p), FS)
@@ -546,7 +546,7 @@ def test_combined_body_accepts_the_next_counter():
     h.acked_counter = 0
     h.members = [Copy(2400, 0, 0., 2., fields.copy())]
     h.last = 2400
-    path = ROOT/'captures/onair-0927-1544/stream.flac'
+    path = CAPTURES/'onair-0927-1544/stream.flac'
     if not path.exists():
         pytest.skip('local floor recording absent')
     audio = onair.session.load_wav(str(path), FS)[:round(1.1*FS)].copy()

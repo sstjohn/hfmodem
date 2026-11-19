@@ -33,6 +33,7 @@ else:
 
 from hfmodem.core import gil, wav
 from hfmodem.core.capture_identity import _absolute
+from .waits import join, wait_until
 
 _CLOSE_TIMEOUT = 30
 _WINDOWS = os.name == 'nt'
@@ -712,8 +713,7 @@ class ChildControlSender:
                     self._queue.append((self._fd, dict(op='close')))
                 self._closed = True
                 self._condition.notify()
-        self._thread.join(timeout=timeout)
-        if self._thread.is_alive():
+        if not join(self._thread, time.monotonic() + timeout):
             self.report('Recording child control close timed out: coverage lost')
 
 
@@ -893,7 +893,7 @@ class Lane:
         self.row = {'rate': rate, 'clock': clock, 'source_id': _id(), 'index_id': _id(),
                     'gaps': [], 'state': 'ongoing', 'position': 0}
 
-    def _mark_origin(self):
+    def _write_origin(self):
         if self.family is None or self.disabled:
             return
         origin = 'unknown' if self.origin is None else f'{self.origin:020d}'
@@ -902,15 +902,33 @@ class Lane:
             path.parent.mkdir(parents=True, exist_ok=True)
             facts = {k: self.row[k] for k in ('rate', 'clock', 'source_id', 'index_id')}
             facts['source'] = self.row.get('source', _relative(self.family, self.session._root))
-            with path.open('xb') as marker:
+            marker = path.open('xb')
+            try:
                 marker.write(json.dumps(facts).encode('utf-8'))
                 marker.flush()
+            except BaseException:
+                marker.close()
+                raise
+            return marker
+        except Exception as exc:
+            self._origin_failure(exc)
+
+    def _sync_origin(self, marker):
+        if marker is None:
+            return
+        path = Path(marker.name)
+        try:
+            with marker:
                 os.fsync(marker.fileno())
             for directory in (path.parent, path.parent.parent):
                 _sync_directory(directory)
         except Exception as exc:
+            self._origin_failure(exc)
+
+    def _origin_failure(self, error):
+        with self.session._state_lock:
             self.disabled = True
-            self.session._enqueue(lambda error=exc: self.session.report(f'Recording {self.name} origin: {error}'))
+        self.session._enqueue(lambda: self.session.report(f'Recording {self.name} origin: {error}'))
 
     def _clock(self, facts):
         # The caller holds the input lock. Producer facts outrank an owner's.
@@ -1058,7 +1076,8 @@ class Lane:
             if self.origin is None:
                 self.origin = first
                 self.consumed = first
-                self._mark_origin()
+                if self.family is not None and not self.disabled:
+                    rec._pcm.put(('origin', self), wake=False)
             if first < self.position:
                 rec._notice(self, 'overlap', f'Recording {self.name}: overlapping input dropped')
                 return
@@ -1091,7 +1110,7 @@ class Lane:
 
 
 class RecordingSession:
-    """One PCM drainer and one storage worker; producers persist lane origins."""
+    """One PCM drainer and one storage worker; producers queue lane origins."""
 
     # State -> input or job queue; neither takes state in return. Publication
     # is storage-only and never nests with state, input or the job queue.
@@ -1155,7 +1174,7 @@ class RecordingSession:
             finally:
                 finished.set()
         self._enqueue(run)
-        if not finished.wait(30):
+        if not wait_until(finished.wait, time.monotonic() + 30):
             raise TimeoutError('Recording storage operation timed out')
         if errors:
             raise errors[0]
@@ -1241,7 +1260,7 @@ class RecordingSession:
                 if ownership is None:
                     path = lane.family
                 lane.row['source'] = _relative(path, self._root)
-                lane._mark_origin()
+                lane._sync_origin(lane._write_origin())
             if self.policy == 'everything':
                 try:
                     lane.writer = self._writer(lane, path)
@@ -1392,6 +1411,12 @@ class RecordingSession:
             for item in self._pcm.take(_DRAIN_INTERVAL) + [None]:
                 if item is not None and item[0] == 'pcm':
                     pending.setdefault(item[1], []).append(item[2:])
+                    continue
+                if item is not None and item[0] == 'origin':
+                    lane = item[1]
+                    marker = lane._write_origin()
+                    if marker is not None:
+                        self._enqueue(lambda lane=lane, marker=marker: lane._sync_origin(marker))
                     continue
                 # Lanes are independent, so each lane's PCM is joined up to the
                 # next control item and the control item still sees all of it.
@@ -2352,9 +2377,7 @@ class RecordingSession:
         for child in self._child_controls:
             child.close()
         deadline = time.monotonic() + _CLOSE_TIMEOUT
-        def remaining():
-            return max(0, deadline - time.monotonic())
-        if not self._input_lock.acquire(timeout=remaining()):
+        if not wait_until(lambda r: self._input_lock.acquire(True, r), deadline):
             raise TimeoutError('Recording input close timed out')
         try:
             if self._closed:
@@ -2369,8 +2392,7 @@ class RecordingSession:
         finally:
             self._input_lock.release()
         if self.policy != 'off':
-            self._pcm_thread.join(timeout=remaining())
-            if self._pcm_thread.is_alive():
+            if not join(self._pcm_thread, deadline):
                 raise TimeoutError('Recording PCM close timed out')
             self._enqueue(self._pending)
         if hasattr(self, '_storage_thread'):
@@ -2382,13 +2404,12 @@ class RecordingSession:
                 finally:
                     finished.set()
             self._enqueue(finish)
-            if not finished.wait(remaining()):
+            if not wait_until(finished.wait, deadline):
                 raise TimeoutError('Recording pending storage timed out')
             with self._storage_condition:
                 self._storage_stop = True
                 self._storage_condition.notify()
-            self._storage_thread.join(timeout=remaining())
-            if self._storage_thread.is_alive():
+            if not join(self._storage_thread, deadline):
                 raise TimeoutError('Recording worker close timed out')
         self._closed = True
 

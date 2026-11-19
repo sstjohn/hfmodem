@@ -4,7 +4,6 @@
 """Recorded RMS deadlines and false CS3 evidence, without hardware I/O."""
 import json
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,8 +12,9 @@ from scipy.io import wavfile
 
 from hfmodem.shrike import arq, onair, p3acquire, rxfront, spec
 from hfmodem.tests.shrike.test_entry_answer import _Session
+from hfmodem.tests.evidence import CAPTURES
 
-CAP = Path(__file__).resolve().parents[5] / "captures/onair-0914-1731"
+CAP = CAPTURES / "onair-0914-1731"
 
 
 @pytest.fixture(scope="module")

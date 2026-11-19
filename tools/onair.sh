@@ -120,6 +120,7 @@ unset launcher_verb launcher_skip launcher_arg
 # run `rigctl` by name, and a build from source is on no machine's PATH. Shared
 # with the three unattended launchers, which answer to the same environment.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ports.sh"
+: "${RIGCTLD_PORT:?RIGCTLD_PORT unresolved: ports.sh did not provide it}"
 # The rig and the codec this station drives, `tune`, and the channel sense --
 # shared with the unattended launchers, which need the verified dial and the
 # same instrument held to a stricter rule.
@@ -905,7 +906,7 @@ gate_rx_level() {
 rig_power() {
   took daemon
   local dial="$1" level watts
-  level="$(printf '\\get_level RFPOWER\nq\n' | nc -w 3 127.0.0.1 4532 2>/dev/null | sed -n 1p || true)"
+  level="$(printf '\\get_level RFPOWER\nq\n' | nc -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null | sed -n 1p || true)"
   case "$level" in ''|*[!0-9.]*)
     level="$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" l RFPOWER 2>/dev/null | sed -n 1p || true)" ;;
   esac
@@ -914,7 +915,7 @@ rig_power() {
     return 0 ;;
   esac
   watts="$(printf '\\power2mW %s %s PKTUSB\nq\n' "$level" "$dial" \
-             | nc -w 3 127.0.0.1 4532 2>/dev/null | sed -n 1p || true)"
+             | nc -w 3 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null | sed -n 1p || true)"
   case "$watts" in ''|*[!0-9]*)
     watts="$(claim_native rigctl -P NONE -m "$MODEL" -r "$CAT_PORT" -s "$BAUD" 2 "$level" "$dial" PKTUSB \
                2>/dev/null | sed -n 1p || true)" ;;
@@ -1134,7 +1135,7 @@ vara)    # kestrel drives the keying line itself, the shape vara-mail proved.
   claim_run "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_connect.py" \
       --gateway "$gw" --mycall "$MYCALL" --bw "$bw" \
       --tx-device "$AUDIO_OUT" --rx-device "$AUDIO_IN" \
-      --rigctld 127.0.0.1:4532 --freq "$(printf '%d.%03d' "$(((centre - 1500) / 1000))" "$(((centre - 1500) % 1000))")" \
+      --rigctld "127.0.0.1:$RIGCTLD_PORT" --freq "$(printf '%d.%03d' "$(((centre - 1500) / 1000))" "$(((centre - 1500) % 1000))")" \
       --arm --expect-model "$RIG_EXPECT_MODEL" --ptt-device "$PTT_PORT" --line-ptt \
       $KEY_FORCE ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} \
       --run-dir "${RECORDING_DESTINATION:-$SESSION}" \
@@ -1160,7 +1161,7 @@ nothing after -- '${KEY_ARGS[0]}' would go nowhere"
   witness_start "$((centre - 1500))" "$gw"
   claim_pending modem
   claim_start "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.besra.host.run_server \
-      --radio "$RIG_NAME" --rigctld 127.0.0.1:4532 \
+      --radio "$RIG_NAME" --rigctld "127.0.0.1:$RIGCTLD_PORT" \
       --audio-in "$AUDIO_IN" --audio-out "$AUDIO_OUT" \
       --channel "$centre" --bandwidth "$bw" \
       --ptt-device "$PTT_PORT" --line-ptt --run-dir "${RECORDING_DESTINATION:-$SESSION}"
@@ -1207,7 +1208,7 @@ ardop-mail)  # A whole Winlink exchange over one held ARDOP link: run_server own
   rc=0
   claim_pending modem
   claim_run "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.besra.host.run_server \
-      --radio "$RIG_NAME" --rigctld 127.0.0.1:4532 \
+      --radio "$RIG_NAME" --rigctld "127.0.0.1:$RIGCTLD_PORT" \
       --audio-in "$AUDIO_IN" --audio-out "$AUDIO_OUT" \
       --channel "$centre" --bandwidth "$bw" \
       --ptt-device "$PTT_PORT" --line-ptt --run-dir "${RECORDING_DESTINATION:-$SESSION}" \
@@ -1242,7 +1243,7 @@ rpr-mail)
     esac
   done
   "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/rpr_mail.py" prepare \
-    "${HFMODEM_STATION:-$REPO/station.toml}" "$centre" "$SESSION" ${mail_args[@]+"${mail_args[@]}"}
+    "${HFMODEM_STATION:-$REPO/station.toml}" "$centre" "$SESSION" --rigctld-port "$RIGCTLD_PORT" ${mail_args[@]+"${mail_args[@]}"}
   echo "  captures: $SESSION (station.toml, capture-*/stream, tx_events.jsonl, mail/)"
   rpr_stop_bound=$("${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/rpr_mail.py" stop-bound \
     "$SESSION/station.toml" ${bound_args[@]+"${bound_args[@]}"})
@@ -1326,7 +1327,7 @@ vara-mail)   # The same exchange over a held VARA link. PTT does NOT go through 
   claim_run "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_connect.py" \
       --gateway "$gw" --mycall "$MYCALL" --bw "$bw" \
       --tx-device "$AUDIO_OUT" --rx-device "$AUDIO_IN" \
-      --rigctld 127.0.0.1:4532 --freq "$(printf '%d.%03d' "$(((centre - 1500) / 1000))" "$(((centre - 1500) % 1000))")" \
+      --rigctld "127.0.0.1:$RIGCTLD_PORT" --freq "$(printf '%d.%03d' "$(((centre - 1500) / 1000))" "$(((centre - 1500) % 1000))")" \
       --arm --expect-model "$RIG_EXPECT_MODEL" --ptt-device "$PTT_PORT" --line-ptt \
       $KEY_FORCE ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} \
       --run-dir "${RECORDING_DESTINATION:-$SESSION}" \
@@ -1369,7 +1370,7 @@ sabir)   # One-way beacon or prepared DATAGRAM proof; no peer reply is expected.
   rc=0
   claim_pending modem
   claim_run "${HFMODEM_PYTHON:-$VENV/python}" -m hfmodem.sabir.onair --transmit \
-      --radio "$RIG_NAME" --rigctld 127.0.0.1:4532 \
+      --radio "$RIG_NAME" --rigctld "127.0.0.1:$RIGCTLD_PORT" \
       --ptt-device "$PTT_PORT" --line-ptt \
       --channel "$centre" \
       --audio-in "$AUDIO_IN" --audio-out "$AUDIO_OUT" \
@@ -1402,6 +1403,7 @@ vara-chat)   # The attended VarAC session: the calling frequency in Hz, then the
   claim_pending modem
   claim_run "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/kestrel_host.py" --chat \
       --mycall "$MYCALL" --expect-model "$RIG_EXPECT_MODEL" \
+      --rigctld "127.0.0.1:$RIGCTLD_PORT" \
       --ptt-device "$PTT_PORT" --tx-device "$AUDIO_OUT" --rx-device "$AUDIO_IN" \
       "${chat_args[@]}" || rc=$?
   CLAIM_AFTER_DOWN=
@@ -1414,7 +1416,7 @@ vara-txcal)  # Stepped VARA drives with the meters read while keyed, on the dial
   require_hardware
   rigctld_start none
   if [ "$dial" = - ]; then
-    dial="$(printf '+\\get_freq\nq\n' | nc -w 5 127.0.0.1 4532 2>/dev/null \
+    dial="$(printf '+\\get_freq\nq\n' | nc -w 5 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null \
             | sed -n 's/^Frequency: //p' | head -1)"
   fi
   positional dial "$dial"
@@ -1428,6 +1430,7 @@ vara-txcal)  # Stepped VARA drives with the meters read while keyed, on the dial
   # A --session among the console's own arguments comes later and wins.
   claim_run "${HFMODEM_PYTHON:-$VENV/python}" "$REPO/tools/vara_txcal.py" \
       --mycall "$MYCALL" --expect-model "$RIG_EXPECT_MODEL" \
+      --rigctld "127.0.0.1:$RIGCTLD_PORT" \
       --ptt-device "$PTT_PORT" --tx-device "$AUDIO_OUT" --rx-device "$AUDIO_IN" \
       --session "$SESSION" "${@:3}" || rc=$?
   CLAIM_AFTER_DOWN=
@@ -1443,8 +1446,8 @@ rtty)    # Keyboard-to-keyboard RTTY, and the operator keys every over by hand. 
   require_hardware
   say "RTTY terminal as $MYCALL -- nothing transmits until you key"
   rigctld_start none
-  printf '+\\set_mode %s %s\nq\n' "$RIG_MODE" "$(mode_passband 3000)" | nc -w 5 127.0.0.1 4532 >/dev/null || true
-  mode="$(printf '+\\get_mode\nq\n' | nc -w 5 127.0.0.1 4532 2>/dev/null \
+  printf '+\\set_mode %s %s\nq\n' "$RIG_MODE" "$(mode_passband 3000)" | nc -w 5 127.0.0.1 "$RIGCTLD_PORT" >/dev/null || true
+  mode="$(printf '+\\get_mode\nq\n' | nc -w 5 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null \
           | sed -n 's/^Mode: //p' | head -1)"
   # The terminal owns the screen and this stderr goes only to arm.log, so the
   # warning also rides into the session, which holds it on its status line.
@@ -1455,7 +1458,7 @@ rtty)    # Keyboard-to-keyboard RTTY, and the operator keys every over by hand. 
     warn=(--warn "rig mode ${mode:-unread}, not $RIG_MODE")
   fi
   if [ "$dial" = - ]; then
-    dial="$(printf '+\\get_freq\nq\n' | nc -w 5 127.0.0.1 4532 2>/dev/null \
+    dial="$(printf '+\\get_freq\nq\n' | nc -w 5 127.0.0.1 "$RIGCTLD_PORT" 2>/dev/null \
             | sed -n 's/^Frequency: //p' | head -1)"
     case "$dial" in
       ''|*[!0-9]*) die "DIAL UNREAD -- the rig reported no frequency. Name the dial." ;;

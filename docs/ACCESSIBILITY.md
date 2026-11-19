@@ -12,7 +12,7 @@ Diagrams start paused. Use their Play controls to animate them, or read their te
 
 ## Recorded exchanges
 
-The [curated logbook](https://hfmodem.ssj.lol/examples/logbook/) contains six examples with separate send and receive records for VARA, PACTOR-3 and ARDOP. The session summary describes mail outcomes and evidence limits. In an inspector, use the section links to reach playback, frame inspection, event filters or signal measurements directly.
+The [curated logbook](https://hfmodem.ssj.lol/examples/logbook/) contains six examples with separate send and receive records for PACTOR-3, VARA and ARDOP. The session summary describes mail outcomes and evidence limits. In an inspector, use the section links to reach playback, frame inspection, event filters or signal measurements directly.
 
 Playback begins only when requested. Listen is optional. The recordings contain modem tones and radio noise rather than speech. Identified events describe timing, sender, modulation and decoding results; gaps indicate unidentified activity, not necessarily silence. Packet signal measurements have a text view and downloadable numerical data. The decoded-byte view can contain incomplete or compressed binary data; it is not a complete transcript or necessarily the original mail text.
 

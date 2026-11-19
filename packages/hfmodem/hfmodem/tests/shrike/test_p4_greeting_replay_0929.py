@@ -10,6 +10,7 @@ from hfmodem.shrike import p4frame, p4oracle, p4robustrx, session
 from hfmodem.shrike.p4host import P4Host
 from hfmodem.shrike.p4observation import Kind, Observation
 from hfmodem.winlink import B2FSession
+from hfmodem.tests.evidence import CAPTURES
 
 ROOT = Path(__file__).resolve().parents[5]
 GREETING = ROOT/'working/p4-normal-budget-0929/greeting-fields.json'
@@ -48,7 +49,7 @@ def test_nonoverlapping_continuation_and_exact_repeats_keep_b2f_greeting_intact(
 
 
 def test_local_1024_capture_contains_the_restarted_greeting_prefix():
-    path = ROOT/'captures/onair-0929-1024/stream.flac'
+    path = CAPTURES/'onair-0929-1024/stream.flac'
     if not path.exists():
         pytest.skip('local September29 1024 capture absent')
     recording = session.load_wav(str(path), 48000)

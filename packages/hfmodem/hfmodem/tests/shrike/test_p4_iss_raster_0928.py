@@ -4,13 +4,13 @@
 import numpy as np
 import pytest
 import json
-from pathlib import Path
 
 from hfmodem.shrike import onair
 from hfmodem.shrike.p4turn import State
 from hfmodem.shrike.p4observation import Registered
 from hfmodem.tests.shrike.test_p4turn import FS, machine, word
 from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
+from hfmodem.tests.evidence import CAPTURES
 
 
 @pytest.mark.parametrize('tau', [.9194, .9240, .9379, .9432, .947])
@@ -104,7 +104,7 @@ def test_driver_keys_the_step_on_the_raster(monkeypatch, cost_ms, at):
 @pytest.mark.parametrize('arm,first_v38', [('1749', 1862733), ('1044', 2162733),
                                          ('0943', 1142738)])
 def test_recorded_ack_advances_on_the_original_raster(arm, first_v38):
-    capture = Path.cwd() / 'captures' / f'onair-0928-{arm}'
+    capture = CAPTURES / f'onair-0928-{arm}'
     if not (capture / 'stream.flac').exists():
         pytest.skip('local capture absent')
     audio = onair.session.load_wav(str(capture / 'stream.flac'), FS)

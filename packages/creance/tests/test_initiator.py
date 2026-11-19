@@ -64,8 +64,8 @@ def start_responder(bridge, tmp_path, *, sid="SID-R"):
     return th, out
 
 
-def drive_connect(bridge, delay=0.3):
-    """Emit CONNECTED to both ends shortly after the initiator's CONNECT.
+def drive_connect(bridge):
+    """Emit CONNECTED to both ends as soon as the initiator's CONNECT arrives.
 
     The helper deliberately outlives tests that never issue a CONNECT — it waits
     up to 8 s. If the fixture tears the bridge down first, ``bridge.connect()``
@@ -76,7 +76,6 @@ def drive_connect(bridge, delay=0.3):
     def go():
         try:
             bridge.a.wait_command("CONNECT", timeout=8.0)
-            time.sleep(delay)
             bridge.connect()
         except Exception:
             return

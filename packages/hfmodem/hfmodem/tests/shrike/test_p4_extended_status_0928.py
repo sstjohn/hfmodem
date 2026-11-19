@@ -3,7 +3,6 @@
 
 from dataclasses import replace
 from copy import deepcopy
-from pathlib import Path
 
 import pytest
 
@@ -12,11 +11,11 @@ from hfmodem.shrike.p4host import P4Host, P4StreamFailure
 from hfmodem.shrike.p4observation import Kind, Registered, RegisteredObservation
 from hfmodem.shrike.p4turn import State
 from hfmodem.tests.shrike.test_p4turn import body, machine
+from hfmodem.tests.evidence import CAPTURES
 
 PREFIX = b'\x01\x01\x01'
 TAIL = b'306\rCMS via WS8EOC >\r'
 DATA = (PREFIX + TAIL).ljust(40, b'\x1e')
-ROOT = Path(__file__).resolve().parents[5]
 
 
 def frame(data=DATA, status=0x83):
@@ -182,7 +181,7 @@ def test_association_does_not_turn_a_repeated_request_into_a_new_grant(data):
 @pytest.mark.parametrize('at', [1307772, 1367772])
 def test_recorded_extension_single_copy_crc_and_adapter(at):
     from hfmodem.shrike import onair, p4rx, p4short
-    path = ROOT/'captures/onair-0928-2237/stream.flac'
+    path = CAPTURES/'onair-0928-2237/stream.flac'
     if not path.exists():
         pytest.skip('local WS8EOC recording absent')
     audio = onair.session.load_wav(str(path), 48000)
@@ -210,7 +209,7 @@ def test_recorded_prompt_queues_b2f_login_and_leaves_through_driver(monkeypatch)
     from hfmodem.winlink import B2FSession, MailClient, compose
     from hfmodem.winlink.session import secure_login_response
 
-    path = ROOT/'captures/onair-0928-2237/stream.flac'
+    path = CAPTURES/'onair-0928-2237/stream.flac'
     if not path.exists():
         pytest.skip('local WS8EOC recording absent')
     args = options(monkeypatch, '--mail-fetch', '--mail-wait-greeting',

@@ -39,6 +39,7 @@ import itertools
 import os
 import platform
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -157,6 +158,60 @@ def captures_untouched():
     added = sorted(map(str, _captures() - before))
     if added:
         pytest.fail(f"the run wrote into the operator's captures: {added}", pytrace=False)
+
+
+def owned_rigctld_processes(owner_pid, proc=Path('/proc')):
+    """Inventory only; never signal a process found through its environment."""
+    owner = f'HFMODEM_OWNER_PID={owner_pid}'
+    found = []
+    if (proc / 'self' / 'environ').exists():
+        # procps rejects BSD ps's `-ax`, and /proc gives argv and environ without parsing.
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                argv = (entry / 'cmdline').read_bytes().split(b'\0')
+                environ = (entry / 'environ').read_bytes().split(b'\0')
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            if os.path.basename(argv[0].decode(errors='replace')) == 'rigctld' and owner.encode() in environ:
+                found.append((int(entry.name), argv[0].decode(errors='replace')))
+        return found
+    result = subprocess.run(['ps', 'eww', '-ax', '-o', 'pid=,command='],
+                            capture_output=True, text=True, check=True, timeout=10)
+    for row in result.stdout.splitlines():
+        fields = row.split()
+        if (len(fields) >= 3 and fields[0].isdigit()
+                and os.path.basename(fields[1]) == 'rigctld' and owner in fields[2:]):
+            found.append((int(fields[0]), fields[1]))
+    return found
+
+
+@pytest.fixture(scope="session", autouse=True)
+def rigctld_owner():
+    from hfmodem.core import claim
+    keys = ('HFMODEM_OWNER_PID', 'HFMODEM_OWNER_STARTED', 'RIGCTLD_BIND')
+    previous = {key: os.environ.get(key) for key in keys}
+    started = claim.process_started(os.getpid())
+    owner = str(os.getpid())
+    os.environ['HFMODEM_OWNER_PID'] = owner
+    os.environ['HFMODEM_OWNER_STARTED'] = started
+    os.environ['RIGCTLD_BIND'] = '127.0.0.1'
+    try:
+        yield
+        if os.name == 'posix':
+            try:
+                survivors = owned_rigctld_processes(owner)
+            except (OSError, subprocess.SubprocessError) as exc:
+                pytest.fail(f'cannot inventory rigctld for pytest owner {owner}: {exc}', pytrace=False)
+            if survivors:
+                pytest.fail(f'rigctld outlived its pytest owner {owner}: {survivors}', pytrace=False)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _own_captures(monkeypatch, tmp_path):

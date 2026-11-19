@@ -62,7 +62,9 @@ def test_opening_form_resolved_after_decision_preserves_the_body_decision(resolu
 
 
 @pytest.mark.parametrize('values', [(7, 38), (7, 38, 7)])
-def test_completed_opening_does_not_start_unknown_form_gap_answers(values):
+def test_completed_opening_asks_again_for_an_unknown_form_breakin(values):
+    # KO4HJO 1117 26.011: the greeting broke in after the v38 train; one V27
+    # at 26.931 and sixteen silent slots ended the arm "peer silent".
     m, _ = machine()
     m.seed_opening([dict(audio_start=i * 60000, value=value)
                     for i, value in enumerate(values)], [], values=(7, 38))
@@ -73,7 +75,9 @@ def test_completed_opening_does_not_start_unknown_form_gap_answers(values):
     m.keyed()
     due += 60000
     m.silence(due - m.lead, answer_due=due)
-    assert m.decide(due - m.lead) is None
+    answer = m.decide(due - m.lead)
+    assert (answer.stream_sample, answer.word, answer.purpose) == (due, 'V27', 'repeat-request')
+    assert m.state == State.ISS_LADDER
 
 
 @pytest.mark.parametrize('held_kind', [None, Kind.BODY, Kind.NORMAL])

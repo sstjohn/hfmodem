@@ -32,6 +32,7 @@ import pytest
 
 from hfmodem.shrike import rxfront
 from hfmodem.tests.kestrel import corpora
+from hfmodem.tests.evidence import CAPTURES
 
 FS = rxfront.FS
 REPO = Path(__file__).resolve().parents[5]
@@ -39,14 +40,14 @@ REPO = Path(__file__).resolve().parents[5]
 #: The sessions of 2026-07-30 in which a real gateway answered every cycle.
 #: Named rather than globbed: `captures/` is ignored and holds whatever the last
 #: run wrote, so a glob measures the machine and these six measure the checkout.
-ANSWERED = [REPO / "captures" / n for n in
+ANSWERED = [CAPTURES / n for n in
             ("onair-0730-2036", "onair-0730-2037", "onair-0730-2039",
              "onair-0730-2047", "onair-0730-2049", "onair-0730-2050")]
 
 #: The 21 listen windows of the run that produced the false QRM, exactly as the
 #: session handed them to `cs_evidence`. Not committed -- `captures/` is ignored
 #: and these were written by the run itself.
-INCIDENT = REPO / "captures" / "onair-0814-1034"
+INCIDENT = CAPTURES / "onair-0814-1034"
 
 #: Recorded band noise: five minutes of 80 m that the monitor logged zero
 #: detections in, 6950 kHz outside the amateur allocation entirely, and the
@@ -93,7 +94,7 @@ def _close(line: str) -> bool:
 
 def main() -> int:
     if not any(d.is_dir() for d in ANSWERED):
-        print(f"  [SKIP] no on-air sessions under {REPO / 'captures'}")
+        print(f"  [SKIP] no on-air sessions under {CAPTURES}")
         return 2
 
     print("\nA gateway that answered is still heard")
@@ -188,7 +189,7 @@ def main() -> int:
 def test_main() -> None:
     rc = main()
     if rc == 2:
-        pytest.skip(f"no on-air sessions under {REPO / 'captures'}")
+        pytest.skip(f"no on-air sessions under {CAPTURES}")
     assert rc == 0
 
 

@@ -16,7 +16,7 @@ import pytest
 
 from hfmodem.shrike import onair, p4frame, p4longdecode, p4receiver, p4robustlongtx, p4turn
 from hfmodem.shrike.p4receiver import Clock, Expect, Kind, Observation
-from hfmodem.tests.evidence import RECORD, require_input
+from hfmodem.tests.evidence import OPERATOR_DATA, require_input
 from hfmodem.tests.shrike.test_p4_link_0927 import Stream, Tx
 from hfmodem.tests.shrike.p4_declared_clock_1111 import declared_time
 
@@ -25,7 +25,7 @@ ARM = 'onair-20261106T045338027084Z-aca20de9-4170-497c-b28e-e2727baa49f1'
 
 
 def recorded_frame(peer):
-    directory = require_input(RECORD / 'operator-data' / 'working' / ARM)
+    directory = require_input(OPERATOR_DATA / 'working' / ARM)
     paths = list(directory.glob('pactor-*.log'))
     assert len(paths) == 1, f'Missing/ambiguous required transcript: {directory}'
     text = paths[0].read_text()

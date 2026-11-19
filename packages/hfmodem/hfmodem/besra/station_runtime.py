@@ -13,6 +13,7 @@ import threading
 import time
 
 from hfmodem.core.recording import inherit_boundaries
+from hfmodem.core import waits
 
 from .arq.modem import BesraModem
 from .host.modem_core import ModemCore
@@ -166,7 +167,7 @@ class StationArdopModem(ModemCore):
             self._aux_done(name)
             raise ConnectionAbortedError('ARDOP owner command queue full') from None
         try:
-            return future.result(timeout=30)
+            return waits.result(future, time.monotonic() + 30)
         except TimeoutError:
             if future.done() or future.cancel():
                 raise
@@ -281,8 +282,7 @@ class StationArdopModem(ModemCore):
     def stop(self):
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(30)
-            if self._thread.is_alive():
+            if not waits.join(self._thread, time.monotonic() + 30):
                 raise RuntimeError('ARDOP station owner still emitting/retiring')
         else:
             self.core.stop()

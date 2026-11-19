@@ -57,7 +57,7 @@ def board(tmp_path):
     store.close()
 
 
-def drive(d, core):
+def drive(d, core, until=('lobby', 'playing')):
     """Supply generation-fresh BUFFER 0 after actual serialized writes."""
     for _ in range(400):
         d.tick()
@@ -68,7 +68,7 @@ def drive(d, core):
             d.receive('BBS MORE')
         if (not core._jobs and not d.session.bbs.inflight and not d.host.client.data_writer.pending
                 and (not s or not s.pending and not s.outstanding)
-                and s and s.state in ('lobby', 'playing')):
+                and s and s.state in until):
             return
         time.sleep(.001)
     pytest.fail('BBS application did not settle')
@@ -86,7 +86,8 @@ def play(board):
     d, core, *_ = board
     enter(board)
     d.receive('PLAY adventure')
-    drive(d, core)
+    # The lobby is idle too until PLAY is processed; only 'playing' says it was.
+    drive(d, core, until=('playing',))
     assert core.session.state == 'playing'
 
 

@@ -2,8 +2,9 @@
 <!-- SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ) -->
 # Documentation
 
-Operator guides, protocol references and recorded results. VarAC-compatible
-chat and supervised voice/CW contacts are included in 0.4.0.
+Operator guides, protocol references and recorded results. hfmodem is the
+first open-source PACTOR-3 modem. VarAC-compatible chat and supervised
+voice/CW contacts are included in 0.4.0.
 
 Project contact: [hfmodem@ssj.lol](mailto:hfmodem@ssj.lol).
 
@@ -11,7 +12,7 @@ Project contact: [hfmodem@ssj.lol](mailto:hfmodem@ssj.lol).
 
 | Mode | Release status | Implementation | Guide |
 |---|---|---|---|
-| PACTOR | Beta (1–3); experimental (4) | shrike | [PACTOR guide](viz/pactor-explained.html), [PACTOR-4 protocol and PRNG](viz/pactor4-explained.html), [PACTOR-4 limits](STATUS.md#pactor-4) |
+| PACTOR | Beta (1 and 3); experimental (2 and 4) | shrike | [PACTOR guide](viz/pactor-explained.html), [PACTOR-4 protocol and PRNG](viz/pactor4-explained.html), [PACTOR-4 limits](STATUS.md#pactor-4) |
 | VARA | Beta | kestrel | [VARA](viz/vara-explained.html) |
 | ARDOP | Beta | besra | [ARDOP](viz/ardop-explained.html) |
 | Robust Packet | Experimental | brubru | [Illustrated guide](viz/robust-packet-explained.html), [waveform](protocols/robust-packet/waveform.md), [framing](protocols/robust-packet/framing.md), [link boundary](implementation/robust-packet/link.md), [station](implementation/robust-packet/station.md) |

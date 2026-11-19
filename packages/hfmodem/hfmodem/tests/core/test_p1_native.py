@@ -9,14 +9,25 @@ import pytest
 
 from hfmodem.core import crc, p1_native
 from hfmodem.shrike import onair, p1rx, pactor1, rxfront, session
-from hfmodem.tests import evidence
+from hfmodem.tests import evidence, native as native_helpers
 from hfmodem.tests.kestrel import corpora
 
 
 def assert_bits(actual, expected):
     assert actual.shape == expected.shape
     assert actual.dtype == expected.dtype
-    assert actual.tobytes() == expected.tobytes()
+    if padded(actual.dtype):
+        np.testing.assert_array_equal(actual, expected)
+    else:
+        assert actual.tobytes() == expected.tobytes()
+
+
+def padded(dtype):
+    # x86-64 stores a long double's 80 bits in 16 bytes and leaves the rest unset.
+    if dtype.kind not in 'fc':
+        return False
+    info = np.finfo(dtype)
+    return info.nmant + info.nexp + 1 < 8 * dtype.itemsize // (2 if dtype.kind == 'c' else 1)
 
 
 def tables():
@@ -56,10 +67,7 @@ def eye_numpy(mark, space, env, starts, sps, nbits, tail_bits):
 
 @pytest.fixture
 def native():
-    dsp = pytest.importorskip('hfmodem.core._dsp')
-    if not hasattr(dsp, 'sliding_magnitudes'):
-        pytest.skip('front-end extension not built')
-    return dsp
+    return native_helpers.dsp()
 
 
 @pytest.mark.parametrize('kind', ['random', 'zeros', 'cancellation', 'subnormal',
@@ -473,8 +481,12 @@ def test_tones_preserve_unsupported_audio_dtype(dtype):
     if dtype == np.complex128:
         audio += 1j * rng.normal(size=audio.size)
     tones = p1rx._Tones(audio, 240)
-    assert_bits(tones.mark, np.abs(p1rx._sliding_bin(audio, 240, p1rx.MARK)))
-    assert_bits(tones.space, np.abs(p1rx._sliding_bin(audio, 240, p1rx.SPACE)))
+    # Values, not bytes: x86-64 stores a long double's 80 bits in 16 and leaves
+    # the rest unset, so two equal arrays need not share their bytes.
+    for got, want in ((tones.mark, np.abs(p1rx._sliding_bin(audio, 240, p1rx.MARK))),
+                      (tones.space, np.abs(p1rx._sliding_bin(audio, 240, p1rx.SPACE)))):
+        assert got.dtype == want.dtype
+        np.testing.assert_array_equal(got, want)
 
 
 @pytest.mark.parametrize('fractional', [False, True])
@@ -534,3 +546,16 @@ def test_unknown_crc_variant_has_numpy_error(monkeypatch):
     with pytest.raises(ValueError, match='unknown CRC variant') as expected:
         p1_native.gather_frames(*args, variant='unknown')
     assert str(actual.value) == str(expected.value)
+
+
+def test_assert_bits_ignores_padding_but_not_values():
+    if not padded(np.dtype(np.longdouble)):
+        pytest.skip('long double has no padding on this platform')
+    a = np.linspace(1, 2, 5).astype(np.longdouble)
+    b = a.copy()
+    b.view(np.uint8).reshape(5, -1)[:, -1] ^= 0xFF
+    assert a.tobytes() != b.tobytes()
+    assert_bits(a, b)
+    b[2] += 1
+    with pytest.raises(AssertionError):
+        assert_bits(a, b)

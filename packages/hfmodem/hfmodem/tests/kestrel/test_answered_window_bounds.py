@@ -863,6 +863,9 @@ def test_strict_query_fit_returns_only_validated_fits(damage):
         audio[-M.HOP:] = 0
     fit = h._complete_query_fit(audio, kind, want)
     assert (fit is not None) == (damage == 'none')
+    # Only the starts inside the gap are scored, so one older than it is no
+    # verdict at all.
+    assert h._query_missed is None
     if fit is not None:
         assert isinstance(fit, int)
     assert not io.sent
@@ -901,6 +904,47 @@ def test_fixed_single_frame_format_records_completion_proof(bw, role, format):
     h._perform_rx_actions(h._rx_window.event('E', single=True))
     assert h._rx_window.W is None and h._rx_window.K is not None
     assert b''.join(io.host) == payload
+
+
+
+@pytest.mark.parametrize('bw', ['2300', '2750'])
+@pytest.mark.parametrize('route', ['control', 'stream'])
+@pytest.mark.parametrize('processing', [0, .6])
+def test_query_fitted_past_its_gap_is_logged_unanswered(monkeypatch, bw, route, processing):
+    h, io = station(bw, 'responder')
+    feed(h, window(bw, b'A' * 89))
+    kind = F.SESSION_INTERMEDIATE_ANSWER_QUERIES[0]
+    signal = M.synth_burst(h.called, F.for_bw(kind, bw))
+    fit, widest = h._complete_query_fit, A._widest
+
+    def searching(held):
+        _Clock.t += processing
+        return widest(held)
+
+    def slow_fit(*args, **kwargs):
+        # The cost lands inside the search, after its window is set: a query
+        # older than the gap before the search starts is never scored at all.
+        with monkeypatch.context() as m:
+            m.setattr(A, '_widest', searching)
+            return fit(*args, **kwargs)
+
+    monkeypatch.setattr(h, '_complete_query_fit', slow_fit)
+    before = len(io.sent)
+    if route == 'control':
+        audio = np.r_[np.zeros(M.FS // 5), signal, np.zeros(M.FS // 20)]
+        start = min(h._unkeyed_at + A._SHORTEST_OVER / M.FS,
+                    h._decoded_frame_end + h._companion_samples() / M.FS) + .1
+        _Clock.t = h._rx_audio_at = start + (len(signal) + M.FS // 20) / M.FS
+        h._heard += len(audio)
+        h._stream_responder_control(audio)
+    else:
+        feed(h, signal)
+    stale = [m for m in io.msgs if 'nothing keyed' in m]
+    if processing > A._GRANT_FRESH_S:
+        assert len(io.sent) == before and h._rx_window.W is None, io.msgs
+        assert len(stale) == 1 and 'from its last symbol' in stale[0], io.msgs
+    else:
+        assert len(io.sent) == before + 1 and not stale, io.msgs
 
 
 from .receive_window_helpers import rx_evidence  # noqa: F401

@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # SPDX-FileCopyrightText: 2026 Saul St John (W9SSJ)
 
-from pathlib import Path
 
 import pytest
 
 from hfmodem.shrike import p4frame
 from hfmodem.shrike.p4hold import BreakinHold
+from hfmodem.tests.evidence import CAPTURES
 
-ROOT = Path(__file__).resolve().parents[5]
 FS = 48000
 PREFIX = b'\x01\x01\x01'
 
@@ -44,7 +43,7 @@ def test_other_extended_frames_stay_single_copy_only(status, data):
 
 def test_recorded_0x80_copies_decode_combined_one_cycle_early():
     from hfmodem.shrike import onair, p4rx, p4short
-    path = ROOT/'captures/onair-0929-0923/stream.flac'
+    path = CAPTURES/'onair-0929-0923/stream.flac'
     if not path.exists():
         pytest.skip('local WS8EOC 0923 recording absent')
     audio = onair.session.load_wav(str(path), FS)
