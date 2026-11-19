@@ -1730,7 +1730,9 @@ def test_release_reads_line_low_foreground_cli(harness, request, with_line):
         assert line_low(line)
 
 
-@pytest.mark.parametrize('verb', ['power', 'pactor'])
+@pytest.mark.parametrize('verb', ['power', pytest.param('pactor', marks=pytest.mark.skipif(
+    os.environ.get('GITHUB_ACTIONS') == 'true',
+    reason='strace -f outlasts the row timeout on the hosted runner; runs on macOS and in qualification'))])
 def test_power_verb_claims_and_legacy_launcher_during_down(harness, fake_yaesu, verb):
     observe(harness)
     shell_setup(harness)
